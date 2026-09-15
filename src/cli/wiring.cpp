@@ -1,0 +1,105 @@
+#include "ymh/cli/wiring.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <unistd.h>
+
+namespace ymh {
+namespace {
+
+PolicyVerdict parse_verdict(std::string_view value, std::string_view key) {
+    if (value == "allow") {
+        return PolicyVerdict::Allow;
+    }
+    if (value == "ask") {
+        return PolicyVerdict::Ask;
+    }
+    if (value == "deny") {
+        return PolicyVerdict::Deny;
+    }
+    throw ConfigError("[permissions]." + std::string{key} +
+                      " must be one of: allow, ask, deny (got '" + std::string{value} + "')");
+}
+
+void add_rule(PermissionConfig& config,
+              std::string_view tool,
+              PolicyVerdict verdict,
+              std::string_view id) {
+    PolicyRule rule;
+    rule.tool   = std::string{tool};
+    rule.effect = verdict;
+    rule.layer  = PolicyRule::Layer::Global;
+    rule.id     = std::string{id};
+    config.rules.push_back(std::move(rule));
+}
+
+} // namespace
+
+std::string make_boot_id() {
+    static std::atomic<std::uint64_t> counter{0};
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::to_string(static_cast<long long>(::getpid())) + "-" + std::to_string(now) + "-" +
+           std::to_string(counter.fetch_add(1));
+}
+
+std::string default_system_prompt() {
+    return "You are ymh, a terminal coding agent. Inspect and modify the workspace with the "
+           "provided tools. Prefer reading files before editing them. Be concise and never "
+           "invent tool output.";
+}
+
+LLMProviderConfig to_provider_config(const Config& config) {
+    LLMProviderConfig provider;
+    provider.provider     = config.llm.provider;
+    provider.base_url     = config.llm.base_url;
+    provider.model        = effective_model(config);
+    provider.api_key_env  = config.llm.api_key_env;
+    provider.connect_timeout = config.llm.connect_timeout;
+    provider.idle_timeout    = config.llm.idle_timeout;
+    provider.request_timeout = config.llm.request_timeout;
+    provider.retry.max_attempts      = config.llm.retry.max_attempts;
+    provider.retry.base_delay        = config.llm.retry.base_delay;
+    provider.retry.max_delay         = config.llm.retry.max_delay;
+    provider.retry.jitter            = config.llm.retry.jitter;
+    provider.retry.honor_retry_after = config.llm.retry.honor_retry_after;
+    return provider;
+}
+
+PermissionConfig to_permission_config(const Config& config) {
+    PermissionConfig permissions;
+    permissions.default_verdict = PolicyVerdict::Ask;
+
+    const PolicyVerdict read  = parse_verdict(config.permissions.read, "read");
+    const PolicyVerdict write = parse_verdict(config.permissions.write, "write");
+    const PolicyVerdict shell = parse_verdict(config.permissions.shell, "shell");
+
+    add_rule(permissions, "read_file", read, "default.read_file");
+    add_rule(permissions, "grep", read, "default.grep");
+    add_rule(permissions, "glob", read, "default.glob");
+    add_rule(permissions, "write_file", write, "default.write_file");
+    add_rule(permissions, "edit_file", write, "default.edit_file");
+    add_rule(permissions, "shell", shell, "default.shell");
+    return permissions;
+}
+
+AgentConfig to_agent_config(const Config& config) {
+    AgentConfig agent;
+    agent.model       = effective_model(config);
+    agent.max_steps   = config.agent.max_steps;
+    agent.sandbox     = SandboxMode::Workspace;
+    agent.system_prompt =
+        config.agent.system_prompt.empty() ? default_system_prompt() : config.agent.system_prompt;
+    if (config.agent.reasoning_effort.has_value()) {
+        agent.parameters.reasoning_effort = config.agent.reasoning_effort;
+    } else if (config.llm.reasoning_effort.has_value()) {
+        agent.parameters.reasoning_effort = config.llm.reasoning_effort;
+    }
+    return agent;
+}
+
+} // namespace ymh

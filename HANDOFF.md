@@ -179,18 +179,16 @@ its code.
 
 ## 9. Immediate next steps (in order)
 
-Design phase is **complete**: `00-architecture.md` and all ten component specs
-(`01`–`10`) are marked **verified** in `docs/design/DESIGN_STATUS.md` (Oracle
-component gates, no open HIGH/MEDIUM).
+**Milestone 1 MVP is implemented and green** — `include/ymh/` + `src/` + `tests/`;
+`ctest` all passing; live DeepSeek tests opt-in via `YMH_LIVE_LLM=1`. See
+`README.md` for build/run instructions. The design phase is complete:
+`00-architecture.md` and all ten component specs (`01`–`10`) are **verified** in
+`docs/design/DESIGN_STATUS.md`.
 
-Next (implementation, per the design-first rule and the milestone plan):
+Next: **Milestone 2** — split the monolith into the supervisor TUI + one
+`WorkspaceHost` daemon per workspace, with the shared `registry.db` and the
+JSON-RPC length-prefixed Unix-socket transport (§57 Step 13, §58; component
+specs `03`–`05`, all verified).
 
-1. Create the build skeleton (`CMakeLists.txt`, `cmake/`, `include/ymh/`,
-   `src/`, `tests/`) — CMake + Ninja; core deps only (§48).
-2. Implement in dependency order, one component at a time, only after its spec is
-   verified: session event system → SQLite session store → fake agent → TUI →
-   tool registry → shell + permissions → real LLM → agent loop (§57 Steps 1–10).
-3. Milestone 1 is the single-process MVP (§58); the supervisor + per-workspace
-   daemon split is Milestone 2 (§57 Step 13) and is not optional.
-4. Stand up the test harness early: Fake LLM (§45) for the hermetic layer and the
-   scripted PTY driver for the live real-LLM layer (§44).
+Deferred/optional: remote SSH/TCP transport (§47 Mode B), MCP/LSP/PTY
+(Phase 2, §51), and the full multi-workspace switcher / aggregate-flash UI.

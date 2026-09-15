@@ -1,0 +1,448 @@
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <unistd.h>
+
+#include <sqlite3.h>
+
+#include "ymh/session/errors.hpp"
+#include "ymh/session/events.hpp"
+#include "ymh/session/session_persistence.hpp"
+
+namespace {
+
+using namespace ymh;
+
+std::filesystem::path make_temp_dir() {
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("ymh_persist_" + std::to_string(::getpid()) + "_" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(base);
+    return base;
+}
+
+class TempWorkspace {
+public:
+    TempWorkspace() : root_(make_temp_dir()) {}
+
+    ~TempWorkspace() {
+        std::error_code error;
+        std::filesystem::remove_all(root_, error);
+    }
+
+    TempWorkspace(const TempWorkspace&) = delete;
+    TempWorkspace& operator=(const TempWorkspace&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& root() const { return root_; }
+    [[nodiscard]] std::filesystem::path db_path() const { return root_ / ".ymh" / "sessions.db"; }
+    [[nodiscard]] std::filesystem::path lock_path() const {
+        return root_ / ".ymh" / "sessions.lock";
+    }
+
+    [[nodiscard]] PersistenceConfig config(const std::string& boot = "boot-1") const {
+        PersistenceConfig cfg;
+        cfg.db_path   = db_path();
+        cfg.lock_path = lock_path();
+        cfg.boot_id   = BootId{boot};
+        return cfg;
+    }
+
+private:
+    std::filesystem::path root_;
+};
+
+class RawDb {
+public:
+    explicit RawDb(const std::filesystem::path& path, bool read_only = false) {
+        const int flags = read_only ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX)
+                                    : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX);
+        if (sqlite3_open_v2(path.c_str(), &db_, flags, nullptr) != SQLITE_OK) {
+            throw std::runtime_error("raw open failed");
+        }
+    }
+
+    ~RawDb() {
+        if (db_ != nullptr) {
+            sqlite3_close_v2(db_);
+        }
+    }
+
+    RawDb(const RawDb&) = delete;
+    RawDb& operator=(const RawDb&) = delete;
+
+    [[nodiscard]] int exec(const std::string& sql) const {
+        return sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, nullptr);
+    }
+
+    [[nodiscard]] std::int64_t query_int(const std::string& sql) const {
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK) {
+            return -1;
+        }
+        std::int64_t value = -1;
+        if (sqlite3_step(statement) == SQLITE_ROW) {
+            value = sqlite3_column_int64(statement, 0);
+        }
+        sqlite3_finalize(statement);
+        return value;
+    }
+
+    [[nodiscard]] std::string query_text(const std::string& sql) const {
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK) {
+            return {};
+        }
+        std::string value;
+        if (sqlite3_step(statement) == SQLITE_ROW) {
+            const unsigned char* text = sqlite3_column_text(statement, 0);
+            if (text != nullptr) {
+                value = reinterpret_cast<const char*>(text);
+            }
+        }
+        sqlite3_finalize(statement);
+        return value;
+    }
+
+private:
+    sqlite3* db_ = nullptr;
+};
+
+SessionHeader make_header(const std::filesystem::path& cwd, SessionKind kind = SessionKind::Root) {
+    SessionHeader header;
+    header.id            = make_session_id();
+    header.cwd           = std::filesystem::canonical(cwd);
+    header.createdAt     = 1000;
+    header.updatedAt     = 1000;
+    header.model         = "test-model";
+    header.serverProfile = "interactive";
+    header.kind          = kind;
+    return header;
+}
+
+Event make_event(const SessionId& session, std::chrono::system_clock::time_point timestamp) {
+    TypedEvent<payload::SessionStarted> typed;
+    typed.id         = make_event_id();
+    typed.session_id = session;
+    typed.timestamp  = timestamp;
+    typed.payload    = payload::SessionStarted{"test-model", "interactive", "t"};
+    return encode(typed);
+}
+
+Event make_event_with_id(const SessionId& session, const EventId& id) {
+    TypedEvent<payload::SessionStarted> typed;
+    typed.id         = id;
+    typed.session_id = session;
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload::SessionStarted{"test-model", "interactive", "t"};
+    return encode(typed);
+}
+
+TEST(Persistence, OpenAppliesSchemaAndPragmas) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    ASSERT_NE(store, nullptr);
+    EXPECT_EQ(store->schemaVersion(), kSchemaVersion);
+
+    RawDb raw(workspace.db_path(), true);
+    EXPECT_EQ(raw.query_int("PRAGMA application_id"), kApplicationId);
+    EXPECT_EQ(raw.query_int("PRAGMA user_version"), kSchemaVersion);
+    EXPECT_EQ(raw.query_text("PRAGMA journal_mode"), "wal");
+}
+
+TEST(Persistence, ForeignKeysEnforced) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+
+    RawDb raw(workspace.db_path());
+    ASSERT_EQ(raw.exec("PRAGMA foreign_keys = ON"), SQLITE_OK);
+    EXPECT_NE(raw.exec("DELETE FROM sessions WHERE id = '" + header.id.value + "'"), SQLITE_OK);
+    EXPECT_NE(raw.exec("INSERT INTO events(session_id, event_id, timestamp, type, payload) VALUES "
+                       "('missing','e1',0,'session/start','{}')"),
+              SQLITE_OK);
+}
+
+TEST(Persistence, SchemaCheckConstraints) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    RawDb         raw(workspace.db_path());
+    ASSERT_EQ(raw.exec("PRAGMA foreign_keys = ON"), SQLITE_OK);
+
+    ASSERT_EQ(raw.exec("INSERT INTO sessions(id,cwd,created_at,updated_at,kind,parent_session,"
+                       "seed_length) VALUES ('p','/tmp',0,0,'root',NULL,NULL)"),
+              SQLITE_OK);
+    EXPECT_NE(raw.exec("INSERT INTO sessions(id,cwd,created_at,updated_at,kind,parent_session,"
+                       "seed_length) VALUES ('x','/tmp',0,0,'fork',NULL,NULL)"),
+              SQLITE_OK);
+    EXPECT_NE(raw.exec("INSERT INTO sessions(id,cwd,created_at,updated_at,kind,parent_session,"
+                       "seed_length) VALUES ('y','/tmp',0,0,'root','p',NULL)"),
+              SQLITE_OK);
+    EXPECT_NE(raw.exec("INSERT INTO sessions(id,cwd,created_at,updated_at,kind,parent_session,"
+                       "seed_length) VALUES ('z','/tmp',0,0,'subagent','p',5)"),
+              SQLITE_OK);
+    EXPECT_EQ(raw.exec("INSERT INTO sessions(id,cwd,created_at,updated_at,kind,parent_session,"
+                       "seed_length) VALUES ('ok','/tmp',0,0,'subagent','p',0)"),
+              SQLITE_OK);
+}
+
+TEST(Persistence, CreateLoadListRoundTrip) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    SessionHeader header = make_header(workspace.root());
+    header.title         = "round trip";
+    header.metadata      = R"({"k":"v"})";
+    store->create(header);
+
+    const auto loaded = store->load(header.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(*loaded, header);
+    EXPECT_TRUE(store->isLeaseHolder(header.id));
+
+    const auto headers = store->list();
+    ASSERT_EQ(headers.size(), 1u);
+    EXPECT_EQ(headers.front().id.value, header.id.value);
+}
+
+TEST(Persistence, SequenceMonotonicWithGaps) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    const SessionId a   = store->create(make_header(workspace.root())).id;
+    const SessionId b   = store->create(make_header(workspace.root())).id;
+
+    const Sequence a1 = store->append(a, make_event(a, std::chrono::system_clock::now()));
+    const Sequence b1 = store->append(b, make_event(b, std::chrono::system_clock::now()));
+    const Sequence a2 = store->append(a, make_event(a, std::chrono::system_clock::now()));
+
+    EXPECT_LT(a1, b1);
+    EXPECT_LT(b1, a2);
+    EXPECT_GT(a2, a1 + 1);
+    const EventRange events = store->read(a);
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_LT(events[0].seq, events[1].seq);
+}
+
+TEST(Persistence, AppendBatchAtomicAndOrdered) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionId session = store->create(make_header(workspace.root())).id;
+
+    std::vector<Event> batch{make_event(session, std::chrono::system_clock::now()),
+                             make_event(session, std::chrono::system_clock::now())};
+    const std::vector<Sequence> sequences = store->appendBatch(session, batch);
+    ASSERT_EQ(sequences.size(), 2u);
+    EXPECT_LT(sequences[0], sequences[1]);
+
+    const std::size_t before = store->read(session).size();
+
+    const EventId duplicate = make_event_id();
+    std::vector<Event> invalid{make_event_with_id(session, duplicate),
+                               make_event_with_id(session, duplicate)};
+    EXPECT_THROW(store->appendBatch(session, invalid), CorruptionError);
+    EXPECT_EQ(store->read(session).size(), before);
+}
+
+TEST(Persistence, UpdatedAtTracksLastEvent) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    const auto timestamp = std::chrono::system_clock::time_point{std::chrono::milliseconds{123456}};
+    store->append(header.id, make_event(header.id, timestamp));
+
+    const auto loaded = store->load(header.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->updatedAt, 123456);
+}
+
+TEST(Persistence, NonHolderAppendThrowsLeaseLost) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    EXPECT_TRUE(store->releaseLease(header.id));
+    EXPECT_FALSE(store->isLeaseHolder(header.id));
+    EXPECT_THROW(store->append(header.id, make_event(header.id, std::chrono::system_clock::now())),
+                 LeaseLost);
+    EXPECT_TRUE(store->read(header.id).empty());
+}
+
+TEST(Persistence, LeaseAcquireRenewStealRelease) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    const SessionId session    = header.id;
+
+    EXPECT_EQ(store->leaseState(session), LeaseState::HeldByMe);
+    EXPECT_TRUE(store->acquireLease(session));
+    store->renewLeases();
+    EXPECT_TRUE(store->isLeaseHolder(session));
+
+    ASSERT_TRUE(store->releaseLease(session));
+    EXPECT_EQ(store->leaseState(session), LeaseState::Absent);
+
+    RawDb raw(workspace.db_path());
+    ASSERT_EQ(raw.exec("INSERT INTO session_leases(session_id, holder_pid, holder_boot_id, "
+                       "acquired_at, expires_at) VALUES ('" +
+                       session.value + "', 999999, 'dead', 0, 0)"),
+              SQLITE_OK);
+    EXPECT_TRUE(store->acquireLease(session));
+    EXPECT_EQ(store->leaseState(session), LeaseState::HeldByMe);
+
+    ASSERT_EQ(raw.exec("UPDATE session_leases SET holder_pid = " + std::to_string(::getpid()) +
+                       ", holder_boot_id = 'other', expires_at = 99999999999999 WHERE session_id "
+                       "= '" +
+                       session.value + "'"),
+              SQLITE_OK);
+    EXPECT_FALSE(store->acquireLease(session));
+    EXPECT_EQ(store->leaseState(session), LeaseState::HeldByOther);
+}
+
+TEST(Persistence, SecondWriterRejectedWhileFlockHeld) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config("boot-a"));
+    ASSERT_NE(store, nullptr);
+    EXPECT_THROW(SessionPersistence::open(workspace.config("boot-b")), StoreOpenError);
+}
+
+TEST(Persistence, ReadOnlyOpenCoexistsWithWriter) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+
+    auto reader = SessionPersistence::openReadOnly(workspace.config("boot-reader"));
+    ASSERT_NE(reader, nullptr);
+    EXPECT_FALSE(reader->isLeaseHolder(header.id));
+    EXPECT_EQ(reader->read(header.id).size(), 1u);
+    EXPECT_THROW(reader->append(header.id, make_event(header.id, std::chrono::system_clock::now())),
+                 StoreOpenError);
+    EXPECT_THROW(reader->erase(header.id), StoreOpenError);
+}
+
+TEST(Persistence, ReadOnlyMissingDatabaseRejected) {
+    TempWorkspace workspace;
+    EXPECT_THROW(SessionPersistence::openReadOnly(workspace.config()), StoreOpenError);
+}
+
+TEST(Persistence, ForkResolvesSharedPrefix) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 2;
+    store->create(child);
+    store->append(child.id, make_event(child.id, std::chrono::system_clock::now()));
+
+    const EventRange parentView = store->read(parent.id);
+    const EventRange childView  = store->read(child.id);
+    ASSERT_EQ(parentView.size(), 3u);
+    ASSERT_EQ(childView.size(), 3u);
+    EXPECT_EQ(childView[0].seq, parentView[0].seq);
+    EXPECT_EQ(childView[1].seq, parentView[1].seq);
+    EXPECT_GT(childView[2].seq, parentView[1].seq);
+}
+
+TEST(Persistence, ForkInvalidBoundaryRejectedAtRead) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 5;
+    store->create(child);
+    EXPECT_THROW(store->read(child.id), CorruptionError);
+}
+
+TEST(Persistence, EraseRefusesDependentsThenRemoves) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    SessionHeader child        = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession        = parent.id;
+    child.seedLength           = 0;
+    store->create(child);
+
+    EXPECT_THROW(store->erase(parent.id), DependentSessionError);
+    EXPECT_NO_THROW(store->erase(child.id));
+    EXPECT_NO_THROW(store->erase(parent.id));
+    EXPECT_FALSE(store->load(parent.id).has_value());
+    EXPECT_FALSE(store->load(child.id).has_value());
+}
+
+TEST(Persistence, SnapshotCheckpointLifecycle) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+
+    store->checkpoint(header.id);
+    EXPECT_TRUE(store->snapshotIsCurrent(header.id));
+    const auto snapshot = store->loadSnapshot(header.id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->eventCount, 1u);
+    EXPECT_EQ(snapshot->messages.size(), 0u);
+
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    EXPECT_FALSE(store->snapshotIsCurrent(header.id));
+    store->discardSnapshot(header.id);
+    EXPECT_FALSE(store->loadSnapshot(header.id).has_value());
+}
+
+TEST(Persistence, DuplicateEventIdRejected) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    const EventId id           = make_event_id();
+    store->append(header.id, make_event_with_id(header.id, id));
+    EXPECT_THROW(store->append(header.id, make_event_with_id(header.id, id)), CorruptionError);
+    EXPECT_EQ(store->read(header.id).size(), 1u);
+}
+
+TEST(Persistence, PayloadCapRejected) {
+    TempWorkspace workspace;
+    PersistenceConfig config = workspace.config();
+    config.max_payload_bytes = 8;
+    auto          store  = SessionPersistence::open(config);
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    EXPECT_THROW(store->append(header.id, make_event(header.id, std::chrono::system_clock::now())),
+                 PayloadTooLarge);
+    EXPECT_TRUE(store->read(header.id).empty());
+}
+
+TEST(Persistence, NewerSchemaRefused) {
+    TempWorkspace workspace;
+    {
+        auto store = SessionPersistence::open(workspace.config());
+        store->close();
+    }
+    RawDb raw(workspace.db_path());
+    ASSERT_EQ(raw.exec("PRAGMA user_version = 99"), SQLITE_OK);
+    EXPECT_THROW(SessionPersistence::open(workspace.config()), SchemaVersionError);
+}
+
+TEST(Persistence, ForeignApplicationIdRefused) {
+    TempWorkspace workspace;
+    {
+        auto store = SessionPersistence::open(workspace.config());
+        store->close();
+    }
+    RawDb raw(workspace.db_path());
+    ASSERT_EQ(raw.exec("PRAGMA application_id = 12345"), SQLITE_OK);
+    EXPECT_THROW(SessionPersistence::open(workspace.config()), SchemaVersionError);
+}
+
+} // namespace

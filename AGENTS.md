@@ -18,16 +18,38 @@ A spec is `verified` only after independent review (Oracle / review team), with
 no open HIGH/MEDIUM findings and pinned interface sketches. Loop:
 **write → review → fix → re-check → mark verified → code.**
 
-## Current state (repo is design-only)
+## Current state (Milestone 1 MVP implemented)
 
-- Only `HANDOFF.md` and `docs/design/00-architecture.md` exist. There is **no**
-  `src/`, `tests/`, `CMakeLists.txt`, or build/test/lint command yet — do not
-  invent one.
-- `docs/design/DESIGN_STATUS.md` (the written/verified tracker) is specified in
-  `HANDOFF.md` §6 but **not yet created**. Create it from that template before
-  or while starting spec work.
+- The design is **verified**: `docs/design/00-architecture.md` + component specs
+  `01`–`10`, tracked in `docs/design/DESIGN_STATUS.md`.
+- The **Milestone 1 single-process MVP is implemented** in `include/ymh/` +
+  `src/` with tests in `tests/`: core event bus, session event log + SQLite
+  persistence/lease, LLM provider (OpenAI-compatible, DeepSeek default) +
+  `FakeLLM`, execution environment + tools (read/write/edit/grep/glob/shell/git),
+  permissions, agent loop, CLI + headless (`ymh run`), FTXUI TUI, and
+  markdown/syntax/diff rendering.
+- The Milestone 2 split (supervisor TUI + per-workspace `WorkspaceHost` daemons,
+  shared registry, JSON-RPC Unix-socket transport) is designed but **not yet
+  implemented**.
 - `00-architecture.md` is the single authoritative architecture source; the raw
   `drafts/` files were merged into it and are optional reference only.
+
+## Build & test (exact commands)
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+- Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`) — never suppress them.
+- Deps: system SQLite3 / nlohmann_json / spdlog / fmt / libcurl / libgit2 /
+  cmark-gfm; CMake **FetchContent** for FTXUI / Asio / toml++ / CLI11 / GoogleTest.
+- **Live tests** (real LLM) are opt-in: set `YMH_LIVE_LLM=1` and
+  `DEEPSEEK_API_KEY` (the key lives in `~/.apikey.deepseek`, an
+  `export DEEPSEEK_API_KEY=…` snippet); they skip otherwise. Model
+  `deepseek-flash`, `reasoning_effort=low`.
+- `ymh run "<task>"` is the headless path; `ymh` (no args) launches the TUI.
 
 ## Reading order
 
@@ -79,14 +101,16 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
 - Work targets **one component at a time**.
 - No commit unless explicitly requested.
 
-## Testing (specified, not yet built)
+## Testing
 
 Strategy is §44: unit tests, integration tests (fake LLM / fake FS / fake shell),
-golden TUI render tests, and replay tests. A deterministic **Fake LLM (§45)** is
-required for agent-loop tests. Nothing is implemented yet.
+golden TUI render tests, and replay tests. A deterministic **Fake LLM (§45)**
+backs the hermetic suite. **Live tests** (real DeepSeek) are opt-in via
+`YMH_LIVE_LLM=1`; they drive the real binary under a PTY.
 
 ## Immediate next steps
 
-See `HANDOFF.md` §9: create `DESIGN_STATUS.md`, close the §5 top-level open
-items in `00-architecture.md`, re-verify the top-level doc, then write
-`01-session.md` (session first — it is the spine) before any `src/` code.
+Milestone 1 MVP is complete and green. Next: Milestone 2 — split into the
+supervisor TUI + per-workspace `WorkspaceHost` daemons with the shared registry
+and JSON-RPC Unix-socket transport (§57 Step 13, §58; specs `03`–`05`). See
+`HANDOFF.md` §9.
