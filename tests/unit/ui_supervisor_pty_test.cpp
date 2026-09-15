@@ -7,13 +7,18 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "support/host_harness.hpp"
 #include "support/short_temp.hpp"
@@ -41,6 +46,91 @@ std::string strip_ansi(const std::string& input) {
     }
     return output;
 }
+
+// Teardown confirms daemons from `/proc/<pid>/cmdline` (`ymh --host ...
+// --workspace <id>`) because a registry read can lag the daemon's claim/exit.
+bool is_host_process(pid_t pid, const std::string* workspace_id) {
+    std::ifstream input("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    std::string blob((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    std::vector<std::string> args;
+    std::string current;
+    for (const char character : blob) {
+        if (character == '\0') {
+            args.push_back(std::move(current));
+            current.clear();
+        } else {
+            current.push_back(character);
+        }
+    }
+    if (!current.empty()) {
+        args.push_back(std::move(current));
+    }
+    bool host = false;
+    bool workspace_match = workspace_id == nullptr;
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        if (args[index] == "--host") {
+            host = true;
+        }
+        if (workspace_id != nullptr && args[index] == "--workspace" &&
+            index + 1 < args.size() && args[index + 1] == *workspace_id) {
+            workspace_match = true;
+        }
+    }
+    return host && workspace_match;
+}
+
+std::vector<pid_t> host_processes(const std::string* workspace_id = nullptr) {
+    std::vector<pid_t> pids;
+    std::error_code error;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator("/proc", error)) {
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || name.size() > 9 ||
+            !std::all_of(name.begin(), name.end(),
+                         [](unsigned char character) { return std::isdigit(character) != 0; })) {
+            continue;
+        }
+        const pid_t pid = static_cast<pid_t>(std::stoi(name));
+        if (is_host_process(pid, workspace_id)) {
+            pids.push_back(pid);
+        }
+    }
+    return pids;
+}
+
+class HostDaemonGuard {
+public:
+    explicit HostDaemonGuard(std::string workspace_id) : workspace_id_(std::move(workspace_id)) {}
+    HostDaemonGuard(const HostDaemonGuard&) = delete;
+    HostDaemonGuard& operator=(const HostDaemonGuard&) = delete;
+    ~HostDaemonGuard() { stop(); }
+
+    void stop() {
+        if (stopped_) {
+            return;
+        }
+        stopped_ = true;
+        for (const pid_t pid : host_processes(&workspace_id_)) {
+            ::kill(pid, SIGTERM);
+        }
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            if (host_processes(&workspace_id_).empty()) {
+                return;
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        for (const pid_t pid : host_processes(&workspace_id_)) {
+            ::kill(pid, SIGKILL);
+        }
+    }
+
+private:
+    std::string workspace_id_;
+    bool        stopped_ = false;
+};
 
 class PtyChild {
 public:
@@ -198,6 +288,8 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     beta.start();
     ASSERT_TRUE(beta.wait_ready(20s)) << beta.read_log();
 
+    HostDaemonGuard alpha_guard(alpha_id.value);
+
     PtyChild child;
     std::map<std::string, std::string> env;
     env["XDG_STATE_HOME"] = state.string();
@@ -206,6 +298,8 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace_a, env));
 
     ASSERT_TRUE(child.wait_for("alpha", 25s));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 10s))
+        << "supervisor did not auto-create a session";
 
     child.write("\x13");
     ASSERT_TRUE(child.wait_for("beta", 10s));
@@ -216,16 +310,12 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ASSERT_TRUE(child.wait_for(workspace_b.string(), 10s)) << child.text();
 
     child.terminate();
-
-    {
-        std::unique_ptr<WorkspaceRegistry> registry =
-            WorkspaceRegistry::openReadOnly(registry_config);
-        if (const std::optional<WorkspaceRecord> row = registry->findById(alpha_id);
-            row.has_value() && row->host.has_value()) {
-            ::kill(static_cast<pid_t>(row->host->pid), SIGTERM);
-        }
-    }
+    alpha_guard.stop();
     beta.stop();
+
+    EXPECT_FALSE(beta.running());
+    EXPECT_TRUE(host_processes(&alpha_id.value).empty()) << "alpha daemon leaked";
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
 }
 
 } // namespace
