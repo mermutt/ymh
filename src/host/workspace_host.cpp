@@ -11,6 +11,7 @@
 #include <exception>
 #include <expected>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@
 
 #include <asio.hpp>
 
+#include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
@@ -130,6 +132,26 @@ std::unique_ptr<HostConnection> connect_to(const std::filesystem::path& socket_p
     [[maybe_unused]] const protocol::HelloResult hello =
         connection->handshake(protocol::ServerProfile::Interactive,
                               protocol::ClientInstanceId{generate_uuid_v4()});
+    return connection;
+}
+
+// D20.7: never trust a socket just because it answers. The hello must name the
+// registry row's workspace and boot nonce; a reused/stale socket throws
+// `AttachRejected` so the caller re-enters discovery instead of binding a model
+// to the wrong daemon.
+std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& socket_path,
+                                                const WorkspaceId&           workspace,
+                                                const HostBootId&            boot_id) {
+    auto connection = std::make_unique<HostConnection>();
+    connection->connect(socket_path.string());
+    const protocol::HelloResult hello =
+        connection->handshake(protocol::ServerProfile::Interactive,
+                              protocol::ClientInstanceId{generate_uuid_v4()});
+    if (hello.workspace.value != workspace.value || hello.boot_id.value != boot_id.value) {
+        connection->close();
+        throw HostError(protocol::HostErrorCode::AttachRejected,
+                        "attach identity mismatch at " + socket_path.string());
+    }
     return connection;
 }
 
@@ -417,6 +439,14 @@ HostExitCode WorkspaceHost::Impl::startup() {
     turns_ = std::make_unique<TurnExecutor>(workers, workers);
     broker_ = std::make_unique<PermissionBroker>(runtime_->policy(), *permission_adapter_,
                                                  to_permission_config(config_.config));
+    runtime_->agents().set_permission_resolver(
+        [this](const PermissionRequest& request, CancellationToken token) -> PermissionOutcome {
+            std::future<PermissionOutcome> outcome = broker_->resolve(request, token);
+            if (!outcome.valid()) {
+                return PermissionOutcome{payload::PermissionDecisionKind::Deny, "no-resolver"};
+            }
+            return outcome.get();
+        });
 
     HostIdentity identity;
     identity.workspace   = config_.workspace;
@@ -836,17 +866,38 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record) {
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
     std::string last_error;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (!launcher_.isAlive(spawned.pid)) {
-            break;
-        }
         try {
-            return AttachResult{connect_to(spawned.socketPath), true};
+            return AttachResult{
+                connect_checked(spawned.socketPath, record.id, spawned.bootId), true};
         } catch (const std::exception& error) {
             last_error = error.what();
+        }
+        if (!launcher_.isAlive(spawned.pid)) {
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{20});
     }
     launcher_.requestStop(spawned.pid, ShutdownReason::StartupFailure);
+
+    // D-F1 spawn race: another supervisor may have won the workspace flock and
+    // our daemon exited `WorkspaceBusy`. Attach to the winner instead of
+    // failing; never signal it.
+    const std::chrono::steady_clock::time_point winner_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < winner_deadline) {
+        const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
+        if (current.has_value() && current->host.has_value()) {
+            try {
+                return AttachResult{
+                    connect_checked(current->host->socketPath, current->id,
+                                    current->host->bootId),
+                    false};
+            } catch (const std::exception& error) {
+                last_error = error.what();
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
     throw HostError(protocol::HostErrorCode::HostUnreachable,
                     "daemon did not become ready: " + last_error);
 }
@@ -861,11 +912,11 @@ AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace) {
         return spawnAndAttach(*record);
     }
     if (registry_.probeLiveness(workspace) == HostLiveness::Live) {
-        try {
-            return AttachResult{connect_to(record->host->socketPath), false};
-        } catch (const std::exception& error) {
-            throw HostError(protocol::HostErrorCode::HostUnreachable, error.what());
-        }
+        // H10/H11: a held sidecar flock always means live. Attach only if the
+        // hello identity matches; a mismatch is refused, never reaped, and a
+        // connection failure (e.g. SIGSTOP) never spawns a second daemon.
+        return AttachResult{
+            connect_checked(record->host->socketPath, record->id, record->host->bootId), false};
     }
     reapIfStale(*record);
     return spawnAndAttach(*record);

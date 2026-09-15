@@ -266,6 +266,10 @@ void TransportServer::stop() {
                 for (const auto& session : snapshot) {
                     session->close_from_owner();
                 }
+                // Outstanding broker/keepalive timers are not owned here, so the
+                // io_context must be stopped explicitly or `run()` would block
+                // shutdown until the longest deadline (errata §11.3).
+                io_.stop();
             });
         }
     }

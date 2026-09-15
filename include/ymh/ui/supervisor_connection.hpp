@@ -130,6 +130,9 @@ public:
     [[nodiscard]] protocol::ClientId clientId() const;
     [[nodiscard]] std::optional<protocol::EventCursor> cursor(const SessionId& session) const;
     [[nodiscard]] std::uint64_t attachCount() const;   // successful hello+subscribe phases
+    // True once the per-session `event.subscribe` has been acknowledged on the
+    // live link (the deterministic barrier for "a turn event cannot be missed").
+    [[nodiscard]] bool subscribed(const SessionId& session) const;
 
     // ---- test seams --------------------------------------------------------
     // Force the pump to drop the link and re-enter the reconnect state machine.

@@ -216,4 +216,8 @@ void AgentRegistry::suspendSession(const SessionId& id) {
     }
 }
 
+void AgentRegistry::set_permission_resolver(AgentServices::PermissionResolver resolver) {
+    services_.permission_resolver = std::move(resolver);
+}
+
 } // namespace ymh

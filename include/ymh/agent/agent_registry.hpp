@@ -58,6 +58,12 @@ public:
     // in-flight turn. False for an unknown session.
     [[nodiscard]] bool hasPendingWork(const SessionId& id) const noexcept;
 
+    // 11-m2-errata §7 (D18/D19): the daemon installs the async
+    // `PermissionBroker` resolver once the runtime is built. Must be called
+    // before any agent is created; the resolver runs on the turn thread and
+    // blocks on the broker's future, never on the transport thread.
+    void set_permission_resolver(AgentServices::PermissionResolver resolver);
+
 private:
     std::expected<AgentId, AgentError> registerAgent(const SessionId& sessionId);
 
