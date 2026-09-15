@@ -185,7 +185,7 @@ public:
         }
         const WorkspaceId workspace_id = workspace->id;
         if (workspace->activeSessionId.value.empty()) {
-            create_session_and_prompt(workspace_id, text);
+            create_session(workspace_id, text);
             return;
         }
         prompt(workspace_id, workspace->activeSessionId, text);
@@ -247,6 +247,17 @@ private:
         });
     }
 
+    void activate_session(const WorkspaceId& workspace, const SessionId& session) {
+        const auto it = model_.workspaces.find(workspace);
+        if (it == model_.workspaces.end()) {
+            return;
+        }
+        it->second.activeSessionId = session;
+        model_.dirty.mark(session,
+                          UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::Input);
+        model_.dirty.markAggregate();
+    }
+
     void refresh_sessions(const WorkspaceId& workspace) {
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
@@ -255,16 +266,15 @@ private:
         connection->second->submit(
             std::string(protocol::method::kSessionList), nlohmann::json::object(),
             [this, workspace](SupervisorReply reply) {
-                if (!reply.ok || !reply.result.is_array()) {
-                    return;
-                }
                 std::vector<std::pair<SessionId, std::string>> sessions;
-                for (const nlohmann::json& entry : reply.result) {
-                    const std::string id = entry.value("id", std::string{});
-                    if (id.empty()) {
-                        continue;
+                if (reply.ok && reply.result.is_array()) {
+                    for (const nlohmann::json& entry : reply.result) {
+                        const std::string id = entry.value("id", std::string{});
+                        if (id.empty()) {
+                            continue;
+                        }
+                        sessions.emplace_back(SessionId{id}, entry.value("title", std::string{}));
                     }
-                    sessions.emplace_back(SessionId{id}, entry.value("title", std::string{}));
                 }
                 const auto connection_it = connections_.find(workspace);
                 if (connection_it != connections_.end()) {
@@ -279,51 +289,77 @@ private:
                         return;
                     }
                     for (const auto& [session, title] : sessions) {
+                        (void)title;
                         SessionUiState& state = model_.ensureSessionIn(workspace, session);
                         if (state.status.model.empty()) {
                             state.status.model = options_.config.agent.model;
                         }
                         model_.ensureCellIn(workspace, session);
                     }
-                    if (it->second.activeSessionId.value.empty() && !sessions.empty()) {
-                        it->second.activeSessionId = sessions.front().first;
-                        model_.focusSession(sessions.front().first);
+                    if (it->second.activeSessionId.value.empty()) {
+                        if (!sessions.empty()) {
+                            activate_session(workspace, sessions.front().first);
+                        } else {
+                            // Attach (existing daemon) and spawn paths both
+                            // converge here, so auto-create the first session.
+                            create_session(workspace, std::string{});
+                        }
                     }
                 });
             });
     }
 
-    void create_session_and_prompt(const WorkspaceId& workspace, const std::string& text) {
+    // Creates a session through the daemon and activates it. De-duplicated per
+    // workspace: concurrent callers share one `session.create`, and a prompt
+    // supplied while a create is in flight is sent once the daemon confirms it.
+    void create_session(const WorkspaceId& workspace, std::string prompt_text) {
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
             return;
         }
+        const auto pending = pending_creates_.find(workspace);
+        if (pending != pending_creates_.end()) {
+            if (pending->second.empty() && !prompt_text.empty()) {
+                pending->second = std::move(prompt_text);
+            }
+            return;
+        }
+        pending_creates_.emplace(workspace, std::move(prompt_text));
         connection->second->submit(
             std::string(protocol::method::kSessionCreate),
             nlohmann::json{{"title", "tui"}},
-            [this, workspace, text](SupervisorReply reply) {
-                if (!reply.ok) {
-                    return;
+            [this, workspace](SupervisorReply reply) {
+                std::string session;
+                if (reply.ok) {
+                    session = reply.result.value("session", std::string{});
                 }
-                const std::string session = reply.result.value("session", std::string{});
-                if (session.empty()) {
-                    return;
-                }
-                const auto connection_it = connections_.find(workspace);
-                if (connection_it != connections_.end()) {
-                    connection_it->second->track(SessionId{session});
+                if (!session.empty()) {
+                    const auto connection_it = connections_.find(workspace);
+                    if (connection_it != connections_.end()) {
+                        connection_it->second->track(SessionId{session});
+                    }
                 }
                 enqueue([this, workspace, session] {
+                    std::string queued;
+                    const auto pending_it = pending_creates_.find(workspace);
+                    if (pending_it != pending_creates_.end()) {
+                        queued = pending_it->second;
+                        pending_creates_.erase(pending_it);
+                    }
+                    if (session.empty()) {
+                        return;
+                    }
                     SessionUiState& state =
                         model_.ensureSessionIn(workspace, SessionId{session});
-                    state.status.model = options_.config.agent.model;
+                    if (state.status.model.empty()) {
+                        state.status.model = options_.config.agent.model;
+                    }
                     model_.ensureCellIn(workspace, SessionId{session});
-                    const auto it = model_.workspaces.find(workspace);
-                    if (it != model_.workspaces.end()) {
-                        it->second.activeSessionId = SessionId{session};
+                    activate_session(workspace, SessionId{session});
+                    if (!queued.empty()) {
+                        prompt(workspace, SessionId{session}, queued);
                     }
                 });
-                prompt(workspace, SessionId{session}, text);
             });
     }
 
@@ -466,6 +502,10 @@ private:
     bool handle_input(const ftxui::Event& event) {
         SessionUiState* state = active();
         if (state == nullptr) {
+            WorkspaceModel* workspace = model_.activeWorkspace();
+            if (workspace != nullptr && workspace->activeSessionId.value.empty()) {
+                create_session(workspace->id, std::string{});
+            }
             return false;
         }
         InputModel& input = state->input;
@@ -571,6 +611,7 @@ private:
     UiEventAdapter adapter_;
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
+    std::map<WorkspaceId, std::string> pending_creates_;
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
