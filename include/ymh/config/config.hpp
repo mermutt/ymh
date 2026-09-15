@@ -112,6 +112,35 @@ struct ConfigPaths {
 [[nodiscard]] std::filesystem::path workspace_config_path(
     const std::filesystem::path& workspace_root);
 
+// `ymh::Logger` (core/logging.hpp); only the pointer is used here so the config
+// component stays free of a logging-library dependency.
+class Logger;
+
+// What `scaffold_config` did. All flags are false when the target already
+// existed or the step failed; `ok` is false if any best-effort step failed.
+struct ScaffoldResult {
+    std::filesystem::path global_config;
+    std::filesystem::path workspace_dir;
+    bool global_dir_created = false;
+    bool global_config_created = false;
+    bool workspace_dir_created = false;
+    bool ok = true;
+};
+
+// First-run scaffolding, best-effort and never throwing. Creates the global
+// config directory, writes a commented default `config.toml` there if (and only
+// if) it does not already exist, and ensures `<workspace_root>/.ymh/` exists.
+// An existing config file is never overwritten. Failures are reported to
+// `logger` (may be null) and reflected in `ScaffoldResult::ok`.
+[[nodiscard]] ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
+                                             const std::filesystem::path& global_config,
+                                             Logger* logger = nullptr);
+
+// Convenience overload resolving the global config path with
+// `default_global_config_path()`.
+[[nodiscard]] ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
+                                             Logger* logger = nullptr);
+
 // Loads defaults, then global, then project, then environment overrides.
 [[nodiscard]] Config load_config(const ConfigPaths& paths);
 

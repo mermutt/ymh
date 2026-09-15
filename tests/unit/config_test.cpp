@@ -2,10 +2,16 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "support/test_env.hpp"
 #include "ymh/config/config.hpp"
+#include "ymh/core/logger.hpp"
 #include "ymh/llm/provider_registry.hpp"
 
 namespace {
@@ -15,16 +21,69 @@ using namespace ymh;
 class ScopedEnv {
 public:
     ScopedEnv(std::string name, std::string value) : name_(std::move(name)) {
+        if (const char* previous = ::getenv(name_.c_str()); previous != nullptr) {
+            previous_ = previous;
+        }
         ::setenv(name_.c_str(), value.c_str(), 1);
     }
-    ~ScopedEnv() { ::unsetenv(name_.c_str()); }
+    ~ScopedEnv() {
+        if (previous_.has_value()) {
+            ::setenv(name_.c_str(), previous_->c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
 
     ScopedEnv(const ScopedEnv&) = delete;
     ScopedEnv& operator=(const ScopedEnv&) = delete;
 
 private:
-    std::string name_;
+    std::string                name_;
+    std::optional<std::string> previous_;
 };
+
+class CapturingLogger final : public Logger {
+public:
+    void log(LogLevel level, std::string_view message) override {
+        if (level == LogLevel::Warn || level == LogLevel::Error) {
+            warnings.emplace_back(message);
+        }
+    }
+
+    std::vector<std::string> warnings;
+};
+
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream      input{path, std::ios::binary};
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+bool same_config(const Config& a, const Config& b) {
+    return a.ui.theme == b.ui.theme && a.ui.show_activity == b.ui.show_activity &&
+           a.ui.side_panel == b.ui.side_panel && a.agent.model == b.agent.model &&
+           a.agent.max_steps == b.agent.max_steps &&
+           a.agent.reasoning_effort == b.agent.reasoning_effort &&
+           a.agent.system_prompt == b.agent.system_prompt && a.workspace.root == b.workspace.root &&
+           a.workspace.workspace_roots == b.workspace.workspace_roots &&
+           a.permissions.shell == b.permissions.shell &&
+           a.permissions.write == b.permissions.write && a.permissions.read == b.permissions.read &&
+           a.logging.level == b.logging.level &&
+           a.logging.log_prompts == b.logging.log_prompts && a.llm.provider == b.llm.provider &&
+           a.llm.base_url == b.llm.base_url && a.llm.model == b.llm.model &&
+           a.llm.api_key_env == b.llm.api_key_env &&
+           a.llm.reasoning_effort == b.llm.reasoning_effort &&
+           a.llm.max_concurrency == b.llm.max_concurrency &&
+           a.llm.connect_timeout == b.llm.connect_timeout &&
+           a.llm.idle_timeout == b.llm.idle_timeout &&
+           a.llm.request_timeout == b.llm.request_timeout &&
+           a.llm.retry.max_attempts == b.llm.retry.max_attempts &&
+           a.llm.retry.base_delay == b.llm.retry.base_delay &&
+           a.llm.retry.max_delay == b.llm.retry.max_delay &&
+           a.llm.retry.jitter == b.llm.retry.jitter &&
+           a.llm.retry.honor_retry_after == b.llm.retry.honor_retry_after;
+}
 
 TEST(Config, DefaultsMatchDeepSeek) {
     const Config config;
@@ -121,6 +180,79 @@ TEST(Config, MalformedTimeoutRejected) {
     ConfigPaths paths;
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, ScaffoldCreatesGlobalConfigAndWorkspaceDir) {
+    test::TempWorkspace workspace("config_scaffold");
+    const std::filesystem::path global = workspace.path() / "xdg" / "ymh" / "config.toml";
+
+    const ScaffoldResult result = scaffold_config(workspace.path(), global);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.global_dir_created);
+    EXPECT_TRUE(result.global_config_created);
+    EXPECT_TRUE(result.workspace_dir_created);
+    EXPECT_TRUE(std::filesystem::is_regular_file(global));
+    EXPECT_TRUE(std::filesystem::is_directory(workspace.path() / ".ymh"));
+}
+
+TEST(Config, ScaffoldRespectsXdgConfigHome) {
+    test::TempWorkspace         workspace("config_scaffold_xdg");
+    const std::filesystem::path xdg = workspace.path() / "xdg-home";
+    ScopedEnv                   xdg_env("XDG_CONFIG_HOME", xdg.string());
+
+    const std::filesystem::path expected = xdg / "ymh" / "config.toml";
+    EXPECT_EQ(default_global_config_path(), expected);
+
+    const ScaffoldResult result = scaffold_config(workspace.path());
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(std::filesystem::is_regular_file(expected));
+    EXPECT_TRUE(std::filesystem::is_directory(workspace.path() / ".ymh"));
+}
+
+TEST(Config, ScaffoldDoesNotOverwriteExistingFile) {
+    test::TempWorkspace workspace("config_scaffold_nooverwrite");
+    const std::filesystem::path global = workspace.path() / "global.toml";
+    const std::string sentinel = "# user-customized\n[agent]\nmax_steps = 7\n";
+    workspace.write("global.toml", sentinel);
+
+    const ScaffoldResult result = scaffold_config(workspace.path(), global);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_FALSE(result.global_config_created);
+    EXPECT_EQ(read_file(global), sentinel);
+}
+
+TEST(Config, ScaffoldDefaultLoadsAsBuiltinDefaults) {
+    test::TempWorkspace workspace("config_scaffold_load");
+    const std::filesystem::path global = workspace.path() / "xdg" / "ymh" / "config.toml";
+
+    ASSERT_TRUE(scaffold_config(workspace.path(), global).ok);
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config loaded = load_config(paths);
+
+    Config expected;
+    apply_env_overrides(expected);
+    EXPECT_TRUE(same_config(loaded, expected));
+}
+
+TEST(Config, ScaffoldFailureLogsWarningAndDoesNotThrow) {
+    test::TempWorkspace workspace("config_scaffold_fail");
+    workspace.write("blocker", "not a directory");
+
+    const std::filesystem::path global = workspace.path() / "blocker" / "ymh" / "config.toml";
+    CapturingLogger             logger;
+
+    ScaffoldResult result;
+    ASSERT_NO_THROW(result = scaffold_config(workspace.path(), global, &logger));
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_FALSE(result.global_config_created);
+    EXPECT_FALSE(logger.warnings.empty());
 }
 
 } // namespace

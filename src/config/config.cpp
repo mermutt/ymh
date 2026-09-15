@@ -1,6 +1,7 @@
 #include "ymh/config/config.hpp"
 
 #include <cstdlib>
+#include <fstream>
 #include <initializer_list>
 #include <optional>
 #include <sstream>
@@ -10,6 +11,8 @@
 #include <utility>
 
 #include <toml++/toml.h>
+
+#include "ymh/core/logger.hpp"
 
 namespace ymh {
 namespace {
@@ -269,6 +272,118 @@ bool truthy(std::string_view value) {
     return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
+// Every key below is a real key accepted by the loader (unknown keys are
+// rejected). Optional keys whose default is "absent" are commented out so the
+// generated file loads to exactly the built-in defaults.
+constexpr std::string_view kDefaultConfigToml =
+    R"TOML(# ymh configuration — created on first run.
+#
+# Layering (last writer wins):
+#   built-in defaults -> this global file -> <workspace>/.ymh/config.toml
+#   -> YMH_* environment variables -> command-line flags.
+#
+# The loader is strict: an unknown key is an error, so add only real keys.
+# Secrets are never stored here; `api_key_env` names the environment variable
+# that holds the key.
+
+[ui]
+theme = "default"           # color theme name
+show_activity = true        # show the activity indicator
+side_panel = "auto"         # "auto" | "always" | "never"
+
+[agent]
+model = ""                  # empty => use llm.default.model
+max_steps = 100             # max tool-calling steps per task
+# reasoning_effort = "low"  # optional: "low" | "medium" | "high"
+# system_prompt = ""        # empty => built-in default system prompt
+
+[workspace]
+root = "."                  # workspace root (relative to the process cwd)
+# workspace_roots = []      # discovery roots for workspace selection
+
+[permissions]
+shell = "ask"               # "allow" | "ask" | "deny"
+write = "ask"
+read = "allow"
+
+[logging]
+level = "info"              # "debug" | "info" | "warn" | "error"
+log_prompts = false         # never enable implicitly; prompt bodies are redacted
+
+[llm.default]
+provider = "openai-compatible"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+# reasoning_effort = "low"  # optional: "low" | "medium" | "high"
+max_concurrency = 4
+connect_timeout_ms = 10000
+idle_timeout_ms = 60000
+request_timeout_ms = 120000
+
+[llm.default.retry]
+max_attempts = 3
+base_delay_ms = 500
+max_delay_ms = 30000
+jitter = 0.25
+honor_retry_after = true
+)TOML";
+
+void scaffold_warn(Logger* logger, std::string_view message) {
+    if (logger != nullptr) {
+        logger->warn(message);
+    }
+}
+
+bool ensure_directory(const std::filesystem::path& dir, Logger* logger, bool& created) {
+    created = false;
+    if (dir.empty()) {
+        return true;
+    }
+    std::error_code error;
+    if (std::filesystem::exists(dir, error)) {
+        if (error) {
+            scaffold_warn(logger,
+                          "config: cannot inspect '" + dir.string() + "': " + error.message());
+            return false;
+        }
+        return true;
+    }
+    created = std::filesystem::create_directories(dir, error);
+    if (error) {
+        scaffold_warn(logger,
+                      "config: cannot create directory '" + dir.string() + "': " + error.message());
+        return false;
+    }
+    return true;
+}
+
+bool write_default_config(const std::filesystem::path& file, Logger* logger, bool& created) {
+    created = false;
+    std::error_code error;
+    if (std::filesystem::exists(file, error)) {
+        if (error) {
+            scaffold_warn(logger,
+                          "config: cannot inspect '" + file.string() + "': " + error.message());
+            return false;
+        }
+        return true;
+    }
+    std::ofstream output{file, std::ios::binary | std::ios::trunc};
+    if (!output) {
+        scaffold_warn(logger, "config: cannot write '" + file.string() + "'");
+        return false;
+    }
+    output << kDefaultConfigToml;
+    output.flush();
+    if (!output) {
+        scaffold_warn(logger, "config: cannot write '" + file.string() + "'");
+        return false;
+    }
+    created = true;
+    return true;
+}
+
 } // namespace
 
 std::optional<std::string> env_value(std::string_view name) {
@@ -291,6 +406,32 @@ std::filesystem::path default_global_config_path() {
 
 std::filesystem::path workspace_config_path(const std::filesystem::path& workspace_root) {
     return workspace_root / ".ymh" / kConfigFile;
+}
+
+ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
+                               const std::filesystem::path& global_config,
+                               Logger* logger) {
+    ScaffoldResult result;
+    result.global_config = global_config;
+    result.workspace_dir = workspace_root / ".ymh";
+
+    if (ensure_directory(global_config.parent_path(), logger, result.global_dir_created)) {
+        if (!write_default_config(global_config, logger, result.global_config_created)) {
+            result.ok = false;
+        }
+    } else {
+        result.ok = false;
+    }
+
+    if (!ensure_directory(result.workspace_dir, logger, result.workspace_dir_created)) {
+        result.ok = false;
+    }
+
+    return result;
+}
+
+ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root, Logger* logger) {
+    return scaffold_config(workspace_root, default_global_config_path(), logger);
 }
 
 void apply_toml_file(Config& config, const std::filesystem::path& path) {
