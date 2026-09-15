@@ -1,12 +1,12 @@
-# txtcoder — Handoff & Design-First Policy
+# ymh — Handoff & Design-First Policy
 
-**Move this file into `~/prjs/github/txtcoder/` as `HANDOFF.md`** (along with the files listed in §3). It is the operating instructions for the repo until coding starts.
+**Move this file into `~/prjs/github/ymh/` as `HANDOFF.md`** (along with the files listed in §3). It is the operating instructions for the repo until coding starts.
 
 ---
 
 ## 1. What this project is
 
-**txtcoder** — a native C++23 terminal coding-agent harness (Claude Code / OpenCode-class), built on the DeepSeek Harness (dsh) architecture. Terminal-first, SSH-friendly, low-overhead, model-provider agnostic, plugin-extensible.
+**ymh** — a native C++23 terminal coding-agent harness (Claude Code / OpenCode-class), built on the DeepSeek Harness (dsh) architecture. Terminal-first, SSH-friendly, low-overhead, model-provider agnostic, plugin-extensible.
 
 Core architecture (locked, dsh-aligned):
 
@@ -40,9 +40,9 @@ Coding a component is permitted *only* after its spec is marked `verified` in `D
 
 ## 3. Files to move into the repo
 
-| Source (in this vault / /tmp) | Destination in `~/prjs/github/txtcoder/` |
+| Source (in this vault / /tmp) | Destination in `~/prjs/github/ymh/` |
 |---|---|
-| `TXTCODER_HANDOFF.md` (this file) | `HANDOFF.md` |
+| `YMH_HANDOFF.md` (this file) | `HANDOFF.md` |
 | `cpp_coding_harness_design.md` | `docs/design/00-architecture.md` |
 | *(optional)* `/tmp/opencode/dsh-design/audit.md` | `docs/design/drafts/audit.md` |
 | *(optional)* `/tmp/opencode/dsh-design/core-ipc.md` | `docs/design/drafts/core-ipc.md` |
@@ -55,12 +55,12 @@ The three `drafts/` files are **already merged** into `00-architecture.md`; move
 ## 4. Repo layout (proposed)
 
 ```text
-txtcoder/
+ymh/
 ├── HANDOFF.md
 ├── AGENTS.md                      (operating manual — see §8)
 ├── docs/
 │   └── design/
-│       ├── 00-architecture.md     (the current 5152-line doc)
+│       ├── 00-architecture.md     (the architecture baseline)
 │       ├── 01-session.md          (to be written)
 │       ├── 02-persistence.md
 │       ├── 03-workspace-registry.md
@@ -83,8 +83,16 @@ txtcoder/
 
 These were flagged as unresolved during the design pass and must be decided/closed:
 
-2. **Registry bootstrap discovery** (§9.10): clarify how bootstrap discovers workspaces — scan per-workspace `<workspace>/.ymh/sessions.db` files, or migrate a legacy central store. (Currently ambiguous.)
-3. **`SessionHeader` finalization**: it is referenced and sketched but needs a definitive field list (id, cwd, createdAt, parentSession?, seedLength?, boot nonce).
+1. **Naming** — **RESOLVED**: `ymh` is final for the project, CLI binary, state
+   dir (`~/.local/state/ymh/`), per-workspace dir (`<workspace>/.ymh/`), source
+   tree (`ymh/`, `include/ymh/`), and namespace (`ymh::`). The working name
+   `txtcoder` is retired.
+2. **Registry bootstrap discovery** (§9.10) — **RESOLVED**: first-run discovery
+   walks the configured `workspace_roots` (default `["$HOME/prjs"]`, bounded
+   depth 4, denylist), imports every `<dir>/.ymh/sessions.db`, and optionally
+   migrates a legacy central store once. A process scan is not a discovery
+   source.
+3. **`SessionHeader` finalization** — **RESOLVED** (§9.2/§9.10): fields are `id`, `cwd`, `createdAt`, `updatedAt`, `title`, `model`, `serverProfile`, `kind` (root|fork|subagent), `parentSession?`, `seedLength?`, `metadata?`. No boot nonce in the header (liveness lives in the lease / host registration). `ordinal`/`archived` stay in the registry junction.
 4. **Remote/SSH transport (TCP)**: deferred. Decide when §47 Mode B (local TUI + remote daemons) is in scope; the JSON-RPC protocol is transport-agnostic, so this is a scheduling decision, not a design blocker.
 5. **Deferred dsh-items** (accepted for v1): no offline session cache (live host required); host-level events merged into the mux; no hot plugin reload (dynamic libs deferred).
 
@@ -141,7 +149,7 @@ Only then does the component move from `docs/design/` to `src/`. The review loop
 ## 8. Suggested repo `AGENTS.md` (paste verbatim at repo root)
 
 ```markdown
-# AGENTS.md — txtcoder
+# AGENTS.md — ymh
 
 C++23 terminal coding-agent harness, dsh-aligned. Design-first workflow.
 
@@ -171,8 +179,18 @@ its code.
 
 ## 9. Immediate next steps (in order)
 
-1. `git init` (already done), then move the files from §3 into place.
-2. Create `AGENTS.md` (§8) and `docs/design/DESIGN_STATUS.md` (§6).
-3. Close the §5 top-level open items (naming first) in `00-architecture.md`.
-4. Re-verify the top-level doc (one Oracle pass); resolve findings; mark `00-architecture` **verified**.
-5. Start `01-session.md` — write, review, verify — then (and only then) begin the session component in `src/`.
+Design phase is **complete**: `00-architecture.md` and all ten component specs
+(`01`–`10`) are marked **verified** in `docs/design/DESIGN_STATUS.md` (Oracle
+component gates, no open HIGH/MEDIUM).
+
+Next (implementation, per the design-first rule and the milestone plan):
+
+1. Create the build skeleton (`CMakeLists.txt`, `cmake/`, `include/ymh/`,
+   `src/`, `tests/`) — CMake + Ninja; core deps only (§48).
+2. Implement in dependency order, one component at a time, only after its spec is
+   verified: session event system → SQLite session store → fake agent → TUI →
+   tool registry → shell + permissions → real LLM → agent loop (§57 Steps 1–10).
+3. Milestone 1 is the single-process MVP (§58); the supervisor + per-workspace
+   daemon split is Milestone 2 (§57 Step 13) and is not optional.
+4. Stand up the test harness early: Fake LLM (§45) for the hermetic layer and the
+   scripted PTY driver for the live real-LLM layer (§44).

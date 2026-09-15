@@ -589,6 +589,13 @@ names so replay and cross-harness tooling line up. The C++ enum uses CamelCase
 (`TurnStarted`); the wire/JSON `type` string uses the slash form
 (`turn/start`, `turn/end`, `step/start`, `step/end`).
 
+**Errata — the durable set is non-exhaustive.** The list above is the baseline,
+not a closed set: component specs extend it. Named extensions include
+`turn/cancel` (§34), `context/compaction` (§32), `usage` (§33),
+`subagent/spawn` / `subagent/fan_in` (§30), and the `followup` inbox op whose
+queued turn records `TurnStarted{origin=FollowUp}` (§10.1, spec 06). A component
+spec that adds a durable event extends this set; it does not contradict it.
+
 ### Live events
 
 These are runtime notifications.
@@ -756,13 +763,20 @@ Initial schema:
 
 ```sql
 CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    cwd TEXT,
-    title TEXT,
-    model TEXT,
-    metadata JSON
+    id              TEXT PRIMARY KEY,       -- SessionId (UUIDv4, stable, never a path)
+    cwd             TEXT NOT NULL,          -- canonical workspace root, immutable
+    created_at      INTEGER NOT NULL,       -- epoch ms
+    updated_at      INTEGER NOT NULL,       -- epoch ms of last appended event
+    title           TEXT NOT NULL DEFAULT '',   -- display title ('' => derive)
+    model           TEXT NOT NULL DEFAULT '',   -- default model id
+    server_profile  TEXT NOT NULL DEFAULT 'interactive',
+    kind            TEXT NOT NULL DEFAULT 'root',   -- root | fork | subagent
+    parent_session  TEXT,                   -- fork/subagent parent, NULL if root
+    seed_length     INTEGER,                -- # parent events copied; NULL for root/subagent; required for fork
+    metadata        JSON,
+    FOREIGN KEY(parent_session) REFERENCES sessions(id),
+    CHECK (kind IN ('root','fork','subagent')),
+    CHECK ((kind='root' AND parent_session IS NULL AND seed_length IS NULL) OR (kind='fork' AND parent_session IS NOT NULL AND seed_length IS NOT NULL) OR (kind='subagent' AND parent_session IS NOT NULL AND (seed_length IS NULL OR seed_length = 0)))
 );
 
 CREATE TABLE events (
@@ -790,15 +804,24 @@ CREATE TABLE session_leases (
 ```
 
 This is the **per-workspace** database, at `<workspace>/.ymh/sessions.db`,
-owned by that workspace's daemon host. It holds exactly three concerns:
-`sessions` (headers), `events` (the append-only log), and `session_leases`
-(the cross-process write lease, §9.7).
+owned by that workspace's daemon host. It holds three **source-of-truth**
+concerns: `sessions` (headers), `events` (the append-only log), and
+`session_leases` (the cross-process write lease, §9.7), plus a derived,
+discardable snapshot cache (`session_snapshots`, spec 02 §6). The snapshot cache
+is never a source of truth and may be deleted and rebuilt from `events` at any
+time (spec 02 §3.5).
 
 The old single-row `workspace` table is removed. The open-set is cross-workspace
 state and lives in the shared workspace registry (§9.10), not in this database.
 The focused/active session is **supervisor-local** state (held in `WorkspaceModel`
 / `UiModel`, §20.22), not in the registry either. Keeping both out of the event
 log preserves D2/D21.
+
+**Connection pragmas (required).** SQLite has foreign keys OFF by default, so
+every connection that opens this database MUST set `PRAGMA foreign_keys=ON`,
+`PRAGMA journal_mode=WAL`, and a busy timeout (`PRAGMA busy_timeout=<ms>`) as
+part of opening it. These are required, not optional; the concrete values and
+open/close policy belong in the persistence spec (02).
 
 Do not prematurely normalize every event type into separate SQL tables. The
 event payload can evolve independently.
@@ -869,7 +892,7 @@ TUI reconstruction
 This should eventually permit:
 
 ```text
-dsh-cpp replay <session>
+ymh replay SESSION
 ```
 
 ---
@@ -926,7 +949,7 @@ Shared spine *inside a daemon*:
 ```cpp
 struct SessionOptions {
     std::filesystem::path cwd;
-    std::string profile;
+    std::string serverProfile;   // Interactive | Automation
     std::string model;
     std::string title;
 };
@@ -951,11 +974,12 @@ ownership is enforced by the write lease (§9.7).
 
 The supervisor↔host wire is JSON-RPC 2.0 over a length-prefixed Unix domain
 socket. `event.stream` notifications carry `SessionEnvelope{session, event}`
-(§20.22). Two server profiles mirror dsh: Interactive (full event stream, the
-API-gateway equivalent) and Automation (prompt/cancel/permission, the ACP
-equivalent). The protocol stays transport-agnostic; TCP for remote runtimes is
-deferred. The supervisor attaches to several hosts at once; v1 requires a live
-host (no offline session cache).
+where `event` is the core, durable `Event` (§8.2) — never a frontend type; the
+frontend adapts it through `UiEventAdapter` (§20.6, §20.22). Two server profiles
+mirror dsh: Interactive (full event stream, the API-gateway equivalent) and
+Automation (prompt/cancel/permission, the ACP equivalent). The protocol stays
+transport-agnostic; TCP for remote runtimes is deferred. The supervisor attaches
+to several hosts at once; v1 requires a live host (no offline session cache).
 
 ---
 
@@ -967,18 +991,9 @@ startup is safe: no other workspace shares the process. Every session in the
 daemon is rooted at the same workspace cwd, and cross-project reads and writes
 cannot follow.
 
-Path safety is still enforced per session:
-
-```cpp
-class ExecutionEnvironment {
-public:
-    virtual const std::filesystem::path& root() const = 0;
-
-    // resolve a caller-supplied relative path against root(),
-    // never against getcwd()
-    virtual std::filesystem::path resolve(std::string_view) const = 0;
-};
-```
+Path safety is still enforced per session through the single
+`ExecutionEnvironment` interface (§18); its `root()` / `resolve()` members are
+the rooting contract (root-relative, never `getcwd()`).
 
 Rules:
 
@@ -1012,12 +1027,14 @@ steal    REPLACE when the row is expired, or when (holder_pid, holder_boot_id)
 release  DELETE WHERE holder_pid = me AND holder_boot_id = my_boot
 ```
 
-Lease/heartbeat liveness is established primarily by an `flock`/`fcntl` lock on
-the session DB file, which the kernel releases automatically on process death;
-the lease row is tied to that lock and cross-checked against the holder's boot
-nonce. `kill(pid, 0)` is only a **secondary hint, never the sole liveness test**:
-PID reuse would otherwise block a session forever, and a SIGSTOP/suspended
-process would look dead while it is merely frozen (split-brain).
+Lease/heartbeat liveness is established primarily by a `flock` on a **dedicated
+sidecar lock file**, `<workspace>/.ymh/sessions.lock` — not on the SQLite DB
+file, whose own fcntl locks are unrelated and released per-connection. The
+kernel releases the sidecar flock automatically on process death; the lease row
+is tied to that lock and cross-checked against the holder's boot nonce.
+`kill(pid, 0)` is only a **secondary hint, never the sole liveness test**: PID
+reuse would otherwise block a session forever, and a SIGSTOP/suspended process
+would look dead while it is merely frozen (split-brain).
 
 Only the lease holder may append events. A holder that fails to renew stops
 writing, degrades to read-only, and notifies its supervisor. `SessionHandle`
@@ -1038,7 +1055,7 @@ is written. Retrofitting it later is a breaking change across every tool.
 | Detach | `Ctrl+W` | TUI detaches from the daemon. The daemon SURVIVES; the session keeps running headless. TUI frees `SessionUiState` and re-attaches later. | No |
 | Cancel | `Ctrl+C` / `/cancel` | Stop the in-flight turn, keep session open and history intact. | No |
 | Delete | `/session delete` | Remove from `SessionStore`; destructive, requires confirmation. | Yes |
-| Archive | (deferred) | `metadata` flag in `sessions`; list/search concern, not a tab concern. | No |
+| Archive | (deferred) | `archived` column in the `workspace_sessions` junction (§9.10); list/search concern, not a tab concern. | No |
 
 Detach must not emit `SessionEnded`; Delete must. Overloading them corrupts
 §9.3 resume: did the session end, or was it only closed here?
@@ -1067,26 +1084,35 @@ is needed: the daemon survives and re-attach returns the current state.
 
 Ship in two phases (Q7/Q8).
 
-Phase A (ship first): suspended sessions.
+Phase A (ship first; single-process MVP): one active session per workspace.
 
 ```text
-non-active sessions in a daemon stay suspended; only the focused session's agent runs
-switching gracefully cancels the current turn (§34) and resumes the target
+only one session per workspace is active; activation is serialized by the daemon
+a workspace runs its active session whenever it has pending work, regardless of
+  whether any Supervisor is attached or focused; attachment and focus never gate work
+when the active session finishes or blocks awaiting input, the daemon activates
+  the next session with pending work; switching gracefully cancels the current
+  turn (§34) when the daemon itself moves the active slot
 static glyphs plus an aggregate waiting count; no flash timer
 reuses the existing per-session UiModel / SessionUiState shape unchanged
 ```
 
-The daemon itself never suspends: it survives TUI detach and keeps any
-in-flight session running (D23). "Suspended" is a per-session state inside the
-daemon, not a process state.
+**A workspace runs its active session whenever it has pending work, regardless
+of whether any Supervisor is attached or focused; attachment and focus never
+gate work.** UI focus is display-only: it selects what a Supervisor shows, never
+what the daemon runs. The daemon itself never suspends: it survives TUI detach
+and keeps any in-flight session running (D23). "Suspended" is a per-session state
+inside the daemon, not a process state, and has explicit causes only (awaiting
+input, user action, resource caps). With multiple supervisors attached to one
+daemon, the daemon serializes activation and only one session is active per
+workspace at a time.
 
-Phase B (later, only if concurrent watching plus mid-flight alerts are actually
-needed): background execution, edge-triggered attention, flash, and LLM/tool
-caps, layered on the Phase A base.
+Phase B (later; daemon-model baseline): background execution, edge-triggered
+attention, flash, and LLM/tool caps, layered on the Phase A base.
 
-Resume-suspended (F10): sessions resume SUSPENDED (`Idle`) and rehydrate on
-focus. Background auto-resume is opt-in only, so a restart does not spawn a
-burst of LLM calls.
+Resume-suspended (F10): sessions resume SUSPENDED (`Idle`) so a restart spawns no
+auto-resume LLM burst. The daemon activates a session when it has pending work,
+independent of UI focus; auto-resume is opt-in only.
 
 Attention (F4) is UI-only and derived (D19), with exactly TWO mechanisms:
 
@@ -1095,10 +1121,14 @@ Attention (F4) is UI-only and derived (D19), with exactly TWO mechanisms:
                         sum of per-session AgentState across ALL attached
                         workspaces whenever a state edge arrives; self-healing
                         (a missed edge is corrected by the next recompute)
-(b) transient signal    the ~1s FLASH — an EDGE NOTIFICATION armed only when a
+(b) transient signal    the ~1s FLASH — an EDGE NOTIFICATION armed when a
                         session transitions Thinking|CallingTool →
-                        Waiting*|Error (§20.15, §20.23)
+                        Waiting*|Error (needs input), or Thinking|CallingTool →
+                        Idle (done) (§20.15, §20.23)
 ```
+
+Attention therefore signals **both** "needs input" and "done"; neither is
+suppressed by UI focus.
 
 `recompute()` (§20.23) is the single algorithm for the counts: sum per-session
 `AgentState` on each edge arrival — never increment per edge, never per token,
@@ -1151,9 +1181,10 @@ ${XDG_STATE_HOME:-~/.local/state}/ymh/registry.db
 ```
 
 This is separate from the per-workspace session DBs
-(`<workspace>/.ymh/sessions.db`, §9.2). It is small — workspace records
-plus the session junction only — and is the one database multiple processes
-touch.
+(`<workspace>/.ymh/sessions.db`, §9.2). It is small — workspace records,
+the session junction, the `pending_mutation` crash-recovery marker, and a
+one-row bookkeeping table — and is the one
+database multiple processes touch.
 
 ```sql
 CREATE TABLE workspaces (
@@ -1162,38 +1193,57 @@ CREATE TABLE workspaces (
     display_title   TEXT NOT NULL,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
-    host_pid        INTEGER,               -- WorkspaceHost daemon (0 if none)
+    host_pid        INTEGER,               -- WorkspaceHost daemon; NULL if none, never 0
     host_boot_id    TEXT,                  -- daemon's per-boot UUID (PID-reuse guard)
     host_socket     TEXT,                  -- Unix socket path for IPC
     host_heartbeat  INTEGER,               -- last heartbeat (epoch ms)
-    metadata        JSON
+    metadata        JSON,
+    CHECK (host_pid IS NULL OR host_pid > 0),
+    CHECK ((host_pid IS NULL) = (host_boot_id IS NULL)),
+    CHECK ((host_pid IS NULL) = (host_socket IS NULL)),
+    CHECK ((host_pid IS NULL) = (host_heartbeat IS NULL))
 );
 
 CREATE TABLE workspace_sessions (
     workspace_id    TEXT NOT NULL,
     session_id      TEXT NOT NULL,
-    ordinal         INTEGER NOT NULL,      -- position in the ordered list
+    ordinal         INTEGER NOT NULL,      -- ordering key; strictly increasing, not dense
     archived        INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, session_id),
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+    CHECK (archived IN (0, 1))
 );
 
 CREATE INDEX idx_ws_sessions ON workspace_sessions(workspace_id, ordinal);
 
-CREATE TABLE pending_mutation (            -- dsh-style crash recovery marker
-    workspace_id    TEXT PRIMARY KEY,
+CREATE TABLE pending_mutation (            -- dsh-style crash recovery marker (§8)
+    workspace_id    TEXT PRIMARY KEY,      -- at most one marker per workspace
     mutation_type   TEXT NOT NULL,         -- 'create' | 'delete' | 'reorder'
     payload         JSON NOT NULL,
-    timestamp       INTEGER NOT NULL
+    timestamp       INTEGER NOT NULL,
+    CHECK (mutation_type IN ('create','delete','reorder'))
+);
+
+CREATE TABLE registry_meta (               -- schema/bootstrap bookkeeping only
+    key             TEXT PRIMARY KEY,      -- 'initialized' | 'legacy_migrated' | ...
+    value           TEXT NOT NULL
 );
 ```
 
+**`registry_meta` is bookkeeping, not workspace state.** It holds
+schema/bootstrap markers only (`initialized`, `legacy_migrated`; the schema
+version itself is tracked by `PRAGMA user_version`, not a row) and carries no
+open-set payload. The DDL above is the canonical form that component spec 03
+reproduces.
+
 **Single writer (D22).** Readers (supervisor TUI, CLI) open WAL read
 transactions and never block. Exactly one process holds `flock(LOCK_EX)` on
-`~/.local/state/ymh/registry.lock`; only the lock holder writes. The
-`WorkspaceHost` daemon is the canonical writer for its own workspace's session
-list; the supervisor writes only host claim/heartbeat rows.
+`~/.local/state/ymh/registry.lock`; only the lock holder writes. The `flock` is
+taken **for each mutation** (a per-write critical section), so exactly one
+process holds it at any instant. The `WorkspaceHost` daemon is the canonical
+writer for its own workspace's session list; the supervisor writes only host
+claim/heartbeat rows.
 
 **Pending mutations (DIV-3).** A mutation writes its `pending_mutation` marker
 before the two writes (record + order) can diverge. On startup the registry
@@ -1202,29 +1252,94 @@ resolves exactly the marked mutation: a pending `create` rolls back, a pending
 
 **Heartbeat registration.** On startup a daemon canonicalizes its directory,
 claims `host_pid`/`host_boot_id`/`host_socket`, and refreshes `host_heartbeat`
-every 5s. Liveness is checked primarily by an `flock`/`fcntl` lock the daemon
-holds on its workspace DB (kernel-released on process death) plus the
-`host_boot_id` match; `kill(pid, 0)` is only a secondary hint (PID reuse,
-SIGSTOP). A claim whose lock is gone, whose `host_boot_id` no longer matches, or
-whose heartbeat is stale is cleared lazily on next access.
-`claimHost`/`releaseHost` are the only supervisor writes.
+every 5s. Liveness is checked primarily by an `flock` the daemon holds on its
+workspace lock file, `<workspace>/.ymh/sessions.lock` (kernel-released on
+process death; §9.7), plus the `host_boot_id` match; `kill(pid, 0)` is only a
+secondary hint (PID reuse, SIGSTOP). A claim is cleared lazily on next access
+**only when the daemon's lock is absent AND its `host_boot_id` no longer
+matches the holder's boot nonce**; heartbeat staleness is only a hint and is never
+sufficient on its own to clear a claim. `claimHost`/`releaseHost` are the only
+supervisor writes.
 
 **Bootstrap (one-time).** On first run (no `initialized` marker) the registry
-walks its canonical-path index and, for each indexed workspace, scans that
-workspace's `<workspace>/.ymh/sessions.db` `sessions` table. It groups the
-persisted `SessionHeader` rows by canonical `cwd` into per-directory workspaces
-(newest first), then writes the `initialized` marker last so an interrupted
-bootstrap resumes safely.
+has no canonical-path index to walk, so the first-time discovery source is the
+configured `workspace_roots` list (§37). Each configured root is walked to a
+bounded depth (default 4), skipping a denylist (`.git`, `node_modules`,
+`.cache`, `Library`, `target`, `build`, `.venv`); every directory containing
+`<dir>/.ymh/sessions.db` is canonicalized and its `sessions` rows imported,
+grouped by canonical `cwd` into per-directory workspaces (newest first). If
+`workspace_roots` is unset it defaults to `["$HOME/prjs"]`; if that path does
+not exist there is no auto-discovery and the user runs
+`ymh workspace add <path>`. Optionally a legacy central store may be imported
+once, after which it is marked migrated. The `initialized` marker is written
+last so an interrupted bootstrap resumes safely. A process scan is **NOT** a
+discovery source: it only sees currently-running daemons, never the durable
+ordered open-set.
+
+**Discovery vs. liveness (closes the §5 bootstrap item).** These are two
+different questions and must never be conflated:
+
+- *Open-set discovery* — which workspaces and sessions exist, and in what order
+  — is **durable state, not process state**. The `workspaces` rows plus the
+  `workspace_sessions.ordinal` junction are authoritative, seeded by the one-time
+  bootstrap above. Process inspection cannot reconstruct the ordered junction, so
+  it is never the source of truth.
+- *Liveness* — is a host still alive? — is established by the `flock` the daemon
+  holds on its workspace lock file (`<workspace>/.ymh/sessions.lock`, §9.7;
+  kernel-released on process death), cross-checked against `host_boot_id`.
+  `kill(pid, 0)` is only a hint (PID reuse, SIGSTOP). A `ps`/procfs scan is no
+  stronger than `kill(pid, 0)` and is therefore **never the sole liveness
+  test**.
+
+**Process-scan fallback (best-effort only).** When the registry is missing,
+corrupt, or predates `initialized`, the supervisor MAY enumerate candidate
+daemons with an exact-match process scan: match the executable name on `argv[0]`
+**exactly** (never a substring `grep ymh`). The scan uses `argv` only to seed
+candidate PIDs; it never trusts the self-reported `--workspace`/`--socket`
+values. The DB/socket path is derived **independently** — from the registry row
+or from the workspace root — and never from the scanned argv. Every candidate
+MUST be confirmed before it is trusted: by connecting to its independently
+derived Unix socket and completing the authenticated JSON-RPC handshake, or by
+probing the workspace `flock` (§9.7). A process scan **NEVER** kills a daemon on
+`ps` evidence alone. Reaping an orphan requires lock-absence on the
+independently derived DB path **and** a `host_boot_id` mismatch, and the
+supervisor MUST take the D22 registry write lock before mutating anything. `ps`
+output is self-reported, spoofable, and racy; it is used only to seed candidate
+PIDs, never as authoritative membership or liveness.
 
 ```cpp
+enum class SessionKind { Root, Fork, Subagent };
+
 struct SessionHeader {                  // one row of the per-workspace `sessions` table
-    SessionId   id;
-    std::filesystem::path cwd;
-    int64_t     createdAt;
-    std::optional<SessionId> parentSession;   // forked/subagent sessions
-    std::optional<size_t>    seedLength;      // fork boundary, when forked
+    SessionId                  id;              // UUIDv4; never the path
+    std::filesystem::path      cwd;             // canonical workspace root; immutable
+    int64_t                    createdAt;       // epoch ms
+    int64_t                    updatedAt;       // epoch ms of last appended event
+    std::string                title;           // display title ("" => derive)
+    std::string                model;           // default model id
+    std::string                serverProfile;   // Interactive | Automation
+    SessionKind                kind;            // root | fork | subagent discriminator
+    std::optional<SessionId>   parentSession;   // fork/subagent parent
+    std::optional<size_t>      seedLength;      // # parent events copied; set iff kind==Fork
+    std::optional<std::string> metadata;        // opaque JSON, no schema commitments
 };
 ```
+
+Invariants:
+
+- `kind` is the root/fork/subagent discriminator. A `Root` has no
+  `parentSession` and no `seedLength`; a `Fork` has both a `parentSession` and a
+  `seedLength` (the parent events copied at fork time, ≤ the parent's event
+  count then); a `Subagent` has a `parentSession` while `seedLength` may be
+  NULL or 0 (no copied prefix).
+- `cwd` is realpath-canonicalized at creation and immutable thereafter.
+- `id` is a UUID, never derived from `cwd`.
+- **No liveness token in the header.** The boot nonce lives in
+  `session_leases.holder_boot_id` (§9.7) and `workspaces.host_boot_id` (§9.10) —
+  mutable runtime state, not durable header state. Only `updatedAt`/`title`/
+  `metadata` change after creation.
+- `ordinal` and `archived` are **not** header fields: they are cross-workspace
+  open-set state in the `workspace_sessions` junction (§9.10).
 
 **Open-set and resume.** The junction's `ordinal` is the ordered open-set. The
 supervisor's focused session per workspace is **supervisor-local** state
@@ -1243,9 +1358,10 @@ focus this supervisor's last active session (local)
 rehydrate that session only
 ```
 
-Non-focused sessions stay suspended until focus. This is what keeps restart
-from firing N LLM calls (F10). v1 requires a live host for a workspace's
-sessions; there is no offline session cache.
+Non-active sessions stay suspended until the daemon activates them (activation
+is daemon-driven, never focus-driven). This is what keeps restart from firing N
+LLM calls (F10). v1 requires a live host for a workspace's sessions; there is no
+offline session cache.
 
 ---
 
@@ -1662,6 +1778,8 @@ Central interface:
 ```cpp
 class ExecutionEnvironment {
 public:
+    virtual const std::filesystem::path& root() const = 0;
+    virtual std::filesystem::path resolve(std::string_view) const = 0;
     virtual Filesystem& fs() = 0;
     virtual ProcessService& process() = 0;
     virtual PtyService& pty() = 0;
@@ -1693,17 +1811,9 @@ SSHEnvironment
 
 can execute on another host while the TUI remains local.
 
-Every environment is rooted (F1):
-
-```cpp
-class ExecutionEnvironment {
-public:
-    virtual const std::filesystem::path& root() const = 0;
-
-    // Root-relative resolution. Never uses getcwd().
-    virtual std::filesystem::path resolve(std::string_view) const = 0;
-};
-```
+Every environment is rooted (F1): `root()` and `resolve()` on the canonical
+interface above are the rooting contract — root-relative resolution that never
+uses `getcwd()`.
 
 Path rules:
 
@@ -1744,6 +1854,11 @@ public:
         const ExecutionContext&);
 };
 ```
+
+> **Errata (09).** The two-argument `evaluate(const ToolRequest&, const
+> ExecutionContext&)` sketch above is superseded by spec 09's
+> `evaluate(const PermissionRequest&) const`; `PermissionRequest` carries the
+> execution context.
 
 Example rules:
 
@@ -1921,7 +2036,9 @@ It contains no agent logic.
 
 ## 20.4 UiModel
 
-Single authoritative presentation model.
+**Superseded (early sketch).** This is the original single-workspace `UiModel`.
+§20.22 is authoritative for the multi-workspace shape and the `apply()`
+signatures; this block is kept only as history.
 
 ```cpp
 class UiModel {
@@ -2713,13 +2830,22 @@ public:
 
     AggregateStatusModel                  aggregate;   // §20.23
 
+    DialogModel                           dialogs;     // global modal stack (§20.16)
+    UiMode                                mode = UiMode::Conversation;
+    bool                                  shouldExit = false;
+
     WorkspaceModel& activeWorkspace();
     SessionUiState& activeSession();
 
-    void apply(const SessionEnvelope& event);
+    void apply(const UiEvent& event);          // adapted, frontend-facing (§20.6)
     void apply(const WorkspaceEvent& event);   // workspace-level events
 };
 ```
+
+`apply()` takes the frontend-adapted `UiEvent` (reconciling §20.4 with this
+authoritative shape): `UiEventAdapter` (§20.6) unwraps a wire `SessionEnvelope`
+(core `Event`, below) into a `UiEvent` before calling `apply`. The model never
+sees core or wire types.
 
 `SessionUiState` holds only per-session projections plus derived attention:
 
@@ -2751,14 +2877,15 @@ D15/D10 require headless and RPC frontends to get an equivalent
 session-state-change signal (D19). D2/D9 stay clean because the open-set lives
 outside the event log (D21) and subagents keep their own `SessionId` (§20.25).
 
-Envelope: `UiEvent` stays a frontend-agnostic variant (§20.5, D15). SessionId
-wraps it; it is not a member of the variant. Core `Event` already carries
-`session_id` (§8.2), so do not duplicate the id inside the variant.
+Envelope: the wire carries the core, durable `Event` (§8.2), never a frontend
+type. `UiEvent` is produced only by `UiEventAdapter` in the frontend (§20.6,
+D15). Core `Event` already carries `session_id`, so `SessionEnvelope` does not
+duplicate the id; `session` is retained for routing.
 
 ```cpp
 struct SessionEnvelope {
     SessionId session;
-    UiEvent   event;
+    Event     event;   // core, durable; frontend adapts via UiEventAdapter
 };
 
 struct WorkspaceEvent {
@@ -2833,9 +2960,9 @@ edge is corrected by the next recompute. The transient ~1s flash below is the
 separate EDGE NOTIFICATION. Focusing a session does not remove it from
 `waitingCount`; the count drops only when its `AgentState` leaves the waiting set.
 
-**Flash (~1s).** When any non-active session transitions
-`Thinking|CallingTool → Waiting*|Error`, the aggregate line flashes for ~1s,
-then stops:
+**Flash (~1s).** When any session (focused or not; §9.9) transitions
+`Thinking|CallingTool → Waiting*|Error` (needs input) or `Thinking|CallingTool →
+Idle` (a turn completed), the aggregate line flashes for ~1s, then stops:
 
 ```cpp
 enum class FlashPhase { Idle, Flashing, Done };
@@ -2973,7 +3100,7 @@ F11 subagent ID duality: an envelope for a subagent carries two IDs.
 struct SubagentEnvelope {
     SessionId parent;      // UI display routing
     SessionId subagent;    // durability / replay (§30, §9.5)
-    UiEvent   event;
+    Event     event;       // core, durable; frontend adapts via UiEventAdapter
 };
 ```
 
@@ -3827,6 +3954,7 @@ max_steps = 100
 
 [workspace]
 root = "."
+workspace_roots = ["~/prjs"]   # first-run bootstrap discovery roots (§9.10)
 
 [permissions]
 shell = "ask"
@@ -3856,6 +3984,9 @@ command-line overrides
 ---
 
 # 38. Profiles
+
+**Disambiguation.** A composition profile/bundle here is distinct from a
+session's `server_profile` (Interactive/Automation, §9.6).
 
 Eventually support:
 
@@ -3995,6 +4126,8 @@ ymh show SESSION
 ymh replay SESSION
 ymh fork SESSION
 ymh run "task"
+ymh workspace add PATH
+ymh workspace list
 ```
 
 Eventually:
@@ -4025,6 +4158,10 @@ final result
 ```
 
 This is essential for testing.
+
+The headless state-change signal required by D19 (an equivalent of the UI's
+edge-triggered attention signal) is explicitly **deferred to the headless/CLI
+component spec**; it is not specified here.
 
 ---
 
@@ -4112,6 +4249,45 @@ same projected state
 ```
 
 This is one of the biggest benefits of event sourcing.
+
+## Live end-to-end tests (real LLM, PTY-driven)
+
+The deterministic layers above run with the Fake LLM (§45) and need no network.
+A separate **live** layer exercises the real product end to end, exactly as a
+human would:
+
+```text
+spawn the real ymh binary under a PTY (forkpty / posix_openpt)
+        ↓
+write a prompt to the pty master (as typed keystrokes)
+        ↓
+read and parse the rendered terminal output (ANSI) from the pty master
+        ↓
+assert observable behavior: session created, assistant text streamed,
+    tool call rendered, permission prompt handled, session resumes
+```
+
+- Uses a **real LLM API** through the same `LLMProvider` seam as production.
+- Gated by an API key plus an explicit opt-in flag; skipped (not failed) when
+  absent, so the default suite stays hermetic and offline.
+- Tolerant of model nondeterminism: assert on structure and invariants (events
+  emitted, tools invoked, final state), not exact prose. Any retry/quorum is
+  explicit, never silent.
+- The top-level **supervisor/manager** flow must be **100% automatically
+  testable**: a scripted PTY driver (or `tmux send-keys` + `capture-pane`) stands
+  in for the human, so no manual keystrokes are required to cover multi-workspace
+  attach, session switching, and permission handling.
+- Runs as a separate CI stage from the hermetic unit/integration/golden/replay
+  suite; it is never part of the fast default test command.
+
+**Milestone gating.** The live multi-workspace PTY tests above target Milestone
+2 (daemon + supervisor, §57 Step 13 / §58); MVP live tests cover only the
+single-process flow.
+
+**Fake vs. live.** §45's Fake LLM is the substrate for unit, integration, golden,
+and replay tests (deterministic, hermetic, fully automatable). The live layer is
+the only place a real provider is used, and it is the acceptance test for the
+end-user experience.
 
 ---
 
@@ -4675,7 +4851,7 @@ F6   input/keybinding focus        F12  flash clock in model
 - **F7** — per-session dirty flags: plus `aggregateDirty`, so background bursts do not jitter the active view (§20.23).
 - **F8** — resource caps: bound tool subprocesses and PTYs, not just LLM calls (§9.11).
 - **F9** — cancellation scoping: `Ctrl+C` cancels only the active session (§20.24).
-- **F10** — resume-suspended: sessions reopen `Idle` and rehydrate on focus; no auto-resume burst (§9.9, §9.10).
+- **F10** — resume-suspended: sessions reopen `Idle` and rehydrate on activation (not on UI focus); no auto-resume burst (§9.9, §9.10).
 - **F11** — subagent ID duality: parent ID routes display, subagent ID keeps durability (§20.25).
 - **F12** — flash clock in model: flash phase in `AggregateStatusModel`, ticked at model level (§9.9, §20.23).
 
