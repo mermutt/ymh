@@ -1,0 +1,72 @@
+add_executable(ymh_tests
+    unit/cancellation_test.cpp
+    unit/event_bus_test.cpp
+    unit/event_test.cpp
+    unit/session_test.cpp
+    unit/persistence_test.cpp
+    unit/llm_types_test.cpp
+    unit/tool_call_assembler_test.cpp
+    unit/sse_parser_test.cpp
+    unit/fake_llm_test.cpp
+    unit/provider_registry_test.cpp
+    unit/openai_adapter_test.cpp
+    unit/llm_live_test.cpp
+    unit/path_safety_test.cpp
+    unit/output_test.cpp
+    unit/process_test.cpp
+    unit/registry_test.cpp
+    unit/tools_test.cpp
+    unit/git_tools_test.cpp
+    unit/permissions_test.cpp
+    unit/agent_loop_test.cpp
+    unit/agent_inbox_test.cpp
+    unit/agent_registry_test.cpp
+    unit/agent_coalescer_test.cpp
+    unit/llm_pool_test.cpp
+    unit/config_test.cpp
+    unit/logging_test.cpp
+    unit/cli_test.cpp
+    unit/headless_test.cpp
+    unit/session_cli_test.cpp
+    unit/headless_live_test.cpp
+    unit/ui_model_test.cpp
+    unit/ui_render_golden_test.cpp
+    unit/syntax_renderer_test.cpp
+    unit/markdown_renderer_test.cpp
+    unit/diff_renderer_test.cpp
+    unit/render_golden_test.cpp
+    unit/ui_driver_test.cpp
+    unit/ui_live_pty_test.cpp
+)
+
+target_include_directories(ymh_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(ymh_tests PRIVATE YMH_TEST_BINARY="$<TARGET_FILE:ymh>")
+
+target_link_libraries(ymh_tests
+    PRIVATE
+        ymh::core
+        ymh::session
+        ymh::llm
+        ymh::execution
+        ymh::policy
+        ymh::tools
+        ymh::agent
+        ymh::config
+        ymh::logging
+        ymh::cli
+        ymh::ui
+        ymh::render
+        CLI11::CLI11
+        SQLite3::SQLite3
+        CURL::libcurl
+        Threads::Threads
+        GTest::gtest_main
+        ymh::warnings
+)
+
+include(GoogleTest)
+gtest_discover_tests(ymh_tests)

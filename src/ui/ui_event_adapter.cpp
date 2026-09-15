@@ -1,0 +1,227 @@
+#include "ymh/ui/ui_event_adapter.hpp"
+
+#include <utility>
+
+#include "ymh/agent/message.hpp"
+#include "ymh/session/events.hpp"
+
+namespace ymh::ui {
+namespace {
+
+constexpr std::size_t kMaxArgumentsPreview = 512;
+
+std::string flatten_content(const std::vector<ContentBlock>& content) {
+    std::string text;
+    for (const ContentBlock& block : content) {
+        if (block.kind != ContentBlockKind::Text || block.text.empty()) {
+            continue;
+        }
+        if (!text.empty()) {
+            text += '\n';
+        }
+        text += block.text;
+    }
+    return text;
+}
+
+} // namespace
+
+std::string summarize_tool_arguments(const std::string& name, const nlohmann::json& arguments) {
+    (void)name;
+    std::string dumped = arguments.dump();
+    if (dumped.size() > kMaxArgumentsPreview) {
+        dumped.resize(kMaxArgumentsPreview);
+        dumped += "...";
+    }
+    return dumped;
+}
+
+UiEventAdapter::UiEventAdapter(UiModel& model) : model_(model) {}
+
+UiEventAdapter::UiEventAdapter(UiModel& model, UiController& controller)
+    : model_(model) {
+    (void)controller;
+}
+
+UiEventAdapter::~UiEventAdapter() = default;
+
+void UiEventAdapter::set_state_provider(
+    std::function<AgentState(const SessionId&)> provider) {
+    state_provider_ = std::move(provider);
+}
+
+AgentState UiEventAdapter::project_state(const SessionId& session, const Event& event) const {
+    if (state_provider_) {
+        return state_provider_(session);
+    }
+    const auto previous = lastState_.find(session);
+    const AgentState old = previous == lastState_.end() ? AgentState::Idle : previous->second;
+    switch (event.type) {
+        case EventType::TurnStarted:
+        case EventType::StepStarted:
+        case EventType::UserMessage:
+            return AgentState::Thinking;
+        case EventType::ToolCall:
+            return AgentState::CallingTool;
+        case EventType::ToolResult:
+            return AgentState::Thinking;
+        case EventType::TurnEnded:
+        case EventType::TurnCancelled:
+        case EventType::SessionEnded:
+            return AgentState::Idle;
+        case EventType::TurnFailed:
+            return AgentState::Error;
+        default:
+            return old;
+    }
+}
+
+std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
+    std::vector<UiEvent> events;
+    const SessionId session = event.session_id;
+
+    switch (event.type) {
+        case EventType::UserMessage: {
+            const auto payload = event.payload.get<payload::UserMessage>();
+            events.push_back(UiEvent{UserMessage{session, payload.id, flatten_content(payload.content)}});
+            break;
+        }
+        case EventType::AssistantChunk: {
+            const auto payload = event.payload.get<payload::AssistantChunk>();
+            if (payload.kind == payload::AssistantChunkKind::Reasoning || payload.text.empty()) {
+                break;
+            }
+            if (startedMessages_.find(session) == startedMessages_.end() ||
+                startedMessages_.at(session) != payload.message) {
+                events.push_back(UiEvent{AssistantMessageStarted{session, payload.message}});
+            }
+            events.push_back(
+                UiEvent{AssistantTextDelta{session, payload.message, payload.text, false}});
+            break;
+        }
+        case EventType::AssistantMessage: {
+            const auto payload = event.payload.get<payload::AssistantMessage>();
+            events.push_back(UiEvent{AssistantMessageFinished{
+                session, payload.id, flatten_content(payload.content), payload.usage}});
+            break;
+        }
+        case EventType::ToolCall: {
+            const auto payload = event.payload.get<payload::ToolCall>();
+            events.push_back(UiEvent{ToolStarted{session, payload.id, payload.name,
+                                                 summarize_tool_arguments(payload.name,
+                                                                          payload.arguments)}});
+            break;
+        }
+        case EventType::ToolResult: {
+            const auto payload = event.payload.get<payload::ToolResult>();
+            events.push_back(UiEvent{ToolFinished{session, payload.id, payload.name,
+                                                  payload.outcome, payload.output,
+                                                  payload.truncated, payload.error}});
+            break;
+        }
+        case EventType::TokenUsage: {
+            const auto payload = event.payload.get<payload::TokenUsage>();
+            events.push_back(UiEvent{TokenUsageUpdated{session, payload.usage}});
+            break;
+        }
+        case EventType::TurnFailed: {
+            const auto payload = event.payload.get<payload::TurnFailed>();
+            events.push_back(UiEvent{ErrorOccurred{session, payload.message}});
+            break;
+        }
+        case EventType::SubagentFanIn: {
+            const auto payload = event.payload.get<payload::SubagentFanIn>();
+            AgentState state = AgentState::Idle;
+            if (payload.outcome == payload::SubagentOutcome::Failed) {
+                state = AgentState::Error;
+            } else if (payload.outcome == payload::SubagentOutcome::Cancelled) {
+                state = AgentState::Idle;
+            }
+            events.push_back(UiEvent{SubagentUpdated{session, payload.subagent, payload.summary, state}});
+            break;
+        }
+        default:
+            break;
+    }
+
+    const auto previous = lastState_.find(session);
+    const AgentState old = previous == lastState_.end() ? AgentState::Idle : previous->second;
+    const AgentState next = project_state(session, event);
+    if (next != old) {
+        events.push_back(UiEvent{AgentStateChanged{session, old, next}});
+    }
+    return events;
+}
+
+void UiEventAdapter::applyAndMark(const UiEvent& event) {
+    model_.apply(event);
+    std::visit(
+        [this](const auto& e) {
+            using T = std::decay_t<decltype(e)>;
+            if constexpr (std::is_same_v<T, AgentStateChanged>) {
+                model_.aggregate.recompute(model_.workspaces, model_.sessions);
+                model_.aggregate.armOnEdge(e.oldState, e.newState);
+                lastState_[e.session] = e.newState;
+                model_.dirty.markAggregate();
+            } else if constexpr (std::is_same_v<T, AssistantMessageStarted>) {
+                startedMessages_[e.session] = e.message;
+            }
+        },
+        event.value);
+}
+
+void UiEventAdapter::onEvent(const Event& event) {
+    for (const UiEvent& adapted : adapt(event)) {
+        applyAndMark(adapted);
+    }
+}
+
+void UiEventAdapter::onSessionEnvelope(const protocol::SessionEnvelope& envelope) {
+    if (envelope.session != envelope.event.session_id) {
+        return;
+    }
+    onEvent(envelope.event);
+}
+
+void UiEventAdapter::onPermissionRequest(const SessionId& session,
+                                         const PermissionRequestId& id,
+                                         const PermissionRequest& request) {
+    PermissionRequested requested;
+    requested.session = session;
+    requested.request = id;
+    requested.tool = request.tool;
+    requested.summary = summarize_tool_arguments(request.tool, request.arguments);
+    applyAndMark(UiEvent{std::move(requested)});
+
+    const auto previous = lastState_.find(session);
+    const AgentState old = previous == lastState_.end() ? AgentState::Idle : previous->second;
+    if (old != AgentState::WaitingForPermission) {
+        applyAndMark(UiEvent{AgentStateChanged{session, old, AgentState::WaitingForPermission}});
+    }
+}
+
+void UiEventAdapter::onPermissionResolved(const SessionId& session,
+                                          const PermissionRequestId& id,
+                                          payload::PermissionDecisionKind decision) {
+    applyAndMark(UiEvent{PermissionResolved{session, id, decision}});
+
+    const auto previous = lastState_.find(session);
+    const AgentState old = previous == lastState_.end() ? AgentState::Idle : previous->second;
+    if (old != AgentState::Thinking) {
+        applyAndMark(UiEvent{AgentStateChanged{session, old, AgentState::Thinking}});
+    }
+}
+
+void UiEventAdapter::onWorkspaceEvent(const WorkspaceEvent& event) {
+    model_.apply(event);
+}
+
+void UiEventAdapter::onTick(std::chrono::milliseconds delta) {
+    const FlashPhase before = model_.aggregate.flash.phase;
+    model_.aggregate.flash.tick(delta);
+    if (model_.aggregate.flash.phase != before) {
+        model_.dirty.markAggregate();
+    }
+}
+
+} // namespace ymh::ui

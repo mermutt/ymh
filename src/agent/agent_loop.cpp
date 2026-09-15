@@ -1,0 +1,606 @@
+#include "ymh/agent/agent_loop.hpp"
+
+#include <chrono>
+#include <exception>
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "ymh/execution/environment.hpp"
+#include "ymh/execution/resource_governor.hpp"
+#include "ymh/llm/llm_provider.hpp"
+#include "ymh/session/session.hpp"
+#include "ymh/tools/tool.hpp"
+#include "ymh/tools/tool_context.hpp"
+#include "ymh/tools/tool_registry.hpp"
+
+namespace ymh {
+namespace {
+
+ContentBlock text_block(ContentBlockKind kind, std::string text) {
+    ContentBlock block;
+    block.kind = kind;
+    block.text = std::move(text);
+    return block;
+}
+
+ContentBlock tool_use_block(const ToolCallAssembled& call) {
+    ContentBlock block;
+    block.kind         = ContentBlockKind::ToolUse;
+    block.tool_call_id = call.id;
+    block.tool_name    = call.name;
+    block.arguments    = call.arguments;
+    return block;
+}
+
+} // namespace
+
+AgentLoop::AgentLoop(AgentId id, Session& session, AgentServices services, AgentConfig config)
+    : id_(std::move(id)),
+      session_(session),
+      services_(std::move(services)),
+      config_(std::move(config)) {}
+
+AgentLoop::~AgentLoop() = default;
+
+AgentId AgentLoop::id() const {
+    return id_;
+}
+
+SessionId AgentLoop::session() const {
+    return session_.id();
+}
+
+bool AgentLoop::turnInFlight() const noexcept {
+    switch (state_) {
+        case AgentState::Thinking:
+        case AgentState::CallingTool:
+        case AgentState::WaitingForPermission:
+        case AgentState::WaitingForInput:
+        case AgentState::Cancelling:
+            return true;
+        case AgentState::Idle:
+        case AgentState::Error:
+            return false;
+    }
+    return false;
+}
+
+AgentStatus AgentLoop::status() const noexcept {
+    return turnInFlight() ? AgentStatus::Running : AgentStatus::Idle;
+}
+
+AgentState AgentLoop::state() const noexcept {
+    return state_;
+}
+
+bool AgentLoop::disposed() const noexcept {
+    return disposed_;
+}
+
+bool AgentLoop::hasTurnTrigger() const noexcept {
+    for (const InboxItem& item : inbox_) {
+        if (item.kind == InboxKind::Send || item.kind == InboxKind::FollowUp ||
+            item.kind == InboxKind::Steer) {
+            return true;
+        }
+        if (item.kind == InboxKind::Inject && item.context.startsTurn) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AgentLoop::hasPendingWork() const noexcept {
+    return hasTurnTrigger() || turnInFlight();
+}
+
+InboxResult AgentLoop::send(Message message) {
+    InboxItem item;
+    item.kind    = InboxKind::Send;
+    item.origin  = running_ ? payload::TurnOrigin::FollowUp : payload::TurnOrigin::User;
+    item.message = std::move(message);
+    return enqueue(std::move(item));
+}
+
+InboxResult AgentLoop::followup(Message message) {
+    InboxItem item;
+    item.kind    = InboxKind::FollowUp;
+    item.origin  = payload::TurnOrigin::FollowUp;
+    item.message = std::move(message);
+    return enqueue(std::move(item));
+}
+
+InboxResult AgentLoop::steer(Message message) {
+    InboxItem item;
+    item.kind    = InboxKind::Steer;
+    item.origin  = payload::TurnOrigin::Steer;
+    item.message = std::move(message);
+    return enqueue(std::move(item));
+}
+
+InboxResult AgentLoop::inject(ContextMessage context) {
+    InboxItem item;
+    item.kind    = InboxKind::Inject;
+    item.origin  = context.startsTurn ? payload::TurnOrigin::Injection : payload::TurnOrigin::User;
+    item.context = std::move(context);
+    return enqueue(std::move(item));
+}
+
+InboxResult AgentLoop::enqueue(InboxItem item) {
+    if (disposed_) {
+        return InboxResult::AgentDisposed;
+    }
+    if (inbox_.size() >= config_.max_inbox) {
+        return InboxResult::InboxFull;
+    }
+    if (state_ == AgentState::Error) {
+        state_ = AgentState::Idle;
+    }
+    inbox_.push_back(std::move(item));
+    if (!running_) {
+        activate();
+    }
+    return InboxResult::Accepted;
+}
+
+void AgentLoop::activate() {
+    if (disposed_ || running_ || state_ == AgentState::Error) {
+        return;
+    }
+    running_ = true;
+    while (!disposed_ && state_ != AgentState::Error && hasTurnTrigger()) {
+        runTurn();
+    }
+    running_ = false;
+    if (state_ != AgentState::Error) {
+        state_ = AgentState::Idle;
+    }
+    flushIdleCallbacks();
+}
+
+void AgentLoop::cancel() {
+    if (disposed_ || !turnInFlight() || state_ == AgentState::Cancelling) {
+        return;
+    }
+    cancel_reason_ = "user";
+    state_        = AgentState::Cancelling;
+    turn_cancel_.cancel();
+}
+
+void AgentLoop::suspend() {
+    if (disposed_ || !turnInFlight() || state_ == AgentState::Cancelling) {
+        return;
+    }
+    cancel_reason_ = "superseded";
+    state_        = AgentState::Cancelling;
+    turn_cancel_.cancel();
+}
+
+void AgentLoop::dispose() {
+    if (disposed_) {
+        return;
+    }
+    disposed_ = true;
+    if (turnInFlight()) {
+        cancel_reason_ = "user";
+        state_        = AgentState::Cancelling;
+        turn_cancel_.cancel();
+    }
+    inbox_.clear();
+    state_   = AgentState::Idle;
+    running_ = false;
+    flushIdleCallbacks();
+}
+
+void AgentLoop::whenIdle(std::function<void()> callback) {
+    if (!callback) {
+        return;
+    }
+    if (!running_ && !hasPendingWork()) {
+        callback();
+        return;
+    }
+    idle_callbacks_.push_back(std::move(callback));
+}
+
+void AgentLoop::flushIdleCallbacks() {
+    if (running_ || hasPendingWork()) {
+        return;
+    }
+    std::vector<std::function<void()>> callbacks = std::move(idle_callbacks_);
+    idle_callbacks_.clear();
+    for (auto& callback : callbacks) {
+        callback();
+    }
+}
+
+Task<void> AgentLoop::run(CancellationToken sessionCancel) {
+    if (sessionCancel.cancelled()) {
+        return Task<void>{};
+    }
+    sessionCancel.on_cancel([this]() { suspend(); });
+    activate();
+    return Task<void>{};
+}
+
+void AgentLoop::appendUserMessage(const Message& message) {
+    payload::UserMessage user;
+    user.id      = make_event_id().value;
+    user.content = message.content;
+    session_.append(user);
+}
+
+void AgentLoop::appendContextInjected(const ContextMessage& context) {
+    payload::ContextInjected injected;
+    injected.id   = make_event_id().value;
+    injected.role = context.role;
+    injected.text = context.text;
+    session_.append(injected);
+}
+
+void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message) {
+    payload::TurnFailed failed;
+    failed.turn    = turn;
+    failed.code    = std::string{agent_error_code_name(code)};
+    failed.message = std::move(message);
+    session_.append(failed);
+    state_ = AgentState::Error;
+}
+
+void AgentLoop::runCompaction(const std::vector<Message>& messages) {
+    if (services_.compactor == nullptr) {
+        return;
+    }
+    std::optional<payload::ContextCompaction> compaction =
+        services_.compactor->run(session_, messages, turn_cancel_.token());
+    if (compaction.has_value()) {
+        session_.append(*compaction);
+    }
+}
+
+LLMRequest AgentLoop::buildRequest(const std::vector<Message>& messages) const {
+    LLMRequest request;
+    request.model    = config_.model;
+    request.messages = messages;
+    if (services_.context != nullptr) {
+        request.tools = services_.context->tools();
+    }
+    request.parameters = config_.parameters;
+    return request;
+}
+
+void AgentLoop::drainFoldedItems() {
+    while (!inbox_.empty()) {
+        InboxItem& item = inbox_.front();
+        if (item.kind == InboxKind::Steer) {
+            appendUserMessage(item.message);
+            inbox_.pop_front();
+        } else if (item.kind == InboxKind::Inject && !item.context.startsTurn) {
+            appendContextInjected(item.context);
+            inbox_.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn, StepId step) {
+    payload::ToolCall call;
+    call.id          = assembled.id;
+    call.turn        = turn;
+    call.step        = step;
+    call.name        = assembled.name;
+    call.arguments   = assembled.arguments;
+    call.requestedAt = std::chrono::system_clock::now();
+    session_.append(call);
+
+    PermissionRequest request;
+    request.call      = call.id;
+    request.session   = session_.id();
+    request.turn      = turn;
+    request.step      = step;
+    request.tool      = call.name;
+    request.arguments = call.arguments;
+    if (services_.execution != nullptr) {
+        request.root = services_.execution->root();
+    }
+    request.sandbox = config_.sandbox;
+    if (services_.tools != nullptr) {
+        if (Tool* tool = services_.tools->find(ToolName{call.name}); tool != nullptr) {
+            request.destructive = tool->schema().destructive;
+        }
+    }
+
+    payload::PermissionDecisionKind decision = payload::PermissionDecisionKind::Deny;
+    std::string                     reason;
+
+    if (services_.gate != nullptr) {
+        services_.gate->set_decision_hook(
+            [this](const payload::PermissionDecision& recorded) { session_.append(recorded); });
+        state_ = AgentState::WaitingForPermission;
+        const PermissionOutcome outcome = services_.gate->resolve(request, turn_cancel_.token());
+        decision = outcome.decision;
+        reason   = outcome.reason;
+        state_   = AgentState::CallingTool;
+    } else {
+        const PolicyVerdict verdict =
+            services_.policy != nullptr ? services_.policy->evaluate(request) : PolicyVerdict::Ask;
+        if (verdict == PolicyVerdict::Allow) {
+            decision = payload::PermissionDecisionKind::Allow;
+        } else if (verdict == PolicyVerdict::Deny) {
+            decision = payload::PermissionDecisionKind::Deny;
+            reason   = "denied by policy";
+        } else {
+            state_ = AgentState::WaitingForPermission;
+            if (services_.permission_resolver) {
+                const PermissionOutcome outcome =
+                    services_.permission_resolver(request, turn_cancel_.token());
+                decision = outcome.decision;
+                reason   = outcome.reason;
+            } else {
+                decision = payload::PermissionDecisionKind::Deny;
+                reason   = "no permission resolver attached";
+            }
+            state_ = AgentState::CallingTool;
+        }
+
+        payload::PermissionDecision recorded;
+        recorded.call     = call.id;
+        recorded.decision = decision;
+        recorded.reason   = reason;
+        session_.append(recorded);
+
+        if (services_.policy != nullptr) {
+            const GrantScope scope = decision == payload::PermissionDecisionKind::AllowAlways
+                                         ? GrantScope::Always
+                                         : GrantScope::Once;
+            services_.policy->remember(request, decision, scope);
+        }
+    }
+
+    if (decision == payload::PermissionDecisionKind::Deny) {
+        payload::ToolResult denied;
+        denied.id      = call.id;
+        denied.name    = call.name;
+        denied.outcome = payload::ToolOutcome::Denied;
+        denied.output  = reason.empty() ? std::string{"permission denied"} : reason;
+        denied.error   = denied.output;
+        session_.append(denied);
+        return false;
+    }
+
+    payload::ToolResult result;
+    if (services_.tools == nullptr || services_.execution == nullptr ||
+        services_.logger == nullptr || services_.governor == nullptr ||
+        services_.output == nullptr) {
+        result.id      = call.id;
+        result.name    = call.name;
+        result.outcome = payload::ToolOutcome::Error;
+        result.output  = "tool runtime unavailable";
+        result.error   = result.output;
+        session_.append(result);
+        return false;
+    }
+
+    StaticPermissionHandle handle(decision);
+    ToolContext context(*services_.execution, session_, *services_.logger, turn_cancel_.token(),
+                        *services_.governor, *services_.output, handle, call.id, turn, step);
+    try {
+        result = services_.tools->execute(call, context).get();
+    } catch (const std::exception& error) {
+        result.id      = call.id;
+        result.name    = call.name;
+        result.outcome = payload::ToolOutcome::Error;
+        result.output  = error.what();
+        result.error   = std::string{error.what()};
+    }
+    session_.append(result);
+    return true;
+}
+
+void AgentLoop::runTurn() {
+    while (!inbox_.empty() && inbox_.front().kind == InboxKind::Inject &&
+           !inbox_.front().context.startsTurn) {
+        appendContextInjected(inbox_.front().context);
+        inbox_.pop_front();
+    }
+    if (inbox_.empty()) {
+        return;
+    }
+
+    InboxItem trigger = std::move(inbox_.front());
+    inbox_.pop_front();
+
+    const TurnId turn = session_.nextTurnId();
+    if (trigger.kind == InboxKind::Inject) {
+        appendContextInjected(trigger.context);
+    } else {
+        appendUserMessage(trigger.message);
+    }
+    session_.append(payload::TurnStarted{turn, trigger.origin});
+
+    turn_cancel_ = CancellationSource{};
+    cancel_reason_ = "user";
+
+    for (std::size_t stepNumber = 1;; ++stepNumber) {
+        const StepId step = session_.nextStepId();
+        session_.append(payload::StepStarted{turn, step});
+
+        drainFoldedItems();
+        state_ = AgentState::Thinking;
+
+        if (services_.context == nullptr) {
+            appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, "no context assembler");
+            return;
+        }
+
+        std::vector<Message> messages;
+        try {
+            messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+        } catch (const std::exception& error) {
+            appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
+            return;
+        }
+
+        if (config_.compaction_threshold_tokens > 0 && services_.estimator != nullptr &&
+            services_.estimator->estimate(messages) > config_.compaction_threshold_tokens) {
+            runCompaction(messages);
+            try {
+                messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+            } catch (const std::exception& error) {
+                appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
+                return;
+            }
+        }
+
+        LLMRequest request = buildRequest(messages);
+
+        const MessageId messageId = make_event_id().value;
+        ChunkCoalescer  coalescer(session_, messageId, config_.max_chunk_batch,
+                                  config_.chunk_flush_interval);
+        std::string          text;
+        std::string          reasoning;
+        std::optional<Usage> streamUsage;
+
+        StreamSink sink = [&](const StreamEvent& event) -> SinkFlow {
+            if (const auto* delta = std::get_if<TextDelta>(&event)) {
+                text += delta->text;
+                coalescer.onText(delta->text);
+            } else if (const auto* delta = std::get_if<ReasoningDelta>(&event)) {
+                reasoning += delta->text;
+                coalescer.onReasoning(delta->text);
+            } else if (const auto* usage = std::get_if<UsageEvent>(&event)) {
+                streamUsage = usage->usage;
+            }
+            return SinkFlow::Continue;
+        };
+
+        LLMResponse response;
+        bool        slotCancelled = false;
+        if (services_.provider == nullptr) {
+            appendTurnFailed(turn, AgentErrorCode::ProviderFailed, "no provider configured");
+            return;
+        }
+
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (services_.pool != nullptr) {
+                std::optional<LLMPool::Slot> slot =
+                    services_.pool->acquire(turn_cancel_.token()).get();
+                if (!slot.has_value()) {
+                    slotCancelled = true;
+                    break;
+                }
+            }
+            try {
+                response = services_.provider->stream(request, sink, turn_cancel_.token()).get();
+            } catch (const std::exception& error) {
+                response              = LLMResponse{};
+                response.outcome      = StreamOutcome::Failed;
+                response.error.code   = LLMErrorCode::ProviderInternal;
+                response.error.detail = error.what();
+            }
+            if (response.outcome != StreamOutcome::Failed ||
+                response.error.code != LLMErrorCode::ContextLengthExceeded) {
+                break;
+            }
+            if (attempt == 1) {
+                break;
+            }
+            runCompaction(messages);
+            try {
+                messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+            } catch (const std::exception& error) {
+                appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
+                return;
+            }
+            request = buildRequest(messages);
+        }
+        if (slotCancelled) {
+            response         = LLMResponse{};
+            response.outcome = StreamOutcome::Cancelled;
+            response.finish  = FinishReason::Other;
+        }
+
+        try {
+            coalescer.flush();
+        } catch (const LeaseLost& error) {
+            appendTurnFailed(turn, AgentErrorCode::LeaseLost, error.what());
+            return;
+        } catch (const StoreError& error) {
+            appendTurnFailed(turn, AgentErrorCode::StoreUnavailable, error.what());
+            return;
+        }
+
+        std::vector<ContentBlock> content;
+        if (!reasoning.empty()) {
+            content.push_back(text_block(ContentBlockKind::Reasoning, reasoning));
+        }
+        if (!text.empty()) {
+            content.push_back(text_block(ContentBlockKind::Text, text));
+        }
+        for (const ToolCallAssembled& call : response.tool_calls) {
+            content.push_back(tool_use_block(call));
+        }
+
+        payload::AssistantMessage assistant;
+        assistant.id      = messageId;
+        assistant.content = std::move(content);
+        const std::optional<Usage> usage =
+            response.usage.has_value() ? response.usage : streamUsage;
+        assistant.usage = usage;
+        session_.append(assistant);
+
+        const std::string cancelReason = cancel_reason_.empty() ? std::string{"user"} : cancel_reason_;
+
+        if (response.outcome == StreamOutcome::Cancelled) {
+            session_.append(payload::TurnCancelled{turn, cancelReason});
+            state_ = AgentState::Idle;
+            return;
+        }
+        if (response.outcome == StreamOutcome::Failed) {
+            const std::string detail = response.error.detail.empty()
+                                           ? response.error.provider_message
+                                           : response.error.detail;
+            appendTurnFailed(turn, mapAgentError(response.error.code), detail);
+            return;
+        }
+
+        if (response.tool_calls.empty()) {
+            if (usage.has_value()) {
+                session_.append(payload::TokenUsage{*usage, turn});
+            }
+            session_.append(payload::StepEnded{turn, step});
+            session_.append(payload::TurnEnded{turn});
+            state_ = AgentState::Idle;
+            return;
+        }
+
+        state_ = AgentState::CallingTool;
+        for (const ToolCallAssembled& call : response.tool_calls) {
+            if (turn_cancel_.cancelled()) {
+                break;
+            }
+            executeToolCall(call, turn, step);
+        }
+
+        if (usage.has_value()) {
+            session_.append(payload::TokenUsage{*usage, turn});
+        }
+        session_.append(payload::StepEnded{turn, step});
+
+        if (turn_cancel_.cancelled()) {
+            session_.append(payload::TurnCancelled{turn, cancelReason});
+            state_ = AgentState::Idle;
+            return;
+        }
+        if (stepNumber >= config_.max_steps) {
+            appendTurnFailed(turn, AgentErrorCode::StepLimitExceeded, "step limit exceeded");
+            return;
+        }
+    }
+}
+
+} // namespace ymh
