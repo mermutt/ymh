@@ -41,6 +41,8 @@ add_executable(ymh_tests
     unit/session_cli_test.cpp
     unit/headless_live_test.cpp
     unit/ui_model_test.cpp
+    unit/ui_event_adapter_test.cpp
+    unit/supervisor_connection_test.cpp
     unit/ui_render_golden_test.cpp
     unit/syntax_renderer_test.cpp
     unit/markdown_renderer_test.cpp
@@ -48,6 +50,7 @@ add_executable(ymh_tests
     unit/render_golden_test.cpp
     unit/ui_driver_test.cpp
     unit/ui_live_pty_test.cpp
+    unit/ui_supervisor_pty_test.cpp
     unit/provider_factory_test.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp

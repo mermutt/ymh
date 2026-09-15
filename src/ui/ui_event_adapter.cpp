@@ -9,6 +9,7 @@ namespace ymh::ui {
 namespace {
 
 constexpr std::size_t kMaxArgumentsPreview = 512;
+constexpr std::size_t kMaxAppliedEventIds = 8192;
 
 std::string flatten_content(const std::vector<ContentBlock>& content) {
     std::string text;
@@ -177,8 +178,27 @@ void UiEventAdapter::onEvent(const Event& event) {
 }
 
 void UiEventAdapter::onSessionEnvelope(const protocol::SessionEnvelope& envelope) {
+    onSessionEnvelope(model_.activeWorkspaceId, envelope);
+}
+
+void UiEventAdapter::onSessionEnvelope(const WorkspaceId& workspace,
+                                       const protocol::SessionEnvelope& envelope) {
     if (envelope.session != envelope.event.session_id) {
         return;
+    }
+    if (!envelope.event.id.value.empty()) {
+        if (applied_event_ids_.find(envelope.event.id.value) != applied_event_ids_.end()) {
+            return;
+        }
+        applied_event_ids_.insert(envelope.event.id.value);
+        applied_event_order_.push_back(envelope.event.id.value);
+        if (applied_event_order_.size() > kMaxAppliedEventIds) {
+            applied_event_ids_.erase(applied_event_order_.front());
+            applied_event_order_.pop_front();
+        }
+    }
+    if (model_.sessions.find(envelope.session) == model_.sessions.end()) {
+        model_.ensureSessionIn(workspace, envelope.session);
     }
     onEvent(envelope.event);
 }
@@ -200,6 +220,29 @@ void UiEventAdapter::onPermissionRequest(const SessionId& session,
     }
 }
 
+void UiEventAdapter::onPermissionRequest(const WorkspaceId& workspace,
+                                         const protocol::PermissionRequest& request) {
+    if (model_.sessions.find(request.session) == model_.sessions.end()) {
+        model_.ensureSessionIn(workspace, request.session);
+    }
+    const PermissionRequestId id{request.request_id};
+    PermissionRequested requested;
+    requested.session = request.session;
+    requested.request = id;
+    requested.tool = request.tool;
+    requested.summary = request.summary.empty()
+                            ? summarize_tool_arguments(request.tool, request.arguments)
+                            : request.summary;
+    applyAndMark(UiEvent{std::move(requested)});
+
+    const auto previous = lastState_.find(request.session);
+    const AgentState old = previous == lastState_.end() ? AgentState::Idle : previous->second;
+    if (old != AgentState::WaitingForPermission) {
+        applyAndMark(
+            UiEvent{AgentStateChanged{request.session, old, AgentState::WaitingForPermission}});
+    }
+}
+
 void UiEventAdapter::onPermissionResolved(const SessionId& session,
                                           const PermissionRequestId& id,
                                           payload::PermissionDecisionKind decision) {
@@ -214,6 +257,39 @@ void UiEventAdapter::onPermissionResolved(const SessionId& session,
 
 void UiEventAdapter::onWorkspaceEvent(const WorkspaceEvent& event) {
     model_.apply(event);
+}
+
+void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
+                                  const protocol::HostNotice& notice) {
+    switch (notice.kind) {
+        case protocol::HostNoticeKind::SessionCreated: {
+            WorkspaceEvent event;
+            event.workspace = workspace;
+            event.kind = WorkspaceEventKind::SessionOpened;
+            model_.apply(event);
+            break;
+        }
+        case protocol::HostNoticeKind::SessionClosed: {
+            WorkspaceEvent event;
+            event.workspace = workspace;
+            event.kind = WorkspaceEventKind::SessionClosed;
+            model_.apply(event);
+            break;
+        }
+        case protocol::HostNoticeKind::DaemonShuttingDown: {
+            WorkspaceEvent event;
+            event.workspace = workspace;
+            event.kind = WorkspaceEventKind::DaemonDetached;
+            model_.apply(event);
+            break;
+        }
+        case protocol::HostNoticeKind::LeaseLost: {
+            if (notice.session.has_value()) {
+                model_.setSessionReadOnly(*notice.session, true);
+            }
+            break;
+        }
+    }
 }
 
 void UiEventAdapter::onTick(std::chrono::milliseconds delta) {

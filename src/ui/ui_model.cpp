@@ -1,5 +1,6 @@
 #include "ymh/ui/ui_model.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace ymh::ui {
@@ -172,26 +173,40 @@ const SessionUiState* UiModel::session(const SessionId& id) const {
     return it == sessions.end() ? nullptr : &it->second;
 }
 
-void UiModel::ensureCell(const SessionId& id) {
-    WorkspaceModel& workspace = workspaces[activeWorkspaceId];
-    for (const SessionCell& cell : workspace.sessions) {
+void UiModel::ensureCell(const SessionId& id) { ensureCellIn(activeWorkspaceId, id); }
+
+void UiModel::ensureCellIn(const WorkspaceId& workspace, const SessionId& id) {
+    WorkspaceModel& target = workspaces[workspace];
+    if (target.id.value.empty()) {
+        target.id = workspace;
+    }
+    for (const SessionCell& cell : target.sessions) {
         if (cell.id == id) {
             return;
         }
     }
     SessionCell cell;
     cell.id = id;
-    workspace.sessions.push_back(std::move(cell));
+    target.sessions.push_back(std::move(cell));
 }
 
 SessionUiState& UiModel::ensureSession(const SessionId& id) {
+    return ensureSessionIn(activeWorkspaceId, id);
+}
+
+SessionUiState& UiModel::ensureSessionIn(const WorkspaceId& workspace, const SessionId& id) {
     auto it = sessions.find(id);
     if (it == sessions.end()) {
         SessionUiState state;
         state.id = id;
-        state.workspace = activeWorkspaceId;
+        state.workspace = workspace;
         it = sessions.emplace(id, std::move(state)).first;
-        ensureCell(id);
+        ensureCellIn(workspace, id);
+        return it->second;
+    }
+    if (it->second.workspace.value.empty()) {
+        it->second.workspace = workspace;
+        ensureCellIn(workspace, id);
     }
     return it->second;
 }
@@ -201,15 +216,45 @@ void UiModel::refreshCell(const SessionId& id) {
     if (state == sessions.end()) {
         return;
     }
-    WorkspaceModel& workspace = workspaces[activeWorkspaceId];
-    for (SessionCell& cell : workspace.sessions) {
+    refreshCellIn(state->second.workspace, id);
+}
+
+void UiModel::refreshCellIn(const WorkspaceId& workspace, const SessionId& id) {
+    const auto state = sessions.find(id);
+    if (state == sessions.end()) {
+        return;
+    }
+    const auto workspace_it = workspaces.find(workspace);
+    if (workspace_it == workspaces.end()) {
+        return;
+    }
+    WorkspaceModel& target = workspace_it->second;
+    for (SessionCell& cell : target.sessions) {
         if (cell.id != id) {
             continue;
         }
         cell.state = state->second.agent_state;
         cell.attention = state->second.attention.needsInput;
-        cell.unread = state->second.attention.completed && id != workspace.activeSessionId;
+        cell.unread = state->second.attention.completed && id != target.activeSessionId;
         return;
+    }
+}
+
+void UiModel::setSessionReadOnly(const SessionId& id, bool read_only) {
+    const auto state = sessions.find(id);
+    if (state == sessions.end()) {
+        return;
+    }
+    const auto workspace_it = workspaces.find(state->second.workspace);
+    if (workspace_it == workspaces.end()) {
+        return;
+    }
+    for (SessionCell& cell : workspace_it->second.sessions) {
+        if (cell.id == id) {
+            cell.readOnly = read_only;
+            dirty.mark(id, UiDirtyFlag::SessionBar | UiDirtyFlag::Attention);
+            return;
+        }
     }
 }
 
@@ -403,6 +448,163 @@ void UiModel::apply(const WorkspaceEvent& event) {
         }
     }
     dirty.markAggregate();
+}
+
+void UiModel::openSwitcher() {
+    switcher.open(*this);
+    mode = UiMode::Switcher;
+    dirty.markAggregate();
+}
+
+void UiModel::focusWorkspace(const WorkspaceId& workspace) {
+    if (workspaces.find(workspace) == workspaces.end()) {
+        return;
+    }
+    activeWorkspaceId = workspace;
+    dirty.markAggregate();
+}
+
+void UiModel::focusSession(const SessionId& id) {
+    const auto state = sessions.find(id);
+    if (state == sessions.end()) {
+        return;
+    }
+    const WorkspaceId workspace = state->second.workspace;
+    const auto workspace_it = workspaces.find(workspace);
+    if (workspace_it == workspaces.end()) {
+        return;
+    }
+    activeWorkspaceId = workspace;
+    workspace_it->second.activeSessionId = id;
+    mode = UiMode::Conversation;
+    dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::Input);
+    dirty.markAggregate();
+}
+
+void SwitcherOverlayModel::open(const UiModel& model) {
+    workspaces.clear();
+    const bool filtering = filter.has_value() && !filter->empty();
+    for (const auto& [workspace_id, workspace] : model.workspaces) {
+        WorkspaceNode node;
+        node.id = workspace_id;
+        node.title = workspace.title.empty() ? workspace.cwd : workspace.title;
+        node.status = workspace.daemonStatus;
+        for (const SessionCell& cell : workspace.sessions) {
+            if (filtering && cell.title.find(*filter) == std::string::npos &&
+                cell.id.value.find(*filter) == std::string::npos) {
+                continue;
+            }
+            node.sessions.push_back(SessionNode{cell.id, cell.title, cell.state, cell.attention});
+        }
+        if (filtering && node.sessions.empty() && node.title.find(*filter) == std::string::npos) {
+            continue;
+        }
+        workspaces.push_back(std::move(node));
+    }
+
+    // The model map is keyed by UUID, so sort by display title to keep the tree
+    // stable and match the registry's canonical-path order in practice.
+    std::sort(workspaces.begin(), workspaces.end(),
+              [](const WorkspaceNode& left, const WorkspaceNode& right) {
+                  return left.title < right.title;
+              });
+
+    const auto active = model.workspaces.find(model.activeWorkspaceId);
+    const bool cursor_valid = !cursor.workspace.value.empty() &&
+                              model.workspaces.find(cursor.workspace) != model.workspaces.end();
+    if (!cursor_valid) {
+        cursor.workspace = model.activeWorkspaceId;
+        cursor.session.reset();
+        if (active != model.workspaces.end() && !active->second.activeSessionId.value.empty()) {
+            cursor.session = active->second.activeSessionId;
+        }
+    }
+}
+
+void SwitcherOverlayModel::close() {
+    workspaces.clear();
+    cursor = SwitcherCursor{};
+    filter.reset();
+}
+
+void SwitcherOverlayModel::moveDown() {
+    if (workspaces.empty()) {
+        return;
+    }
+    for (std::size_t index = 0; index < workspaces.size(); ++index) {
+        WorkspaceNode& workspace = workspaces[index];
+        if (workspace.id != cursor.workspace) {
+            continue;
+        }
+        if (!cursor.session.has_value()) {
+            if (collapsed.find(workspace.id) == collapsed.end() && !workspace.sessions.empty()) {
+                cursor.session = workspace.sessions.front().id;
+                return;
+            }
+        } else {
+            for (std::size_t leaf = 0; leaf + 1 < workspace.sessions.size(); ++leaf) {
+                if (workspace.sessions[leaf].id == *cursor.session) {
+                    cursor.session = workspace.sessions[leaf + 1].id;
+                    return;
+                }
+            }
+        }
+        if (index + 1 < workspaces.size()) {
+            cursor.workspace = workspaces[index + 1].id;
+            cursor.session.reset();
+        }
+        return;
+    }
+    cursor.workspace = workspaces.front().id;
+    cursor.session.reset();
+}
+
+void SwitcherOverlayModel::moveUp() {
+    if (workspaces.empty()) {
+        return;
+    }
+    for (std::size_t index = 0; index < workspaces.size(); ++index) {
+        WorkspaceNode& workspace = workspaces[index];
+        if (workspace.id != cursor.workspace) {
+            continue;
+        }
+        if (cursor.session.has_value()) {
+            for (std::size_t leaf = 0; leaf < workspace.sessions.size(); ++leaf) {
+                if (workspace.sessions[leaf].id != *cursor.session) {
+                    continue;
+                }
+                if (leaf > 0) {
+                    cursor.session = workspace.sessions[leaf - 1].id;
+                } else {
+                    cursor.session.reset();
+                }
+                return;
+            }
+        }
+        if (index > 0) {
+            WorkspaceNode& previous = workspaces[index - 1];
+            cursor.workspace = previous.id;
+            cursor.session.reset();
+            if (collapsed.find(previous.id) == collapsed.end() && !previous.sessions.empty()) {
+                cursor.session = previous.sessions.back().id;
+            }
+        }
+        return;
+    }
+    cursor.workspace = workspaces.front().id;
+    cursor.session.reset();
+}
+
+void SwitcherOverlayModel::toggleExpand() {
+    if (cursor.workspace.value.empty()) {
+        return;
+    }
+    if (collapsed.find(cursor.workspace) != collapsed.end()) {
+        collapsed.erase(cursor.workspace);
+        return;
+    }
+    collapsed.insert(cursor.workspace);
+    cursor.session.reset();
 }
 
 } // namespace ymh::ui

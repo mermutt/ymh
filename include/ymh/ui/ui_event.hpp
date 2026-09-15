@@ -17,6 +17,7 @@
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/ids.hpp"
+#include "ymh/transport/protocol.hpp"
 
 namespace ymh::ui {
 
@@ -182,15 +183,8 @@ struct UiEvent {
         value;
 };
 
-// The wire envelope (10 §4.5, 05 §5.2). In Milestone 1 the "wire" is the local
-// `EventBus`; the shape is kept identical so the daemon fork is mechanical.
-namespace protocol {
-
-struct SessionEnvelope {
-    SessionId session;
-    Event     event;
-};
-
-} // namespace protocol
+// The wire envelope is the transport's `protocol::SessionEnvelope` (05 §5.2);
+// the local duplicate that Milestone 1 carried is retired so the adapter
+// consumes the real wire type (10 §4.5, U4).
 
 } // namespace ymh::ui

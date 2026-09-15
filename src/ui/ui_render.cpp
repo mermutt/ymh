@@ -62,6 +62,20 @@ const char* state_name(AgentState state) {
     return "unknown";
 }
 
+const char* daemon_status_glyph(DaemonStatus status) {
+    switch (status) {
+        case DaemonStatus::Connecting:
+            return "~";
+        case DaemonStatus::Attached:
+            return "o";
+        case DaemonStatus::Detached:
+            return "-";
+        case DaemonStatus::Dead:
+            return "x";
+    }
+    return "?";
+}
+
 std::string short_id(const SessionId& id) {
     return id.value.size() > 8 ? id.value.substr(0, 8) : id.value;
 }
@@ -215,6 +229,56 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
     return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) | ftxui::center;
 }
 
+Element render_switcher(const UiModel& model, const Theme& theme) {
+    const SwitcherOverlayModel& switcher = model.switcher;
+    Elements rows;
+    rows.push_back(ftxui::text("Switcher") | ftxui::bold);
+    rows.push_back(ftxui::separator());
+    if (switcher.workspaces.empty()) {
+        rows.push_back(ftxui::text("(no workspaces)") | ftxui::dim);
+    }
+    for (const WorkspaceNode& workspace : switcher.workspaces) {
+        const bool on_workspace = switcher.cursor.workspace == workspace.id &&
+                                  !switcher.cursor.session.has_value();
+        const bool collapsed = switcher.collapsed.find(workspace.id) != switcher.collapsed.end();
+        const std::string title =
+            workspace.title.empty() ? workspace.id.value : workspace.title;
+        Element row = ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " +
+                                  daemon_status_glyph(workspace.status));
+        if (on_workspace) {
+            row = paint(row, ftxui::Color::Cyan, theme) | ftxui::bold;
+        }
+        rows.push_back(row);
+        if (collapsed) {
+            continue;
+        }
+        for (const SessionNode& session : workspace.sessions) {
+            const bool on_session = switcher.cursor.workspace == workspace.id &&
+                                    switcher.cursor.session.has_value() &&
+                                    *switcher.cursor.session == session.id;
+            const std::string leaf_title =
+                session.title.empty() ? short_id(session.id) : session.title;
+            std::string leaf = "    [" + leaf_title + " " + state_glyph(session.state);
+            if (session.attention) {
+                leaf += "!";
+            }
+            leaf += "]";
+            Element leaf_element = ftxui::text(leaf);
+            if (on_session) {
+                leaf_element = leaf_element | ftxui::inverted;
+            }
+            if (session.attention) {
+                leaf_element = paint(leaf_element, ftxui::Color::Red, theme);
+            }
+            rows.push_back(leaf_element);
+        }
+    }
+    rows.push_back(ftxui::separator());
+    rows.push_back(ftxui::text("j/k move · Tab expand · Enter focus · Esc close") | ftxui::dim);
+    return ftxui::window(ftxui::text("workspaces"), ftxui::vbox(std::move(rows))) |
+           ftxui::center;
+}
+
 Element render_header(const UiModel& model, const Theme& theme) {
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     std::string title = "ymh";
@@ -260,6 +324,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
     if (model.dialog.open) {
         return ftxui::dbox({main, render_dialog(model, theme)});
+    }
+    if (model.mode == UiMode::Switcher) {
+        return ftxui::dbox({main, render_switcher(model, theme)});
     }
     return main;
 }
