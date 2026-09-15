@@ -494,6 +494,32 @@ target_link_libraries(ymh_transport
 )
 
 # ---------------------------------------------------------------------------
+# HostRuntime bridge (M2 §4): TransportHost over WorkspaceRuntime
+# ---------------------------------------------------------------------------
+
+add_library(ymh_host STATIC
+    src/host/host_runtime.cpp
+)
+add_library(ymh::host ALIAS ymh_host)
+
+target_include_directories(ymh_host
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_host
+    PUBLIC
+        ymh::runtime
+        ymh::registry
+        ymh::transport
+        ymh::permission
+        ymh::agent
+    PRIVATE
+        nlohmann_json::nlohmann_json
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
 # Render library (component 10 §8.2): markdown, syntax, diff (§22-§24)
 # ---------------------------------------------------------------------------
 
