@@ -79,6 +79,24 @@ struct WorkspaceSessionRecord {
     std::int64_t createdAt = 0; // epoch ms
 };
 
+// 11-m2-errata §5.3 (D16): a store session reduced to the fields the
+// `session.list` join needs.
+struct SessionRef {
+    SessionId    sessionId;
+    std::int64_t createdAt = 0;  // epoch ms
+};
+
+// 11-m2-errata §5.3 (D16): one entry in the daemon's `session.list` order.
+// `inJunction == false` marks a store-only session (the crash window between
+// the store commit and the junction write) that is surfaced after the
+// junction set and flagged for reconcile.
+struct SessionOrderEntry {
+    SessionId    sessionId;
+    std::int64_t ordinal    = 0;
+    bool         archived   = false;
+    bool         inJunction = true;
+};
+
 enum class MutationType : std::uint8_t { Create, Delete, Reorder };
 
 [[nodiscard]] std::string_view mutation_type_name(MutationType type) noexcept;
@@ -200,6 +218,12 @@ public:
         const std::filesystem::path& path) const;
     [[nodiscard]] std::vector<WorkspaceSessionRecord>   listSessions(WorkspaceId) const;  // ORDER BY ordinal
     [[nodiscard]] std::optional<WorkspaceSessionRecord> findSession(WorkspaceId, SessionId) const;
+
+    // 11-m2-errata §5.3 (D16): the `session.list` order — junction rows by
+    // ordinal, then store-only sessions by `(createdAt, sessionId)`. The
+    // Wave-2 `HostRuntime` calls this with the store's session refs.
+    [[nodiscard]] std::vector<SessionOrderEntry> listSessionsOrdered(
+        WorkspaceId workspace, const std::vector<SessionRef>& storeSessions) const;
     [[nodiscard]] std::optional<PendingMutation>        pendingMutation(WorkspaceId) const;
 
     // Number of rows with a host claim (supports §9.11's live-daemon cap; F8).
@@ -258,6 +282,14 @@ private:
 
 // Generates a UUIDv4 string. Exposed for deterministic id minting in callers.
 [[nodiscard]] std::string generate_uuid_v4();
+
+// 11-m2-errata §5.3 (D16): the daemon's `session.list` order. Junction rows
+// come first in `ordinal` ascending order; store-only sessions follow, sorted
+// by `(createdAt, sessionId)`, flagged `inJunction == false`. Never lexical id
+// and never the store's `createdAt` for the junction set (R8).
+[[nodiscard]] std::vector<SessionOrderEntry> orderSessions(
+    const std::vector<WorkspaceSessionRecord>& junction,
+    const std::vector<SessionRef>&             storeSessions);
 
 } // namespace ymh
 

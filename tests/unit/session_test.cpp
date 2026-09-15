@@ -499,4 +499,27 @@ TEST(SessionManager, DeleteEmitsSessionEnded) {
     EXPECT_THROW(manager.session(id), UnknownSession);
 }
 
+TEST(SessionStoreDefaults, FakeStoreHeadSequenceAndBoundedReadAfter) {
+    FakeStore          store;
+    const SessionHeader header = make_header(make_temp_dir());
+    store.create(header);
+    EXPECT_EQ(store.headSequence(header.id), 0);
+
+    const Sequence first = store.append(
+        header.id,
+        record(1, header.id, payload::SessionStarted{"test-model", "interactive", "t"}).event);
+    const Sequence second = store.append(
+        header.id,
+        record(2, header.id, payload::SessionStarted{"test-model", "interactive", "t"}).event);
+
+    EXPECT_EQ(store.headSequence(header.id), second);
+    EXPECT_TRUE(store.readAfter(header.id, 0, 0).empty());
+
+    const EventRange bounded = store.readAfter(header.id, 0, 1);
+    ASSERT_EQ(bounded.size(), 1u);
+    EXPECT_EQ(bounded[0].seq, first);
+    EXPECT_EQ(store.readAfter(header.id, first, kUnbounded).size(), 1u);
+    EXPECT_THROW(static_cast<void>(store.headSequence(SessionId{"missing"})), UnknownSession);
+}
+
 } // namespace

@@ -17,6 +17,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -558,6 +559,43 @@ std::string generate_uuid_v4() {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
 }
 
+std::vector<SessionOrderEntry> orderSessions(const std::vector<WorkspaceSessionRecord>& junction,
+                                             const std::vector<SessionRef>& storeSessions) {
+    std::vector<WorkspaceSessionRecord> junction_ordered = junction;
+    std::sort(junction_ordered.begin(), junction_ordered.end(),
+              [](const WorkspaceSessionRecord& left, const WorkspaceSessionRecord& right) {
+                  return left.ordinal < right.ordinal;
+              });
+
+    std::vector<SessionOrderEntry> ordered;
+    ordered.reserve(junction.size() + storeSessions.size());
+    std::unordered_set<std::string> in_junction;
+    for (const WorkspaceSessionRecord& record : junction_ordered) {
+        ordered.push_back(
+            SessionOrderEntry{record.sessionId, record.ordinal, record.archived, true});
+        in_junction.insert(record.sessionId.value);
+    }
+
+    std::vector<SessionRef> store_only;
+    store_only.reserve(storeSessions.size());
+    for (const SessionRef& session : storeSessions) {
+        if (!in_junction.contains(session.sessionId.value)) {
+            store_only.push_back(session);
+        }
+    }
+    std::sort(store_only.begin(), store_only.end(),
+              [](const SessionRef& left, const SessionRef& right) {
+                  if (left.createdAt != right.createdAt) {
+                      return left.createdAt < right.createdAt;
+                  }
+                  return left.sessionId.value < right.sessionId.value;
+              });
+    for (const SessionRef& session : store_only) {
+        ordered.push_back(SessionOrderEntry{session.sessionId, 0, false, false});
+    }
+    return ordered;
+}
+
 std::string_view mutation_type_name(MutationType type) noexcept {
     switch (type) {
         case MutationType::Create:
@@ -775,6 +813,11 @@ std::vector<WorkspaceSessionRecord> WorkspaceRegistry::listSessions(WorkspaceId 
         result.push_back(read_session(statement));
     }
     return result;
+}
+
+std::vector<SessionOrderEntry> WorkspaceRegistry::listSessionsOrdered(
+    WorkspaceId workspace, const std::vector<SessionRef>& storeSessions) const {
+    return orderSessions(listSessions(workspace), storeSessions);
 }
 
 std::optional<WorkspaceSessionRecord> WorkspaceRegistry::findSession(WorkspaceId workspace,

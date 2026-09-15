@@ -1,10 +1,13 @@
 #include "ymh/transport/transport_server.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstddef>
-#include <filesystem>
+#include <cstring>
+#include <fcntl.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -16,6 +19,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 
 namespace ymh::protocol {
 
@@ -97,26 +101,27 @@ private:
             return;
         }
         write_queue_.push_back(std::move(frame));
-        if (!writing_) {
-            write_next();
-        }
+        write_next();
     }
 
     void write_next() {
-        if (write_queue_.empty()) {
-            writing_ = false;
+        if (closed_ || current_frame_.has_value()) {
             return;
         }
-        writing_ = true;
+        if (write_queue_.empty()) {
+            return;
+        }
+        current_frame_ = std::move(write_queue_.front());
+        write_queue_.pop_front();
         const auto self = shared_from_this();
         asio::async_write(
-            socket_, asio::buffer(write_queue_.front()),
+            socket_, asio::buffer(*current_frame_),
             [self](const std::error_code& error, std::size_t count) {
+                self->current_frame_.reset();
                 if (error) {
                     self->shutdown();
                     return;
                 }
-                self->write_queue_.pop_front();
                 self->server_.onFrameWritten(self->id_, count);
                 self->write_next();
             });
@@ -136,6 +141,8 @@ private:
         socket_.shutdown(asio::socket_base::shutdown_both, error);
         socket_.close(error);
         write_queue_.clear();
+        // `current_frame_` is retained until its async_write completion runs:
+        // that handler owns the only remaining reference to the buffer.
         if (on_close_) {
             on_close_(this);
         }
@@ -148,13 +155,16 @@ private:
     TransportLimits                      limits_;
     std::array<char, 65536>              read_buffer_{};
     std::deque<std::string>              write_queue_;
+    std::optional<std::string>           current_frame_;
     std::function<void(SocketSession*)>  on_close_;
     ClientId                             id_{};
     std::uint32_t                        peer_uid_{0};
     std::int32_t                         peer_pid_{0};
-    bool                                 writing_{false};
     bool                                 closed_{false};
 };
+
+TransportError::TransportError(HostErrorCode code, std::string message)
+    : std::runtime_error(std::move(message)), code_(code) {}
 
 TransportServer::TransportServer(ProtocolServer& server, std::string socket_path,
                                  TransportLimits limits)
@@ -165,10 +175,55 @@ TransportServer::TransportServer(ProtocolServer& server, std::string socket_path
 
 TransportServer::~TransportServer() { stop(); }
 
-void TransportServer::start() {
-    std::error_code error;
-    std::filesystem::remove(socket_path_, error);
+bool TransportServer::socket_path_too_long() const {
+    sockaddr_un address{};
+    return socket_path_.size() >= sizeof(address.sun_path);
+}
 
+bool TransportServer::post(std::function<void()> fn) {
+    std::lock_guard lock(post_mutex_);
+    if (!started_.load() || stopping_.load()) {
+        return false;
+    }
+    asio::post(io_, std::move(fn));
+    return true;
+}
+
+void TransportServer::start() {
+    if (socket_path_too_long()) {
+        throw TransportError(HostErrorCode::SocketPathTooLong,
+                             "transport: socket path too long: " + socket_path_);
+    }
+
+    struct stat status {};
+    if (::lstat(socket_path_.c_str(), &status) == 0) {
+        const int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (probe < 0) {
+            throw TransportError(HostErrorCode::SocketUnavailable,
+                                 std::string("transport: probe socket: ") + std::strerror(errno));
+        }
+        ::fcntl(probe, F_SETFL, ::fcntl(probe, F_GETFL, 0) | O_NONBLOCK);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path, socket_path_.c_str(), socket_path_.size() + 1);
+        const int connected =
+            ::connect(probe, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+        const int probe_errno = errno;
+        ::close(probe);
+        if (connected == 0 || probe_errno == EINPROGRESS || probe_errno == EAGAIN) {
+            throw TransportError(HostErrorCode::AlreadyRunning,
+                                 "transport: another daemon is live at " + socket_path_);
+        }
+        if (probe_errno == ECONNREFUSED) {
+            ::unlink(socket_path_.c_str());
+        } else {
+            throw TransportError(HostErrorCode::SocketUnavailable,
+                                 std::string("transport: connect-probe: ") +
+                                     std::strerror(probe_errno));
+        }
+    }
+
+    std::error_code error;
     acceptor_.open(asio::local::stream_protocol(), error);
     if (error) {
         throw std::runtime_error("transport: open acceptor: " + error.message());
@@ -183,32 +238,49 @@ void TransportServer::start() {
         throw std::runtime_error("transport: listen: " + error.message());
     }
 
+    own_inode_.reset();
+    if (::lstat(socket_path_.c_str(), &status) == 0) {
+        own_inode_ = status.st_ino;
+    }
+
     do_accept();
-    thread_ = std::thread([this] { io_.run(); });
-    started_ = true;
+    {
+        std::lock_guard lock(post_mutex_);
+        thread_ = std::thread([this] { io_.run(); });
+        started_.store(true);
+    }
 }
 
 void TransportServer::stop() {
     if (stopping_.exchange(true)) {
         return;
     }
-    asio::post(io_, [this] {
-        std::error_code error;
-        acceptor_.close(error);
-        const std::vector<std::shared_ptr<SocketSession>> snapshot(sessions_.begin(),
-                                                                   sessions_.end());
-        for (const auto& session : snapshot) {
-            session->close_from_owner();
+    {
+        std::lock_guard lock(post_mutex_);
+        if (started_.load()) {
+            asio::post(io_, [this] {
+                std::error_code error;
+                acceptor_.close(error);
+                const std::vector<std::shared_ptr<SocketSession>> snapshot(sessions_.begin(),
+                                                                           sessions_.end());
+                for (const auto& session : snapshot) {
+                    session->close_from_owner();
+                }
+            });
         }
-    });
+    }
     if (thread_.joinable()) {
         thread_.join();
     }
     sessions_.clear();
-    if (started_) {
-        std::error_code error;
-        std::filesystem::remove(socket_path_, error);
-        started_ = false;
+    if (started_.load()) {
+        if (own_inode_.has_value()) {
+            struct stat status {};
+            if (::lstat(socket_path_.c_str(), &status) == 0 && status.st_ino == *own_inode_) {
+                ::unlink(socket_path_.c_str());
+            }
+        }
+        started_.store(false);
     }
 }
 

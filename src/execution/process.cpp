@@ -111,6 +111,10 @@ void fill_from_status(int status, ProcessResult& result) {
     }
 }
 
+// The sole reaper for tool children (E8, M-F5): always a specific pid, never a
+// global `waitpid(-1)` sweep, which would race this path and destroy the exit
+// status it needs. The daemon installs no SIGCHLD reaper; see
+// `ymh/execution/signal_policy.hpp`.
 ProcessResult reap(int pid) {
     int status = 0;
     while (::waitpid(pid, &status, 0) < 0) {

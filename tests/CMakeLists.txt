@@ -18,9 +18,11 @@ add_executable(ymh_tests
     unit/tools_test.cpp
     unit/git_tools_test.cpp
     unit/permissions_test.cpp
+    unit/permission_broker_test.cpp
     unit/agent_loop_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp
+    unit/agent_turn_executor_test.cpp
     unit/agent_coalescer_test.cpp
     unit/llm_pool_test.cpp
     unit/workspace_runtime_test.cpp
@@ -43,6 +45,9 @@ add_executable(ymh_tests
     unit/render_golden_test.cpp
     unit/ui_driver_test.cpp
     unit/ui_live_pty_test.cpp
+    unit/provider_factory_test.cpp
+    integration_child_process_test.cpp
+    integration_host_harness_test.cpp
 )
 
 target_include_directories(ymh_tests
@@ -59,6 +64,7 @@ target_link_libraries(ymh_tests
         ymh::llm
         ymh::execution
         ymh::policy
+        ymh::permission
         ymh::tools
         ymh::agent
         ymh::runtime

@@ -50,7 +50,7 @@ TEST_F(WorkspaceRuntimeTest, WiresStoreBusToolsLeaseAndRegistry) {
     ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
     WorkspaceRuntime& runtime = **runtime_result;
 
-    EXPECT_EQ(runtime.store().schemaVersion(), kSchemaVersion);
+    EXPECT_EQ(runtime.persistence()->schemaVersion(), kSchemaVersion);
     EXPECT_TRUE(runtime.tools().frozen());
     EXPECT_TRUE(runtime.tools().contains(ToolName{"read_file"}));
     EXPECT_TRUE(runtime.tools().contains(ToolName{"write_file"}));
@@ -120,6 +120,70 @@ TEST_F(WorkspaceRuntimeTest, ProviderFactoryThrowIsReported) {
     ASSERT_FALSE(runtime_result.has_value());
     EXPECT_EQ(runtime_result.error().code, WorkspaceRuntimeErrorCode::ProviderSetupFailed);
     EXPECT_EQ(runtime_result.error().detail, "boom");
+}
+
+TEST_F(WorkspaceRuntimeTest, StoreFactorySeamSkipsRealDatabase) {
+    TempWorkspace workspace("runtime_store_factory");
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.store_factory           = []() -> std::unique_ptr<SessionStore> {
+        return std::make_unique<MemorySessionStore>();
+    };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    EXPECT_EQ(runtime.persistence(), nullptr);
+    EXPECT_FALSE(std::filesystem::exists(workspace.path() / ".ymh" / "sessions.db"));
+
+    SessionOptions session_options;
+    session_options.cwd           = workspace.path();
+    session_options.serverProfile = "automation";
+    session_options.model         = "fake-model";
+    const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+    const SessionId session = runtime.agents().get(*created).session();
+    EXPECT_FALSE(runtime.store().read(session).empty());
+}
+
+TEST_F(WorkspaceRuntimeTest, NullStoreFactoryIsStoreUnavailable) {
+    TempWorkspace workspace("runtime_store_null");
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.store_factory = []() -> std::unique_ptr<SessionStore> { return nullptr; };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_FALSE(runtime_result.has_value());
+    EXPECT_EQ(runtime_result.error().code, WorkspaceRuntimeErrorCode::StoreUnavailable);
+}
+
+TEST_F(WorkspaceRuntimeTest, ThrowingStoreFactoryIsStoreUnavailable) {
+    TempWorkspace workspace("runtime_store_throw");
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.store_factory           = []() -> std::unique_ptr<SessionStore> {
+        throw std::runtime_error("no store");
+    };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_FALSE(runtime_result.has_value());
+    EXPECT_EQ(runtime_result.error().code, WorkspaceRuntimeErrorCode::StoreUnavailable);
+}
+
+TEST_F(WorkspaceRuntimeTest, HeldFlockMapsToWorkspaceBusy) {
+    TempWorkspace workspace("runtime_busy");
+    PersistenceConfig persistence;
+    persistence.db_path   = workspace.path() / ".ymh" / "sessions.db";
+    persistence.lock_path = workspace.path() / ".ymh" / "sessions.lock";
+    persistence.boot_id   = BootId{"runtime-busy-holder"};
+    auto holder           = SessionPersistence::open(persistence);
+    ASSERT_NE(holder, nullptr);
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(options_for(workspace));
+    ASSERT_FALSE(runtime_result.has_value());
+    EXPECT_EQ(runtime_result.error().code, WorkspaceRuntimeErrorCode::WorkspaceBusy);
 }
 
 } // namespace

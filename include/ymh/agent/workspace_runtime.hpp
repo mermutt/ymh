@@ -53,6 +53,7 @@ struct SessionId;
 enum class WorkspaceRuntimeErrorCode : std::uint8_t {
     WorkspaceMissing,
     StoreUnavailable,
+    WorkspaceBusy,
     ProviderSetupFailed,
     Internal,
 };
@@ -76,6 +77,12 @@ struct WorkspaceRuntimeOptions {
     // returns a provider, that provider is used instead of resolving one from
     // the `ProviderRegistry`. A throw is reported as `ProviderSetupFailed`.
     std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)> provider_factory;
+
+    // 11-m2-errata §3.5 (D9): when set, the runtime uses this store instead of
+    // opening the real SQLite file, so daemon integration tests can run without
+    // a DB. The caller owns the store and must keep it alive for the runtime's
+    // lifetime; never set in production (H6: one store / one flock).
+    std::function<std::unique_ptr<SessionStore>()> store_factory;
 };
 
 class WorkspaceRuntime {
@@ -98,7 +105,8 @@ public:
     [[nodiscard]] ExecutionEnvironment& environment() noexcept;
     [[nodiscard]] ResourceGovernor&     governor() noexcept;
     [[nodiscard]] EventBus&             bus() noexcept;
-    [[nodiscard]] SessionPersistence&   store() noexcept;
+    [[nodiscard]] SessionStore&         store() noexcept;
+    [[nodiscard]] SessionPersistence*   persistence() noexcept;
     [[nodiscard]] SessionManager&       sessions() noexcept;
     [[nodiscard]] AgentRegistry&        agents() noexcept;
     [[nodiscard]] ToolRegistry&         tools() noexcept;

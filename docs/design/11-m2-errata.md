@@ -793,16 +793,26 @@ namespace ymh {
 
 // 09 §4.2's ctor takes a `Clock&` but never defines the type; M1 only has
 // file-local `using Clock = std::chrono::steady_clock;` (e.g.
-// permission_policy.cpp:14, process.cpp:26). Pin it as a public type here so the
-// timeout is injectable and testable.
+// permission_policy.cpp:14, process.cpp:26). Pin it as a public type here.
 using Clock = std::chrono::steady_clock;
+
+// AMENDED (post-freeze, track-E finding; additive). A `Clock&` is INERT:
+// `clock.now()` resolves to the static `Clock::now()` regardless of the bound
+// reference, so the timeout is not injectable and timeout tests cannot be made
+// deterministic. The broker takes an injectable clock READER instead; it is the
+// only time source the broker may use. `Clock::now` is the default, so
+// production construction is unchanged. tests/support/manual_clock.hpp provides
+// `ManualClock::reader()` for tests.
+using ClockReader = std::function<Clock::time_point()>;
 
 class PermissionBroker {
 public:
+    // `now` defaults to `Clock::now`; tests pass `ManualClock::reader()`.
+    // Timeout is computed from `now()`, NEVER `Clock::now()` directly (E21).
     PermissionBroker(PermissionPolicy& policy,
                      protocol::TransportServer& transport,
-                     Clock& clock,
-                     PermissionConfig config);
+                     PermissionConfig config,
+                     ClockReader now = Clock::now);
 
     // Called ONLY for an Ask verdict, from the TURN thread. Registers the
     // request, posts permission.request onto the transport thread, and returns
@@ -842,10 +852,12 @@ public:
 ### 7.3 Rules (frozen)
 
 - **D19.1 — Fail-closed timeout auto-deny.** `PermissionConfig::permission_timeout`
-  (default 5 min, `permission_policy.hpp:93`) bounds the wait. On expiry the
-  broker resolves `Deny` with reason `"timeout"` and the loop appends the durable
-  `payload::PermissionDecision` (09 §4.1 `:604`). Cancellation resolves `Deny`
-  with reason `"cancelled"`. Neither throws.
+  (default 5 min, `permission_policy.hpp:93`) bounds the wait. **Expiry is
+  measured with the injected `ClockReader` (`now()`), never `Clock::now()`
+  directly** (§7.2, E21), so tests advance a `ManualClock` instead of sleeping. On
+  expiry the broker resolves `Deny` with reason `"timeout"` and the loop appends
+  the durable `payload::PermissionDecision` (09 §4.1 `:604`). Cancellation resolves
+  `Deny` with reason `"cancelled"`. Neither throws.
 - **D19.2 — First-wins.** `onDecision` applies the first decision atomically at
   the transport dispatch point and ignores later ones (05 §7.6 `:994-995`); an
   unknown/expired `request_id` is `InvalidParams` (idempotent at the policy
@@ -1313,7 +1325,7 @@ Wave exit gates:
 
 ---
 
-## 14. Invariants (E1–E20)
+## 14. Invariants (E1–E21)
 
 | # | Invariant | § |
 |---|---|---|
@@ -1337,6 +1349,7 @@ Wave exit gates:
 | E18 | Destruction order: runtime ⊃ adapter ⊃ protocol ⊃ transport | §11.2 |
 | E19 | `host.shutdown` reply and notice flush before `stop()`; `stop()` off the io thread | §11.3 |
 | E20 | `DaemonShuttingDown` precedes `SessionClosed`/`LeaseLost` notices | §11.3 |
+| E21 | Broker timeout reads the injected `ClockReader`; no direct `Clock::now()` | §7.2, §7.3 |
 
 ## 15. Failure modes (M-F1–M-F12)
 
@@ -1363,7 +1376,8 @@ Wave exit gates:
   (`AlreadyRunning`/stale/`SocketUnavailable`); inode-checked unlink; uid
   enforcement; `headSequence`/`readAfter` bounds; cursor round-trip and
   `CursorInvalid`; boot-nonce mint-once; error-mapping table (every row of §4.4);
-  `PermissionBroker` first-wins + timeout + zero-subscriber auto-deny.
+  `PermissionBroker` first-wins + timeout + zero-subscriber auto-deny, with the
+  timeout driven by an injected `ManualClock::reader()` (no sleep; E21).
 - **Integration (fake host / Fake LLM).** `foreground == true` daemon with an
   injected store; turn on the executor while accept/heartbeat stay live;
   reconnect supersede + per-session resume; `host.shutdown` reply-before-stop;

@@ -263,6 +263,28 @@ target_link_libraries(ymh_policy
 )
 
 # ---------------------------------------------------------------------------
+# Permission broker library (component 09 §4, errata §7)
+# ---------------------------------------------------------------------------
+
+add_library(ymh_permission STATIC
+    src/permission/permission_broker.cpp
+)
+add_library(ymh::permission ALIAS ymh_permission)
+
+target_include_directories(ymh_permission
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_permission
+    PUBLIC
+        ymh::policy
+        nlohmann_json::nlohmann_json
+    PRIVATE
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
 # Tools library (component 07 §3-§5)
 # ---------------------------------------------------------------------------
 
@@ -388,6 +410,7 @@ target_link_libraries(ymh_wiring
         ymh::llm
         ymh::policy
     PRIVATE
+        ymh::registry
         ymh::warnings
 )
 
@@ -537,6 +560,7 @@ target_link_libraries(ymh_ui
 # ---------------------------------------------------------------------------
 
 add_library(ymh_cli STATIC
+    src/cli/provider_factory.cpp
     src/cli/headless.cpp
     src/cli/session_cli.cpp
     src/cli/cli.cpp

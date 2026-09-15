@@ -7,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -308,16 +309,28 @@ public:
         return header;
     }
 
-    [[nodiscard]] EventRange read_events_locked(const SessionId& id) const {
+    [[nodiscard]] EventRange read_events_after_locked(const SessionId& id, Sequence after,
+                                                      std::size_t limit) const {
+        if (limit == 0) {
+            return {};
+        }
+        const bool unbounded =
+            limit >= static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
         Statement statement{
-            db,
-            "SELECT sequence, session_id, event_id, timestamp, type, payload FROM events WHERE "
-            "session_id = ? ORDER BY sequence"};
+            db, unbounded
+                    ? "SELECT sequence, session_id, event_id, timestamp, type, payload FROM events "
+                      "WHERE session_id = ? AND sequence > ? ORDER BY sequence"
+                    : "SELECT sequence, session_id, event_id, timestamp, type, payload FROM events "
+                      "WHERE session_id = ? AND sequence > ? ORDER BY sequence LIMIT ?"};
         statement.bindText(1, id.value);
+        statement.bindInt64(2, after);
+        if (!unbounded) {
+            statement.bindInt64(3, static_cast<std::int64_t>(limit));
+        }
         EventRange records;
         while (statement.step() == SQLITE_ROW) {
             EventRecord record;
-            record.seq  = statement.columnInt64(0);
+            record.seq   = statement.columnInt64(0);
             record.event = decode_event(statement.columnText(1), statement.columnInt64(3),
                                         statement.columnText(4), statement.columnText(5));
             record.event.id.value = statement.columnText(2);
@@ -326,8 +339,9 @@ public:
         return records;
     }
 
-    [[nodiscard]] EventRange resolve_locked(const SessionId& id,
-                                            std::vector<std::string>& stack) const {
+    [[nodiscard]] EventRange resolve_after_locked(const SessionId& id, Sequence after,
+                                                  std::size_t limit,
+                                                  std::vector<std::string>& stack) const {
         const auto header = load_header_locked(id);
         if (!header.has_value()) {
             throw UnknownSession("unknown session: " + id.value);
@@ -337,23 +351,39 @@ public:
         }
         stack.push_back(id.value);
 
-        EventRange own = read_events_locked(id);
         EventRange result;
         if (header->kind == SessionKind::Fork) {
             if (!header->parentSession.has_value()) {
                 throw CorruptionError("fork without parent: " + id.value);
             }
-            const EventRange parent = resolve_locked(*header->parentSession, stack);
-            const std::size_t seed  = header->seedLength.value_or(0);
-            if (seed > parent.size()) {
-                throw CorruptionError("fork seed exceeds parent view: " + id.value);
+            const std::size_t seed = header->seedLength.value_or(0);
+            if (seed > 0) {
+                const EventRange prefix =
+                    resolve_after_locked(*header->parentSession, 0, seed, stack);
+                if (prefix.size() < seed) {
+                    throw CorruptionError("fork seed exceeds parent view: " + id.value);
+                }
+                for (const EventRecord& record : prefix) {
+                    if (record.seq > after) {
+                        result.push_back(record);
+                        if (result.size() == limit) {
+                            break;
+                        }
+                    }
+                }
             }
-            result.insert(result.end(), parent.begin(),
-                          parent.begin() + static_cast<std::ptrdiff_t>(seed));
         }
-        result.insert(result.end(), own.begin(), own.end());
+        if (result.size() < limit) {
+            EventRange own = read_events_after_locked(id, after, limit - result.size());
+            result.insert(result.end(), own.begin(), own.end());
+        }
         stack.pop_back();
         return result;
+    }
+
+    [[nodiscard]] EventRange resolve_locked(const SessionId& id,
+                                            std::vector<std::string>& stack) const {
+        return resolve_after_locked(id, 0, kUnbounded, stack);
     }
 
     [[nodiscard]] bool lease_matches_me_locked(const SessionId& id) const {
@@ -586,10 +616,16 @@ std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
             throw StoreOpenError("cannot open sidecar lock: " + config.lock_path.string());
         }
         if (::flock(impl.lock_fd, LOCK_EX | LOCK_NB) != 0) {
+            const int lock_error = errno;
             ::close(impl.lock_fd);
             impl.lock_fd = -1;
-            throw StoreOpenError("workspace is locked by another daemon: " +
-                                 config.lock_path.string());
+            if (lock_error == EWOULDBLOCK || lock_error == EAGAIN) {
+                throw StoreOpenError(StoreOpenErrorCode::Locked,
+                                     "workspace is locked by another daemon: " +
+                                         config.lock_path.string());
+            }
+            throw StoreOpenError(StoreOpenErrorCode::Unavailable,
+                                 "cannot acquire sidecar lock: " + config.lock_path.string());
         }
     }
 
@@ -766,16 +802,38 @@ void SessionPersistence::erase(SessionId id) {
 }
 
 EventRange SessionPersistence::read(SessionId id, Sequence after) const {
+    return readAfter(id, after, kUnbounded);
+}
+
+Sequence SessionPersistence::headSequence(SessionId id) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    std::vector<std::string>    stack;
-    EventRange                  resolved = impl_->resolve_locked(id, stack);
-    EventRange                  result;
-    for (const EventRecord& record : resolved) {
-        if (record.seq > after) {
-            result.push_back(record);
+    const auto header = impl_->load_header_locked(id);
+    if (!header.has_value()) {
+        throw UnknownSession("unknown session: " + id.value);
+    }
+    Statement statement{
+        impl_->db, "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE session_id = ?"};
+    statement.bindText(1, id.value);
+    Sequence head = 0;
+    if (statement.step() == SQLITE_ROW) {
+        head = statement.columnInt64(0);
+    }
+    if (head == 0 && header->kind == SessionKind::Fork) {
+        std::vector<std::string> stack;
+        for (const EventRecord& record : impl_->resolve_locked(id, stack)) {
+            head = std::max(head, record.seq);
         }
     }
-    return result;
+    return head;
+}
+
+EventRange SessionPersistence::readAfter(SessionId id, Sequence after, std::size_t limit) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (limit == 0) {
+        return {};
+    }
+    std::vector<std::string> stack;
+    return impl_->resolve_after_locked(id, after, limit, stack);
 }
 
 EventRange SessionPersistence::readRange(SessionId id, Sequence from, Sequence to) const {

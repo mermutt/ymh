@@ -27,13 +27,15 @@ class WorkspaceRuntime::Impl {
 public:
     Impl(Config config,
          std::filesystem::path root,
-         std::unique_ptr<SessionPersistence> store,
+         std::unique_ptr<SessionStore> store,
+         SessionPersistence* persistence,
          ProviderRegistry providers,
          LLMProviderConfig provider_config,
          std::unique_ptr<LLMProvider> provider,
          bool attach_permission_gate)
         : root_(std::move(root)),
           store_(std::move(store)),
+          persistence_(persistence),
           environment_(std::make_unique<LocalEnvironment>(root_, SandboxMode::Workspace,
                                                           tool_config_)),
           permission_config_(to_permission_config(config)),
@@ -72,7 +74,8 @@ public:
     }
 
     std::filesystem::path              root_;
-    std::unique_ptr<SessionPersistence> store_;
+    std::unique_ptr<SessionStore>      store_;
+    SessionPersistence*                persistence_ = nullptr;
     EventBus                           bus_;
     ToolConfig                         tool_config_;
     std::unique_ptr<LocalEnvironment>  environment_;
@@ -109,17 +112,40 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
             "workspace root is not a directory: " + options.root.string()});
     }
 
-    PersistenceConfig persistence;
-    persistence.db_path   = options.root / ".ymh" / "sessions.db";
-    persistence.lock_path = options.root / ".ymh" / "sessions.lock";
-    persistence.boot_id   = options.boot_id;
-
-    std::unique_ptr<SessionPersistence> store;
-    try {
-        store = SessionPersistence::open(persistence);
-    } catch (const std::exception& open_error) {
-        return std::unexpected(
-            WorkspaceRuntimeError{WorkspaceRuntimeErrorCode::StoreUnavailable, open_error.what()});
+    std::unique_ptr<SessionStore> store;
+    SessionPersistence*           persistence = nullptr;
+    if (options.store_factory) {
+        try {
+            store = options.store_factory();
+        } catch (const std::exception& factory_error) {
+            return std::unexpected(WorkspaceRuntimeError{WorkspaceRuntimeErrorCode::StoreUnavailable,
+                                                         factory_error.what()});
+        }
+        if (store == nullptr) {
+            return std::unexpected(
+                WorkspaceRuntimeError{WorkspaceRuntimeErrorCode::StoreUnavailable,
+                                      "store_factory returned null"});
+        }
+    } else {
+        PersistenceConfig persistence_config;
+        persistence_config.db_path   = options.root / ".ymh" / "sessions.db";
+        persistence_config.lock_path = options.root / ".ymh" / "sessions.lock";
+        persistence_config.boot_id   = options.boot_id;
+        try {
+            std::unique_ptr<SessionPersistence> opened =
+                SessionPersistence::open(persistence_config);
+            persistence = opened.get();
+            store       = std::move(opened);
+        } catch (const StoreOpenError& open_error) {
+            const WorkspaceRuntimeErrorCode code =
+                open_error.code() == StoreOpenErrorCode::Locked
+                    ? WorkspaceRuntimeErrorCode::WorkspaceBusy
+                    : WorkspaceRuntimeErrorCode::StoreUnavailable;
+            return std::unexpected(WorkspaceRuntimeError{code, open_error.what()});
+        } catch (const std::exception& open_error) {
+            return std::unexpected(WorkspaceRuntimeError{WorkspaceRuntimeErrorCode::StoreUnavailable,
+                                                         open_error.what()});
+        }
     }
 
     ProviderRegistry   providers       = make_default_provider_registry();
@@ -143,7 +169,7 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
 
     try {
         auto impl = std::make_unique<Impl>(std::move(options.config), std::move(options.root),
-                                           std::move(store), std::move(providers),
+                                           std::move(store), persistence, std::move(providers),
                                            std::move(provider_config), std::move(provider),
                                            options.attach_permission_gate);
         return std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
@@ -163,7 +189,8 @@ const std::filesystem::path& WorkspaceRuntime::root() const noexcept { return im
 ExecutionEnvironment& WorkspaceRuntime::environment() noexcept { return *impl_->environment_; }
 ResourceGovernor&     WorkspaceRuntime::governor() noexcept { return impl_->governor_; }
 EventBus&             WorkspaceRuntime::bus() noexcept { return impl_->bus_; }
-SessionPersistence&   WorkspaceRuntime::store() noexcept { return *impl_->store_; }
+SessionStore&         WorkspaceRuntime::store() noexcept { return *impl_->store_; }
+SessionPersistence*   WorkspaceRuntime::persistence() noexcept { return impl_->persistence_; }
 SessionManager&       WorkspaceRuntime::sessions() noexcept { return impl_->sessions_; }
 AgentRegistry&        WorkspaceRuntime::agents() noexcept { return *impl_->agents_; }
 ToolRegistry&         WorkspaceRuntime::tools() noexcept { return impl_->tools_; }
@@ -179,8 +206,18 @@ const LLMProviderConfig& WorkspaceRuntime::provider_config() const noexcept {
     return impl_->provider_config_;
 }
 
-bool WorkspaceRuntime::acquireLease(const SessionId& id) { return impl_->store_->acquireLease(id); }
+bool WorkspaceRuntime::acquireLease(const SessionId& id) {
+    if (impl_->persistence_ == nullptr) {
+        throw StoreError("lease operations require a durable SessionPersistence store");
+    }
+    return impl_->persistence_->acquireLease(id);
+}
 
-bool WorkspaceRuntime::releaseLease(const SessionId& id) { return impl_->store_->releaseLease(id); }
+bool WorkspaceRuntime::releaseLease(const SessionId& id) {
+    if (impl_->persistence_ == nullptr) {
+        throw StoreError("lease operations require a durable SessionPersistence store");
+    }
+    return impl_->persistence_->releaseLease(id);
+}
 
 } // namespace ymh

@@ -86,6 +86,10 @@ public:
     Sequence   append(SessionId id, Event event) override;
     bool       isLeaseHolder(SessionId id) const override;
 
+    [[nodiscard]] Sequence   headSequence(SessionId id) const override;
+    [[nodiscard]] EventRange readAfter(SessionId id, Sequence after,
+                                       std::size_t limit) const override;
+
     std::vector<Sequence> appendBatch(SessionId id, std::span<const Event> events) override;
 
     [[nodiscard]] LeaseState leaseState(SessionId id) const;

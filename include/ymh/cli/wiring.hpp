@@ -11,6 +11,9 @@
 #include "ymh/config/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/registry/registry.hpp"
+#include "ymh/session/session_persistence.hpp"
+#include "ymh/transport/protocol.hpp"
 
 namespace ymh {
 
@@ -24,7 +27,13 @@ namespace ymh {
 
 [[nodiscard]] std::string default_system_prompt();
 
-// Per-process boot nonce (02 §2.1): pid + steady-clock + counter.
-[[nodiscard]] std::string make_boot_id();
+// 11-m2-errata §6 (D17): the per-process boot nonce. Minted EXACTLY ONCE at
+// daemon startup (04 §3.3 step 3), after chdir, before store open; a UUIDv4
+// (03 §9.7 / 02 §5.2) stored in `HostIdentity.boot_id` and read by reference
+// everywhere else. The adapters are one-way and never mint.
+[[nodiscard]] BootId mint_boot_id();
+[[nodiscard]] HostBootId to_host_boot_id(const BootId& boot_id);
+[[nodiscard]] BootId to_boot_id(const HostBootId& boot_id);
+[[nodiscard]] protocol::HostBootId to_protocol_boot_id(const HostBootId& boot_id);
 
 } // namespace ymh
