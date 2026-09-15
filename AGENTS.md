@@ -28,9 +28,12 @@ no open HIGH/MEDIUM findings and pinned interface sketches. Loop:
   `FakeLLM`, execution environment + tools (read/write/edit/grep/glob/shell/git),
   permissions, agent loop, CLI + headless (`ymh run`), FTXUI TUI, and
   markdown/syntax/diff rendering.
-- The Milestone 2 split (supervisor TUI + per-workspace `WorkspaceHost` daemons,
-  shared registry, JSON-RPC Unix-socket transport) is designed but **not yet
-  implemented**.
+- The **Milestone 2 split is implemented**: supervisor TUI + per-workspace
+  `WorkspaceHost` daemons, shared `registry.db`, and JSON-RPC 2.0 over a
+  length-prefixed Unix domain socket. `ymh` (no args) attaches to / spawns the
+  cwd workspace daemon; `ymh --host …` is the daemon entry. See
+  `docs/design/11-m2-errata.md` (the frozen M2 interfaces) and
+  `docs/design/12-m1-drift-errata.md`.
 - `00-architecture.md` is the single authoritative architecture source; the raw
   `drafts/` files were merged into it and are optional reference only.
 
@@ -66,10 +69,10 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
 
 ## Architecture facts an agent will get wrong
 
-- **Two milestones, not one topology.** Final target = supervisor TUI + N ×
-  `WorkspaceHost` daemons (one daemon per workspace, owns its cwd, survives TUI
-  exit). But MVP is a **single-process monolith** (Milestone 1). The daemon split
-  is Milestone 2 and is *not optional* — §57 Step 13 / §58 define the fork point.
+- **Two milestones, both implemented.** Milestone 1 = single-process MVP;
+  Milestone 2 = supervisor TUI + N × `WorkspaceHost` daemons (one daemon per
+  workspace, owns its cwd, survives TUI exit). `ymh` (no args) attaches/spawns
+  the cwd daemon; `ymh --host …` is the daemon entry.
 - **Sessions are event-sourced.** The append-only typed event log is the durable
   source of truth; the TUI is one consumer of the event stream, not the agent.
 - **Transport** is JSON-RPC 2.0 over a **length-prefixed Unix domain socket**
@@ -110,7 +113,7 @@ backs the hermetic suite. **Live tests** (real DeepSeek) are opt-in via
 
 ## Immediate next steps
 
-Milestone 1 MVP is complete and green. Next: Milestone 2 — split into the
-supervisor TUI + per-workspace `WorkspaceHost` daemons with the shared registry
-and JSON-RPC Unix-socket transport (§57 Step 13, §58; specs `03`–`05`). See
-`HANDOFF.md` §9.
+Milestone 2 is complete and green (supervisor + per-workspace daemons, registry,
+Unix-socket JSON-RPC). Next candidates: remote SSH/TCP transport (§47 Mode B),
+MCP/LSP/PTY (Phase 2, §51), and multi-workspace switcher / aggregate-flash
+polish. See `HANDOFF.md` §9.
