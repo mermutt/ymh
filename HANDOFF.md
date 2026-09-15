@@ -179,16 +179,13 @@ its code.
 
 ## 9. Immediate next steps (in order)
 
-**Milestone 1 MVP is implemented and green** — `include/ymh/` + `src/` + `tests/`;
-`ctest` all passing; live DeepSeek tests opt-in via `YMH_LIVE_LLM=1`. See
-`README.md` for build/run instructions. The design phase is complete:
-`00-architecture.md` and all ten component specs (`01`–`10`) are **verified** in
-`docs/design/DESIGN_STATUS.md`.
+**Milestone 1 MVP and Milestone 2 are implemented and green** — `include/ymh/` +
+`src/` + `tests/`; `ctest` all passing (564 hermetic + 12 opt-in live); 0 orphaned
+daemons. See `README.md` for build/run. The design is complete: specs `01`–`10`
+verified plus `11-m2-errata.md` (frozen M2 interfaces) and `12-m1-drift-errata.md`.
 
-Next: **Milestone 2** — split the monolith into the supervisor TUI + one
-`WorkspaceHost` daemon per workspace, with the shared `registry.db` and the
-JSON-RPC length-prefixed Unix-socket transport (§57 Step 13, §58; component
-specs `03`–`05`, all verified).
-
-Deferred/optional: remote SSH/TCP transport (§47 Mode B), MCP/LSP/PTY
-(Phase 2, §51), and the full multi-workspace switcher / aggregate-flash UI.
+Milestone 2 delivers the supervisor TUI + per-workspace `WorkspaceHost` daemons,
+the shared `registry.db`, and JSON-RPC over a length-prefixed Unix socket.
+`ymh` (no args) attaches to / spawns the cwd daemon; `ymh --host …` is the daemon
+entry. Next candidates: remote SSH/TCP transport (§47 Mode B), MCP/LSP/PTY
+(Phase 2, §51), and multi-workspace UI polish.
