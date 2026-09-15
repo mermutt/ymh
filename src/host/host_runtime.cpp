@@ -294,18 +294,13 @@ void HostRuntime::ensureAgent(const SessionId& id) {
 }
 
 void HostRuntime::acquireLeaseOrThrow(const SessionId& id) {
-    if (runtime_.persistence() == nullptr) {
-        return;
-    }
     if (!runtime_.acquireLease(id)) {
         throw_mapped(WireError{protocol::code_value(protocol::AppCode::LeaseLost), "LeaseLost"});
     }
 }
 
 void HostRuntime::releaseLeaseIfDurable(const SessionId& id) {
-    if (runtime_.persistence() != nullptr) {
-        runtime_.releaseLease(id);
-    }
+    runtime_.releaseLease(id);
 }
 
 protocol::HostState HostRuntime::hostState() const {

@@ -1150,4 +1150,60 @@ TEST_F(TwoProcess, NoOrphanedDaemonsAfterSuite) {
     EXPECT_TRUE(orphans.empty()) << "orphaned ymh --host daemons: " << orphans.size();
 }
 
+TEST_F(TwoProcess, PingKeepsIdleLinkAliveAndDetectsCrash) {
+    ShortTempRoot root("ymh-2p-ping");
+    configure_workspace(root);
+    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write("fake.json", kFakeTextScript);
+
+    const RegistryConfig registry_config = registry_config_for(root.state_dir());
+    const std::string    workspace_id =
+        register_workspace(registry_config, root.path(), "ping").value;
+
+    HostHarness harness(options_for(root, workspace_id, root.path() / "fake.json"));
+    harness.start();
+    ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
+    DaemonGuard guard(workspace_id);
+
+    ui::SupervisorSink sink;
+    ui::SupervisorConnectionConfig config;
+    config.socket_path       = harness.socket_path().string();
+    config.workspace         = ui::WorkspaceId{workspace_id};
+    config.client_instance   = protocol::ClientInstanceId{generate_uuid_v4()};
+    config.poll_interval     = 10ms;
+    config.reconnect_backoff = 50ms;
+    config.ping_interval     = 100ms;
+    config.request_timeout   = 2s;
+    ui::SupervisorConnection connection(config, std::move(sink));
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(ui::SupervisorLinkState::Attached, 15s));
+    const std::uint64_t first_attach = connection.attachCount();
+
+    std::this_thread::sleep_for(600ms);
+    EXPECT_TRUE(connection.attached());
+    EXPECT_EQ(connection.attachCount(), first_attach)
+        << "an idle link must stay attached across several ping intervals";
+
+    const ExitStatus crash = harness.crash(SIGKILL);
+    EXPECT_TRUE(crash.signalled);
+    const auto killed_at = std::chrono::steady_clock::now();
+    ASSERT_TRUE(connection.waitUntil(
+        [&connection] { return connection.state() == ui::SupervisorLinkState::Dead; }, 3s))
+        << "the supervisor never noticed the daemon death";
+    EXPECT_LT(std::chrono::steady_clock::now() - killed_at, 2s);
+
+    ForkExecLauncher                   launcher(binary_);
+    std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+    HostLifecycle                      lifecycle(launcher, *registry);
+    AttachResult                       attach = lifecycle.ensureRunning(WorkspaceId{workspace_id});
+    ASSERT_NE(attach.connection, nullptr);
+    attach.connection->close();
+
+    ASSERT_TRUE(connection.waitUntil(
+        [&connection, first_attach] { return connection.attachCount() > first_attach; }, 20s))
+        << "the supervisor never reattached to the respawned daemon";
+    EXPECT_TRUE(connection.attached());
+    connection.stop();
+}
+
 } // namespace

@@ -91,6 +91,30 @@ struct ConversationModel {
     [[nodiscard]] std::size_t find_message(const std::string& id) const;
 };
 
+// Per-session conversation viewport (10 §8.2 refinement). Supervisor-local,
+// purely presentational: scrolling never gates agent work and never touches the
+// event log. `fraction` is the scroll position in [0,1] from the top; it is only
+// meaningful while `following` is false. `unseen` is raised when content arrives
+// while the view is scrolled up.
+struct ConversationScroll {
+    static constexpr float kPageStep = 0.20f;
+    static constexpr float kLineStep = 0.04f;
+
+    float fraction  = 0.0f;
+    bool  following = true;
+    bool  unseen    = false;
+
+    [[nodiscard]] float position() const { return following ? 1.0f : fraction; }
+
+    void pageUp();
+    void pageDown();
+    void lineUp();
+    void lineDown();
+    void toTop();
+    void toBottom();
+    void onNewContent();
+};
+
 struct ToolCallView {
     std::string  id;
     std::string  name;
@@ -114,8 +138,21 @@ struct InputModel {
     std::size_t              cursor = 0;
     std::vector<std::string> history;
     std::size_t              history_pos = 0;
+    std::string              saved_draft;
 
     void push_history(std::string line);
+    bool history_up();
+    bool history_down();
+    bool delete_forward();
+    void clear_line();
+    bool delete_word();
+};
+
+// One entry of the slash-command completion list, snapshotted into the model so
+// the renderer stays pure (10 §8.2 refinement).
+struct CommandHint {
+    std::string name;
+    std::string description;
 };
 
 struct StatusModel {
@@ -149,12 +186,14 @@ struct SessionUiState {
     SessionId id;
     WorkspaceId workspace;
 
-    ConversationModel conversation;
-    ToolModel         tools;
-    InputModel        input;
-    StatusModel       status;
-    AttentionState    attention;
-    SubagentModel     subagents;
+    ConversationModel  conversation;
+    ToolModel          tools;
+    InputModel         input;
+    StatusModel        status;
+    AttentionState     attention;
+    SubagentModel      subagents;
+    ConversationScroll scroll;
+    std::vector<CommandHint> command_hints;
 
     AgentState agent_state = AgentState::Idle;
 };

@@ -192,6 +192,8 @@ public:
 
     [[nodiscard]] std::string text() const { return strip_ansi(buffer_); }
 
+    [[nodiscard]] std::size_t raw_size() const { return buffer_.size(); }
+
     bool wait_for(const std::string& needle, std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -203,6 +205,20 @@ public:
         }
         read_available();
         return strip_ansi(buffer_).find(needle) != std::string::npos;
+    }
+
+    bool wait_for_since(std::size_t offset, const std::string& needle,
+                        std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            read_available();
+            if (text_since(offset).find(needle) != std::string::npos) {
+                return true;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        read_available();
+        return text_since(offset).find(needle) != std::string::npos;
     }
 
     void terminate() {
@@ -229,6 +245,13 @@ public:
     }
 
 private:
+    [[nodiscard]] std::string text_since(std::size_t offset) const {
+        if (offset > buffer_.size()) {
+            offset = buffer_.size();
+        }
+        return strip_ansi(buffer_.substr(offset));
+    }
+
     void read_available() {
         if (master_ < 0) {
             return;
@@ -315,6 +338,53 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
 
     EXPECT_FALSE(beta.running());
     EXPECT_TRUE(host_processes(&alpha_id.value).empty()) << "alpha daemon leaked";
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
+    ShortTempRoot root("ymh_pty_help");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "help-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "help-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("/help\r");
+    ASSERT_TRUE(child.wait_for("list slash commands", 10s)) << child.text();
+
+    const std::size_t clear_mark = child.raw_size();
+    child.write("/clear\r");
+    ASSERT_TRUE(child.wait_for_since(clear_mark, "Type a message and press Enter", 10s))
+        << child.text();
+
+    const std::size_t recall_mark = child.raw_size();
+    child.write("\x1b[A");
+    ASSERT_TRUE(child.wait_for_since(recall_mark, "/clear", 10s)) << child.text();
+
+    child.terminate();
+    guard.stop();
+
     EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
 }
 

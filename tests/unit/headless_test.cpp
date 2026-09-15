@@ -12,6 +12,7 @@
 #include "ymh/cli/headless.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/llm/fake_llm.hpp"
+#include "ymh/session/session_persistence.hpp"
 
 namespace {
 
@@ -194,6 +195,34 @@ TEST_F(HeadlessTest, ResumeAppendsToExistingSession) {
     EXPECT_EQ(second_result.exit_code, 0);
     EXPECT_EQ(second_result.session.value, first_result.session.value);
     EXPECT_EQ(second_result.assistant_text, "second-answer");
+}
+
+TEST_F(HeadlessTest, BusyWorkspaceReportsActionableError) {
+    test::TempWorkspace workspace("headless_busy");
+    std::filesystem::create_directories(workspace.path() / ".ymh");
+
+    PersistenceConfig held;
+    held.db_path   = workspace.path() / ".ymh" / "sessions.db";
+    held.lock_path = workspace.path() / ".ymh" / "sessions.lock";
+    held.boot_id   = BootId{"busy-holder"};
+    std::unique_ptr<SessionPersistence> holder = SessionPersistence::open(held);
+
+    std::ostringstream out;
+    std::ostringstream err;
+    HeadlessOptions    options;
+    options.workspace        = workspace.path();
+    options.task             = "say pong";
+    options.out              = &out;
+    options.err              = &err;
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        return std::make_unique<FakeLLM>(text_script("pong"));
+    };
+
+    const HeadlessResult result = run_headless(options);
+    EXPECT_EQ(result.exit_code, 2);
+    EXPECT_NE(err.str().find("workspace is busy"), std::string::npos) << err.str();
+    EXPECT_NE(err.str().find("sessions.lock"), std::string::npos) << err.str();
+    holder->close();
 }
 
 } // namespace

@@ -14,6 +14,7 @@
 
 #include "ymh/core/event.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/ui/command_registry.hpp"
 #include "ymh/ui/terminal_layer.hpp"
 #include "ymh/ui/ui_application.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
@@ -349,6 +350,135 @@ TEST(UiModel, AggregateWaitingCountIncludesPermission) {
     model.focusSession(kSession);
     model.aggregate.recompute(model.workspaces, model.sessions);
     EXPECT_EQ(model.aggregate.current.waitingCount, 1u);
+}
+
+TEST(UiModel, InputHistoryPreservesDraft) {
+    InputModel input;
+    input.push_history("first");
+    input.push_history("second");
+    input.draft = "in-progress";
+    input.cursor = input.draft.size();
+
+    EXPECT_TRUE(input.history_up());
+    EXPECT_EQ(input.draft, "second");
+    EXPECT_EQ(input.cursor, input.draft.size());
+    EXPECT_TRUE(input.history_up());
+    EXPECT_EQ(input.draft, "first");
+    EXPECT_FALSE(input.history_up());
+    EXPECT_EQ(input.draft, "first");
+
+    EXPECT_TRUE(input.history_down());
+    EXPECT_EQ(input.draft, "second");
+    EXPECT_TRUE(input.history_down());
+    EXPECT_EQ(input.draft, "in-progress");
+    EXPECT_FALSE(input.history_down());
+}
+
+TEST(UiModel, InputEditingHelpers) {
+    InputModel input;
+    input.draft = "hello world";
+    input.cursor = 5;
+    EXPECT_TRUE(input.delete_forward());
+    EXPECT_EQ(input.draft, "helloworld");
+
+    input.draft = "hello world";
+    input.cursor = 11;
+    EXPECT_TRUE(input.delete_word());
+    EXPECT_EQ(input.draft, "hello ");
+    EXPECT_EQ(input.cursor, 6u);
+    EXPECT_TRUE(input.delete_word());
+    EXPECT_EQ(input.draft, "");
+
+    input.draft = "abc";
+    input.cursor = 3;
+    input.clear_line();
+    EXPECT_TRUE(input.draft.empty());
+    EXPECT_EQ(input.cursor, 0u);
+}
+
+TEST(UiModel, ConversationScrollFollowAndUnseen) {
+    ConversationScroll scroll;
+    EXPECT_TRUE(scroll.following);
+    EXPECT_FALSE(scroll.unseen);
+    EXPECT_FLOAT_EQ(scroll.position(), 1.0f);
+
+    scroll.pageUp();
+    EXPECT_FALSE(scroll.following);
+    EXPECT_FLOAT_EQ(scroll.position(), 0.8f);
+    scroll.onNewContent();
+    EXPECT_TRUE(scroll.unseen);
+
+    scroll.pageDown();
+    EXPECT_TRUE(scroll.following);
+    EXPECT_FALSE(scroll.unseen);
+    EXPECT_FLOAT_EQ(scroll.position(), 1.0f);
+
+    scroll.toTop();
+    EXPECT_FALSE(scroll.following);
+    EXPECT_FLOAT_EQ(scroll.position(), 0.0f);
+    scroll.lineUp();
+    EXPECT_FLOAT_EQ(scroll.position(), 0.0f);
+    scroll.toBottom();
+    EXPECT_TRUE(scroll.following);
+}
+
+TEST(UiModel, NewContentWhileScrolledRaisesUnseen) {
+    UiModel model = make_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->scroll.pageUp();
+    EXPECT_FALSE(state->scroll.following);
+
+    model.apply(UiEvent{UserMessage{kSession, "m1", "hi"}});
+    EXPECT_TRUE(state->scroll.unseen);
+
+    state->scroll.toBottom();
+    model.apply(UiEvent{UserMessage{kSession, "m2", "again"}});
+    EXPECT_FALSE(state->scroll.unseen);
+}
+
+TEST(UiModel, CommandRegistryDispatchesBuiltins) {
+    UiModel model = make_model();
+    const CommandRegistry registry = CommandRegistry::builtin();
+    bool exited = false;
+    bool created = false;
+    CommandContext context{model};
+    context.session = model.session(kSession);
+    context.request_exit = [&exited] { exited = true; };
+    context.create_session = [&created] { created = true; };
+
+    EXPECT_FALSE(registry.dispatch("plain text", context));
+    EXPECT_TRUE(registry.dispatch("/help", context));
+    EXPECT_FALSE(model.session(kSession)->conversation.entries.empty());
+
+    EXPECT_TRUE(registry.dispatch("/clear", context));
+    EXPECT_TRUE(model.session(kSession)->conversation.entries.empty());
+
+    EXPECT_TRUE(registry.dispatch("/new", context));
+    EXPECT_TRUE(created);
+
+    EXPECT_TRUE(registry.dispatch("/model tiny", context));
+    EXPECT_EQ(model.session(kSession)->status.model, "tiny");
+
+    EXPECT_TRUE(registry.dispatch("/bogus", context));
+    EXPECT_TRUE(registry.dispatch("/exit", context));
+    EXPECT_TRUE(exited);
+
+    const std::vector<const Command*> matches = registry.complete("he");
+    ASSERT_EQ(matches.size(), 1u);
+    EXPECT_EQ(matches.front()->name, "help");
+}
+
+TEST(UiModel, CommandOutputWhileScrolledRaisesUnseen) {
+    UiModel model = make_model();
+    const CommandRegistry registry = CommandRegistry::builtin();
+    CommandContext context{model};
+    context.session = model.session(kSession);
+    context.session->scroll.pageUp();
+    ASSERT_FALSE(context.session->scroll.following);
+
+    ASSERT_TRUE(registry.dispatch("/help", context));
+    EXPECT_TRUE(context.session->scroll.unseen);
 }
 
 } // namespace

@@ -86,7 +86,44 @@ bool looks_like_diff(const std::string& text) {
            text.rfind("@@ ", 0) == 0 || text.find("\n@@ ") != std::string::npos;
 }
 
-Element render_entry(const ConversationEntry& entry, const RenderContext& context) {
+Element render_tool_entry(const ConversationEntry& entry, const ToolModel* tools,
+                          const RenderContext& context) {
+    const Theme& theme = context.theme;
+    const ToolCallView* call = nullptr;
+    if (tools != nullptr) {
+        const std::size_t index = tools->find(entry.tool_call_id);
+        if (index != kNoEntry) {
+            call = &tools->calls[index];
+        }
+    }
+    const bool expanded = call != nullptr && call->expanded;
+    Elements rows;
+    std::string header = "tool: " + entry.tool_name;
+    if (expanded) {
+        header += " (expanded)";
+    }
+    rows.push_back(paint(ftxui::text(header), ftxui::Color::Yellow, theme));
+    if (expanded && !call->arguments.empty()) {
+        rows.push_back(ftxui::text("args: " + call->arguments) | ftxui::dim);
+    }
+    const std::string& text =
+        expanded && call != nullptr && !call->output.empty() ? call->output : entry.text;
+    if (!text.empty()) {
+        if (looks_like_diff(text)) {
+            rows.push_back(DiffRenderer{}.render(DiffModel::parse(text), context));
+        } else {
+            Element body = ftxui::paragraph(text);
+            if (!expanded) {
+                body = body | ftxui::dim;
+            }
+            rows.push_back(body);
+        }
+    }
+    return ftxui::vbox(std::move(rows));
+}
+
+Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
+                     const RenderContext& context) {
     const Theme& theme = context.theme;
     const MarkdownRenderer markdown;
     Elements rows;
@@ -102,16 +139,7 @@ Element render_entry(const ConversationEntry& entry, const RenderContext& contex
             rows.push_back(markdown.render(MarkdownBlock{entry.text}, context));
             break;
         case ConversationRole::Tool:
-            rows.push_back(paint(ftxui::text("tool: " + entry.tool_name),
-                                 ftxui::Color::Yellow, theme));
-            if (!entry.text.empty()) {
-                if (looks_like_diff(entry.text)) {
-                    rows.push_back(DiffRenderer{}.render(DiffModel::parse(entry.text), context));
-                } else {
-                    rows.push_back(ftxui::paragraph(entry.text) | ftxui::dim);
-                }
-            }
-            break;
+            return render_tool_entry(entry, tools, context);
         case ConversationRole::System:
             rows.push_back(ftxui::paragraph(entry.text) | ftxui::dim);
             break;
@@ -126,11 +154,57 @@ Element render_conversation(const SessionUiState* active, const RenderContext& c
         return ftxui::vbox(std::move(rows));
     }
     for (const ConversationEntry& entry : active->conversation.entries) {
-        rows.push_back(render_entry(entry, context));
+        rows.push_back(render_entry(entry, &active->tools, context));
     }
     if (rows.empty()) {
         rows.push_back(ftxui::text("Type a message and press Enter. Ctrl+D or /exit quits.") |
                        ftxui::dim);
+    }
+    return ftxui::vbox(std::move(rows)) |
+           ftxui::focusPositionRelative(0.f, active->scroll.position()) | ftxui::yframe |
+           ftxui::vscroll_indicator;
+}
+
+Element render_scroll_hint(const SessionUiState* active, const Theme& theme) {
+    if (active == nullptr || active->scroll.following) {
+        return ftxui::text("");
+    }
+    std::string label = active->scroll.unseen ? "new output below (Ctrl+End to follow)"
+                                              : "scrolled (Ctrl+End to follow)";
+    return paint(ftxui::text(label), ftxui::Color::Yellow, theme);
+}
+
+Element render_subagents(const SessionUiState* active, const Theme& theme) {
+    if (active == nullptr || active->subagents.agents.empty()) {
+        return ftxui::text("");
+    }
+    Elements cells;
+    cells.push_back(paint(ftxui::text("subagents:"), ftxui::Color::Magenta, theme));
+    for (const SubagentView& agent : active->subagents.agents) {
+        std::string label = " [" + short_id(agent.id) + " " + state_glyph(agent.state) + "]";
+        if (!agent.summary.empty()) {
+            std::string summary = agent.summary;
+            if (summary.size() > 32) {
+                summary.resize(32);
+                summary += "...";
+            }
+            label += " " + summary;
+        }
+        cells.push_back(ftxui::text(label));
+    }
+    return ftxui::hbox(std::move(cells));
+}
+
+Element render_command_hints(const SessionUiState* active, const Theme& theme) {
+    if (active == nullptr || active->command_hints.empty()) {
+        return ftxui::text("");
+    }
+    Elements rows;
+    for (const CommandHint& hint : active->command_hints) {
+        rows.push_back(ftxui::hbox({
+            paint(ftxui::text("/" + hint.name), ftxui::Color::Green, theme) | ftxui::bold,
+            ftxui::text("  " + hint.description) | ftxui::dim,
+        }));
     }
     return ftxui::vbox(std::move(rows));
 }
@@ -184,6 +258,14 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     std::string left = state;
     if (active != nullptr && !active->status.model.empty()) {
         left += " · " + active->status.model;
+    }
+    if (active != nullptr) {
+        const StatusModel& status = active->status;
+        if (status.input_tokens != 0 || status.output_tokens != 0 || status.cached_tokens != 0) {
+            left += " · ↑" + std::to_string(status.input_tokens) + " ↓" +
+                    std::to_string(status.output_tokens) + " ⚡" +
+                    std::to_string(status.cached_tokens);
+        }
     }
     if (active != nullptr && !active->status.note.empty()) {
         left += " · " + active->status.note;
@@ -316,8 +398,17 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     rows.push_back(ftxui::separator());
     rows.push_back(render_conversation(active, RenderContext{size.width, theme, false}) |
                    ftxui::flex);
+    if (active != nullptr && !active->scroll.following) {
+        rows.push_back(render_scroll_hint(active, theme));
+    }
     rows.push_back(ftxui::separator());
     rows.push_back(render_session_bar(model, theme));
+    if (active != nullptr && !active->subagents.agents.empty()) {
+        rows.push_back(render_subagents(active, theme));
+    }
+    if (active != nullptr && !active->command_hints.empty()) {
+        rows.push_back(render_command_hints(active, theme));
+    }
     rows.push_back(render_input(model, theme));
     rows.push_back(render_status(model, active, theme));
 

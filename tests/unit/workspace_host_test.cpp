@@ -496,4 +496,43 @@ TEST(HostLifecycleTest, ReapIfStaleClearsStaleClaim) {
     EXPECT_FALSE(refreshed->host.has_value());
 }
 
+TEST(WorkspaceHostLease, FakeStoreDaemonSessionLifecycleDoesNotThrow) {
+    ShortTempRoot root("ymh-host-lease-fake");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    const WorkspaceId workspace_id = register_workspace(canonical, "lease-fake");
+    // base_config injects a MemorySessionStore + FakeLLM, so the daemon runs
+    // with no durable SessionPersistence (the D9 store seam).
+    HostConfig config = base_config(canonical, workspace_id.value);
+
+    ForegroundHost daemon(config);
+    daemon.start();
+    ASSERT_TRUE(daemon.waitReady());
+    ASSERT_NE(daemon.connection(), nullptr);
+
+    nlohmann::json created;
+    ASSERT_NO_THROW(created = daemon.connection()->request(
+                        protocol::method::kSessionCreate, nlohmann::json::object()));
+    ASSERT_TRUE(created.contains("session")) << created.dump();
+    const SessionId session{created.at("session").get<std::string>()};
+
+    // resume and fork both take the lease path inside HostRuntime.
+    nlohmann::json resumed;
+    EXPECT_NO_THROW(resumed = daemon.connection()->request(
+                        protocol::method::kSessionResume, {{"session", session.value}}));
+    EXPECT_TRUE(resumed.contains("session"));
+    nlohmann::json forked;
+    ASSERT_NO_THROW(forked = daemon.connection()->request(
+                        protocol::method::kSessionFork,
+                        {{"session", session.value}, {"seed_length", 1}}));
+    EXPECT_TRUE(forked.contains("session"));
+
+    nlohmann::json prompted;
+    EXPECT_NO_THROW(prompted = daemon.connection()->request(
+                        protocol::method::kAgentPrompt,
+                        {{"session", session.value}, {"message", "hi"}}));
+
+    EXPECT_GE(daemon.host().store().list().size(), 1u);
+    EXPECT_EQ(daemon.stopAndJoin(), HostExitCode::Ok);
+}
+
 } // namespace

@@ -147,6 +147,32 @@ TEST_F(WorkspaceRuntimeTest, StoreFactorySeamSkipsRealDatabase) {
     EXPECT_FALSE(runtime.store().read(session).empty());
 }
 
+TEST_F(WorkspaceRuntimeTest, LeaseOpsAreNoOpsWithoutDurableStore) {
+    TempWorkspace workspace("runtime_fake_lease");
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.store_factory           = []() -> std::unique_ptr<SessionStore> {
+        return std::make_unique<MemorySessionStore>();
+    };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+    EXPECT_FALSE(runtime.hasDurableStore());
+
+    SessionOptions session_options;
+    session_options.cwd           = workspace.path();
+    session_options.serverProfile = "automation";
+    session_options.model         = "fake-model";
+    const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+    const SessionId session = runtime.agents().get(*created).session();
+
+    EXPECT_TRUE(runtime.acquireLease(session));
+    EXPECT_NO_THROW(runtime.renewLeases());
+    EXPECT_FALSE(runtime.releaseLease(session));
+}
+
 TEST_F(WorkspaceRuntimeTest, NullStoreFactoryIsStoreUnavailable) {
     TempWorkspace workspace("runtime_store_null");
     WorkspaceRuntimeOptions options = options_for(workspace);

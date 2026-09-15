@@ -216,7 +216,7 @@ public:
 
     [[nodiscard]] SessionManager& sessions() { return runtime_->sessions(); }
     [[nodiscard]] WorkspaceRegistry& registry() { return *registry_; }
-    [[nodiscard]] SessionPersistence& store() { return *runtime_->persistence(); }
+    [[nodiscard]] SessionStore& store() { return runtime_->store(); }
     [[nodiscard]] ExecutionEnvironment& environment() { return runtime_->environment(); }
     [[nodiscard]] ResourceGovernor& caps() { return runtime_->governor(); }
 
@@ -655,9 +655,7 @@ void WorkspaceHost::Impl::armLeaseRenewal() {
             return;
         }
         try {
-            if (SessionPersistence* persistence = runtime_->persistence(); persistence != nullptr) {
-                persistence->renewLeases();
-            }
+            runtime_->renewLeases();
         } catch (const std::exception&) {
         }
         armLeaseRenewal();
@@ -717,7 +715,7 @@ const std::filesystem::path& WorkspaceHost::socketPath() const noexcept {
 
 SessionManager&       WorkspaceHost::sessions() { return impl_->sessions(); }
 WorkspaceRegistry&    WorkspaceHost::registry() { return impl_->registry(); }
-SessionPersistence&   WorkspaceHost::store() { return impl_->store(); }
+SessionStore&         WorkspaceHost::store() { return impl_->store(); }
 ExecutionEnvironment& WorkspaceHost::environment() { return impl_->environment(); }
 ResourceGovernor&     WorkspaceHost::caps() { return impl_->caps(); }
 

@@ -107,6 +107,12 @@ public:
     [[nodiscard]] EventBus&             bus() noexcept;
     [[nodiscard]] SessionStore&         store() noexcept;
     [[nodiscard]] SessionPersistence*   persistence() noexcept;
+
+    // True when the runtime opened the real SQLite `SessionPersistence`; false
+    // when a `store_factory` supplied an in-memory fake (D9 store seam). Only a
+    // durable store carries a cross-process write lease, so the lease methods
+    // below are no-ops when this is false.
+    [[nodiscard]] bool hasDurableStore() const noexcept;
     [[nodiscard]] SessionManager&       sessions() noexcept;
     [[nodiscard]] AgentRegistry&        agents() noexcept;
     [[nodiscard]] ToolRegistry&         tools() noexcept;
@@ -119,12 +125,16 @@ public:
     [[nodiscard]] const AgentConfig&       agent_config() const noexcept;
     [[nodiscard]] const LLMProviderConfig& provider_config() const noexcept;
 
-    // Write-lease convenience: the store is the sole lease authority (02 §5).
-    // `acquireLease` returns false when another writer holds the session;
-    // `releaseLease` returns false when nothing was released. Both may throw on
-    // a store failure, exactly like the underlying store calls.
+    // Write-lease convenience: the durable store is the sole lease authority
+    // (02 §5). `acquireLease` returns false when another writer holds the
+    // session; `releaseLease` returns false when nothing was released. Both may
+    // throw on a store failure, exactly like the underlying store calls. When
+    // `hasDurableStore()` is false there is no cross-process lease to take:
+    // `acquireLease` reports success, `releaseLease` reports nothing released,
+    // and `renewLeases` does nothing.
     bool acquireLease(const SessionId& id);
     bool releaseLease(const SessionId& id);
+    void renewLeases();
 
 private:
     class Impl;

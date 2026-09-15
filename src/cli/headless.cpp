@@ -125,6 +125,10 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         const WorkspaceRuntimeError& runtime_error = runtime_result.error();
         if (runtime_error.code == WorkspaceRuntimeErrorCode::StoreUnavailable) {
             err << "ymh: cannot open session store: " << runtime_error.detail << '\n';
+        } else if (runtime_error.code == WorkspaceRuntimeErrorCode::WorkspaceBusy) {
+            err << "ymh: workspace is busy: another ymh process holds "
+                << (root / ".ymh" / "sessions.lock")
+                << "; stop the running daemon or choose a different workspace\n";
         } else if (runtime_error.code == WorkspaceRuntimeErrorCode::ProviderSetupFailed) {
             err << "ymh: provider setup failed: " << runtime_error.detail << '\n';
         } else {
