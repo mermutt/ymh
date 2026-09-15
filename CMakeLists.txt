@@ -499,6 +499,7 @@ target_link_libraries(ymh_transport
 
 add_library(ymh_host STATIC
     src/host/host_runtime.cpp
+    src/host/workspace_host.cpp
 )
 add_library(ymh::host ALIAS ymh_host)
 
@@ -516,6 +517,7 @@ target_link_libraries(ymh_host
         ymh::agent
     PRIVATE
         nlohmann_json::nlohmann_json
+        Threads::Threads
         ymh::warnings
 )
 
@@ -612,6 +614,7 @@ target_link_libraries(ymh_cli
         ymh::wiring
         ymh::runtime
         ymh::registry
+        ymh::host
         ymh::ui
     PRIVATE
         CLI11::CLI11

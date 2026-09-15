@@ -1,10 +1,12 @@
 #include "ymh/cli/cli.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -14,11 +16,15 @@
 #include <unistd.h>
 
 #include "ymh/cli/headless.hpp"
+#include "ymh/cli/provider_factory.hpp"
 #include "ymh/cli/session_cli.hpp"
+#include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/llm/provider_registry.hpp"
+#include "ymh/registry/registry.hpp"
+#include "ymh/transport/host_connection.hpp"
 #include "ymh/ui/ui_application.hpp"
 
 #ifndef YMH_VERSION
@@ -132,6 +138,157 @@ std::string help_text(CLI::App& app, std::initializer_list<CLI::App*> subcommand
     return app.help();
 }
 
+std::string host_usage() {
+    return "ymh --host --workspace <uuid> --root <canonical-root> --socket <path>\n"
+           "          [--config <path>] [--boot-id <uuid>]\n";
+}
+
+bool contains_host_flag(const std::vector<std::string>& args) {
+    return std::find(args.begin(), args.end(), "--host") != args.end();
+}
+
+int run_host_command(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    std::string workspace_id;
+    std::string root;
+    std::string socket_path;
+    std::string config_path;
+    std::string boot_id;
+
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        const std::string& argument = args[index];
+        if (argument == "--host") {
+            continue;
+        }
+        if (argument == "--help" || argument == "-h") {
+            out << host_usage();
+            return 0;
+        }
+        auto take_value = [&](std::string& target) {
+            if (index + 1 >= args.size()) {
+                return false;
+            }
+            target = args[++index];
+            return true;
+        };
+        if (argument == "--workspace") {
+            if (!take_value(workspace_id)) { err << host_usage(); return 2; }
+        } else if (argument == "--root") {
+            if (!take_value(root)) { err << host_usage(); return 2; }
+        } else if (argument == "--socket") {
+            if (!take_value(socket_path)) { err << host_usage(); return 2; }
+        } else if (argument == "--config") {
+            if (!take_value(config_path)) { err << host_usage(); return 2; }
+        } else if (argument == "--boot-id") {
+            if (!take_value(boot_id)) { err << host_usage(); return 2; }
+        } else {
+            err << "ymh --host: unknown argument '" << argument << "'\n";
+            return 2;
+        }
+    }
+
+    if (workspace_id.empty() || root.empty()) {
+        err << host_usage();
+        return 2;
+    }
+
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error)) {
+        err << "ymh --host: workspace root is not a directory: " << root << '\n';
+        return static_cast<int>(HostExitCode::WorkspaceMissing);
+    }
+    const std::filesystem::path canonical = std::filesystem::canonical(root, error);
+    if (error) {
+        err << "ymh --host: cannot canonicalize " << root << '\n';
+        return static_cast<int>(HostExitCode::WorkspaceMissing);
+    }
+
+    Config config;
+    try {
+        ConfigPaths paths;
+        paths.global = config_path.empty() ? default_global_config_path()
+                                           : std::filesystem::path{config_path};
+        paths.workspace = workspace_config_path(canonical);
+        config = load_config(paths);
+    } catch (const ConfigError& config_error) {
+        err << "ymh --host: " << config_error.what() << '\n';
+        return 2;
+    }
+
+    HostConfig host_config;
+    host_config.workspace      = WorkspaceId{workspace_id};
+    host_config.workspace_root = canonical;
+    host_config.socket_path    = socket_path.empty()
+                                     ? canonical / ".ymh" / "host.sock"
+                                     : std::filesystem::path{socket_path};
+    host_config.log_sink       = canonical / ".ymh" / "host.log";
+    host_config.registry       = default_registry_config();
+    host_config.persistence.db_path   = canonical / ".ymh" / "sessions.db";
+    host_config.persistence.lock_path = canonical / ".ymh" / "sessions.lock";
+    host_config.config                = std::move(config);
+    host_config.provider_factory      = make_provider_factory({});
+    host_config.foreground            = false;
+    if (!boot_id.empty()) {
+        host_config.boot_id = HostBootId{boot_id};
+    }
+
+    std::unique_ptr<WorkspaceHost> host;
+    try {
+        host = WorkspaceHost::create(std::move(host_config));
+    } catch (const HostError& host_error) {
+        err << "ymh --host: " << host_error.what() << '\n';
+        return static_cast<int>(HostExitCode::WorkspaceMissing);
+    }
+    return static_cast<int>(host->run());
+}
+
+int run_workspace_stop(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    if (args.size() != 2) {
+        err << "ymh: usage: ymh workspace stop <workspace-id|path>\n";
+        return 2;
+    }
+
+    std::unique_ptr<WorkspaceRegistry> registry;
+    try {
+        registry = WorkspaceRegistry::openReadOnly(default_registry_config());
+    } catch (const std::exception& registry_error) {
+        err << "ymh: registry unavailable: " << registry_error.what() << '\n';
+        return 1;
+    }
+
+    std::optional<WorkspaceRecord> record = registry->findById(WorkspaceId{args[1]});
+    if (!record.has_value()) {
+        std::error_code error;
+        const std::filesystem::path canonical = std::filesystem::canonical(args[1], error);
+        if (!error) {
+            record = registry->findByCanonicalPath(canonical);
+        }
+    }
+    if (!record.has_value()) {
+        err << "ymh: unknown workspace: " << args[1] << '\n';
+        return 1;
+    }
+    if (!record->host.has_value()) {
+        err << "ymh: workspace is not running\n";
+        return 1;
+    }
+
+    try {
+        protocol::HostConnection connection;
+        connection.connect(record->host->socketPath.string());
+        [[maybe_unused]] const protocol::HelloResult hello = connection.handshake(
+            protocol::ServerProfile::Interactive,
+            protocol::ClientInstanceId{generate_uuid_v4()});
+        [[maybe_unused]] const nlohmann::json reply =
+            connection.request(protocol::method::kHostShutdown, {{"reason", "workspace stop"}});
+        connection.close();
+    } catch (const std::exception& stop_error) {
+        err << "ymh: cannot stop daemon: " << stop_error.what() << '\n';
+        return 1;
+    }
+    out << "stopped " << record->id.value << '\n';
+    return 0;
+}
+
 } // namespace
 
 CliInvocation parse_cli(const std::vector<std::string>& args) {
@@ -168,6 +325,9 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     std::string workspace_path;
     workspace_add->add_option("path", workspace_path, "Workspace path")->required();
     CLI::App*   workspace_list = workspace->add_subcommand("list", "List registered workspaces");
+    CLI::App*   workspace_stop = workspace->add_subcommand("stop", "Stop a workspace daemon");
+    std::string workspace_stop_target;
+    workspace_stop->add_option("target", workspace_stop_target, "Workspace ID or path")->required();
 
     std::string config_action;
     CLI::App*   config = app.add_subcommand("config", "Configuration commands");
@@ -219,6 +379,9 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
             }
         } else if (workspace_list->parsed()) {
             invocation.workspace_args.emplace_back("list");
+        } else if (workspace_stop->parsed()) {
+            invocation.workspace_args.emplace_back("stop");
+            invocation.workspace_args.push_back(workspace_stop_target);
         }
         return invocation;
     }
@@ -244,6 +407,10 @@ CliInvocation parse_cli(int argc, char** argv) {
 }
 
 int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+    if (contains_host_flag(args)) {
+        return run_host_command(args, out, err);
+    }
+
     CliInvocation invocation;
     try {
         invocation = parse_cli(args);
@@ -320,6 +487,9 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
             return session_fork(root, invocation.session, out, err);
 
         case CliInvocation::Command::Workspace:
+            if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "stop") {
+                return run_workspace_stop(invocation.workspace_args, out, err);
+            }
             return run_workspace_command(invocation.workspace_args, out, err);
 
         case CliInvocation::Command::Config:
