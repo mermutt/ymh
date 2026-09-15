@@ -273,4 +273,82 @@ TEST(UiApplication, RejectsMissingWorkspace) {
     EXPECT_EQ(run_tui(options), 2);
 }
 
+TEST(UiModel, MultiWorkspaceSessionsRouteAndCount) {
+    UiModel model = make_model();
+    const SessionId other{"session-2"};
+    model.workspaces[WorkspaceId{"workspace-2"}] = WorkspaceModel{
+        WorkspaceId{"workspace-2"}, "beta", "/tmp/beta", "", DaemonStatus::Attached, other, {}};
+    model.ensureSessionIn(WorkspaceId{"workspace-2"}, other);
+
+    model.session(kSession)->agent_state = AgentState::Thinking;
+    model.session(other)->agent_state = AgentState::WaitingForPermission;
+    model.aggregate.recompute(model.workspaces, model.sessions);
+
+    EXPECT_EQ(model.session(other)->workspace, WorkspaceId{"workspace-2"});
+    EXPECT_EQ(model.aggregate.current.activeCount, 1u);
+    EXPECT_EQ(model.aggregate.current.waitingCount, 1u);
+
+    model.aggregate.flash.enabled = true;
+    model.aggregate.armOnEdge(AgentState::Thinking, AgentState::WaitingForPermission);
+    EXPECT_TRUE(model.aggregate.flash.isFlashing());
+}
+
+TEST(UiModel, SwitcherNavigatesAcrossWorkspaces) {
+    UiModel model = make_model();
+    const SessionId second{"session-2"};
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-2"};
+    beta.title = "beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.activeSessionId = second;
+    SessionCell cell;
+    cell.id = second;
+    cell.title = "second";
+    beta.sessions.push_back(cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-2"}, second);
+
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 2u);
+    EXPECT_EQ(model.switcher.cursor.workspace, model.activeWorkspaceId);
+
+    model.switcher.moveDown();
+    EXPECT_EQ(model.switcher.cursor.workspace, WorkspaceId{"workspace-2"});
+    EXPECT_FALSE(model.switcher.cursor.session.has_value());
+
+    model.switcher.moveDown();
+    ASSERT_TRUE(model.switcher.cursor.session.has_value());
+    EXPECT_EQ(*model.switcher.cursor.session, second);
+
+    model.focusSession(second);
+    EXPECT_EQ(model.activeWorkspaceId, WorkspaceId{"workspace-2"});
+    EXPECT_EQ(model.activeWorkspace()->activeSessionId, second);
+    EXPECT_EQ(model.mode, UiMode::Conversation);
+}
+
+TEST(UiModel, SwitcherCollapseHidesSessions) {
+    UiModel model = make_model();
+    SessionCell cell;
+    cell.id = kSession;
+    cell.title = "one";
+    model.workspaces[model.activeWorkspaceId].sessions.push_back(cell);
+
+    model.openSwitcher();
+    model.switcher.toggleExpand();
+    EXPECT_NE(model.switcher.collapsed.find(model.activeWorkspaceId),
+              model.switcher.collapsed.end());
+    model.switcher.moveDown();
+    EXPECT_FALSE(model.switcher.cursor.session.has_value());
+}
+
+TEST(UiModel, AggregateWaitingCountIncludesPermission) {
+    UiModel model = make_model();
+    model.session(kSession)->agent_state = AgentState::WaitingForPermission;
+    model.aggregate.recompute(model.workspaces, model.sessions);
+    EXPECT_EQ(model.aggregate.current.waitingCount, 1u);
+    model.focusSession(kSession);
+    model.aggregate.recompute(model.workspaces, model.sessions);
+    EXPECT_EQ(model.aggregate.current.waitingCount, 1u);
+}
+
 } // namespace

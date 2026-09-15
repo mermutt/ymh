@@ -555,6 +555,8 @@ add_library(ymh_ui STATIC
     src/ui/ui_render.cpp
     src/ui/terminal_layer.cpp
     src/ui/ui_application.cpp
+    src/ui/supervisor_connection.cpp
+    src/ui/supervisor.cpp
 )
 add_library(ymh::ui ALIAS ymh_ui)
 
@@ -577,6 +579,9 @@ target_link_libraries(ymh_ui
         ymh::wiring
         ymh::runtime
         ymh::render
+        ymh::registry
+        ymh::host
+        ymh::transport
         ftxui::component
     PRIVATE
         Threads::Threads

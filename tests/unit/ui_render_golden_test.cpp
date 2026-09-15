@@ -209,4 +209,42 @@ TEST(UiRenderGolden, LayoutModes) {
     EXPECT_EQ(calculate_layout(160), LayoutMode::Wide);
 }
 
+TEST(UiRenderGolden, MultiWorkspaceSwitcherTree) {
+    UiModel model = build_model();
+    model.workspaces[model.activeWorkspaceId].title = "alpha";
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-beta"};
+    beta.title = "beta";
+    beta.cwd = "/work/beta";
+    beta.daemonStatus = DaemonStatus::Dead;
+    beta.activeSessionId = SessionId{"beta-session"};
+    SessionCell beta_cell;
+    beta_cell.id = SessionId{"beta-session"};
+    beta_cell.title = "notes";
+    beta_cell.state = AgentState::WaitingForInput;
+    beta_cell.attention = true;
+    beta.sessions.push_back(beta_cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    model.openSwitcher();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    EXPECT_NE(rendered.find("Switcher"), std::string::npos) << rendered;
+    EXPECT_NE(rendered.find("alpha"), std::string::npos) << rendered;
+    EXPECT_NE(rendered.find("beta"), std::string::npos) << rendered;
+    EXPECT_NE(rendered.find("notes"), std::string::npos) << rendered;
+
+    const std::string again =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    EXPECT_EQ(rendered, again);
+}
+
+TEST(UiRenderGolden, RenderIsPureAcrossCalls) {
+    UiModel model = build_model();
+    const std::string first = render_to_ansi(model, TerminalSize{100, 40}, Theme{false});
+    const std::string second = render_to_ansi(model, TerminalSize{100, 40}, Theme{false});
+    EXPECT_EQ(first, second);
+}
+
 } // namespace

@@ -1,18 +1,29 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "support/host_harness.hpp"
 #include "support/short_temp.hpp"
+#include "ymh/cli/cli.hpp"
+#include "ymh/core/event.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/transport/protocol.hpp"
+#include "ymh/ui/supervisor_connection.hpp"
 
 namespace {
+
+using namespace std::chrono_literals;
 
 TEST(HostHarness, BuildsPinnedArgv) {
     ymh::test::HostHarnessOptions options;
@@ -135,6 +146,130 @@ TEST_F(HostIntegration, ClaimsRegistryWhileRunningThenReleases) {
         ASSERT_TRUE(record.has_value());
         EXPECT_FALSE(record->host.has_value());
     }
+}
+
+TEST_F(HostIntegration, SupervisorConnectionStreamsFromRealDaemon) {
+    ymh::test::ShortTempRoot root("ymh-sup-host");
+    root.write("fake.json", R"([{"text": "hello from the daemon"}])");
+
+    ymh::test::HostHarnessOptions options;
+    options.binary         = binary_;
+    options.workspace_root = root.path();
+    options.env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
+
+    ymh::RegistryConfig registry_config;
+    registry_config.db_path   = root.path() / ".state" / "ymh" / "registry.db";
+    registry_config.lock_path = root.path() / ".state" / "ymh" / "registry.lock";
+
+    ymh::test::HostHarness harness(options);
+    harness.start();
+    ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
+
+    ymh::WorkspaceId workspace_id;
+    std::string boot_id;
+    {
+        std::unique_ptr<ymh::WorkspaceRegistry> registry =
+            ymh::WorkspaceRegistry::openReadOnly(registry_config);
+        const std::optional<ymh::WorkspaceRecord> record =
+            registry->findByCanonicalPath(root.path());
+        ASSERT_TRUE(record.has_value());
+        ASSERT_TRUE(record->host.has_value());
+        workspace_id = record->id;
+        boot_id = record->host->bootId.value;
+    }
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<ymh::protocol::SessionEnvelope> envelopes;
+    ymh::ui::SupervisorSink sink;
+    sink.on_envelope = [&](const ymh::protocol::SessionEnvelope& envelope) {
+        const std::lock_guard lock(mutex);
+        envelopes.push_back(envelope);
+        cv.notify_all();
+    };
+
+    ymh::ui::SupervisorConnectionConfig config;
+    config.socket_path = harness.socket_path().string();
+    config.workspace = ymh::ui::WorkspaceId{workspace_id.value};
+    config.expected_boot_id = boot_id;
+    config.client_instance = ymh::protocol::ClientInstanceId{"cccccccc-cccc-4ccc-8ccc-cccccccccccc"};
+    config.poll_interval = 10ms;
+    config.ping_interval = 10s;
+    ymh::ui::SupervisorConnection connection(std::move(config), std::move(sink));
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(ymh::ui::SupervisorLinkState::Attached, 10s));
+    EXPECT_EQ(connection.attachCount(), 1u);
+
+    std::string session;
+    std::atomic<bool> created{false};
+    connection.submit(std::string(ymh::protocol::method::kSessionCreate),
+                      nlohmann::json{{"title", "integration"}},
+                      [&](ymh::ui::SupervisorReply reply) {
+                          if (reply.ok) {
+                              session = reply.result.value("session", std::string{});
+                              created.store(true);
+                          }
+                      });
+    ASSERT_TRUE(connection.waitUntil([&] { return created.load(); }, 10s));
+    ASSERT_FALSE(session.empty());
+
+    connection.track(ymh::SessionId{session});
+    std::atomic<bool> prompted{false};
+    connection.submit(std::string(ymh::protocol::method::kAgentPrompt),
+                      nlohmann::json{{"session", session}, {"message", "say hello"}},
+                      [&](ymh::ui::SupervisorReply reply) { prompted.store(reply.ok); });
+    ASSERT_TRUE(connection.waitUntil([&] { return prompted.load(); }, 10s));
+
+    {
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(cv.wait_for(lock, 15s, [&] {
+            for (const auto& envelope : envelopes) {
+                if (envelope.event.type == ymh::EventType::TurnEnded ||
+                    envelope.event.type == ymh::EventType::AssistantChunk) {
+                    return true;
+                }
+            }
+            return false;
+        })) << "no streamed envelope arrived";
+        bool saw_assistant = false;
+        for (const auto& envelope : envelopes) {
+            if (envelope.event.type == ymh::EventType::AssistantChunk) {
+                saw_assistant = true;
+            }
+        }
+        EXPECT_TRUE(saw_assistant);
+    }
+
+    connection.stop();
+    const ymh::test::ExitStatus status = harness.stop();
+    EXPECT_TRUE(status.exited);
+}
+
+TEST_F(HostIntegration, RunRoutesThroughLiveDaemon) {
+    ymh::test::ShortTempRoot root("ymh-run-host");
+    root.write("fake.json", R"([{"text": "hello from the daemon"}])");
+
+    ymh::test::HostHarnessOptions options;
+    options.binary         = binary_;
+    options.workspace_root = root.path();
+    options.env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
+
+    ymh::test::HostHarness harness(options);
+    harness.start();
+    ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
+
+    ::setenv("XDG_STATE_HOME", (root.path() / ".state").string().c_str(), 1);
+    ::setenv("HOME", root.path().string().c_str(), 1);
+
+    std::ostringstream out;
+    std::ostringstream err;
+    const int code = ymh::run_cli(
+        {"--workspace", root.path().string(), "run", "say hello"}, out, err);
+    EXPECT_EQ(code, 0) << err.str();
+    EXPECT_NE(out.str().find("hello from the daemon"), std::string::npos) << out.str();
+
+    const ymh::test::ExitStatus status = harness.stop();
+    EXPECT_TRUE(status.exited);
 }
 
 } // namespace

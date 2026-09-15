@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -14,6 +15,8 @@
 #include "ymh/ui/ui_event.hpp"
 
 namespace ymh::ui {
+
+struct UiModel;
 
 constexpr std::size_t kNoEntry = static_cast<std::size_t>(-1);
 
@@ -167,10 +170,49 @@ struct SessionCell {
 
 struct WorkspaceModel {
     WorkspaceId              id;
+    std::string              title;
     std::string              cwd;
+    std::string              boot_id;
     DaemonStatus             daemonStatus = DaemonStatus::Attached;
     SessionId                activeSessionId;
     std::vector<SessionCell> sessions;
+
+    [[nodiscard]] bool hasDaemon() const { return daemonStatus == DaemonStatus::Attached; }
+};
+
+struct SessionNode {
+    SessionId   id;
+    std::string title;
+    AgentState  state = AgentState::Idle;
+    bool        attention = false;
+};
+
+struct WorkspaceNode {
+    WorkspaceId              id;
+    std::string              title;
+    DaemonStatus             status = DaemonStatus::Connecting;
+    std::vector<SessionNode> sessions;
+};
+
+struct SwitcherCursor {
+    WorkspaceId              workspace;
+    std::optional<SessionId> session;
+
+    auto operator<=>(const SwitcherCursor&) const = default;
+};
+
+class SwitcherOverlayModel {
+public:
+    std::vector<WorkspaceNode> workspaces;
+    SwitcherCursor             cursor;
+    std::optional<std::string> filter;
+    std::set<WorkspaceId>      collapsed;
+
+    void open(const UiModel& model);
+    void close();
+    void moveDown();
+    void moveUp();
+    void toggleExpand();
 };
 
 struct AggregateStatus {
@@ -220,6 +262,7 @@ struct UiModel {
     WorkspaceId                           activeWorkspaceId;
     std::map<SessionId, SessionUiState>   sessions;
     AggregateStatusModel                  aggregate;
+    SwitcherOverlayModel                  switcher;
     PermissionDialogModel                 dialog;
     UiMode                                mode = UiMode::Conversation;
     bool                                  shouldExit = false;
@@ -231,8 +274,18 @@ struct UiModel {
     [[nodiscard]] const SessionUiState* session(const SessionId& id) const;
 
     SessionUiState& ensureSession(const SessionId& id);
+    SessionUiState& ensureSessionIn(const WorkspaceId& workspace, const SessionId& id);
     void            ensureCell(const SessionId& id);
+    void            ensureCellIn(const WorkspaceId& workspace, const SessionId& id);
     void            refreshCell(const SessionId& id);
+    void            refreshCellIn(const WorkspaceId& workspace, const SessionId& id);
+    void            setSessionReadOnly(const SessionId& id, bool read_only);
+
+    // Builds (or refreshes) the switcher node tree from the current workspaces
+    // and sessions (10 §7.1). Pure model work; no registry/daemon access.
+    void            openSwitcher();
+    void            focusWorkspace(const WorkspaceId& workspace);
+    void            focusSession(const SessionId& id);
 
     void apply(const UiEvent& event);
     void apply(const WorkspaceEvent& event);

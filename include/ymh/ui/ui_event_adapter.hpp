@@ -7,9 +7,11 @@
 // from `adapt()`; `onEvent()` updates it after applying (10 §5.2).
 
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,13 +46,20 @@ public:
     // from the core event type (10 §5.2).
     void set_state_provider(std::function<AgentState(const SessionId&)> provider);
 
-    // Decoded wire frames, posted to the UI thread (10 §3.3).
+    // Decoded wire frames, posted to the UI thread (10 §3.3). The workspace
+    // overloads route a background workspace's events to the right
+    // `SessionUiState`; the single-argument forms target the active workspace.
     void onEvent(const Event& event);
     void onSessionEnvelope(const protocol::SessionEnvelope& envelope);
+    void onSessionEnvelope(const WorkspaceId& workspace,
+                           const protocol::SessionEnvelope& envelope);
     void onPermissionRequest(const SessionId& session, const PermissionRequestId& id,
                              const PermissionRequest& request);
+    void onPermissionRequest(const WorkspaceId& workspace,
+                             const protocol::PermissionRequest& request);
     void onPermissionResolved(const SessionId& session, const PermissionRequestId& id,
                               payload::PermissionDecisionKind decision);
+    void onHostNotice(const WorkspaceId& workspace, const protocol::HostNotice& notice);
     void onWorkspaceEvent(const WorkspaceEvent& event);
 
     // Model-level clock; the ONLY place the flash advances (10 §5.2, F12, D16).
@@ -68,6 +77,8 @@ private:
     std::map<SessionId, AgentState>      lastState_;
     std::map<SessionId, std::string>     startedMessages_;
     std::function<AgentState(const SessionId&)> state_provider_;
+    std::set<std::string>                applied_event_ids_;
+    std::deque<std::string>              applied_event_order_;
 };
 
 [[nodiscard]] std::string summarize_tool_arguments(const std::string& name,

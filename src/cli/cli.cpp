@@ -18,13 +18,17 @@
 #include "ymh/cli/headless.hpp"
 #include "ymh/cli/provider_factory.hpp"
 #include "ymh/cli/session_cli.hpp"
+#include "ymh/host/host_launcher.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
+#include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/registry/registry.hpp"
+#include "ymh/session/events.hpp"
 #include "ymh/transport/host_connection.hpp"
+#include "ymh/ui/supervisor.hpp"
 #include "ymh/ui/ui_application.hpp"
 
 #ifndef YMH_VERSION
@@ -289,6 +293,177 @@ int run_workspace_stop(const std::vector<std::string>& args, std::ostream& out, 
     return 0;
 }
 
+std::optional<std::filesystem::path> canonicalize(const std::filesystem::path& root) {
+    std::error_code error;
+    const std::filesystem::path canonical = std::filesystem::canonical(root, error);
+    if (error) {
+        return std::nullopt;
+    }
+    return canonical;
+}
+
+// Registers the workspace if it is absent; returns the row. Never spawns.
+std::optional<WorkspaceRecord> find_or_register_workspace(
+    const std::filesystem::path& canonical, std::ostream& err) {
+    try {
+        std::unique_ptr<WorkspaceRegistry> reader =
+            WorkspaceRegistry::openReadOnly(default_registry_config());
+        if (const std::optional<WorkspaceRecord> row = reader->findByCanonicalPath(canonical)) {
+            return row;
+        }
+    } catch (const std::exception&) {
+    }
+    try {
+        std::unique_ptr<WorkspaceRegistry> writer =
+            WorkspaceRegistry::open(default_registry_config());
+        if (const std::optional<WorkspaceRecord> row = writer->findByCanonicalPath(canonical)) {
+            return row;
+        }
+        return writer->registerWorkspace(canonical, canonical.filename().string());
+    } catch (const std::exception& error) {
+        err << "ymh: cannot register workspace: " << error.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+int run_supervisor_entry(const std::filesystem::path& root, const Config& config, bool verbose,
+                         std::ostream& err) {
+    const std::optional<std::filesystem::path> canonical = canonicalize(root);
+    if (!canonical.has_value()) {
+        err << "ymh: cannot canonicalize " << root << '\n';
+        return 1;
+    }
+    const std::optional<WorkspaceRecord> row = find_or_register_workspace(*canonical, err);
+    if (!row.has_value()) {
+        return 1;
+    }
+
+    std::unique_ptr<WorkspaceRegistry> registry;
+    try {
+        registry = WorkspaceRegistry::open(default_registry_config());
+    } catch (const std::exception& error) {
+        err << "ymh: registry unavailable: " << error.what() << '\n';
+        return 1;
+    }
+
+    ForkExecLauncher launcher;
+    HostLifecycle    lifecycle(launcher, *registry);
+    try {
+        const AttachResult attach = lifecycle.ensureRunning(row->id);
+        (void)attach;
+    } catch (const std::exception& error) {
+        err << "ymh: cannot attach to workspace daemon: " << error.what() << '\n';
+        return 1;
+    }
+
+    const std::optional<WorkspaceRecord> refreshed = registry->findById(row->id);
+    if (!refreshed.has_value() || !refreshed->host.has_value()) {
+        err << "ymh: daemon did not publish a host claim\n";
+        return 1;
+    }
+
+    std::vector<ui::SupervisorWorkspace> attached;
+    auto add_workspace = [&attached](const WorkspaceRecord& record) {
+        if (!record.host.has_value()) {
+            return;
+        }
+        ui::SupervisorWorkspace workspace;
+        workspace.id = ui::WorkspaceId{record.id.value};
+        workspace.cwd = record.canonicalPath.string();
+        workspace.title = record.displayTitle;
+        workspace.socket_path = record.host->socketPath.string();
+        workspace.boot_id = record.host->bootId.value;
+        attached.push_back(std::move(workspace));
+    };
+    add_workspace(*refreshed);
+
+    // Multi-workspace attach: every other registered workspace with a live
+    // daemon is attached without spawning one (read-only discovery).
+    for (const WorkspaceRecord& record : registry->listWorkspaces()) {
+        if (record.id == refreshed->id || !record.host.has_value()) {
+            continue;
+        }
+        if (registry->probeLiveness(record.id) != HostLiveness::Live) {
+            continue;
+        }
+        add_workspace(record);
+    }
+
+    ui::SupervisorRunOptions options;
+    options.workspaces = std::move(attached);
+    options.initial_workspace = *canonical;
+    options.config = config;
+    options.verbose = verbose;
+    return ui::run_supervisor(options);
+}
+
+// `ymh run` against a live daemon: attach, create/resume a session, stream the turn.
+int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
+                   const std::string& task, const std::string& resume, std::ostream& out,
+                   std::ostream& err) {
+    ForkExecLauncher launcher;
+    HostLifecycle    lifecycle(launcher, registry);
+    AttachResult     attach;
+    try {
+        attach = lifecycle.ensureRunning(row.id);
+    } catch (const std::exception& error) {
+        err << "ymh: cannot attach to workspace daemon: " << error.what() << '\n';
+        return 1;
+    }
+    protocol::HostConnection& connection = *attach.connection;
+    try {
+        SessionId session;
+        if (!resume.empty()) {
+            const nlohmann::json resumed = connection.request(
+                protocol::method::kSessionResume, {{"session", resume}});
+            session = SessionId{resumed.at("session").get<std::string>()};
+        } else {
+            const nlohmann::json created =
+                connection.request(protocol::method::kSessionCreate, {{"title", "headless"}});
+            session = SessionId{created.at("session").get<std::string>()};
+        }
+
+        protocol::StreamFrom beginning;
+        beginning.kind = protocol::StreamFrom::Kind::Beginning;
+        nlohmann::json subscribe;
+        protocol::to_json(subscribe, protocol::SubscribeParams{session, beginning});
+        static_cast<void>(
+            connection.request(protocol::method::kEventSubscribe, std::move(subscribe)));
+        static_cast<void>(connection.request(protocol::method::kAgentPrompt,
+                                             {{"session", session.value}, {"message", task}}));
+
+        while (true) {
+            const std::optional<protocol::Notification> notification =
+                connection.nextNotification(std::chrono::minutes{10});
+            if (!notification.has_value()) {
+                err << "ymh: timed out waiting for the daemon turn\n";
+                return 1;
+            }
+            if (notification->method != protocol::notify::kEventStream) {
+                continue;
+            }
+            const protocol::StreamNotification stream =
+                notification->params.get<protocol::StreamNotification>();
+            const Event& event = stream.envelope.event;
+            if (event.type == EventType::AssistantChunk) {
+                const auto chunk = event.payload.get<payload::AssistantChunk>();
+                if (chunk.kind == payload::AssistantChunkKind::Text) {
+                    out << chunk.text << std::flush;
+                }
+            } else if (event.type == EventType::TurnFailed) {
+                err << "ymh: turn failed\n";
+                return 1;
+            } else if (event.type == EventType::TurnEnded || event.type == EventType::TurnCancelled) {
+                out << '\n';
+                return 0;
+            }
+        }
+    } catch (const std::exception& error) {
+        err << "ymh: daemon request failed: " << error.what() << '\n';
+        return 1;
+    }
+}
+
 } // namespace
 
 CliInvocation parse_cli(const std::vector<std::string>& args) {
@@ -452,14 +627,28 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
 
     switch (invocation.command) {
         case CliInvocation::Command::Tui: {
-            ui::UiRunOptions ui_options;
-            ui_options.workspace = root;
-            ui_options.config = config;
-            ui_options.verbose = invocation.verbose;
-            return ui::run_tui(ui_options);
+            return run_supervisor_entry(root, config, invocation.verbose, err);
         }
 
         case CliInvocation::Command::Run: {
+            try {
+                std::unique_ptr<WorkspaceRegistry> reader =
+                    WorkspaceRegistry::openReadOnly(default_registry_config());
+                const std::optional<std::filesystem::path> canonical = canonicalize(root);
+                if (canonical.has_value()) {
+                    const std::optional<WorkspaceRecord> row =
+                        reader->findByCanonicalPath(*canonical);
+                    if (row.has_value() && row->host.has_value() &&
+                        reader->probeLiveness(row->id) == HostLiveness::Live) {
+                        std::unique_ptr<WorkspaceRegistry> writer =
+                            WorkspaceRegistry::open(default_registry_config());
+                        return run_via_daemon(*writer, *row, invocation.task, invocation.session,
+                                              out, err);
+                    }
+                }
+            } catch (const std::exception&) {
+            }
+
             HeadlessOptions options;
             options.workspace = root;
             options.task      = invocation.task;
