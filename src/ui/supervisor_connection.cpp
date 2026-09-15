@@ -125,6 +125,11 @@ std::uint64_t SupervisorConnection::attachCount() const {
     return attach_count_;
 }
 
+bool SupervisorConnection::subscribed(const SessionId& session) const {
+    std::lock_guard lock(mutex_);
+    return subscribed_.find(session) != subscribed_.end();
+}
+
 void SupervisorConnection::forceReconnect() {
     {
         std::lock_guard lock(mutex_);
@@ -248,13 +253,19 @@ void SupervisorConnection::subscribe_one(const SessionId& session) {
     try {
         static_cast<void>(connection_->request(protocol::method::kEventSubscribe, params,
                                                config_.request_timeout));
-        std::lock_guard lock(mutex_);
-        subscribed_.insert(session);
+        {
+            std::lock_guard lock(mutex_);
+            subscribed_.insert(session);
+        }
+        cv_.notify_all();
         return;
     } catch (const protocol::RpcException& error) {
         if (is_unknown_session(error)) {
-            std::lock_guard lock(mutex_);
-            subscribed_.insert(session);
+            {
+                std::lock_guard lock(mutex_);
+                subscribed_.insert(session);
+            }
+            cv_.notify_all();
             return;
         }
         if (!is_cursor_invalid(error)) {
@@ -276,8 +287,11 @@ void SupervisorConnection::subscribe_one(const SessionId& session) {
     try {
         static_cast<void>(connection_->request(protocol::method::kEventSubscribe, retry,
                                                config_.request_timeout));
-        std::lock_guard lock(mutex_);
-        subscribed_.insert(session);
+        {
+            std::lock_guard lock(mutex_);
+            subscribed_.insert(session);
+        }
+        cv_.notify_all();
     } catch (const std::exception&) {
         // Left unsubscribed; the next reconnect retries the whole phase.
     }

@@ -54,6 +54,7 @@ add_executable(ymh_tests
     unit/provider_factory_test.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp
+    integration_two_process_test.cpp
 )
 
 target_include_directories(ymh_tests
