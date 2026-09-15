@@ -184,9 +184,25 @@ void AgentRegistry::activateSession(const SessionId& id) {
         return;
     }
     const auto agent = agents_.find(session->second.value);
-    if (agent != agents_.end()) {
-        agent->second->activate();
+    if (agent == agents_.end()) {
+        return;
     }
+    if (!activationAllowed(agent->second->state())) {
+        return;
+    }
+    agent->second->activate();
+}
+
+bool AgentRegistry::hasPendingWork(const SessionId& id) const noexcept {
+    const auto session = bySession_.find(id.value);
+    if (session == bySession_.end()) {
+        return false;
+    }
+    const auto agent = agents_.find(session->second.value);
+    if (agent == agents_.end()) {
+        return false;
+    }
+    return agent->second->hasPendingWork();
 }
 
 void AgentRegistry::suspendSession(const SessionId& id) {

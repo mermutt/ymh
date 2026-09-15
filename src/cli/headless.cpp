@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -16,17 +15,16 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
 #include <unistd.h>
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/message.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
+#include "ymh/cli/provider_factory.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
-#include "ymh/llm/fake_llm.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -94,118 +92,6 @@ void render_tool_result(std::ostream& out, const payload::ToolResult& result) {
     out << '\n';
 }
 
-FinishReason parse_finish(std::string_view name) {
-    if (name == "stop") {
-        return FinishReason::Stop;
-    }
-    if (name == "length") {
-        return FinishReason::Length;
-    }
-    if (name == "tool_calls" || name == "tool_call") {
-        return FinishReason::ToolCalls;
-    }
-    if (name == "content_filter") {
-        return FinishReason::ContentFilter;
-    }
-    return FinishReason::Other;
-}
-
-std::optional<LLMError> parse_error(const nlohmann::json& node) {
-    if (!node.is_object()) {
-        return std::nullopt;
-    }
-    LLMError error;
-    const std::string code = node.value("code", std::string{"provider_internal"});
-    if (code == "auth") {
-        error.code = LLMErrorCode::Auth;
-    } else if (code == "config_error") {
-        error.code = LLMErrorCode::ConfigError;
-    } else if (code == "bad_request") {
-        error.code = LLMErrorCode::BadRequest;
-    } else if (code == "rate_limited") {
-        error.code = LLMErrorCode::RateLimited;
-    } else if (code == "server_error") {
-        error.code = LLMErrorCode::ServerError;
-    } else if (code == "network_error") {
-        error.code = LLMErrorCode::NetworkError;
-    } else if (code == "timeout") {
-        error.code = LLMErrorCode::Timeout;
-    } else if (code == "context_length_exceeded") {
-        error.code = LLMErrorCode::ContextLengthExceeded;
-    } else {
-        error.code = LLMErrorCode::ProviderInternal;
-    }
-    error.detail = node.value("detail", std::string{});
-    return error;
-}
-
-std::optional<FakeScript> parse_fake_script(const nlohmann::json& document) {
-    const nlohmann::json* steps = nullptr;
-    FakeScript             script;
-    if (document.is_array()) {
-        steps = &document;
-    } else if (document.is_object() && document.contains("steps")) {
-        steps = &document["steps"];
-        script.chunk_size = document.value("chunk_size", script.chunk_size);
-    } else {
-        return std::nullopt;
-    }
-    if (!steps->is_array()) {
-        return std::nullopt;
-    }
-
-    for (const nlohmann::json& step : *steps) {
-        FakeResponseStep response;
-        response.text     = step.value("text", std::string{});
-        response.reasoning = step.contains("reasoning")
-                                 ? std::optional<std::string>{step["reasoning"].get<std::string>()}
-                                 : std::nullopt;
-        response.finish = parse_finish(step.value("finish", std::string{"stop"}));
-        if (step.contains("usage") && step["usage"].is_object()) {
-            Usage usage;
-            usage.input_tokens  = step["usage"].value("input_tokens", std::int64_t{0});
-            usage.output_tokens = step["usage"].value("output_tokens", std::int64_t{0});
-            response.usage      = usage;
-        }
-        if (step.contains("error")) {
-            response.error = parse_error(step["error"]);
-        }
-        if (step.contains("tool_calls") && step["tool_calls"].is_array()) {
-            for (const nlohmann::json& call : step["tool_calls"]) {
-                FakeToolCallStep tool;
-                tool.name      = call.value("name", std::string{});
-                tool.arguments = call.value("arguments", nlohmann::json::object());
-                if (call.contains("id")) {
-                    tool.id = call["id"].get<std::string>();
-                }
-                response.tool_calls.push_back(std::move(tool));
-            }
-            if (response.finish == FinishReason::Stop) {
-                response.finish = FinishReason::ToolCalls;
-            }
-        }
-        script.steps.push_back(std::move(response));
-    }
-    return script;
-}
-
-std::optional<FakeScript> fake_script_from_env() {
-    const std::optional<std::string> path = env_value("YMH_FAKE_LLM_SCRIPT");
-    if (!path.has_value()) {
-        return std::nullopt;
-    }
-    std::ifstream input{*path, std::ios::binary};
-    if (!input) {
-        throw ConfigError("YMH_FAKE_LLM_SCRIPT cannot be opened: " + *path);
-    }
-    const nlohmann::json document = nlohmann::json::parse(input);
-    std::optional<FakeScript> script = parse_fake_script(document);
-    if (!script.has_value()) {
-        throw ConfigError("YMH_FAKE_LLM_SCRIPT is not a valid FakeLLM script: " + *path);
-    }
-    return script;
-}
-
 } // namespace
 
 HeadlessResult run_headless(const HeadlessOptions& options) {
@@ -230,17 +116,8 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config  = options.config;
     runtime_options.root    = root;
-    runtime_options.boot_id = BootId{make_boot_id()};
-    runtime_options.provider_factory =
-        [&options](const LLMProviderConfig& provider_config) -> std::unique_ptr<LLMProvider> {
-        if (options.provider_factory) {
-            return options.provider_factory(provider_config);
-        }
-        if (std::optional<FakeScript> script = fake_script_from_env(); script.has_value()) {
-            return std::make_unique<FakeLLM>(std::move(*script));
-        }
-        return nullptr;
-    };
+    runtime_options.boot_id = mint_boot_id();
+    runtime_options.provider_factory = make_provider_factory(options.provider_factory);
 
     std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
         make_workspace_runtime(std::move(runtime_options));

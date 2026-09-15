@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -600,6 +601,160 @@ TEST(TransportServer, LeaseLostNoticeReachesInteractiveSubscribers) {
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].at("method").get<std::string>(), "host.event");
     EXPECT_EQ(frames[0].at("params").at("kind").get<std::string>(), "lease_lost");
+}
+
+TEST(TransportServer, SessionSubscriberCountTracksInteractiveSubscriptions) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    const SessionId other = harness.host.seed("s2");
+    Peer* interactive = harness.open();
+    harness.hello(*interactive, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*interactive);
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB);
+    harness.drain(*automation);
+
+    EXPECT_EQ(harness.server->sessionSubscriberCount(session), 0u);
+
+    protocol::StreamFrom now;
+    now.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*interactive, Harness::request(2, protocol::method::kEventSubscribe,
+                                                Harness::subscribe_params(session, now)));
+    harness.drain(*interactive);
+    EXPECT_EQ(harness.server->sessionSubscriberCount(session), 1u);
+    EXPECT_EQ(harness.server->sessionSubscriberCount(other), 0u);
+
+    harness.send(*automation, Harness::request(2, protocol::method::kEventSubscribe,
+                                               Harness::subscribe_params(session, now)));
+    harness.drain(*automation);
+    EXPECT_EQ(harness.server->sessionSubscriberCount(session), 1u);
+
+    Peer* second = harness.open();
+    harness.hello(*second, protocol::ServerProfile::Interactive, kInstanceB);
+    harness.drain(*second);
+    harness.send(*second, Harness::request(2, protocol::method::kEventSubscribe,
+                                           Harness::subscribe_params(session, now)));
+    harness.drain(*second);
+    EXPECT_EQ(harness.server->sessionSubscriberCount(session), 2u);
+
+    harness.server->onSessionClosed(session, "closed");
+    EXPECT_EQ(harness.server->sessionSubscriberCount(session), 0u);
+}
+
+TEST(TransportServer, SubscribeObserverFiresAfterInstallForInteractiveOnly) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    std::vector<std::pair<SessionId, protocol::ClientId>> observed;
+    harness.server->set_subscribe_observer(
+        [&](const SessionId& subscribed, protocol::ClientId client) {
+            observed.emplace_back(subscribed, client);
+            EXPECT_GE(harness.server->sessionSubscriberCount(subscribed), 1u);
+        });
+
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    protocol::StreamFrom now;
+    now.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*peer, Harness::request(2, protocol::method::kEventSubscribe,
+                                         Harness::subscribe_params(session, now)));
+    harness.drain(*peer);
+    ASSERT_EQ(observed.size(), 1u);
+    EXPECT_EQ(observed[0].first.value, session.value);
+    EXPECT_EQ(observed[0].second.value, peer->id.value);
+
+    harness.send(*peer, Harness::request(3, protocol::method::kSessionReplay,
+                                         Harness::subscribe_params(session, now)));
+    harness.drain(*peer);
+    EXPECT_EQ(observed.size(), 1u);
+
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB);
+    harness.drain(*automation);
+    harness.send(*automation, Harness::request(2, protocol::method::kEventSubscribe,
+                                               Harness::subscribe_params(session, now)));
+    harness.drain(*automation);
+    EXPECT_EQ(observed.size(), 1u);
+
+    harness.send(*peer, Harness::request(4, protocol::method::kEventSubscribe,
+                                         Harness::subscribe_params(session, now)));
+    harness.drain(*peer);
+    EXPECT_EQ(observed.size(), 2u);
+}
+
+TEST(TransportServer, WaitForDrainTrueWhenNoOutboundIsPending) {
+    Harness harness;
+    EXPECT_TRUE(harness.server->waitForDrain(std::chrono::milliseconds{10}));
+}
+
+TEST(TransportServer, WaitForDrainBlocksUntilOutboundAcked) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    Peer* peer = harness.open(/*ack=*/false);
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    protocol::StreamFrom now;
+    now.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*peer, Harness::request(2, protocol::method::kEventSubscribe,
+                                         Harness::subscribe_params(session, now)));
+    harness.emit(session, EventType::TurnStarted, {{"n", 1}});
+    ASSERT_GT(harness.server->outstandingBytes(peer->id), 0u);
+
+    EXPECT_FALSE(harness.server->waitForDrain(std::chrono::milliseconds{20}));
+
+    harness.server->onFrameWritten(peer->id, harness.server->outstandingBytes(peer->id));
+    EXPECT_TRUE(harness.server->waitForDrain(std::chrono::milliseconds{20}));
+}
+
+TEST(TransportServer, CloseConnectionReleasesOutstandingBytes) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    Peer* peer = harness.open(/*ack=*/false);
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    protocol::StreamFrom now;
+    now.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*peer, Harness::request(2, protocol::method::kEventSubscribe,
+                                         Harness::subscribe_params(session, now)));
+    harness.emit(session, EventType::TurnStarted, {{"n", 1}});
+    ASSERT_GT(harness.server->outstandingBytes(peer->id), 0u);
+    EXPECT_FALSE(harness.server->waitForDrain(std::chrono::milliseconds{10}));
+
+    harness.server->closeConnection(peer->id);
+    EXPECT_TRUE(harness.server->waitForDrain(std::chrono::milliseconds{10}));
+}
+
+TEST(TransportServer, DaemonShuttingDownNoticeIsEmittedOnce) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    harness.server->onDaemonShuttingDown("bye");
+    harness.server->onDaemonShuttingDown("bye again");
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].at("params").at("kind").get<std::string>(), "daemon_shutting_down");
+}
+
+TEST(TransportServer, UnexpectedExceptionMapsToInternalError) {
+    Harness harness;
+    harness.host.throw_internal_on = "session.list";
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionList));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InternalError));
+}
+
+TEST(TransportServer, MalformedParamsMapToInvalidParams) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    harness.send(*peer, Harness::request(2, protocol::method::kPermissionDecide));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InvalidParams));
 }
 
 } // namespace

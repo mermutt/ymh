@@ -16,7 +16,8 @@ coded after it is marked **verified** here.
 | 08 | `08-llm-provider.md` | yes | **verified** | Oracle component gate: GATE PASS (8 findings fixed; no open HIGH/MEDIUM) | 1390 lines; L1–L17 + L-F1–L-F18; retry barrier, `turn/fail`; §4.5 errata delegates `TurnFailed.code` to 06 |
 | 09 | `09-permissions.md` | yes | **verified** | Oracle component gate: GATE PASS (12 findings fixed; no open HIGH/MEDIUM) | 1360 lines; Q1–Q15 + Q-F1–Q-F16; `PermissionConfig`; F2 surface-via-attention |
 | 10 | `10-supervisor-tui.md` | yes | **verified** | Oracle component gate: GATE PASS (8 findings fixed; no open HIGH/MEDIUM) | 1626 lines; U1–U18 + U-F1–U-F20; focus-independent flash |
-| 11 | `11-m2-errata.md` | yes | **verified** | Oracle G0 interface-freeze gate: PASS (21 findings fixed; no open HIGH/MEDIUM) | 1412 lines; M2 interfaces frozen; amends 03/04/05/09/10 |
+| 11 | `11-m2-errata.md` | yes | **verified** | Oracle G0 interface-freeze gate: PASS (21 findings fixed; no open HIGH/MEDIUM) | 1426 lines; M2 interfaces frozen; amends 03/04/05/09/10; post-gate additive §7.2 `ClockReader` amendment (track E) + E21 |
+| 12 | `12-m1-drift-errata.md` | yes | — (register; not a component spec) | track F (self), pending review | 204 lines; M1 spec-text ↔ code reconciliation register DR1–DR6; defers to 11 (no new semantics) |
 
 ## Open top-level items (`HANDOFF.md` §5)
 
@@ -69,4 +70,6 @@ coded after it is marked **verified** here.
 | 2026-09-14 | `10-supervisor-tui.md` | Oracle component pass 2 | **GATE PASS** — 8 resolved; focus-independent flash confirmed |
 | 2026-09-15 | `11-m2-errata.md` | Oracle G0 pass 1 | GATE FAIL — 6 HIGH, 8 MEDIUM, 7 LOW |
 | 2026-09-15 | `11-m2-errata.md` | Oracle G0 pass 2 | GATE PASS — 21 resolved + R1–R3; interfaces frozen |
+| 2026-09-15 | `11-m2-errata.md` §7.2 | track E finding (post-gate, additive) | `Clock&` inert → injectable `ClockReader` (default `Clock::now`); D19.1 + E21 + §16 updated; no other interface semantics changed |
+| 2026-09-15 | `12-m1-drift-errata.md` | track F (self) | written — M1 spec/code reconciliation register DR1–DR6; no new semantics; defers to 11; pending review |
 

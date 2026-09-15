@@ -72,6 +72,12 @@ TEST(TransportProtocol, HostErrorMapping) {
               protocol::code_value(protocol::RpcCode::InvalidRequest));
 }
 
+TEST(TransportProtocol, PingIntervalOutpacesIdleTimeout) {
+    EXPECT_EQ(protocol::kPingInterval.count(), 10000);
+    EXPECT_EQ(protocol::TransportLimits{}.idle_timeout.count(), 30000);
+    EXPECT_GE(protocol::TransportLimits{}.idle_timeout, 3 * protocol::kPingInterval);
+}
+
 TEST(TransportProtocol, SessionEnvelopeCarriesCoreEventOnly) {
     protocol::SessionEnvelope envelope;
     envelope.session = SessionId{"session-1"};

@@ -69,7 +69,7 @@ void HostConnection::send_message(const nlohmann::json& message) {
     std::size_t written = 0;
     while (written < frame.size()) {
         const ssize_t count =
-            ::write(fd_, frame.data() + written, frame.size() - written);
+            ::send(fd_, frame.data() + written, frame.size() - written, MSG_NOSIGNAL);
         if (count < 0) {
             if (errno == EINTR) {
                 continue;

@@ -1,13 +1,8 @@
 #include "ymh/cli/wiring.hpp"
 
-#include <atomic>
-#include <chrono>
-#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <unistd.h>
 
 namespace ymh {
 namespace {
@@ -40,11 +35,14 @@ void add_rule(PermissionConfig& config,
 
 } // namespace
 
-std::string make_boot_id() {
-    static std::atomic<std::uint64_t> counter{0};
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    return std::to_string(static_cast<long long>(::getpid())) + "-" + std::to_string(now) + "-" +
-           std::to_string(counter.fetch_add(1));
+BootId mint_boot_id() { return BootId{generate_uuid_v4()}; }
+
+HostBootId to_host_boot_id(const BootId& boot_id) { return HostBootId{boot_id.value}; }
+
+BootId to_boot_id(const HostBootId& boot_id) { return BootId{boot_id.value}; }
+
+protocol::HostBootId to_protocol_boot_id(const HostBootId& boot_id) {
+    return protocol::HostBootId{boot_id.value};
 }
 
 std::string default_system_prompt() {

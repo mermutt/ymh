@@ -321,6 +321,47 @@ TEST(WorkspaceRegistryTest, AddSessionOrdinalsAreIncreasingAndGapTolerant) {
     EXPECT_EQ(d.ordinal, 3);
 }
 
+TEST(WorkspaceRegistryTest, OrderSessionsJunctionFirstThenStoreOnlyByCreatedAt) {
+    TempDir dir{"ymh_reg_order"};
+    const RegistryConfig config = test_config(dir.path());
+    auto registry = WorkspaceRegistry::open(config);
+    const WorkspaceRecord record = registry->registerWorkspace(dir.path(), "t");
+
+    registry->addSession(record.id, SessionId{"b"});
+    registry->addSession(record.id, SessionId{"a"});
+
+    const std::vector<SessionRef> store{
+        SessionRef{SessionId{"z"}, 50},
+        SessionRef{SessionId{"a"}, 10},
+        SessionRef{SessionId{"c"}, 20},
+    };
+    const std::vector<SessionOrderEntry> ordered =
+        registry->listSessionsOrdered(record.id, store);
+
+    ASSERT_EQ(ordered.size(), 4U);
+    EXPECT_EQ(ordered[0].sessionId.value, "b");
+    EXPECT_EQ(ordered[0].ordinal, 0);
+    EXPECT_TRUE(ordered[0].inJunction);
+    EXPECT_EQ(ordered[1].sessionId.value, "a");
+    EXPECT_EQ(ordered[1].ordinal, 1);
+    EXPECT_TRUE(ordered[1].inJunction);
+    EXPECT_EQ(ordered[2].sessionId.value, "c");
+    EXPECT_FALSE(ordered[2].inJunction);
+    EXPECT_EQ(ordered[3].sessionId.value, "z");
+    EXPECT_FALSE(ordered[3].inJunction);
+}
+
+TEST(WorkspaceRegistryTest, OrderSessionsUsesOrdinalNotLexicalId) {
+    const std::vector<WorkspaceSessionRecord> junction{
+        WorkspaceSessionRecord{WorkspaceId{"w"}, SessionId{"zzz"}, 1, false, 0},
+        WorkspaceSessionRecord{WorkspaceId{"w"}, SessionId{"aaa"}, 0, false, 0},
+    };
+    const std::vector<SessionOrderEntry> ordered = orderSessions(junction, {});
+    ASSERT_EQ(ordered.size(), 2U);
+    EXPECT_EQ(ordered[0].sessionId.value, "aaa");
+    EXPECT_EQ(ordered[1].sessionId.value, "zzz");
+}
+
 TEST(WorkspaceRegistryTest, ReorderWritesMarkerThenClearsIt) {
     TempDir dir{"ymh_reg_reorder"};
     const RegistryConfig config = test_config(dir.path());

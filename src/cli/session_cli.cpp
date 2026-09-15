@@ -54,7 +54,7 @@ PersistenceConfig persistence_config(const std::filesystem::path& workspace) {
     PersistenceConfig config;
     config.db_path   = database_path(workspace);
     config.lock_path = lock_path(workspace);
-    config.boot_id   = BootId{make_boot_id()};
+    config.boot_id   = mint_boot_id();
     return config;
 }
 

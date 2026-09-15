@@ -13,6 +13,7 @@
 
 #include <sqlite3.h>
 
+#include "ymh/cli/wiring.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -311,6 +312,31 @@ TEST(Persistence, SecondWriterRejectedWhileFlockHeld) {
     EXPECT_THROW(SessionPersistence::open(workspace.config("boot-b")), StoreOpenError);
 }
 
+TEST(Persistence, HeldFlockReportsLockedCode) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config("boot-a"));
+    ASSERT_NE(store, nullptr);
+    try {
+        SessionPersistence::open(workspace.config("boot-b"));
+        FAIL() << "expected StoreOpenError";
+    } catch (const StoreOpenError& error) {
+        EXPECT_EQ(error.code(), StoreOpenErrorCode::Locked);
+    }
+}
+
+TEST(Persistence, MissingWorkspaceRootReportsUnavailableCode) {
+    TempWorkspace workspace;
+    PersistenceConfig config = workspace.config();
+    config.db_path   = workspace.root() / "missing" / ".ymh" / "sessions.db";
+    config.lock_path = workspace.root() / "missing" / ".ymh" / "sessions.lock";
+    try {
+        SessionPersistence::open(config);
+        FAIL() << "expected StoreOpenError";
+    } catch (const StoreOpenError& error) {
+        EXPECT_EQ(error.code(), StoreOpenErrorCode::Unavailable);
+    }
+}
+
 TEST(Persistence, ReadOnlyOpenCoexistsWithWriter) {
     TempWorkspace workspace;
     auto          store  = SessionPersistence::open(workspace.config());
@@ -352,6 +378,76 @@ TEST(Persistence, ForkResolvesSharedPrefix) {
     EXPECT_EQ(childView[0].seq, parentView[0].seq);
     EXPECT_EQ(childView[1].seq, parentView[1].seq);
     EXPECT_GT(childView[2].seq, parentView[1].seq);
+}
+
+TEST(Persistence, HeadSequenceIsHighestCommitted) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    EXPECT_EQ(store->headSequence(header.id), 0);
+
+    const Sequence first  = store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    const Sequence second = store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    EXPECT_GT(second, first);
+    EXPECT_EQ(store->headSequence(header.id), second);
+}
+
+TEST(Persistence, HeadSequenceUnknownSessionThrows) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    EXPECT_THROW(static_cast<void>(store->headSequence(SessionId{"00000000-0000-4000-8000-000000000000"})),
+                 UnknownSession);
+}
+
+TEST(Persistence, ReadAfterIsBoundedAndAscending) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    const Sequence first  = store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    const Sequence second = store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    const Sequence third  = store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+
+    EXPECT_TRUE(store->readAfter(header.id, 0, 0).empty());
+
+    const EventRange first_two = store->readAfter(header.id, 0, 2);
+    ASSERT_EQ(first_two.size(), 2u);
+    EXPECT_EQ(first_two[0].seq, first);
+    EXPECT_EQ(first_two[1].seq, second);
+
+    const EventRange rest = store->readAfter(header.id, second, kUnbounded);
+    ASSERT_EQ(rest.size(), 1u);
+    EXPECT_EQ(rest[0].seq, third);
+
+    const EventRange all = store->readAfter(header.id, 0, kUnbounded);
+    EXPECT_EQ(all.size(), store->read(header.id).size());
+}
+
+TEST(Persistence, ReadAfterForkPrefixHonoursLimit) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 2;
+    store->create(child);
+    store->append(child.id, make_event(child.id, std::chrono::system_clock::now()));
+
+    const EventRange childView = store->read(child.id);
+    ASSERT_EQ(childView.size(), 3u);
+    EXPECT_EQ(store->headSequence(child.id), childView.back().seq);
+
+    const EventRange bounded = store->readAfter(child.id, 0, 2);
+    ASSERT_EQ(bounded.size(), 2u);
+    EXPECT_EQ(bounded[0].seq, childView[0].seq);
+    EXPECT_EQ(bounded[1].seq, childView[1].seq);
+
+    const EventRange tail = store->readAfter(child.id, bounded[1].seq, kUnbounded);
+    ASSERT_EQ(tail.size(), 1u);
+    EXPECT_EQ(tail[0].seq, childView[2].seq);
 }
 
 TEST(Persistence, ForkInvalidBoundaryRejectedAtRead) {
@@ -443,6 +539,19 @@ TEST(Persistence, ForeignApplicationIdRefused) {
     RawDb raw(workspace.db_path());
     ASSERT_EQ(raw.exec("PRAGMA application_id = 12345"), SQLITE_OK);
     EXPECT_THROW(SessionPersistence::open(workspace.config()), SchemaVersionError);
+}
+
+TEST(BootNonce, MintIsUuidV4AndAdaptersRoundTrip) {
+    const BootId boot = mint_boot_id();
+    ASSERT_EQ(boot.value.size(), 36u);
+    EXPECT_EQ(boot.value[14], '4');
+    EXPECT_EQ(boot.value[8], '-');
+    EXPECT_NE(mint_boot_id().value, boot.value);
+
+    const HostBootId host = to_host_boot_id(boot);
+    EXPECT_EQ(host.value, boot.value);
+    EXPECT_EQ(to_boot_id(host).value, boot.value);
+    EXPECT_EQ(to_protocol_boot_id(host).value, boot.value);
 }
 
 } // namespace

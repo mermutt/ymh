@@ -42,6 +42,15 @@ enum class AgentState : std::uint8_t {
     Error,
 };
 
+// 11 §12.4: a turn may be activated only when the agent is Idle or blocked
+// awaiting a permission/input reply. Thinking/CallingTool/Cancelling/Error are
+// never interrupted by activation; only an explicit cancel/suspend cancels a
+// turn.
+[[nodiscard]] constexpr bool activationAllowed(AgentState state) noexcept {
+    return state == AgentState::Idle || state == AgentState::WaitingForPermission ||
+           state == AgentState::WaitingForInput;
+}
+
 enum class InboxResult : std::uint8_t {
     Accepted,
     InboxFull,

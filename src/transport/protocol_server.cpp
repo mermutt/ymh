@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include "ymh/transport/frame_codec.hpp"
 #include "ymh/transport/json_rpc.hpp"
 
@@ -89,6 +91,8 @@ constexpr std::size_t kReplayBatch = 256;
 
 } // namespace
 
+std::uint32_t current_uid() noexcept { return static_cast<std::uint32_t>(::getuid()); }
+
 ProtocolServer::ProtocolServer(TransportHost& host, ProtocolServerConfig config)
     : host_(host), config_(std::move(config)) {}
 
@@ -152,6 +156,8 @@ void ProtocolServer::closeConnection(ClientId id) {
         return;
     }
     it->second.dropped = true;
+    outstanding_total_.fetch_sub(it->second.outstanding);
+    signal_drain_progress();
     connections_.erase(it);
 }
 
@@ -160,7 +166,10 @@ void ProtocolServer::onFrameWritten(ClientId id, std::size_t bytes) {
     if (conn == nullptr || conn->dropped) {
         return;
     }
-    conn->outstanding = bytes > conn->outstanding ? 0 : conn->outstanding - bytes;
+    const std::size_t before = conn->outstanding;
+    conn->outstanding = bytes > before ? 0 : before - bytes;
+    outstanding_total_.fetch_sub(before - conn->outstanding);
+    signal_drain_progress();
     maybe_close_after_drain(*conn);
 }
 
@@ -480,8 +489,10 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
         }
     } catch (const RpcException& error) {
         respond_error(conn, request.id, error.code(), error.what(), error.data());
-    } catch (const std::exception& error) {
+    } catch (const nlohmann::json::exception& error) {
         respond_error(conn, request.id, code_value(RpcCode::InvalidParams), error.what());
+    } catch (const std::exception& error) {
+        respond_error(conn, request.id, code_value(RpcCode::InternalError), error.what());
     }
 }
 
@@ -556,6 +567,11 @@ void ProtocolServer::handle_subscribe(Connection& conn, const Request& request, 
         return;
     }
     conn.subscriptions[subscription] = Subscription{params.session};
+
+    if (subscribe_observer_ && conn.profile == ServerProfile::Interactive) {
+        SubscribeObserver observer = subscribe_observer_;
+        observer(params.session, conn.id);
+    }
 }
 
 void ProtocolServer::respond(Connection& conn, const RequestId& id, nlohmann::json result) {
@@ -596,6 +612,7 @@ void ProtocolServer::enqueue_frame(Connection& conn, std::string frame) {
         return;
     }
     conn.outstanding += frame.size();
+    outstanding_total_.fetch_add(frame.size());
     conn.outbound.push_back(std::move(frame));
     pump(conn);
 }
@@ -614,7 +631,20 @@ void ProtocolServer::pump(Connection& conn) {
         }
     }
     conn.pumping = false;
+    signal_drain_progress();
     maybe_close_after_drain(conn);
+}
+
+void ProtocolServer::signal_drain_progress() {
+    std::lock_guard lock(drain_mutex_);
+    drain_cv_.notify_all();
+}
+
+bool ProtocolServer::waitForDrain(std::chrono::milliseconds grace) {
+    std::unique_lock lock(drain_mutex_);
+    return drain_cv_.wait_for(lock, grace, [this] {
+        return outstanding_total_.load() == 0;
+    });
 }
 
 void ProtocolServer::maybe_close_after_drain(Connection& conn) {
@@ -633,6 +663,9 @@ void ProtocolServer::drop_client(Connection& conn, std::string reason) {
     conn.dropped = true;
     conn.outbound.clear();
     conn.subscriptions.clear();
+    outstanding_total_.fetch_sub(conn.outstanding);
+    conn.outstanding = 0;
+    signal_drain_progress();
     DropFn drop = conn.drop;
     conn.send = nullptr;
     conn.drop = nullptr;
@@ -760,6 +793,10 @@ void ProtocolServer::onLeaseLost(const SessionId& session, std::string detail) {
 }
 
 void ProtocolServer::onDaemonShuttingDown(std::string detail) {
+    if (shutdown_notice_emitted_) {
+        return;
+    }
+    shutdown_notice_emitted_ = true;
     for (auto& entry : connections_) {
         Connection& conn = entry.second;
         if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
@@ -845,6 +882,29 @@ bool ProtocolServer::isDropped(ClientId id) const {
 bool ProtocolServer::isHandshaken(ClientId id) const {
     const auto it = connections_.find(id.value);
     return it != connections_.end() && it->second.hello_done && !it->second.dropped;
+}
+
+std::size_t ProtocolServer::sessionSubscriberCount(const SessionId& session) const {
+    std::size_t count = 0;
+    for (const auto& entry : connections_) {
+        const Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
+            continue;
+        }
+        const bool subscribed =
+            std::any_of(conn.subscriptions.begin(), conn.subscriptions.end(),
+                        [&session](const auto& sub_entry) {
+                            return sub_entry.second.session == session;
+                        });
+        if (subscribed) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void ProtocolServer::set_subscribe_observer(SubscribeObserver observer) {
+    subscribe_observer_ = std::move(observer);
 }
 
 } // namespace ymh::protocol

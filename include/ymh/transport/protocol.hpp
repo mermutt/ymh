@@ -191,6 +191,10 @@ struct TransportLimits {
     std::chrono::milliseconds idle_timeout{30'000};
 };
 
+// D5: the supervisor's `host.ping` cadence. Three missed pings fit inside the
+// daemon's 30 s `idle_timeout`, matching the registry heartbeat ratio.
+inline constexpr std::chrono::milliseconds kPingInterval{10'000};
+
 // ---------------------------------------------------------------------------
 // Wire DTOs (05 §5)
 // ---------------------------------------------------------------------------

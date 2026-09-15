@@ -452,7 +452,7 @@ int run_tui(const UiRunOptions& options) {
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config                  = options.config;
     runtime_options.root                    = root;
-    runtime_options.boot_id                 = BootId{make_boot_id()};
+    runtime_options.boot_id                 = mint_boot_id();
     runtime_options.attach_permission_gate  = true;
 
     std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =

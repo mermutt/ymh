@@ -47,10 +47,16 @@ public:
     std::size_t           activeCount() const;
 
     // Daemon-driven activation (04 (m), A7/A8). Never focus-gated: attachment
-    // and UI focus do not appear here. `activateSession` is idempotent;
-    // `suspendSession` cancels the in-flight turn with reason "superseded".
+    // and UI focus do not appear here. `activateSession` is idempotent and is
+    // gated on Idle/blocked state (11 §12.4): it never cancels or re-enters an
+    // in-flight turn. `suspendSession` cancels the in-flight turn with reason
+    // "superseded".
     void activateSession(const SessionId& id);
     void suspendSession(const SessionId& id);
+
+    // 11 §12.4 / 04 §3.7 arbiter predicate: a queued turn trigger or an
+    // in-flight turn. False for an unknown session.
+    [[nodiscard]] bool hasPendingWork(const SessionId& id) const noexcept;
 
 private:
     std::expected<AgentId, AgentError> registerAgent(const SessionId& sessionId);

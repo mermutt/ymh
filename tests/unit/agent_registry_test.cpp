@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -15,6 +19,54 @@ namespace {
 
 using namespace ymh;
 using namespace ymh::test;
+using namespace std::chrono_literals;
+
+// A provider whose stream() blocks until released, so a test can hold a turn
+// in flight and drive the registry's activation gate concurrently.
+class BlockingLLM final : public LLMProvider {
+public:
+    ProviderId id() const override { return "blocking"; }
+    ProviderCapabilities capabilities() const override { return {}; }
+
+    Task<LLMResponse> stream(const LLMRequest&, StreamSink sink, CancellationToken cancel) override {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            entered_ = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this, &cancel] { return released_ || cancel.cancelled(); });
+        }
+        if (cancel.cancelled()) {
+            LLMResponse cancelled;
+            cancelled.outcome = StreamOutcome::Cancelled;
+            cancelled.finish  = FinishReason::Other;
+            return Task<LLMResponse>{cancelled};
+        }
+        sink(TextDelta{"hello"});
+        LLMResponse response;
+        response.outcome = StreamOutcome::Completed;
+        response.finish  = FinishReason::Stop;
+        return Task<LLMResponse>{response};
+    }
+
+    bool waitEntered() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, 2s, [this] { return entered_; });
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    entered_ = false;
+    bool                    released_ = false;
+};
 
 Message user_message(std::string text) {
     Message message;
@@ -169,6 +221,47 @@ TEST(AgentRegistry, SubagentSpawnAndFanInRecordEdges) {    AgentEnv env("registr
     EXPECT_EQ(count_type(events, EventType::SubagentSpawned), 1u);
     EXPECT_EQ(count_type(events, EventType::SubagentFanIn), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 0u);
+}
+
+TEST(AgentRegistry, ActivationIsAllowedOnlyWhenIdleOrBlocked) {
+    EXPECT_TRUE(activationAllowed(AgentState::Idle));
+    EXPECT_TRUE(activationAllowed(AgentState::WaitingForPermission));
+    EXPECT_TRUE(activationAllowed(AgentState::WaitingForInput));
+
+    EXPECT_FALSE(activationAllowed(AgentState::Thinking));
+    EXPECT_FALSE(activationAllowed(AgentState::CallingTool));
+    EXPECT_FALSE(activationAllowed(AgentState::Cancelling));
+    EXPECT_FALSE(activationAllowed(AgentState::Error));
+}
+
+TEST(AgentRegistry, ActivateSessionDoesNotCancelAnInFlightTurn) {
+    auto         owner = std::make_unique<BlockingLLM>();
+    BlockingLLM* provider = owner.get();
+    AgentEnv     env("registry_no_cancel", std::move(owner));
+    Agent&       agent = env.createAgent();
+    const SessionId sessionId = agent.session();
+
+    std::thread turn([&agent] { (void)agent.send(user_message("hi")); });
+    ASSERT_TRUE(provider->waitEntered());
+    EXPECT_EQ(agent.state(), AgentState::Thinking);
+    EXPECT_TRUE(env.registry.hasPendingWork(sessionId));
+
+    env.registry.activateSession(sessionId);
+
+    EXPECT_EQ(agent.state(), AgentState::Thinking);
+    EXPECT_TRUE(env.registry.hasPendingWork(sessionId));
+
+    provider->release();
+    turn.join();
+
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+    EXPECT_EQ(count_type(env.sessionOf(agent).events(), EventType::TurnEnded), 1u);
+    EXPECT_FALSE(env.registry.hasPendingWork(sessionId));
+}
+
+TEST(AgentRegistry, HasPendingWorkIsFalseForUnknownSession) {
+    AgentEnv env("registry_pending_unknown", std::make_unique<FakeLLM>(script_of({text_step("x")})));
+    EXPECT_FALSE(env.registry.hasPendingWork(SessionId{"missing"}));
 }
 
 } // namespace

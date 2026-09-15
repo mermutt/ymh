@@ -4,9 +4,11 @@
 // §6, §7, §8: `SessionHeader`, `SessionKind`, `SessionStore`, `Session`,
 // `deriveMessages`, and `SessionSnapshot`. No UI/agent-loop type appears here.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -90,6 +92,9 @@ struct SessionSnapshot {
     std::size_t          eventCount = 0;
 };
 
+// 11-m2-errata §5.2 (D15): sentinel for an unbounded `readAfter`.
+inline constexpr std::size_t kUnbounded = std::numeric_limits<std::size_t>::max();
+
 // 01 §7: the persistence seam. Spec 02 owns the SQLite implementation.
 class SessionStore {
 public:
@@ -120,6 +125,34 @@ public:
     }
 
     virtual bool isLeaseHolder(SessionId id) const = 0;
+
+    // 11-m2-errata §5.2 (D15): highest committed Sequence in the session's
+    // resolved view; 0 when it has no events. Throws UnknownSession when the id
+    // is not in the store. Non-pure so the M1 in-memory fakes keep compiling;
+    // the durable store overrides it with an indexed MAX(sequence).
+    [[nodiscard]] virtual Sequence headSequence(SessionId id) const {
+        if (!load(id).has_value()) {
+            throw UnknownSession("unknown session");
+        }
+        Sequence head = 0;
+        for (const EventRecord& record : read(id, 0)) {
+            head = std::max(head, record.seq);
+        }
+        return head;
+    }
+
+    // 11-m2-errata §5.2 (D15): at most `limit` committed events with seq >
+    // `after`, ascending. limit == 0 returns empty. Non-pure for the same
+    // reason as `headSequence`; the durable store overrides it with `LIMIT ?`
+    // so it stops reading at the bound instead of scanning and truncating.
+    [[nodiscard]] virtual EventRange readAfter(SessionId id, Sequence after,
+                                               std::size_t limit) const {
+        EventRange all = read(id, after);
+        if (limit < all.size()) {
+            all.resize(limit);
+        }
+        return all;
+    }
 };
 
 // 01 §6.3: the pure projection. Reads only the header and the resolved event

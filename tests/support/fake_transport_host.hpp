@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,12 @@ public:
     std::optional<nlohmann::json> last_message;
     std::optional<std::string> last_reason;
     std::set<std::string> known_permissions;
+
+    // Test seam (D14): when set to a method name, the corresponding host method
+    // throws a non-RpcException `std::runtime_error` before doing any work. Used
+    // to assert that an unexpected internal failure maps to
+    // `RpcCode::InternalError`, not `InvalidParams`.
+    std::optional<std::string> throw_internal_on;
 
     protocol::HostState hostState() const override { return state; }
 
@@ -66,6 +73,9 @@ public:
     }
 
     std::vector<protocol::SessionSummary> listSessions() override {
+        if (throw_internal_on == "session.list") {
+            throw std::runtime_error("injected internal failure");
+        }
         std::vector<protocol::SessionSummary> summaries;
         for (const auto& entry : logs_) {
             summaries.push_back(summary_for(entry.first));
