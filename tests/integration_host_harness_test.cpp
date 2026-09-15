@@ -3,11 +3,13 @@
 #include <csignal>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "support/host_harness.hpp"
 #include "support/short_temp.hpp"
+#include "ymh/registry/registry.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace {
@@ -91,6 +93,48 @@ TEST_F(HostIntegration, CrashIsReported) {
     EXPECT_TRUE(status.signalled);
     EXPECT_EQ(status.signal, SIGKILL);
     EXPECT_FALSE(harness.running());
+}
+
+TEST_F(HostIntegration, ClaimsRegistryWhileRunningThenReleases) {
+    ymh::test::ShortTempRoot root("ymh-host-claim");
+    root.write("fake.json", R"([{"text": "hello"}])");
+
+    ymh::test::HostHarnessOptions options;
+    options.binary         = binary_;
+    options.workspace_root = root.path();
+    options.env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
+
+    ymh::RegistryConfig registry_config;
+    registry_config.db_path   = root.path() / ".state" / "ymh" / "registry.db";
+    registry_config.lock_path = root.path() / ".state" / "ymh" / "registry.lock";
+
+    ymh::test::HostHarness harness(options);
+    harness.start();
+    ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
+
+    {
+        std::unique_ptr<ymh::WorkspaceRegistry> registry =
+            ymh::WorkspaceRegistry::openReadOnly(registry_config);
+        const std::optional<ymh::WorkspaceRecord> record =
+            registry->findByCanonicalPath(root.path());
+        ASSERT_TRUE(record.has_value());
+        ASSERT_TRUE(record->host.has_value());
+        EXPECT_EQ(record->host->pid, static_cast<ymh::HostPid>(harness.pid()));
+        EXPECT_EQ(record->host->socketPath, harness.socket_path());
+    }
+
+    const ymh::test::ExitStatus status = harness.stop();
+    EXPECT_TRUE(status.exited);
+    EXPECT_EQ(status.code, 0);
+
+    {
+        std::unique_ptr<ymh::WorkspaceRegistry> registry =
+            ymh::WorkspaceRegistry::openReadOnly(registry_config);
+        const std::optional<ymh::WorkspaceRecord> record =
+            registry->findByCanonicalPath(root.path());
+        ASSERT_TRUE(record.has_value());
+        EXPECT_FALSE(record->host.has_value());
+    }
 }
 
 } // namespace

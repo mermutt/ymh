@@ -27,6 +27,8 @@ add_executable(ymh_tests
     unit/llm_pool_test.cpp
     unit/workspace_runtime_test.cpp
     unit/host_runtime_test.cpp
+    unit/workspace_host_test.cpp
+    unit/workspace_host_test.cpp
     unit/workspace_registry_test.cpp
     unit/transport_frame_test.cpp
     unit/transport_protocol_test.cpp
