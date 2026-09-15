@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 
+#include "support/pty_child.hpp"
 #include "support/test_env.hpp"
 
 #ifndef YMH_TEST_BINARY
@@ -164,10 +165,13 @@ TEST(UiLivePty, StreamsAssistantReply) {
     PtyProcess pty;
     ASSERT_TRUE(pty.spawn(YMH_TEST_BINARY, workspace.path().string()));
 
+    // The no-args binary is the M2 supervisor TUI, which auto-creates the first
+    // session asynchronously; keystrokes typed before it is active are dropped.
     std::string output;
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        output += pty.read_available(100);
-        if (output.find("ymh") != std::string::npos) {
+    const auto startup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    while (std::chrono::steady_clock::now() < startup_deadline) {
+        output += pty.read_available(200);
+        if (strip_ansi(output).find("Type a message and press Enter") != std::string::npos) {
             break;
         }
     }
@@ -192,6 +196,7 @@ TEST(UiLivePty, StreamsAssistantReply) {
 
     pty.write_all("/exit\r");
     pty.terminate();
+    test::stop_hosts_for_root(workspace.path());
 
     EXPECT_TRUE(saw_reply) << strip_ansi(output);
 }
