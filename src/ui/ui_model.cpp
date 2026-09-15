@@ -1,6 +1,7 @@
 #include "ymh/ui/ui_model.hpp"
 
 #include <algorithm>
+#include <type_traits>
 #include <utility>
 
 namespace ymh::ui {
@@ -83,12 +84,117 @@ void InputModel::push_history(std::string line) {
     if (line.empty()) {
         return;
     }
+    saved_draft.clear();
     if (!history.empty() && history.back() == line) {
         history_pos = history.size();
         return;
     }
     history.push_back(std::move(line));
     history_pos = history.size();
+}
+
+bool InputModel::history_up() {
+    if (history.empty() || history_pos == 0) {
+        return false;
+    }
+    if (history_pos == history.size()) {
+        saved_draft = draft;
+    }
+    --history_pos;
+    draft = history[history_pos];
+    cursor = draft.size();
+    return true;
+}
+
+bool InputModel::history_down() {
+    if (history.empty() || history_pos >= history.size()) {
+        return false;
+    }
+    ++history_pos;
+    draft = history_pos == history.size() ? saved_draft : history[history_pos];
+    cursor = draft.size();
+    return true;
+}
+
+bool InputModel::delete_forward() {
+    if (cursor >= draft.size()) {
+        return false;
+    }
+    draft.erase(cursor, 1);
+    return true;
+}
+
+void InputModel::clear_line() {
+    draft.clear();
+    cursor = 0;
+}
+
+bool InputModel::delete_word() {
+    const std::size_t before = draft.size();
+    while (cursor > 0 && draft[cursor - 1] == ' ') {
+        draft.erase(cursor - 1, 1);
+        --cursor;
+    }
+    while (cursor > 0 && draft[cursor - 1] != ' ') {
+        draft.erase(cursor - 1, 1);
+        --cursor;
+    }
+    return draft.size() != before;
+}
+
+void ConversationScroll::pageUp() {
+    if (following) {
+        following = false;
+        fraction = 1.0f;
+    }
+    fraction = std::max(0.0f, fraction - kPageStep);
+}
+
+void ConversationScroll::pageDown() {
+    if (following) {
+        return;
+    }
+    fraction = std::min(1.0f, fraction + kPageStep);
+    if (fraction >= 1.0f) {
+        following = true;
+        unseen = false;
+    }
+}
+
+void ConversationScroll::lineUp() {
+    if (following) {
+        following = false;
+        fraction = 1.0f;
+    }
+    fraction = std::max(0.0f, fraction - kLineStep);
+}
+
+void ConversationScroll::lineDown() {
+    if (following) {
+        return;
+    }
+    fraction = std::min(1.0f, fraction + kLineStep);
+    if (fraction >= 1.0f) {
+        following = true;
+        unseen = false;
+    }
+}
+
+void ConversationScroll::toTop() {
+    following = false;
+    fraction = 0.0f;
+}
+
+void ConversationScroll::toBottom() {
+    following = true;
+    fraction = 1.0f;
+    unseen = false;
+}
+
+void ConversationScroll::onNewContent() {
+    if (!following) {
+        unseen = true;
+    }
 }
 
 void FlashState::arm() {
@@ -259,6 +365,19 @@ void UiModel::setSessionReadOnly(const SessionId& id, bool read_only) {
 }
 
 void UiModel::apply(const UiEvent& event) {
+    const bool conversation_event = std::visit(
+        [](const auto& e) {
+            using T = std::decay_t<decltype(e)>;
+            return std::is_same_v<T, UserMessage> ||
+                   std::is_same_v<T, AssistantMessageStarted> ||
+                   std::is_same_v<T, AssistantTextDelta> ||
+                   std::is_same_v<T, AssistantMessageFinished> ||
+                   std::is_same_v<T, ToolStarted> ||
+                   std::is_same_v<T, ToolOutput> ||
+                   std::is_same_v<T, ToolFinished> ||
+                   std::is_same_v<T, ErrorOccurred>;
+        },
+        event.value);
     std::visit(
         [this](const auto& e) {
             using T = std::decay_t<decltype(e)>;
@@ -427,6 +546,13 @@ void UiModel::apply(const UiEvent& event) {
             refreshCell(e.session);
         },
         event.value);
+    if (conversation_event) {
+        const SessionId session_id =
+            std::visit([](const auto& e) { return e.session; }, event.value);
+        if (SessionUiState* state = session(session_id); state != nullptr) {
+            state->scroll.onNewContent();
+        }
+    }
 }
 
 void UiModel::apply(const WorkspaceEvent& event) {

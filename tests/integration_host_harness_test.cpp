@@ -25,6 +25,28 @@ namespace {
 
 using namespace std::chrono_literals;
 
+class ScopedEnv {
+public:
+    explicit ScopedEnv(const char* key) : key_(key) {
+        if (const char* value = std::getenv(key)) {
+            previous_ = value;
+        }
+    }
+    ~ScopedEnv() {
+        if (previous_.has_value()) {
+            ::setenv(key_.c_str(), previous_->c_str(), 1);
+        } else {
+            ::unsetenv(key_.c_str());
+        }
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    std::string                key_;
+    std::optional<std::string> previous_;
+};
+
 TEST(HostHarness, BuildsPinnedArgv) {
     ymh::test::HostHarnessOptions options;
     options.binary       = "/opt/ymh";
@@ -270,6 +292,26 @@ TEST_F(HostIntegration, RunRoutesThroughLiveDaemon) {
 
     const ymh::test::ExitStatus status = harness.stop();
     EXPECT_TRUE(status.exited);
+}
+
+TEST_F(HostIntegration, RunFallsBackInProcessWithoutDaemon) {
+    ymh::test::ShortTempRoot root("ymh-run-nodaemon");
+    root.write("fake.json", R"([{"text": "hello in process"}])");
+
+    ScopedEnv state_env("XDG_STATE_HOME");
+    ScopedEnv home_env("HOME");
+    ScopedEnv fake_env("YMH_FAKE_LLM_SCRIPT");
+    ::setenv("XDG_STATE_HOME", (root.path() / ".state").string().c_str(), 1);
+    ::setenv("HOME", root.path().string().c_str(), 1);
+    ::setenv("YMH_FAKE_LLM_SCRIPT", (root.path() / "fake.json").string().c_str(), 1);
+
+    std::ostringstream out;
+    std::ostringstream err;
+    const int code = ymh::run_cli(
+        {"--workspace", root.path().string(), "run", "say hello"}, out, err);
+    EXPECT_EQ(code, 0) << err.str();
+    EXPECT_NE(out.str().find("hello in process"), std::string::npos) << out.str();
+    EXPECT_FALSE(std::filesystem::exists(root.host_socket()));
 }
 
 } // namespace

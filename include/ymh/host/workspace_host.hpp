@@ -151,7 +151,7 @@ public:
     // ---- owned runtime (valid only while Serving) -------------------------
     [[nodiscard]] SessionManager&       sessions();
     [[nodiscard]] WorkspaceRegistry&    registry();
-    [[nodiscard]] SessionPersistence&   store();
+    [[nodiscard]] SessionStore&         store();
     [[nodiscard]] ExecutionEnvironment& environment();
     [[nodiscard]] ResourceGovernor&     caps();
 

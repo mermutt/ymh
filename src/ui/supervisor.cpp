@@ -24,6 +24,7 @@
 
 #include "ymh/registry/registry.hpp"
 #include "ymh/transport/protocol.hpp"
+#include "ymh/ui/command_registry.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
 #include "ymh/ui/terminal_layer.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
@@ -90,10 +91,26 @@ protocol::PermissionScope wire_scope(GrantScope scope) {
     return protocol::PermissionScope::Once;
 }
 
+bool is_ctrl_home(const ftxui::Event& event) {
+    return event.input() == "\x1b[1;5H" || event.input() == "\x1b[1;5~";
+}
+
+bool is_ctrl_end(const ftxui::Event& event) {
+    return event.input() == "\x1b[1;5F" || event.input() == "\x1b[4;5~";
+}
+
+bool is_shift_up(const ftxui::Event& event) {
+    return event.input() == "\x1b[1;2A";
+}
+
+bool is_shift_down(const ftxui::Event& event) {
+    return event.input() == "\x1b[1;2B";
+}
+
 class SupervisorApp final : public UiController {
 public:
     explicit SupervisorApp(SupervisorRunOptions options)
-        : options_(std::move(options)), adapter_(model_) {
+        : options_(std::move(options)), adapter_(model_), registry_(CommandRegistry::builtin()) {
         model_.aggregate.flash.enabled = true;
     }
 
@@ -181,6 +198,8 @@ public:
             state->input.push_history(text);
             state->input.draft.clear();
             state->input.cursor = 0;
+            state->input.saved_draft.clear();
+            state->command_hints.clear();
             model_.dirty.mark(workspace->activeSessionId, UiDirtyFlag::Input);
         }
         const WorkspaceId workspace_id = workspace->id;
@@ -325,9 +344,12 @@ private:
             return;
         }
         pending_creates_.emplace(workspace, std::move(prompt_text));
+        nlohmann::json create_params{{"title", "tui"}};
+        if (!preferred_model_.empty()) {
+            create_params["model"] = preferred_model_;
+        }
         connection->second->submit(
-            std::string(protocol::method::kSessionCreate),
-            nlohmann::json{{"title", "tui"}},
+            std::string(protocol::method::kSessionCreate), std::move(create_params),
             [this, workspace](SupervisorReply reply) {
                 std::string session;
                 if (reply.ok) {
@@ -415,6 +437,82 @@ private:
             return nullptr;
         }
         return model_.session(workspace->activeSessionId);
+    }
+
+    void new_session() {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace != nullptr) {
+            create_session(workspace->id, std::string{});
+        }
+    }
+
+    bool dispatch_command(const std::string& line) {
+        CommandContext context{model_};
+        context.session = active();
+        context.request_exit = [this] { requestExit(); };
+        context.create_session = [this] { new_session(); };
+        context.set_model = [this](const std::string& name) { preferred_model_ = name; };
+        return registry_.dispatch(line, context);
+    }
+
+    void refresh_hints(SessionUiState& state) {
+        state.command_hints.clear();
+        const std::string& draft = state.input.draft;
+        if (draft.empty() || draft.front() != '/') {
+            return;
+        }
+        const std::string prefix = draft.substr(1);
+        if (prefix.find_first_of(" \t") != std::string::npos) {
+            return;
+        }
+        for (const Command* command : registry_.complete(prefix)) {
+            state.command_hints.push_back(CommandHint{command->name, command->description});
+        }
+    }
+
+    void scroll_by(bool up, bool page) {
+        SessionUiState* state = active();
+        if (state == nullptr) {
+            return;
+        }
+        if (up && page) {
+            state->scroll.pageUp();
+        } else if (up) {
+            state->scroll.lineUp();
+        } else if (page) {
+            state->scroll.pageDown();
+        } else {
+            state->scroll.lineDown();
+        }
+        model_.dirty.mark(state->id, UiDirtyFlag::Conversation);
+    }
+
+    void scroll_to_top() {
+        SessionUiState* state = active();
+        if (state == nullptr) {
+            return;
+        }
+        state->scroll.toTop();
+        model_.dirty.mark(state->id, UiDirtyFlag::Conversation);
+    }
+
+    void scroll_to_bottom() {
+        SessionUiState* state = active();
+        if (state == nullptr) {
+            return;
+        }
+        state->scroll.toBottom();
+        model_.dirty.mark(state->id, UiDirtyFlag::Conversation);
+    }
+
+    void toggle_last_tool() {
+        SessionUiState* state = active();
+        if (state == nullptr || state->tools.calls.empty()) {
+            return;
+        }
+        ToolCallView& call = state->tools.calls.back();
+        call.expanded = !call.expanded;
+        model_.dirty.mark(state->id, UiDirtyFlag::Tools | UiDirtyFlag::Conversation);
     }
 
     bool handle_dialog(const ftxui::Event& event) {
@@ -511,8 +609,13 @@ private:
         InputModel& input = state->input;
         if (event == ftxui::Event::Return) {
             const std::string text = input.draft;
-            if (text == "/exit") {
-                requestExit();
+            if (dispatch_command(text)) {
+                input.push_history(text);
+                input.draft.clear();
+                input.cursor = 0;
+                input.saved_draft.clear();
+                state->command_hints.clear();
+                model_.dirty.mark(state->id, UiDirtyFlag::Input | UiDirtyFlag::Conversation);
                 return true;
             }
             submit(text);
@@ -522,6 +625,14 @@ private:
             if (input.cursor > 0) {
                 input.draft.erase(input.cursor - 1, 1);
                 --input.cursor;
+                refresh_hints(*state);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            }
+            return true;
+        }
+        if (event == ftxui::Event::Delete) {
+            if (input.delete_forward()) {
+                refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
             }
             return true;
@@ -538,9 +649,37 @@ private:
             }
             return true;
         }
+        if (event == ftxui::Event::ArrowUp) {
+            if (input.history_up()) {
+                refresh_hints(*state);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            }
+            return true;
+        }
+        if (event == ftxui::Event::ArrowDown) {
+            if (input.history_down()) {
+                refresh_hints(*state);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            }
+            return true;
+        }
+        if (event == ftxui::Event::CtrlU) {
+            input.clear_line();
+            refresh_hints(*state);
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            return true;
+        }
+        if (event == ftxui::Event::CtrlW) {
+            if (input.delete_word()) {
+                refresh_hints(*state);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            }
+            return true;
+        }
         if (event.is_character()) {
             input.draft.insert(input.cursor, event.character());
             input.cursor += event.character().size();
+            refresh_hints(*state);
             model_.dirty.mark(state->id, UiDirtyFlag::Input);
             return true;
         }
@@ -568,6 +707,38 @@ private:
         }
         if (event == ftxui::Event::CtrlC) {
             cancelActive();
+            return true;
+        }
+        if (event == ftxui::Event::CtrlN) {
+            new_session();
+            return true;
+        }
+        if (event == ftxui::Event::CtrlO) {
+            toggle_last_tool();
+            return true;
+        }
+        if (event == ftxui::Event::PageUp) {
+            scroll_by(true, true);
+            return true;
+        }
+        if (event == ftxui::Event::PageDown) {
+            scroll_by(false, true);
+            return true;
+        }
+        if (is_ctrl_home(event)) {
+            scroll_to_top();
+            return true;
+        }
+        if (is_ctrl_end(event)) {
+            scroll_to_bottom();
+            return true;
+        }
+        if (is_shift_up(event)) {
+            scroll_by(true, false);
+            return true;
+        }
+        if (is_shift_down(event)) {
+            scroll_by(false, false);
             return true;
         }
         return handle_input(event);
@@ -609,6 +780,8 @@ private:
     SupervisorRunOptions options_;
     UiModel model_;
     UiEventAdapter adapter_;
+    CommandRegistry registry_;
+    std::string preferred_model_;
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
     std::map<WorkspaceId, std::string> pending_creates_;

@@ -191,6 +191,7 @@ ResourceGovernor&     WorkspaceRuntime::governor() noexcept { return impl_->gove
 EventBus&             WorkspaceRuntime::bus() noexcept { return impl_->bus_; }
 SessionStore&         WorkspaceRuntime::store() noexcept { return *impl_->store_; }
 SessionPersistence*   WorkspaceRuntime::persistence() noexcept { return impl_->persistence_; }
+bool WorkspaceRuntime::hasDurableStore() const noexcept { return impl_->persistence_ != nullptr; }
 SessionManager&       WorkspaceRuntime::sessions() noexcept { return impl_->sessions_; }
 AgentRegistry&        WorkspaceRuntime::agents() noexcept { return *impl_->agents_; }
 ToolRegistry&         WorkspaceRuntime::tools() noexcept { return impl_->tools_; }
@@ -207,17 +208,24 @@ const LLMProviderConfig& WorkspaceRuntime::provider_config() const noexcept {
 }
 
 bool WorkspaceRuntime::acquireLease(const SessionId& id) {
-    if (impl_->persistence_ == nullptr) {
-        throw StoreError("lease operations require a durable SessionPersistence store");
+    if (!hasDurableStore()) {
+        return true;
     }
     return impl_->persistence_->acquireLease(id);
 }
 
 bool WorkspaceRuntime::releaseLease(const SessionId& id) {
-    if (impl_->persistence_ == nullptr) {
-        throw StoreError("lease operations require a durable SessionPersistence store");
+    if (!hasDurableStore()) {
+        return false;
     }
     return impl_->persistence_->releaseLease(id);
+}
+
+void WorkspaceRuntime::renewLeases() {
+    if (!hasDurableStore()) {
+        return;
+    }
+    impl_->persistence_->renewLeases();
 }
 
 } // namespace ymh

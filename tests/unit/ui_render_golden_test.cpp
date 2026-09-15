@@ -162,7 +162,7 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 ├──────────────────────────────────────────────────────────────────────┤
 │[golden-s o]                                                          │
 │> _                                                                   │
-│idle · test-model                                 0 active · 0 waiting│
+│idle · test-model · ↑12 ↓3 ⚡0                    0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
 TEST(UiRenderGolden, ConversationSnapshot) {
@@ -245,6 +245,95 @@ TEST(UiRenderGolden, RenderIsPureAcrossCalls) {
     const std::string first = render_to_ansi(model, TerminalSize{100, 40}, Theme{false});
     const std::string second = render_to_ansi(model, TerminalSize{100, 40}, Theme{false});
     EXPECT_EQ(first, second);
+}
+
+void append_lines(UiModel& model, std::size_t count) {
+    for (std::size_t index = 0; index < count; ++index) {
+        model.apply(UiEvent{UserMessage{kSession, "u" + std::to_string(index),
+                                        "line-" + std::to_string(index)}});
+    }
+}
+
+TEST(UiRenderGolden, ScrolledConversationClipsAndHints) {
+    UiModel model = build_model();
+    append_lines(model, 40);
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->scroll.toTop();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("line-0"), std::string::npos);
+    EXPECT_EQ(rendered.find("line-39"), std::string::npos);
+    EXPECT_NE(rendered.find("Ctrl+End"), std::string::npos);
+}
+
+TEST(UiRenderGolden, NewOutputHintWhileScrolled) {
+    UiModel model = build_model();
+    append_lines(model, 40);
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->scroll.toTop();
+    model.apply(UiEvent{UserMessage{kSession, "fresh", "fresh-line"}});
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("new output below"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ExpandedToolCallShowsArguments) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_FALSE(state->tools.calls.empty());
+    state->tools.calls.back().expanded = true;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("(expanded)"), std::string::npos);
+    EXPECT_NE(rendered.find("hello.txt"), std::string::npos);
+}
+
+TEST(UiRenderGolden, SlashCommandHintsRendered) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->command_hints = {CommandHint{"help", "list slash commands"},
+                            CommandHint{"new", "create and activate a new session"}};
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("/help"), std::string::npos);
+    EXPECT_NE(rendered.find("list slash commands"), std::string::npos);
+    EXPECT_NE(rendered.find("/new"), std::string::npos);
+}
+
+TEST(UiRenderGolden, StatusShowsTokenUsage) {
+    UiModel model = build_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("↑12"), std::string::npos);
+    EXPECT_NE(rendered.find("↓3"), std::string::npos);
+}
+
+TEST(UiRenderGolden, SubagentPanelRendered) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->subagents.agents.push_back(
+        SubagentView{SessionId{"sub-1"}, "exploring", AgentState::CallingTool});
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("subagents:"), std::string::npos);
+    EXPECT_NE(rendered.find("sub-1"), std::string::npos);
+    EXPECT_NE(rendered.find("exploring"), std::string::npos);
 }
 
 } // namespace
