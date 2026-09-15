@@ -16,6 +16,7 @@ coded after it is marked **verified** here.
 | 08 | `08-llm-provider.md` | yes | **verified** | Oracle component gate: GATE PASS (8 findings fixed; no open HIGH/MEDIUM) | 1390 lines; L1–L17 + L-F1–L-F18; retry barrier, `turn/fail`; §4.5 errata delegates `TurnFailed.code` to 06 |
 | 09 | `09-permissions.md` | yes | **verified** | Oracle component gate: GATE PASS (12 findings fixed; no open HIGH/MEDIUM) | 1360 lines; Q1–Q15 + Q-F1–Q-F16; `PermissionConfig`; F2 surface-via-attention |
 | 10 | `10-supervisor-tui.md` | yes | **verified** | Oracle component gate: GATE PASS (8 findings fixed; no open HIGH/MEDIUM) | 1626 lines; U1–U18 + U-F1–U-F20; focus-independent flash |
+| 11 | `11-m2-errata.md` | yes | **verified** | Oracle G0 interface-freeze gate: PASS (21 findings fixed; no open HIGH/MEDIUM) | 1412 lines; M2 interfaces frozen; amends 03/04/05/09/10 |
 
 ## Open top-level items (`HANDOFF.md` §5)
 
@@ -66,4 +67,6 @@ coded after it is marked **verified** here.
 | 2026-09-14 | `09-permissions.md` | Oracle component pass 2 | **GATE PASS** — 12 resolved; 3 LOW cleaned up |
 | 2026-09-14 | `10-supervisor-tui.md` | Oracle component pass 1 | GATE FAIL — 1 MEDIUM, 7 LOW |
 | 2026-09-14 | `10-supervisor-tui.md` | Oracle component pass 2 | **GATE PASS** — 8 resolved; focus-independent flash confirmed |
+| 2026-09-15 | `11-m2-errata.md` | Oracle G0 pass 1 | GATE FAIL — 6 HIGH, 8 MEDIUM, 7 LOW |
+| 2026-09-15 | `11-m2-errata.md` | Oracle G0 pass 2 | GATE PASS — 21 resolved + R1–R3; interfaces frozen |
 
