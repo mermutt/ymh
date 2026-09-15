@@ -21,21 +21,15 @@
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
-#include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/message.hpp"
+#include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
-#include "ymh/execution/environment.hpp"
-#include "ymh/execution/output.hpp"
-#include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/fake_llm.hpp"
-#include "ymh/policy/permission_policy.hpp"
-#include "ymh/session/session.hpp"
+#include "ymh/session/events.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/session/session_persistence.hpp"
-#include "ymh/tools/builtin_tools.hpp"
-#include "ymh/tools/tool_registry.hpp"
 
 namespace ymh {
 namespace {
@@ -233,72 +227,38 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         return result;
     }
 
-    PersistenceConfig persistence;
-    persistence.db_path   = root / ".ymh" / "sessions.db";
-    persistence.lock_path = root / ".ymh" / "sessions.lock";
-    persistence.boot_id   = BootId{make_boot_id()};
-
-    std::unique_ptr<SessionPersistence> store;
-    try {
-        store = SessionPersistence::open(persistence);
-    } catch (const std::exception& open_error) {
-        err << "ymh: cannot open session store: " << open_error.what() << '\n';
-        result.exit_code = 2;
-        return result;
-    }
-
-    EventBus        bus;
-    SessionManager  sessions(*store, bus);
-    const ToolConfig tool_config;
-    LocalEnvironment environment(root, SandboxMode::Workspace, tool_config);
-    ResourceGovernor governor;
-    ToolRegistry     tools;
-    std::vector<ToolRegistry::Registration> registrations;
-    for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config)) {
-        registrations.push_back(tools.add(std::move(tool)));
-    }
-    tools.freeze();
-
-    RulePermissionPolicy   policy(to_permission_config(options.config));
-    const AgentConfig      agent_config = to_agent_config(options.config);
-    SessionContextAssembler assembler(tools, agent_config.system_prompt);
-    DefaultTokenEstimator  estimator;
-    ProviderRegistry       providers = make_default_provider_registry();
-    LLMProviderConfig      provider_config = to_provider_config(options.config);
-
-    OutputRing    ring(governor.caps().session_output_ring_bytes);
-    RingOutputSink sink(ring);
-
-    AgentServices services;
-    services.sessions        = &sessions;
-    services.governor        = &governor;
-    services.tools           = &tools;
-    services.policy          = &policy;
-    services.context         = &assembler;
-    services.execution       = &environment;
-    services.logger          = &category_logger(LogCategory::Tool);
-    services.output          = &sink;
-    services.estimator       = &estimator;
-    services.providers       = &providers;
-    services.provider_config = provider_config;
-
-    std::unique_ptr<LLMProvider> injected;
-    try {
+    WorkspaceRuntimeOptions runtime_options;
+    runtime_options.config  = options.config;
+    runtime_options.root    = root;
+    runtime_options.boot_id = BootId{make_boot_id()};
+    runtime_options.provider_factory =
+        [&options](const LLMProviderConfig& provider_config) -> std::unique_ptr<LLMProvider> {
         if (options.provider_factory) {
-            injected = options.provider_factory(provider_config);
-        } else if (std::optional<FakeScript> script = fake_script_from_env(); script.has_value()) {
-            injected = std::make_unique<FakeLLM>(std::move(*script));
+            return options.provider_factory(provider_config);
         }
-    } catch (const std::exception& factory_error) {
-        err << "ymh: provider setup failed: " << factory_error.what() << '\n';
+        if (std::optional<FakeScript> script = fake_script_from_env(); script.has_value()) {
+            return std::make_unique<FakeLLM>(std::move(*script));
+        }
+        return nullptr;
+    };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(runtime_options));
+    if (!runtime_result.has_value()) {
+        const WorkspaceRuntimeError& runtime_error = runtime_result.error();
+        if (runtime_error.code == WorkspaceRuntimeErrorCode::StoreUnavailable) {
+            err << "ymh: cannot open session store: " << runtime_error.detail << '\n';
+        } else if (runtime_error.code == WorkspaceRuntimeErrorCode::ProviderSetupFailed) {
+            err << "ymh: provider setup failed: " << runtime_error.detail << '\n';
+        } else {
+            err << "ymh: cannot start workspace runtime: " << runtime_error.detail << '\n';
+        }
         result.exit_code = 2;
         return result;
     }
-    if (injected != nullptr) {
-        services.provider = injected.get();
-    }
-
-    AgentRegistry registry(services, agent_config);
+    std::unique_ptr<WorkspaceRuntime> runtime      = std::move(*runtime_result);
+    AgentRegistry&                    registry     = runtime->agents();
+    const AgentConfig&                agent_config = runtime->agent_config();
 
     AgentId agent_id;
     if (options.resume.has_value()) {
@@ -329,7 +289,7 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
     result.session = agent.session();
 
     try {
-        if (!store->acquireLease(result.session)) {
+        if (!runtime->acquireLease(result.session)) {
             err << "ymh: session " << result.session.value
                 << " is locked by another writer\n";
             result.exit_code = 2;
@@ -343,10 +303,10 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
 
     category_logger(LogCategory::Agent)
         .info("run session=" + result.session.value + " model=" + agent_config.model +
-              " provider=" + provider_config.provider);
+              " provider=" + runtime->provider_config().provider);
 
     std::string terminal;
-    Subscription subscription = bus.subscribe([&](const Event& event) {
+    Subscription subscription = runtime->bus().subscribe([&](const Event& event) {
         if (event.session_id.value != result.session.value) {
             return;
         }
@@ -420,7 +380,7 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
 
     registry.dispose(agent_id);
     try {
-        store->releaseLease(result.session);
+        runtime->releaseLease(result.session);
     } catch (const std::exception&) {
     }
     return result;

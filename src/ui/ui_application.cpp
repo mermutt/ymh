@@ -21,20 +21,13 @@
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
-#include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/message.hpp"
+#include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
-#include "ymh/core/logging.hpp"
-#include "ymh/execution/config.hpp"
-#include "ymh/execution/environment.hpp"
-#include "ymh/execution/output.hpp"
-#include "ymh/execution/resource_governor.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/session/session_persistence.hpp"
-#include "ymh/tools/builtin_tools.hpp"
-#include "ymh/tools/tool_registry.hpp"
 #include "ymh/ui/terminal_layer.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
 #include "ymh/ui/ui_model.hpp"
@@ -456,57 +449,26 @@ int run_tui(const UiRunOptions& options) {
         return 2;
     }
 
-    PersistenceConfig persistence;
-    persistence.db_path = root / ".ymh" / "sessions.db";
-    persistence.lock_path = root / ".ymh" / "sessions.lock";
-    persistence.boot_id = BootId{make_boot_id()};
+    WorkspaceRuntimeOptions runtime_options;
+    runtime_options.config                  = options.config;
+    runtime_options.root                    = root;
+    runtime_options.boot_id                 = BootId{make_boot_id()};
+    runtime_options.attach_permission_gate  = true;
 
-    std::unique_ptr<SessionPersistence> store;
-    try {
-        store = SessionPersistence::open(persistence);
-    } catch (const std::exception& open_error) {
-        std::cerr << "ymh: cannot open session store: " << open_error.what() << '\n';
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(runtime_options));
+    if (!runtime_result.has_value()) {
+        const WorkspaceRuntimeError& runtime_error = runtime_result.error();
+        if (runtime_error.code == WorkspaceRuntimeErrorCode::StoreUnavailable) {
+            std::cerr << "ymh: cannot open session store: " << runtime_error.detail << '\n';
+        } else {
+            std::cerr << "ymh: cannot start workspace runtime: " << runtime_error.detail << '\n';
+        }
         return 2;
     }
+    std::unique_ptr<WorkspaceRuntime> runtime  = std::move(*runtime_result);
+    AgentRegistry&                    registry = runtime->agents();
 
-    EventBus bus;
-    SessionManager sessions(*store, bus);
-    const ToolConfig tool_config;
-    LocalEnvironment environment(root, SandboxMode::Workspace, tool_config);
-    ResourceGovernor governor;
-    ToolRegistry tools;
-    std::vector<ToolRegistry::Registration> registrations;
-    for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config)) {
-        registrations.push_back(tools.add(std::move(tool)));
-    }
-    tools.freeze();
-
-    const PermissionConfig permission_config = to_permission_config(options.config);
-    RulePermissionPolicy policy(permission_config);
-    const AgentConfig agent_config = to_agent_config(options.config);
-    SessionContextAssembler assembler(tools, agent_config.system_prompt);
-    DefaultTokenEstimator estimator;
-    ProviderRegistry providers = make_default_provider_registry();
-    LLMProviderConfig provider_config = to_provider_config(options.config);
-    OutputRing ring(governor.caps().session_output_ring_bytes);
-    RingOutputSink sink(ring);
-    PermissionGate gate(policy, permission_config);
-
-    AgentServices services;
-    services.sessions = &sessions;
-    services.governor = &governor;
-    services.tools = &tools;
-    services.policy = &policy;
-    services.gate = &gate;
-    services.context = &assembler;
-    services.execution = &environment;
-    services.logger = &category_logger(LogCategory::Tool);
-    services.output = &sink;
-    services.estimator = &estimator;
-    services.providers = &providers;
-    services.provider_config = provider_config;
-
-    AgentRegistry registry(services, agent_config);
     SessionOptions session_options;
     session_options.cwd = root;
     session_options.serverProfile = "interactive";
@@ -519,7 +481,7 @@ int run_tui(const UiRunOptions& options) {
     }
     Agent& agent = registry.get(*created);
     const SessionId session = agent.session();
-    if (!store->acquireLease(session)) {
+    if (!runtime->acquireLease(session)) {
         std::cerr << "ymh: session lease unavailable\n";
         registry.dispose(*created);
         return 2;
@@ -527,13 +489,14 @@ int run_tui(const UiRunOptions& options) {
 
     int exit_code = 0;
     {
-        TuiApp app(agent, gate, bus, session, root.string(), effective_model(options.config));
+        TuiApp app(agent, runtime->gate(), runtime->bus(), session, root.string(),
+                   effective_model(options.config));
         exit_code = app.run();
     }
 
     registry.dispose(*created);
     try {
-        store->releaseLease(session);
+        runtime->releaseLease(session);
     } catch (const std::exception&) {
     }
     return exit_code;

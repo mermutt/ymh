@@ -1,0 +1,240 @@
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <string>
+#include <vector>
+
+#include "ymh/transport/protocol.hpp"
+
+namespace {
+
+using namespace ymh;
+
+TEST(TransportProtocol, WireEnumStringsArePinned) {
+    EXPECT_EQ(protocol::wire_name(protocol::ServerProfile::Interactive), "interactive");
+    EXPECT_EQ(protocol::wire_name(protocol::ServerProfile::Automation), "automation");
+    EXPECT_EQ(protocol::wire_name(protocol::StreamFrom::Kind::Now), "now");
+    EXPECT_EQ(protocol::wire_name(protocol::StreamFrom::Kind::Beginning), "beginning");
+    EXPECT_EQ(protocol::wire_name(protocol::StreamFrom::Kind::Cursor), "cursor");
+    EXPECT_EQ(protocol::wire_name(protocol::HostNoticeKind::SessionClosed), "session_closed");
+    EXPECT_EQ(protocol::wire_name(protocol::HostNoticeKind::SessionCreated), "session_created");
+    EXPECT_EQ(protocol::wire_name(protocol::HostNoticeKind::LeaseLost), "lease_lost");
+    EXPECT_EQ(protocol::wire_name(protocol::HostNoticeKind::DaemonShuttingDown),
+              "daemon_shutting_down");
+    EXPECT_EQ(protocol::wire_name(protocol::PermissionAnswer::Allow), "allow");
+    EXPECT_EQ(protocol::wire_name(protocol::PermissionAnswer::Deny), "deny");
+    EXPECT_EQ(protocol::wire_name(protocol::PermissionScope::Once), "once");
+    EXPECT_EQ(protocol::wire_name(protocol::PermissionScope::Session), "session");
+    EXPECT_EQ(protocol::wire_name(protocol::PermissionScope::Always), "always");
+}
+
+TEST(TransportProtocol, ParseEnumRejectsUnknown) {
+    EXPECT_FALSE(protocol::parse_server_profile("tui").has_value());
+    EXPECT_FALSE(protocol::parse_stream_kind("latest").has_value());
+    EXPECT_FALSE(protocol::parse_host_notice_kind("nope").has_value());
+    EXPECT_FALSE(protocol::parse_permission_answer("maybe").has_value());
+    EXPECT_FALSE(protocol::parse_permission_scope("forever").has_value());
+    EXPECT_TRUE(protocol::parse_server_profile("automation").has_value());
+}
+
+TEST(TransportProtocol, MethodCatalogIsComplete) {
+    EXPECT_EQ(protocol::all_methods().size(), 27u);
+    for (const std::string_view name : protocol::all_methods()) {
+        EXPECT_TRUE(protocol::is_known_method(name));
+    }
+    EXPECT_FALSE(protocol::is_known_method("host.nope"));
+}
+
+TEST(TransportProtocol, ProfileGating) {
+    for (const std::string_view name : protocol::all_methods()) {
+        EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Interactive, name));
+    }
+    EXPECT_FALSE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                             protocol::method::kSessionActivate));
+    EXPECT_FALSE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                             protocol::method::kSessionSuspend));
+    EXPECT_FALSE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                             protocol::method::kHostShutdown));
+    EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                            protocol::method::kAgentPrompt));
+    EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                            protocol::method::kEventSubscribe));
+}
+
+TEST(TransportProtocol, HostErrorMapping) {
+    EXPECT_EQ(protocol::rpc_code_for_host_error(protocol::HostErrorCode::WorkspaceMissing),
+              protocol::code_value(protocol::AppCode::UnknownWorkspace));
+    EXPECT_EQ(protocol::rpc_code_for_host_error(protocol::HostErrorCode::AttachRejected),
+              protocol::code_value(protocol::AppCode::AuthFailed));
+    EXPECT_EQ(protocol::rpc_code_for_host_error(protocol::HostErrorCode::ShutdownInProgress),
+              protocol::code_value(protocol::AppCode::ShutdownInProgress));
+    EXPECT_EQ(protocol::rpc_code_for_host_error(protocol::HostErrorCode::AlreadyRunning),
+              protocol::code_value(protocol::RpcCode::InvalidRequest));
+}
+
+TEST(TransportProtocol, SessionEnvelopeCarriesCoreEventOnly) {
+    protocol::SessionEnvelope envelope;
+    envelope.session = SessionId{"session-1"};
+    envelope.event.id.value = "event-1";
+    envelope.event.session_id = SessionId{"session-1"};
+    envelope.event.timestamp =
+        std::chrono::system_clock::time_point{std::chrono::milliseconds{1700000000000}};
+    envelope.event.type = EventType::TurnStarted;
+    envelope.event.payload = nlohmann::json{{"turn", 1}};
+
+    nlohmann::json json;
+    protocol::to_json(json, envelope);
+    EXPECT_EQ(json.at("session").get<std::string>(), "session-1");
+    EXPECT_EQ(json.at("event").at("type").get<std::string>(), "turn/start");
+    EXPECT_FALSE(json.contains("sequence"));
+    EXPECT_FALSE(json.at("event").contains("sequence"));
+    EXPECT_FALSE(json.at("event").contains("ui"));
+
+    protocol::SessionEnvelope parsed;
+    protocol::from_json(json, parsed);
+    EXPECT_EQ(parsed.session.value, "session-1");
+    EXPECT_EQ(parsed.event.session_id.value, "session-1");
+    EXPECT_EQ(parsed.event.type, EventType::TurnStarted);
+}
+
+TEST(TransportProtocol, StreamNotificationCarriesPostEventCursor) {
+    protocol::StreamNotification notification;
+    notification.subscription = protocol::SubscriptionId{9};
+    notification.replay = true;
+    notification.envelope.session = SessionId{"s"};
+    notification.envelope.event.session_id = SessionId{"s"};
+    notification.envelope.event.type = EventType::AssistantChunk;
+    notification.cursor = protocol::EventCursor{"c1:s:4"};
+
+    nlohmann::json json;
+    protocol::to_json(json, notification);
+    EXPECT_EQ(json.at("subscription").get<std::uint64_t>(), 9u);
+    EXPECT_TRUE(json.at("replay").get<bool>());
+    EXPECT_EQ(json.at("cursor").get<std::string>(), "c1:s:4");
+    EXPECT_FALSE(json.contains("sequence"));
+
+    protocol::StreamNotification parsed;
+    protocol::from_json(json, parsed);
+    EXPECT_EQ(parsed.subscription.value, 9u);
+    EXPECT_TRUE(parsed.replay);
+    EXPECT_EQ(parsed.cursor.value, "c1:s:4");
+}
+
+TEST(TransportProtocol, HelloRoundTrips) {
+    protocol::HelloParams params;
+    params.protocol_version = protocol::kProtocolVersion;
+    params.profile = protocol::ServerProfile::Automation;
+    params.client_instance = protocol::ClientInstanceId{"33333333-3333-4333-8333-333333333333"};
+    params.resume_hint = protocol::EventCursor{"c1:s:2"};
+
+    nlohmann::json json;
+    protocol::to_json(json, params);
+    EXPECT_EQ(json.at("profile").get<std::string>(), "automation");
+
+    protocol::HelloParams parsed;
+    protocol::from_json(json, parsed);
+    EXPECT_EQ(parsed.profile, protocol::ServerProfile::Automation);
+    EXPECT_EQ(parsed.client_instance.value, params.client_instance.value);
+    ASSERT_TRUE(parsed.resume_hint.has_value());
+    EXPECT_EQ(parsed.resume_hint->value, "c1:s:2");
+
+    protocol::HelloResult result;
+    result.workspace.value = "w";
+    result.boot_id.value = "b";
+    result.pid = 7;
+    result.profiles = {protocol::ServerProfile::Interactive, protocol::ServerProfile::Automation};
+    result.client_id = protocol::ClientId{3};
+    result.limits.max_frame_bytes = 123;
+    result.server_time_ms = 456;
+
+    nlohmann::json result_json;
+    protocol::to_json(result_json, result);
+    protocol::HelloResult parsed_result;
+    protocol::from_json(result_json, parsed_result);
+    EXPECT_EQ(parsed_result.workspace.value, "w");
+    EXPECT_EQ(parsed_result.client_id.value, 3u);
+    EXPECT_EQ(parsed_result.limits.max_frame_bytes, 123u);
+    EXPECT_EQ(parsed_result.profiles.size(), 2u);
+}
+
+TEST(TransportProtocol, LimitsRoundTrip) {
+    protocol::TransportLimits limits;
+    limits.max_frame_bytes = 4096;
+    limits.max_outbound_bytes = 2048;
+    limits.max_subscriptions_per_client = 8;
+    limits.handshake_timeout = std::chrono::milliseconds{1234};
+    limits.idle_timeout = std::chrono::milliseconds{5678};
+
+    nlohmann::json json;
+    protocol::to_json(json, limits);
+    protocol::TransportLimits parsed;
+    protocol::from_json(json, parsed);
+    EXPECT_EQ(parsed.max_frame_bytes, 4096u);
+    EXPECT_EQ(parsed.max_outbound_bytes, 2048u);
+    EXPECT_EQ(parsed.handshake_timeout.count(), 1234);
+    EXPECT_EQ(parsed.idle_timeout.count(), 5678);
+}
+
+TEST(TransportProtocol, HostNoticeAndPermissionRoundTrip) {
+    protocol::HostNotice notice;
+    notice.kind = protocol::HostNoticeKind::LeaseLost;
+    notice.workspace.value = "w";
+    notice.session = SessionId{"s"};
+    notice.detail = "read-only";
+
+    nlohmann::json json;
+    protocol::to_json(json, notice);
+    EXPECT_EQ(json.at("kind").get<std::string>(), "lease_lost");
+
+    protocol::HostNotice parsed;
+    protocol::from_json(json, parsed);
+    EXPECT_EQ(parsed.kind, protocol::HostNoticeKind::LeaseLost);
+    ASSERT_TRUE(parsed.session.has_value());
+    EXPECT_EQ(parsed.session->value, "s");
+
+    protocol::PermissionRequest request;
+    request.request_id = "req-1";
+    request.session = SessionId{"s"};
+    request.tool = "shell";
+    request.arguments = nlohmann::json{{"cmd", "ls"}};
+    request.summary = "run ls";
+    request.expires_at_ms = 99;
+
+    nlohmann::json request_json;
+    protocol::to_json(request_json, request);
+    protocol::PermissionRequest parsed_request;
+    protocol::from_json(request_json, parsed_request);
+    EXPECT_EQ(parsed_request.request_id, "req-1");
+    EXPECT_EQ(parsed_request.arguments.at("cmd").get<std::string>(), "ls");
+
+    protocol::PermissionDecisionParams decision;
+    decision.request_id = "req-1";
+    decision.decision = protocol::PermissionAnswer::Allow;
+    decision.scope = protocol::PermissionScope::Session;
+    nlohmann::json decision_json;
+    protocol::to_json(decision_json, decision);
+    EXPECT_EQ(decision_json.at("decision").get<std::string>(), "allow");
+    EXPECT_EQ(decision_json.at("scope").get<std::string>(), "session");
+}
+
+TEST(TransportProtocol, HostStatusRoundTrips) {
+    protocol::HostStatus status;
+    status.state = protocol::HostState::Serving;
+    status.workspace.value = "w";
+    status.boot_id.value = "b";
+    status.pid = 11;
+    status.attached_clients = 2;
+    status.active_session = SessionId{"s"};
+    status.profile = protocol::ServerProfile::Interactive;
+
+    nlohmann::json json;
+    protocol::to_json(json, status);
+    protocol::HostStatus parsed;
+    protocol::from_json(json, parsed);
+    EXPECT_EQ(parsed.state, protocol::HostState::Serving);
+    EXPECT_EQ(parsed.attached_clients, 2u);
+    ASSERT_TRUE(parsed.active_session.has_value());
+    EXPECT_EQ(parsed.active_session->value, "s");
+}
+
+} // namespace

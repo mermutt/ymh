@@ -13,3 +13,6 @@ compile_commands.json
 
 # Agent scratch
 .sisyphus/
+
+# ymh per-workspace state (sessions.db, sessions.lock, host.sock, host.log)
+.ymh/

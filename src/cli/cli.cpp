@@ -15,6 +15,7 @@
 
 #include "ymh/cli/headless.hpp"
 #include "ymh/cli/session_cli.hpp"
+#include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/llm/provider_registry.hpp"
@@ -162,11 +163,11 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     add_common(*fork, invocation);
     fork->add_option("session", fork_session, "Session ID")->required();
 
-    std::string workspace_action;
-    std::string workspace_path;
     CLI::App*   workspace = app.add_subcommand("workspace", "Workspace registry commands");
-    workspace->add_option("action", workspace_action, "add | list");
-    workspace->add_option("path", workspace_path, "Workspace path (for `add`)");
+    CLI::App*   workspace_add = workspace->add_subcommand("add", "Register a workspace");
+    std::string workspace_path;
+    workspace_add->add_option("path", workspace_path, "Workspace path")->required();
+    CLI::App*   workspace_list = workspace->add_subcommand("list", "List registered workspaces");
 
     std::string config_action;
     CLI::App*   config = app.add_subcommand("config", "Configuration commands");
@@ -211,11 +212,13 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     }
     if (workspace->parsed()) {
         invocation.command = CliInvocation::Command::Workspace;
-        if (!workspace_action.empty()) {
-            invocation.workspace_args.push_back(workspace_action);
-        }
-        if (!workspace_path.empty()) {
-            invocation.workspace_args.push_back(workspace_path);
+        if (workspace_add->parsed()) {
+            invocation.workspace_args.emplace_back("add");
+            if (!workspace_path.empty()) {
+                invocation.workspace_args.push_back(workspace_path);
+            }
+        } else if (workspace_list->parsed()) {
+            invocation.workspace_args.emplace_back("list");
         }
         return invocation;
     }
@@ -317,9 +320,7 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
             return session_fork(root, invocation.session, out, err);
 
         case CliInvocation::Command::Workspace:
-            err << "ymh: `ymh workspace` requires the workspace registry, which is not part of "
-                   "the single-process MVP.\n";
-            return 2;
+            return run_workspace_command(invocation.workspace_args, out, err);
 
         case CliInvocation::Command::Config:
             return run_config_command(invocation, out, err);
