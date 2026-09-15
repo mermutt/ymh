@@ -392,6 +392,85 @@ target_link_libraries(ymh_wiring
 )
 
 # ---------------------------------------------------------------------------
+# Workspace runtime library (00 §9.6, 04 §3.7): one owner per workspace
+# ---------------------------------------------------------------------------
+
+add_library(ymh_runtime STATIC
+    src/agent/workspace_runtime.cpp
+)
+add_library(ymh::runtime ALIAS ymh_runtime)
+
+target_include_directories(ymh_runtime
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_runtime
+    PUBLIC
+        ymh::agent
+        ymh::config
+        ymh::logging
+        ymh::wiring
+    PRIVATE
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
+# Workspace registry (component 03)
+# ---------------------------------------------------------------------------
+
+add_library(ymh_registry STATIC
+    src/registry/registry.cpp
+    src/registry/liveness.cpp
+    src/registry/process_scan.cpp
+    src/registry/workspace_cli.cpp
+)
+add_library(ymh::registry ALIAS ymh_registry)
+
+target_include_directories(ymh_registry
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_registry
+    PUBLIC
+        ymh::core
+    PRIVATE
+        nlohmann_json::nlohmann_json
+        SQLite3::SQLite3
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
+# Transport library (component 05): JSON-RPC over a length-prefixed Unix socket
+# ---------------------------------------------------------------------------
+
+add_library(ymh_transport STATIC
+    src/transport/protocol.cpp
+    src/transport/frame_codec.cpp
+    src/transport/json_rpc.cpp
+    src/transport/protocol_server.cpp
+    src/transport/host_connection.cpp
+    src/transport/transport_server.cpp
+)
+add_library(ymh::transport ALIAS ymh_transport)
+
+target_include_directories(ymh_transport
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_transport
+    PUBLIC
+        ymh::core
+        nlohmann_json::nlohmann_json
+        asio::asio
+    PRIVATE
+        Threads::Threads
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
 # Render library (component 10 §8.2): markdown, syntax, diff (§22-§24)
 # ---------------------------------------------------------------------------
 
@@ -445,6 +524,7 @@ target_link_libraries(ymh_ui
         ymh::config
         ymh::logging
         ymh::wiring
+        ymh::runtime
         ymh::render
         ftxui::component
     PRIVATE
@@ -480,6 +560,8 @@ target_link_libraries(ymh_cli
         ymh::config
         ymh::logging
         ymh::wiring
+        ymh::runtime
+        ymh::registry
         ymh::ui
     PRIVATE
         CLI11::CLI11
