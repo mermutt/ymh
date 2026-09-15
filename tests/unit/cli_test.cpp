@@ -117,4 +117,19 @@ TEST(Cli, DefaultCommandIsTui) {
     EXPECT_EQ(invocation.command, CliInvocation::Command::Tui);
 }
 
+TEST(Cli, ConfigPathSubcommandParses) {
+    const CliInvocation invocation = parse_cli({"config", "path"});
+    ASSERT_EQ(invocation.command, CliInvocation::Command::Config);
+    ASSERT_EQ(invocation.config_args.size(), 1u);
+    EXPECT_EQ(invocation.config_args[0], "path");
+}
+
+TEST(Cli, ConfigPathPrintsEffectivePath) {
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(run_cli({"--config", "/tmp/ymh-test-config.toml", "config", "path"}, out, err), 0);
+    EXPECT_NE(out.str().find("/tmp/ymh-test-config.toml"), std::string::npos);
+    EXPECT_TRUE(err.str().empty());
+}
+
 } // namespace

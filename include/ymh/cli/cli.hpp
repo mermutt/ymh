@@ -8,6 +8,7 @@
 //   ymh [--resume SESSION] [--new]      default: TUI (placeholder this wave)
 //   ymh run "task"                      headless (§42)
 //   ymh list | show SESSION | replay SESSION | fork SESSION
+//   ymh config path
 //   ymh --version
 
 #include <iosfwd>
@@ -25,6 +26,7 @@ struct CliInvocation {
         Replay,
         Fork,
         Workspace,
+        Config,
         Version,
     };
 
@@ -43,6 +45,7 @@ struct CliInvocation {
     bool        verbose = false;
     bool        version_requested = false;
     std::vector<std::string> workspace_args;
+    std::vector<std::string> config_args;
 };
 
 // Throws `CLI::ParseError` on a malformed command line.

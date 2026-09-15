@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -79,6 +80,44 @@ std::filesystem::path resolve_workspace(const CliInvocation& invocation) {
     return std::filesystem::current_path();
 }
 
+std::filesystem::path effective_global_config(const CliInvocation& invocation) {
+    if (!invocation.config_path.empty()) {
+        return std::filesystem::path{invocation.config_path};
+    }
+    return default_global_config_path();
+}
+
+void scaffold_for_invocation(const CliInvocation& invocation,
+                             const std::filesystem::path& root) {
+    switch (invocation.command) {
+        case CliInvocation::Command::Tui:
+        case CliInvocation::Command::Run:
+        case CliInvocation::Command::List:
+        case CliInvocation::Command::Show:
+        case CliInvocation::Command::Replay:
+        case CliInvocation::Command::Fork:
+            (void)scaffold_config(root, effective_global_config(invocation),
+                                  &category_logger(LogCategory::Filesystem));
+            break;
+        case CliInvocation::Command::Workspace:
+        case CliInvocation::Command::Config:
+        case CliInvocation::Command::Version:
+            break;
+    }
+}
+
+int run_config_command(const CliInvocation& invocation, std::ostream& out, std::ostream& err) {
+    if (invocation.config_args.size() != 1 || invocation.config_args[0] != "path") {
+        err << "ymh: usage: ymh config path\n";
+        return 2;
+    }
+    const std::filesystem::path path = effective_global_config(invocation);
+    std::error_code             error;
+    const bool                  exists = std::filesystem::exists(path, error) && !error;
+    out << path.string() << (exists ? " (exists)" : " (missing)") << '\n';
+    return 0;
+}
+
 // CLI11 reports `--help`/`--help-all` by throwing a `ParseError` whose `what()`
 // is a fixed internal message; the actual help text must be requested from the
 // app. Prefer the help of the subcommand that was parsed (e.g. `ymh run --help`),
@@ -129,13 +168,17 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     workspace->add_option("action", workspace_action, "add | list");
     workspace->add_option("path", workspace_path, "Workspace path (for `add`)");
 
+    std::string config_action;
+    CLI::App*   config = app.add_subcommand("config", "Configuration commands");
+    config->add_option("action", config_action, "path");
+
     std::vector<std::string> reversed(args.rbegin(), args.rend());
     try {
         app.parse(reversed);
     } catch (const CLI::CallForAllHelp&) {
         throw CLI::ParseError(app.help("", CLI::AppFormatMode::All), 0);
     } catch (const CLI::CallForHelp&) {
-        throw CLI::ParseError(help_text(app, {run, list, show, replay, fork, workspace}), 0);
+        throw CLI::ParseError(help_text(app, {run, list, show, replay, fork, workspace, config}), 0);
     }
 
     if (invocation.version_requested) {
@@ -176,6 +219,13 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
         }
         return invocation;
     }
+    if (config->parsed()) {
+        invocation.command = CliInvocation::Command::Config;
+        if (!config_action.empty()) {
+            invocation.config_args.push_back(config_action);
+        }
+        return invocation;
+    }
 
     invocation.command = CliInvocation::Command::Tui;
     return invocation;
@@ -209,7 +259,12 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
         return 0;
     }
 
+    if (invocation.command == CliInvocation::Command::Config) {
+        return run_config_command(invocation, out, err);
+    }
+
     const std::filesystem::path root = resolve_workspace(invocation);
+    scaffold_for_invocation(invocation, root);
 
     Config config;
     try {
@@ -265,6 +320,9 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
             err << "ymh: `ymh workspace` requires the workspace registry, which is not part of "
                    "the single-process MVP.\n";
             return 2;
+
+        case CliInvocation::Command::Config:
+            return run_config_command(invocation, out, err);
 
         case CliInvocation::Command::Version:
             out << "ymh " << YMH_VERSION << '\n';
