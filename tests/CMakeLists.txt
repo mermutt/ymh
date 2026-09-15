@@ -26,6 +26,7 @@ add_executable(ymh_tests
     unit/agent_coalescer_test.cpp
     unit/llm_pool_test.cpp
     unit/workspace_runtime_test.cpp
+    unit/host_runtime_test.cpp
     unit/workspace_registry_test.cpp
     unit/transport_frame_test.cpp
     unit/transport_protocol_test.cpp
@@ -70,6 +71,7 @@ target_link_libraries(ymh_tests
         ymh::runtime
         ymh::registry
         ymh::transport
+        ymh::host
         ymh::config
         ymh::logging
         ymh::cli
