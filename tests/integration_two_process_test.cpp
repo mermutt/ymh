@@ -40,6 +40,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -47,6 +48,7 @@
 
 #include "support/host_harness.hpp"
 #include "support/short_temp.hpp"
+#include "ymh/cli/cli.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/registry/registry.hpp"
@@ -76,6 +78,29 @@ constexpr const char* kAllowAllConfig =
 void set_env(const char* key, const std::string& value) {
     ::setenv(key, value.c_str(), 1);
 }
+
+class ScopedStdinDevNull {
+public:
+    ScopedStdinDevNull() {
+        saved_ = ::dup(STDIN_FILENO);
+        const int null_fd = ::open("/dev/null", O_RDONLY);
+        if (null_fd >= 0) {
+            ::dup2(null_fd, STDIN_FILENO);
+            ::close(null_fd);
+        }
+    }
+    ~ScopedStdinDevNull() {
+        if (saved_ >= 0) {
+            ::dup2(saved_, STDIN_FILENO);
+            ::close(saved_);
+        }
+    }
+    ScopedStdinDevNull(const ScopedStdinDevNull&) = delete;
+    ScopedStdinDevNull& operator=(const ScopedStdinDevNull&) = delete;
+
+private:
+    int saved_{-1};
+};
 
 // `/proc/<pid>/cmdline` is a NUL-separated argv blob, so it is parsed rather
 // than grepped; a `ymh --host` daemon is recognised by `--host`.
@@ -1285,6 +1310,66 @@ TEST_F(TwoProcess, EnsureRunningCarriesAttachIdentity) {
     }
     EXPECT_TRUE(automation_seen) << "ymh run must attach with ClientRole::Automation";
     automation_attach.connection->close();
+}
+
+TEST_F(TwoProcess, WorkspaceStopRequiresConfirmationThenForceTearsDown) {
+    ShortTempRoot root("ymh-2p-stop");
+    configure_workspace(root);
+    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write("fake.json", kFakeTextScript);
+    const std::filesystem::path script = root.path() / "fake.json";
+
+    const RegistryConfig registry_config = registry_config_for(root.state_dir());
+    const std::string    workspace_id =
+        register_workspace(registry_config, root.path(), "stop").value;
+
+    HostHarness harness(options_for(root, workspace_id, script));
+    harness.start();
+    ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
+    DaemonGuard guard(workspace_id);
+
+    std::unique_ptr<protocol::HostConnection> supervisor = open_connection(harness.socket_path());
+    const protocol::OwnershipView owned =
+        supervisor->request(std::string(protocol::method::kHostOwnership))
+            .get<protocol::OwnershipView>();
+    ASSERT_GE(owned.live_supervisors, 1u);
+
+    {
+        ScopedStdinDevNull null_stdin;
+        std::ostringstream out;
+        std::ostringstream err;
+        EXPECT_EQ(run_cli({"workspace", "stop", workspace_id}, out, err), 1) << err.str();
+    }
+
+    const nlohmann::json pong = supervisor->request(std::string(protocol::method::kHostPing));
+    EXPECT_TRUE(pong.contains("server_time_ms"));
+
+    {
+        std::ostringstream out;
+        std::ostringstream err;
+        EXPECT_EQ(run_cli({"workspace", "stop", workspace_id, "--force"}, out, err), 0) << err.str();
+    }
+
+    bool saw_shutdown = false;
+    const auto notice_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!saw_shutdown && std::chrono::steady_clock::now() < notice_deadline) {
+        const std::optional<protocol::Notification> notice = supervisor->nextNotification(500ms);
+        if (!notice.has_value()) {
+            if (!supervisor->isConnected()) {
+                break;
+            }
+            continue;
+        }
+        if (notice->method == protocol::notify::kHostEvent &&
+            notice->params.value("kind", std::string{}) == "daemon_shutting_down") {
+            saw_shutdown = true;
+        }
+    }
+    EXPECT_TRUE(saw_shutdown) << "the owning supervisor must observe DaemonShuttingDown";
+
+    const ExitStatus status = harness.wait_for_exit(15s);
+    EXPECT_TRUE(status.exited || status.signalled);
+    supervisor->close();
 }
 
 } // namespace

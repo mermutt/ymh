@@ -922,6 +922,62 @@ TEST(TransportServer, HostShutdownWorkspaceStopOverridesOwners) {
     EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::WorkspaceStop);
 }
 
+TEST(TransportServer, ObserverShutdownRefusedWhileSupervisorOwns) {
+    Harness harness;
+    Peer* supervisor = harness.open();
+    harness.hello(*supervisor, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*supervisor);
+    Peer* observer = harness.open();
+    harness.hello(*observer, protocol::ServerProfile::Interactive, kInstanceB, 2,
+                  protocol::ClientRole::Observer);
+    harness.drain(*observer);
+
+    harness.send(*observer, Harness::request(3, protocol::method::kHostShutdown,
+                                             nlohmann::json{{"reason", "last_supervisor"}}));
+    const auto frames = harness.drain(*observer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::AppCode::NotLastOwner));
+    EXPECT_EQ(harness.host.state, protocol::HostState::Serving);
+    EXPECT_FALSE(harness.host.last_shutdown_reason.has_value());
+}
+
+TEST(TransportServer, ObserverShutdownRefusedForUnknownReasonWhileSupervisorOwns) {
+    Harness harness;
+    Peer* supervisor = harness.open();
+    harness.hello(*supervisor, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*supervisor);
+    Peer* observer = harness.open();
+    harness.hello(*observer, protocol::ServerProfile::Interactive, kInstanceB, 2,
+                  protocol::ClientRole::Observer);
+    harness.drain(*observer);
+
+    harness.send(*observer, Harness::request(3, protocol::method::kHostShutdown,
+                                             nlohmann::json::object()));
+    const auto frames = harness.drain(*observer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::AppCode::NotLastOwner));
+    EXPECT_EQ(harness.host.state, protocol::HostState::Serving);
+}
+
+TEST(TransportServer, ObserverWorkspaceStopOverridesOwners) {
+    Harness harness;
+    Peer* supervisor = harness.open();
+    harness.hello(*supervisor, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*supervisor);
+    Peer* observer = harness.open();
+    harness.hello(*observer, protocol::ServerProfile::Interactive, kInstanceB, 2,
+                  protocol::ClientRole::Observer);
+    harness.drain(*observer);
+    harness.host.owner_snapshot = snapshot_of({kInstanceA});
+
+    harness.send(*observer, Harness::request(3, protocol::method::kHostShutdown,
+                                             nlohmann::json{{"reason", "workspace_stop"}}));
+    const auto frames = harness.drain(*observer);
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_TRUE(frames[0].contains("result"));
+    EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::WorkspaceStop);
+}
+
 TEST(TransportServer, HostShutdownReasonMappingDoesNotDegrade) {
     {
         Harness harness;

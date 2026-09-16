@@ -1,6 +1,9 @@
 #include "ymh/cli/cli.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -248,9 +251,12 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     return static_cast<int>(host->run());
 }
 
-int run_workspace_stop(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+constexpr std::chrono::milliseconds kOwnershipQueryTimeout{2'000};
+
+int run_workspace_stop(const std::vector<std::string>& args, bool force, std::ostream& out,
+                       std::ostream& err) {
     if (args.size() != 2) {
-        err << "ymh: usage: ymh workspace stop <workspace-id|path>\n";
+        err << "ymh: usage: ymh workspace stop <workspace-id|path> [--force]\n";
         return 2;
     }
 
@@ -282,11 +288,23 @@ int run_workspace_stop(const std::vector<std::string>& args, std::ostream& out, 
     try {
         protocol::HostConnection connection;
         connection.connect(record->host->socketPath.string());
-        [[maybe_unused]] const protocol::HelloResult hello = connection.handshake(
-            protocol::ServerProfile::Interactive,
-            protocol::ClientInstanceId{generate_uuid_v4()});
-        [[maybe_unused]] const nlohmann::json reply =
-            connection.request(protocol::method::kHostShutdown, {{"reason", "workspace stop"}});
+        [[maybe_unused]] const protocol::HelloResult hello =
+            connection.handshake(protocol::ServerProfile::Interactive,
+                                 protocol::ClientInstanceId{generate_uuid_v4()},
+                                 protocol::ClientRole::Observer);
+        const protocol::OwnershipView view =
+            connection
+                .request(protocol::method::kHostOwnership, nlohmann::json::object(),
+                         kOwnershipQueryTimeout)
+                .get<protocol::OwnershipView>();
+        const bool interactive = ::isatty(STDIN_FILENO) != 0;
+        if (!workspace_stop_may_proceed(view.live_supervisors, view.live_automation, force,
+                                        interactive, std::cin, out, err, record->id.value)) {
+            connection.close();
+            return 1;
+        }
+        [[maybe_unused]] const nlohmann::json reply = connection.request(
+            protocol::method::kHostShutdown, {{"reason", "workspace_stop"}});
         connection.close();
     } catch (const std::exception& stop_error) {
         err << "ymh: cannot stop daemon: " << stop_error.what() << '\n';
@@ -459,6 +477,32 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
 
 } // namespace
 
+bool workspace_stop_may_proceed(std::size_t live_supervisors, std::size_t live_automation,
+                                bool force, bool interactive, std::istream& in, std::ostream& out,
+                                std::ostream& err, const std::string& workspace_label) {
+    if (live_supervisors + live_automation == 0) {
+        return true;
+    }
+    if (force) {
+        return true;
+    }
+    out << "workspace " << workspace_label << " is in use by " << live_supervisors
+        << " live supervisor(s) / " << live_automation << " client(s)\n";
+    if (!interactive) {
+        err << "ymh: refusing to stop a workspace in use without confirmation; pass --force\n";
+        return false;
+    }
+    out << "Stopping will disconnect them. Continue? [y/N] ";
+    out.flush();
+    std::string answer;
+    std::getline(in, answer);
+    const std::size_t first = answer.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        return false;
+    }
+    return std::tolower(static_cast<unsigned char>(answer[first])) == 'y';
+}
+
 CliInvocation parse_cli(const std::vector<std::string>& args) {
     CLI::App    app{"ymh - terminal coding-agent harness"};
     CliInvocation invocation;
@@ -495,7 +539,10 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     CLI::App*   workspace_list = workspace->add_subcommand("list", "List registered workspaces");
     CLI::App*   workspace_stop = workspace->add_subcommand("stop", "Stop a workspace daemon");
     std::string workspace_stop_target;
+    bool        workspace_stop_force = false;
     workspace_stop->add_option("target", workspace_stop_target, "Workspace ID or path")->required();
+    workspace_stop->add_flag("--force", workspace_stop_force,
+                             "Stop even when the workspace has live owners (§4.6)");
 
     std::string config_action;
     CLI::App*   config = app.add_subcommand("config", "Configuration commands");
@@ -550,6 +597,7 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
         } else if (workspace_stop->parsed()) {
             invocation.workspace_args.emplace_back("stop");
             invocation.workspace_args.push_back(workspace_stop_target);
+            invocation.workspace_force = workspace_stop_force;
         }
         return invocation;
     }
@@ -670,7 +718,8 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
 
         case CliInvocation::Command::Workspace:
             if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "stop") {
-                return run_workspace_stop(invocation.workspace_args, out, err);
+                return run_workspace_stop(invocation.workspace_args, invocation.workspace_force,
+                                          out, err);
             }
             return run_workspace_command(invocation.workspace_args, out, err);
 
