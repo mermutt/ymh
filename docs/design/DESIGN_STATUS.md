@@ -24,6 +24,7 @@ coded after it is marked **verified** here.
 | 16 | `16-daemon-ownership.md` | yes | **verified** | Dual gate, 5 rounds: adversarial critic + Oracle, **both PASS** (0 open HIGH/MEDIUM) | 2737 lines; supervisor-owned daemons; supersedes 04 H8/H9 §3.2/§6.5/§14.1(f), 00 §54 D23/§9.8/§9.9, 10 §2.1, 11 §8.2 D20.3; amends 03/04/05 (A15/A16); invariants O1–O22, failure modes O-F1–O-F16 |
 | — | `REQUIREMENTS_BACKLOG.md` | yes | — (register; not a component spec) | track: triage, self-verified | 364 lines; RB-01–RB-11 from `requirements_draft.txt`, dedup'd against shipped code; 6 items need a spec/errata before code |
 | — | `UI_SURFACE_INVENTORY.md` | yes | — (register; not a component spec) | track: triage, self-verified | 134 lines; spec-16 ↔ RB-10/RB-11 UI seam (C1–C5); most cross-supervisor visibility already ships |
+| 17 | `17-ui-transcript-errata.md` | yes | **verified** | Oracle gate: 3 rounds → **GATE PASS** (0 open HIGH/MEDIUM/LOW; 18 findings fixed) | 577 lines; additive errata to `10-supervisor-tui.md` for RB-01/02/08/10/11; invariants `U-RB01-1..3`, `U-RB02-1..4`, `U-RB08-1..4`, `U-RB10-*`, `U-RB11-*` |
 
 ## Open top-level items (`HANDOFF.md` §5)
 
@@ -84,4 +85,7 @@ coded after it is marked **verified** here.
 | 2026-09-16 | `16-daemon-ownership.md` | round 4 (rev 3) | GATE FAIL — closure 8/9; **NEW** 1 HIGH (guard omitted `watchdog_disabled`), 2 MEDIUM, 6 LOW; adjudicated Oracle `G3` over the critic (seam retyping was overstated) |
 | 2026-09-16 | `16-daemon-ownership.md` | round 5 (rev 4) | **GATE PASS** — critic 0 HIGH/0 MEDIUM (closure 3/3); Oracle 0 HIGH/0 MEDIUM (closure 9/9); 5 LOW remained |
 | 2026-09-16 | `16-daemon-ownership.md` | final polish (rev 5) + targeted Oracle confirmation | **PASS** — 5/5 LOW fixed, 0 regressions; O15 bounds unchanged (23 s/38 s); escalation budget 12 s → 34 s confirmed exit-bound, not request-bound |
+| 2026-09-16 | `17-ui-transcript-errata.md` | round 1 | GATE FAIL — 1 HIGH (cross-thread `UiModel` mutation for the session title), 7 MEDIUM, 6 LOW |
+| 2026-09-16 | `17-ui-transcript-errata.md` | round 2 | GATE FAIL — closure 13/14; F-02 residual (text-then-reasoning ordering unpinned while claiming "always `[…, Reasoning, Assistant, …]`"), 3 LOW |
+| 2026-09-16 | `17-ui-transcript-errata.md` | round 3 | **GATE PASS** — 0 HIGH/0 MEDIUM/0 LOW; closure 4/4; no regressions. Implemented in `71dda4f16` |
 

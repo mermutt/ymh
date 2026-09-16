@@ -27,17 +27,22 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 
 | ID | Title | Raw | State | Priority | Effort | Risk | Spec gate |
 |----|-------|-----|-------|----------|--------|------|-----------|
-| RB-01 | Message styling: drop role labels, highlight user input | 1 | PARTIAL | P0 | S | Low | No |
-| RB-02 | Fold reasoning + tool output by default, Ctrl+O expand | 2 | PARTIAL | P0 | M | Med | Additive errata (10) |
+| RB-01 | Message styling: drop role labels, highlight user input | 1 | **DONE** | P0 | S | Low | No |
+| RB-02 | Fold reasoning + tool output by default, Ctrl+O expand | 2 | **DONE** | P0 | M | Med | errata 17 (verified) |
 | RB-03 | Auto-name + rename sessions | 3 | PARTIAL | P1 | M | Med | Additive errata (01/05) |
-| RB-04 | Supervisor-owned daemons (no unsupervised daemons) | 4 | ARCH | P0 (design) | L | High | **Yes — 16 in progress** |
+| RB-04 | Supervisor-owned daemons (no unsupervised daemons) | 4 | ARCH | P0 (design) | L | High | **Yes — 16 verified** |
 | RB-05 | `/skills` command | 5 | NEW | P1 | L | Med | **Yes — new spec** |
 | RB-06 | `/context` visualizer (grid + MCP/tools) | 6 | PARTIAL | P1 | M | Low | Additive errata (10/13) |
 | RB-07 | `/export` session to file (+ edit in `$EDITOR`) | 7 | NEW | P1 | S | Low | No (UI-local) |
-| RB-08 | `<Tab>` completes slash commands | 8 | PARTIAL | P0 | S | Low | No |
+| RB-08 | `<Tab>` completes slash commands | 8 | **DONE** | P0 | S | Low | No |
 | RB-09 | Config in `~/.config/ymh/config.jsonc` (JSONC) | 9 | NEW | P1 | M | Med | **Yes — format decision** |
-| RB-10 | Current session name in top line, right-aligned | 10 | NEW | P0 | XS | Low | No |
-| RB-11 | Bottom line: counts only, not the full session list | 11 | PARTIAL | P0 | XS | Low | No |
+| RB-10 | Current session name in top line, right-aligned | 10 | **DONE** | P0 | XS | Low | No |
+| RB-11 | Bottom line: counts only, not the full session list | 11 | **DONE** | P0 | XS | Low | No |
+
+**Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
+per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY
+against real DeepSeek. RB-04 remains design-only (spec `16` is verified but not
+implemented).
 
 ---
 
