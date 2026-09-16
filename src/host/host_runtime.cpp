@@ -485,6 +485,7 @@ protocol::SessionCreated HostRuntime::forkSession(const SessionId& id,
 
 void HostRuntime::closeSession(const SessionId& id) {
     translate([&]() {
+        runtime_.environment().pty().closeSession(id);
         if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
             runtime_.agents().dispose(agent->id());
         } else {
@@ -495,6 +496,7 @@ void HostRuntime::closeSession(const SessionId& id) {
 
 void HostRuntime::deleteSession(const SessionId& id) {
     translate([&]() {
+        runtime_.environment().pty().closeSession(id);
         if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
             runtime_.agents().dispose(agent->id());
         }

@@ -36,11 +36,13 @@ bool path_is_within(const std::filesystem::path& candidate,
 
 LocalEnvironment::LocalEnvironment(std::filesystem::path root,
                                    SandboxMode mode,
-                                   ToolConfig config)
+                                   ToolConfig config,
+                                   PtyService* pty)
     : root_(std::move(root)),
       mode_(mode),
       fs_(std::filesystem::path{}, config),
-      process_(config.terminate_grace) {
+      process_(config.terminate_grace),
+      pty_(pty != nullptr ? pty : &pty_fallback_) {
     std::error_code ec;
     if (!std::filesystem::exists(root_, ec) ||
         !std::filesystem::is_directory(root_, ec)) {

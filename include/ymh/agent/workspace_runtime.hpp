@@ -43,6 +43,7 @@ class ContextAssembler;
 class LLMProvider;
 class LLMPool;
 class SessionPersistence;
+class Executor;
 struct AgentConfig;
 struct LLMProviderConfig;
 struct SessionId;
@@ -83,6 +84,12 @@ struct WorkspaceRuntimeOptions {
     // a DB. The caller owns the store and must keep it alive for the runtime's
     // lifetime; never set in production (H6: one store / one flock).
     std::function<std::unique_ptr<SessionStore>()> store_factory;
+
+    // 14 §4.5 (E-P7): the daemon's loop adapter. When set, the runtime owns a
+    // `LocalPtyService` over it and the `terminal` tool is registered; when
+    // null, `pty()` is the internal `UnavailablePtyService`. The caller owns
+    // the executor and must outlive the runtime.
+    Executor* executor = nullptr;
 };
 
 class WorkspaceRuntime {

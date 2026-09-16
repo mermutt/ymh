@@ -171,7 +171,17 @@ TransportServer::TransportServer(ProtocolServer& server, std::string socket_path
     : server_(server),
       socket_path_(std::move(socket_path)),
       limits_(limits),
-      acceptor_(io_) {}
+      owned_io_(std::make_unique<asio::io_context>()),
+      io_(owned_io_.get()),
+      acceptor_(*io_) {}
+
+TransportServer::TransportServer(ProtocolServer& server, std::string socket_path,
+                                 asio::io_context& io, TransportLimits limits)
+    : server_(server),
+      socket_path_(std::move(socket_path)),
+      limits_(limits),
+      io_(&io),
+      acceptor_(*io_) {}
 
 TransportServer::~TransportServer() { stop(); }
 
@@ -185,7 +195,7 @@ bool TransportServer::post(std::function<void()> fn) {
     if (!started_.load() || stopping_.load()) {
         return false;
     }
-    asio::post(io_, std::move(fn));
+    asio::post(*io_, std::move(fn));
     return true;
 }
 
@@ -246,7 +256,12 @@ void TransportServer::start() {
     do_accept();
     {
         std::lock_guard lock(post_mutex_);
-        thread_ = std::thread([this] { io_.run(); });
+        thread_ = std::thread([this] {
+            if (on_runner_start_) {
+                on_runner_start_();
+            }
+            io_->run();
+        });
         started_.store(true);
     }
 }
@@ -258,7 +273,7 @@ void TransportServer::stop() {
     {
         std::lock_guard lock(post_mutex_);
         if (started_.load()) {
-            asio::post(io_, [this] {
+            asio::post(*io_, [this] {
                 std::error_code error;
                 acceptor_.close(error);
                 const std::vector<std::shared_ptr<SocketSession>> snapshot(sessions_.begin(),
@@ -269,7 +284,7 @@ void TransportServer::stop() {
                 // Outstanding broker/keepalive timers are not owned here, so the
                 // io_context must be stopped explicitly or `run()` would block
                 // shutdown until the longest deadline (errata §11.3).
-                io_.stop();
+                io_->stop();
             });
         }
     }
@@ -293,7 +308,7 @@ void TransportServer::do_accept() {
                                   asio::local::stream_protocol::socket socket) {
         if (!error) {
             auto session = std::make_shared<SocketSession>(
-                io_, server_, std::move(socket), limits_, [this](SocketSession* closed) {
+                *io_, server_, std::move(socket), limits_, [this](SocketSession* closed) {
                     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
                         if (it->get() == closed) {
                             sessions_.erase(it);

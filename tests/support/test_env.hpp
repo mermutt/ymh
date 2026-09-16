@@ -129,8 +129,9 @@ struct ToolEnv {
     explicit ToolEnv(const std::string& prefix,
                      SandboxMode mode = SandboxMode::Workspace,
                      ToolConfig config = {},
-                     ResourceCaps caps = {})
-        : workspace(prefix), env(workspace.path(), mode, config), governor(caps) {
+                     ResourceCaps caps = {},
+                     PtyService* pty = nullptr)
+        : workspace(prefix), env(workspace.path(), mode, config, pty), governor(caps) {
         header.id = make_session_id();
         header.cwd = workspace.path();
         header.createdAt = 0;

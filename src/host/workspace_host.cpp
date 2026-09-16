@@ -37,6 +37,7 @@
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
+#include "ymh/execution/asio_executor.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/host/host_runtime.hpp"
@@ -286,6 +287,9 @@ private:
     HostClaim    claim_;
     std::int32_t pid_ = 0;
 
+    asio::io_context                  io_;
+    std::unique_ptr<AsioExecutor>     executor_;
+
     std::unique_ptr<WorkspaceRuntime>       runtime_;
     std::unique_ptr<WorkspaceRegistry>      registry_;
     std::unique_ptr<TransportServerAdapter> permission_adapter_;
@@ -401,6 +405,8 @@ HostExitCode WorkspaceHost::Impl::startup() {
     boot_id_ = config_.boot_id.value_or(HostBootId{generate_uuid_v4()});
     pid_     = host_pid();
 
+    executor_ = std::make_unique<AsioExecutor>(io_);
+
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config                = config_.config;
     runtime_options.root                  = canonical_root_;
@@ -408,6 +414,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     runtime_options.attach_permission_gate = false;
     runtime_options.store_factory         = config_.store_factory;
     runtime_options.provider_factory      = config_.provider_factory;
+    runtime_options.executor              = executor_.get();
 
     std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
         WorkspaceRuntime::create(std::move(runtime_options));
@@ -468,7 +475,10 @@ HostExitCode WorkspaceHost::Impl::startup() {
     protocol_ = std::make_unique<ProtocolServer>(*host_runtime_, server_config);
     host_runtime_->attachServer(*protocol_);
 
-    transport_ = std::make_unique<TransportServer>(*protocol_, config_.socket_path.string());
+    transport_ = std::make_unique<TransportServer>(*protocol_, config_.socket_path.string(),
+                                                   io_);
+    transport_->setRunnerStartHook(
+        [this] { executor_->bindRunnerThread(std::this_thread::get_id()); });
     permission_adapter_->attach(*protocol_, *transport_);
 
     signals_ = std::make_unique<asio::signal_set>(transport_->io(), SIGTERM, SIGINT, SIGHUP);
@@ -526,6 +536,10 @@ HostExitCode WorkspaceHost::Impl::coordinator() {
     }
     if (turns_ != nullptr) {
         turns_->drain(config_.shutdown_grace);
+    }
+
+    if (runtime_ != nullptr) {
+        runtime_->environment().pty().closeAll();
     }
 
     cancelTimersAndSignals();
