@@ -11,6 +11,7 @@
 //   ymh config path
 //   ymh --version
 
+#include <cstddef>
 #include <iosfwd>
 #include <string>
 #include <vector>
@@ -44,6 +45,7 @@ struct CliInvocation {
     std::string reasoning_effort;
     bool        verbose = false;
     bool        version_requested = false;
+    bool        workspace_force = false;   // `workspace stop --force` (§4.6)
     std::vector<std::string> workspace_args;
     std::vector<std::string> config_args;
 };
@@ -51,6 +53,19 @@ struct CliInvocation {
 // Throws `CLI::ParseError` on a malformed command line.
 [[nodiscard]] CliInvocation parse_cli(const std::vector<std::string>& args);
 [[nodiscard]] CliInvocation parse_cli(int argc, char** argv);
+
+// 16 §4.6 step 3: the `ymh workspace stop` confirmation contract. Returns true
+// when the stop may proceed: no live owners, or `--force`, or an interactive
+// "yes". `interactive` is false when stdin is not a terminal (scripted use); a
+// stop with live owners is then declined unless `force`. Prints the in-use
+// notice/prompt to `out` and a refusal hint to `err`. Pure I/O (no transport),
+// so the CLI decision is unit-testable; `run_workspace_stop` is its only
+// production caller.
+[[nodiscard]] bool workspace_stop_may_proceed(std::size_t live_supervisors,
+                                              std::size_t live_automation, bool force,
+                                              bool interactive, std::istream& in,
+                                              std::ostream& out, std::ostream& err,
+                                              const std::string& workspace_label);
 
 // Parses and executes. Returns a process exit code.
 int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err);

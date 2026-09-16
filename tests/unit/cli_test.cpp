@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -12,6 +13,23 @@
 namespace {
 
 using namespace ymh;
+
+bool stop_proceeds(std::size_t live_supervisors, std::size_t live_automation, bool force,
+                   bool interactive, const std::string& answer, std::string* out = nullptr,
+                   std::string* err = nullptr) {
+    std::istringstream input(answer);
+    std::ostringstream output;
+    std::ostringstream error;
+    const bool result = workspace_stop_may_proceed(live_supervisors, live_automation, force,
+                                                   interactive, input, output, error, "ws-id");
+    if (out != nullptr) {
+        *out = output.str();
+    }
+    if (err != nullptr) {
+        *err = error.str();
+    }
+    return result;
+}
 
 TEST(Cli, DefaultsToTui) {
     const CliInvocation invocation = parse_cli({});
@@ -130,6 +148,56 @@ TEST(Cli, ConfigPathPrintsEffectivePath) {
     EXPECT_EQ(run_cli({"--config", "/tmp/ymh-test-config.toml", "config", "path"}, out, err), 0);
     EXPECT_NE(out.str().find("/tmp/ymh-test-config.toml"), std::string::npos);
     EXPECT_TRUE(err.str().empty());
+}
+
+TEST(Cli, WorkspaceStopForceFlagParses) {
+    const CliInvocation invocation = parse_cli({"workspace", "stop", "ws-id", "--force"});
+    ASSERT_EQ(invocation.command, CliInvocation::Command::Workspace);
+    ASSERT_EQ(invocation.workspace_args.size(), 2u);
+    EXPECT_EQ(invocation.workspace_args[0], "stop");
+    EXPECT_EQ(invocation.workspace_args[1], "ws-id");
+    EXPECT_TRUE(invocation.workspace_force);
+}
+
+TEST(Cli, WorkspaceStopWithoutForceDefaultsFalse) {
+    const CliInvocation invocation = parse_cli({"workspace", "stop", "ws-id"});
+    ASSERT_EQ(invocation.command, CliInvocation::Command::Workspace);
+    EXPECT_FALSE(invocation.workspace_force);
+}
+
+TEST(Cli, WorkspaceStopProceedsWithoutLiveOwners) {
+    std::string out;
+    EXPECT_TRUE(stop_proceeds(0, 0, false, false, "", &out));
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(Cli, WorkspaceStopForceSkipsConfirmation) {
+    std::string out;
+    EXPECT_TRUE(stop_proceeds(3, 1, true, false, "n\n", &out));
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(Cli, WorkspaceStopDeclinesNonInteractiveWithoutForce) {
+    std::string out;
+    std::string err;
+    EXPECT_FALSE(stop_proceeds(1, 0, false, false, "y\n", &out, &err));
+    EXPECT_NE(out.find("in use"), std::string::npos);
+    EXPECT_NE(err.find("--force"), std::string::npos);
+}
+
+TEST(Cli, WorkspaceStopInteractiveConfirmationAccepted) {
+    std::string out;
+    EXPECT_TRUE(stop_proceeds(1, 2, false, true, "y\n", &out));
+    EXPECT_NE(out.find("[y/N]"), std::string::npos);
+    EXPECT_NE(out.find("in use"), std::string::npos);
+}
+
+TEST(Cli, WorkspaceStopInteractiveConfirmationDeclined) {
+    for (const std::string& answer : {std::string{"n\n"}, std::string{"\n"},
+                                      std::string{"no\n"}, std::string{"   "}}) {
+        std::string out;
+        EXPECT_FALSE(stop_proceeds(1, 0, false, true, answer, &out)) << "answer=" << answer;
+    }
 }
 
 } // namespace
