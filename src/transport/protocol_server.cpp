@@ -120,6 +120,8 @@ void ProtocolServer::receiveBytes(ClientId id, std::string_view bytes) {
         return;
     }
     conn->read_buffer.append(bytes.data(), bytes.size());
+    conn->last_frame_at = std::chrono::steady_clock::now();
+    publish_owner_liveness();
 
     std::vector<std::string> frames;
     while (true) {
@@ -159,6 +161,7 @@ void ProtocolServer::closeConnection(ClientId id) {
     outstanding_total_.fetch_sub(it->second.outstanding);
     signal_drain_progress();
     connections_.erase(it);
+    publish_owner_liveness();
 }
 
 void ProtocolServer::onFrameWritten(ClientId id, std::size_t bytes) {
@@ -328,7 +331,10 @@ std::optional<nlohmann::json> ProtocolServer::handle_hello(Connection& conn,
 
     conn.hello_done = true;
     conn.profile = params.profile;
+    conn.role = params.role;
     conn.instance = params.client_instance;
+    conn.last_frame_at = std::chrono::steady_clock::now();
+    publish_owner_liveness();
 
     HelloResult result;
     result.protocol_version = kProtocolVersion;
@@ -357,7 +363,7 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             const std::string reason = request.params.is_object()
                                            ? request.params.value("reason", std::string{})
                                            : std::string{};
-            host_.requestShutdown(reason);
+            host_.requestShutdown(parse_shutdown_reason(reason));
             respond(conn, request.id, nlohmann::json::object());
             onDaemonShuttingDown("host.shutdown accepted");
             conn.close_when_drained = true;
@@ -669,6 +675,7 @@ void ProtocolServer::drop_client(Connection& conn, std::string reason) {
     outstanding_total_.fetch_sub(conn.outstanding);
     conn.outstanding = 0;
     signal_drain_progress();
+    publish_owner_liveness();
     DropFn drop = conn.drop;
     conn.send = nullptr;
     conn.drop = nullptr;
@@ -922,6 +929,32 @@ std::size_t ProtocolServer::sessionSubscriberCount(const SessionId& session) con
 
 void ProtocolServer::set_subscribe_observer(SubscribeObserver observer) {
     subscribe_observer_ = std::move(observer);
+}
+
+void ProtocolServer::set_owner_liveness_sink(OwnerLivenessSink sink) {
+    owner_liveness_sink_ = std::move(sink);
+}
+
+void ProtocolServer::publish_owner_liveness() {
+    if (!owner_liveness_sink_) {
+        return;
+    }
+    std::size_t count = 0;
+    std::chrono::steady_clock::time_point last{};
+    for (const auto& entry : connections_) {
+        const Connection& conn = entry.second;
+        if (!conn.hello_done || conn.dropped) {
+            continue;
+        }
+        if (conn.role != ClientRole::Supervisor && conn.role != ClientRole::Automation) {
+            continue;
+        }
+        ++count;
+        if (conn.last_frame_at > last) {
+            last = conn.last_frame_at;
+        }
+    }
+    owner_liveness_sink_(count, last);
 }
 
 } // namespace ymh::protocol

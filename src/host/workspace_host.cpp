@@ -158,13 +158,60 @@ std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& soc
 
 } // namespace
 
+protocol::ShutdownReason to_protocol(ShutdownReason reason) noexcept {
+    switch (reason) {
+        case ShutdownReason::ClientRequest:
+            return protocol::ShutdownReason::ClientRequest;
+        case ShutdownReason::Signal:
+            return protocol::ShutdownReason::Signal;
+        case ShutdownReason::StartupFailure:
+            return protocol::ShutdownReason::StartupFailure;
+        case ShutdownReason::LastSupervisor:
+            return protocol::ShutdownReason::LastSupervisor;
+        case ShutdownReason::NoOwners:
+            return protocol::ShutdownReason::NoOwners;
+        case ShutdownReason::WorkspaceStop:
+            return protocol::ShutdownReason::WorkspaceStop;
+    }
+    return protocol::ShutdownReason::ClientRequest;
+}
+
+ShutdownReason from_protocol(protocol::ShutdownReason reason) noexcept {
+    switch (reason) {
+        case protocol::ShutdownReason::ClientRequest:
+            return ShutdownReason::ClientRequest;
+        case protocol::ShutdownReason::Signal:
+            return ShutdownReason::Signal;
+        case protocol::ShutdownReason::StartupFailure:
+            return ShutdownReason::StartupFailure;
+        case protocol::ShutdownReason::LastSupervisor:
+            return ShutdownReason::LastSupervisor;
+        case protocol::ShutdownReason::NoOwners:
+            return ShutdownReason::NoOwners;
+        case protocol::ShutdownReason::WorkspaceStop:
+            return ShutdownReason::WorkspaceStop;
+    }
+    return ShutdownReason::ClientRequest;
+}
+
 class WorkspaceHost::Impl {
 public:
     explicit Impl(HostConfig config) : config_(std::move(config)) {}
 
-    ~Impl() = default;
+    ~Impl() {
+        requestWatchdogStop();
+        if (watchdog_thread_.joinable()) {
+            watchdog_thread_.join();
+        }
+    }
 
     HostExitCode run() {
+        // 16 §2.5 step 1' (N3-H1/G1): reject before any state (no chdir, no
+        // store, no claimHost) so no H21 releaseHost is owed. `foreground` is
+        // exempt; both opt-out arms are rejected.
+        if (!config_.foreground && !owner_watchdog_armed(config_)) {
+            return HostExitCode::StartupRejected;
+        }
         HostExitCode code = HostExitCode::Internal;
         try {
             code = startup();
@@ -225,6 +272,12 @@ public:
         return protocol_ != nullptr ? protocol_->attachedClients() : 0;
     }
 
+    [[nodiscard]] bool ownerless() const noexcept { return escalation_armed_.load(); }
+
+    [[nodiscard]] std::shared_ptr<const std::vector<SupervisorId>> freshOwnerSnapshot() const {
+        return ownerSnapshot();
+    }
+
     void activateSession(SessionId session) {
         if (host_runtime_ != nullptr) {
             host_runtime_->activateSession(session);
@@ -271,6 +324,11 @@ private:
     void armSignals();
     void armHeartbeat();
     void armLeaseRenewal();
+    void armOwnerWatchdog();
+    void requestWatchdogStop() noexcept;
+    void ownerWatchdogLoop();
+    void publishOwnerSnapshot(std::shared_ptr<const std::vector<SupervisorId>> snapshot);
+    [[nodiscard]] std::shared_ptr<const std::vector<SupervisorId>> ownerSnapshot() const;
     void cancelTimersAndSignals();
     void unlinkSocketIfOwned();
     [[nodiscard]] bool ensureWorkspaceRegistered();
@@ -313,6 +371,21 @@ private:
 
     std::atomic<std::size_t> attached_clients_{0};
     std::optional<SessionId> active_session_;
+
+    // Owner watchdog (16 §5.1). The two liveness atomics are written on the io
+    // thread by the ProtocolServer sink and read by the watchdog thread.
+    std::atomic<std::size_t>                           live_owner_count_{0};
+    std::atomic<std::chrono::steady_clock::time_point> last_owner_frame_mono_{};
+    std::atomic<bool>                                  watchdog_stop_{false};
+    std::atomic<bool>                                  escalation_armed_{false};
+    std::mutex                                         watchdog_mutex_;
+    std::condition_variable                            watchdog_cv_;
+    std::thread                                        watchdog_thread_;
+    std::optional<std::chrono::steady_clock::time_point> ownerless_since_;
+    std::chrono::steady_clock::time_point               escalation_deadline_{};
+    mutable std::mutex                                  snapshot_mutex_;
+    std::shared_ptr<const std::vector<SupervisorId>>    fresh_owner_snapshot_{
+        std::make_shared<const std::vector<SupervisorId>>()};
 };
 
 HostExitCode WorkspaceHost::Impl::mapRuntimeError(WorkspaceRuntimeErrorCode code) noexcept {
@@ -465,7 +538,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
         *runtime_, *registry_, identity, *turns_, *broker_,
         [this](const EventRecord& record) { forwardEvent(record); });
     host_runtime_->setShutdownHook(
-        [this](std::string) { requestShutdown(ShutdownReason::ClientRequest); });
+        [this](ShutdownReason reason) { requestShutdown(reason); });
 
     protocol::ProtocolServerConfig server_config;
     server_config.uid       = protocol::current_uid();
@@ -474,6 +547,12 @@ HostExitCode WorkspaceHost::Impl::startup() {
     server_config.pid       = pid_;
     protocol_ = std::make_unique<ProtocolServer>(*host_runtime_, server_config);
     host_runtime_->attachServer(*protocol_);
+    protocol_->set_owner_liveness_sink(
+        [this](std::size_t live, std::chrono::steady_clock::time_point last) {
+            live_owner_count_.store(live);
+            last_owner_frame_mono_.store(last);
+        });
+    host_runtime_->setOwnerSnapshotSource([this] { return ownerSnapshot(); });
 
     transport_ = std::make_unique<TransportServer>(*protocol_, config_.socket_path.string(),
                                                    io_);
@@ -512,6 +591,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     armSignals();
     armHeartbeat();
     armLeaseRenewal();
+    armOwnerWatchdog();
 
     host_runtime_->setState(protocol::HostState::Serving);
     state_.store(protocol::HostState::Serving);
@@ -540,6 +620,14 @@ HostExitCode WorkspaceHost::Impl::coordinator() {
 
     if (runtime_ != nullptr) {
         runtime_->environment().pty().closeAll();
+    }
+
+    // 16 §4.3 step 7 (N2-L3/N3-M1): stop and UNCONDITIONALLY join the watchdog
+    // before TransportServer::stop(); the stop/join handshake, not a timeout,
+    // bounds the wait, so steps 8-9 still run on the orphan path.
+    requestWatchdogStop();
+    if (watchdog_thread_.joinable()) {
+        watchdog_thread_.join();
     }
 
     cancelTimersAndSignals();
@@ -676,6 +764,88 @@ void WorkspaceHost::Impl::armLeaseRenewal() {
     });
 }
 
+void WorkspaceHost::Impl::armOwnerWatchdog() {
+    if (!owner_watchdog_armed(config_) || watchdog_thread_.joinable()) {
+        return;
+    }
+    watchdog_stop_.store(false);
+    watchdog_thread_ = std::thread([this] { ownerWatchdogLoop(); });
+}
+
+void WorkspaceHost::Impl::requestWatchdogStop() noexcept {
+    watchdog_stop_.store(true);
+    watchdog_cv_.notify_all();
+}
+
+void WorkspaceHost::Impl::publishOwnerSnapshot(
+    std::shared_ptr<const std::vector<SupervisorId>> snapshot) {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    fresh_owner_snapshot_ = std::move(snapshot);
+}
+
+std::shared_ptr<const std::vector<SupervisorId>> WorkspaceHost::Impl::ownerSnapshot() const {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    return fresh_owner_snapshot_;
+}
+
+void WorkspaceHost::Impl::ownerWatchdogLoop() {
+    const std::chrono::milliseconds idle_timeout = protocol::TransportLimits{}.idle_timeout;
+    // 16 §5.1 (R4-L4): the whole-teardown bound = 3 * shutdown_grace (session
+    // drain/close, waitForDrain, TurnExecutor::drain) + 2 * watchdog_interval
+    // (join handshake + one tick margin) = 34 s at the defaults.
+    const std::chrono::milliseconds teardown_budget =
+        3 * config_.shutdown_grace + 2 * config_.watchdog_interval;
+
+    std::unique_lock<std::mutex> lock(watchdog_mutex_);
+    while (true) {
+        watchdog_cv_.wait_for(lock, config_.watchdog_interval);
+        if (watchdog_stop_.load()) {
+            return;
+        }
+        try {
+            const std::chrono::steady_clock::time_point m = config_.owner_monotonic_clock();
+            const std::int64_t w = epoch_ms(config_.owner_wall_clock());
+            const bool live = live_owner_count_.load() > 0 &&
+                              (m - last_owner_frame_mono_.load()) <= idle_timeout;
+
+            std::vector<SupervisorId> ids;
+            for (const SupervisorRow& row : registry_->listSupervisors()) {
+                if (isFresh(row, w, config_.owner_lease_ttl)) {
+                    ids.push_back(row.id);
+                }
+            }
+            const bool fresh = !ids.empty();
+            publishOwnerSnapshot(
+                std::make_shared<const std::vector<SupervisorId>>(std::move(ids)));
+
+            if (live || fresh) {
+                ownerless_since_.reset();
+                escalation_armed_.store(false);
+                continue;
+            }
+            if (!ownerless_since_.has_value()) {
+                ownerless_since_ = m;
+            }
+            if (!escalation_armed_.load() &&
+                (m - *ownerless_since_) >= config_.owner_grace) {
+                escalation_armed_.store(true);
+                escalation_deadline_ = m + teardown_budget;
+                requestShutdown(ShutdownReason::NoOwners);
+                continue;
+            }
+            if (escalation_armed_.load() && m >= escalation_deadline_) {
+                std::_Exit(static_cast<int>(HostExitCode::Internal));
+            }
+        } catch (...) {
+            // 16 §5.1 (O-M2): publish an EMPTY snapshot (fail-safe toward
+            // termination) and keep the thread alive; an escaping exception
+            // must never remove orphan prevention.
+            publishOwnerSnapshot(std::make_shared<const std::vector<SupervisorId>>());
+            continue;
+        }
+    }
+}
+
 void WorkspaceHost::Impl::cancelTimersAndSignals() {
     if (signals_ != nullptr) {
         signals_->cancel();
@@ -734,6 +904,12 @@ ExecutionEnvironment& WorkspaceHost::environment() { return impl_->environment()
 ResourceGovernor&     WorkspaceHost::caps() { return impl_->caps(); }
 
 std::size_t WorkspaceHost::attachedClients() const noexcept { return impl_->attachedClients(); }
+
+bool WorkspaceHost::ownerless() const noexcept { return impl_->ownerless(); }
+
+std::shared_ptr<const std::vector<SupervisorId>> WorkspaceHost::freshOwnerSnapshot() const {
+    return impl_->freshOwnerSnapshot();
+}
 
 void WorkspaceHost::activateSession(SessionId session) {
     impl_->activateSession(std::move(session));
@@ -858,6 +1034,8 @@ HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     config.registry       = default_registry_config();
     config.persistence.db_path   = record.canonicalPath / ".ymh" / "sessions.db";
     config.persistence.lock_path = record.canonicalPath / ".ymh" / "sessions.lock";
+    config.require_owner         = true;
+    config.watchdog_disabled     = false;
     return config;
 }
 

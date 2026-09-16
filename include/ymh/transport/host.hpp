@@ -9,6 +9,7 @@
 // value or throw `RpcException` carrying an RpcCode|AppCode.
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -60,7 +61,13 @@ public:
 
     virtual HostState hostState() const = 0;
     virtual HostStatusInfo hostStatus() const = 0;
-    virtual void requestShutdown(std::string reason) = 0;
+    virtual void requestShutdown(ShutdownReason reason) = 0;
+
+    // 16 §7.4 (N-M3/N2-M2): the daemon's published fresh-id snapshot, typed in
+    // transport terms. HostRuntime converts the ymh::SupervisorId snapshot
+    // (§5.1) to wire-identical ClientInstanceId text. io thread only.
+    [[nodiscard]] virtual std::shared_ptr<const std::vector<ClientInstanceId>>
+    freshOwnerSnapshot() const = 0;
 
     virtual std::vector<WorkspaceSummary> listWorkspaces() = 0;
     virtual WorkspaceDetail showWorkspace(const WorkspaceId& id) = 0;
