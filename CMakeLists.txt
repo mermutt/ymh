@@ -143,6 +143,7 @@ pkg_check_modules(CMARK_GFM REQUIRED IMPORTED_TARGET libcmark-gfm)
 # ---------------------------------------------------------------------------
 
 add_library(ymh_core STATIC
+    src/core/clock.cpp
     src/core/event.cpp
     src/core/event_bus.cpp
 )
@@ -491,6 +492,7 @@ add_library(ymh_registry STATIC
     src/registry/registry.cpp
     src/registry/liveness.cpp
     src/registry/process_scan.cpp
+    src/registry/supervisor.cpp
     src/registry/workspace_cli.cpp
 )
 add_library(ymh::registry ALIAS ymh_registry)

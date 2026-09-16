@@ -64,11 +64,15 @@ enum class HostExitCode : std::uint8_t {
     Internal          = 17,  // unexpected exception
 };
 
-// Why a shutdown was requested (04 §2.1).
+// Why a shutdown was requested (04 §2.1; 16 §7.3). Total and 1:1 with the
+// transport mirror protocol::ShutdownReason (16 §7.4).
 enum class ShutdownReason : std::uint8_t {
-    ClientRequest,   // host.shutdown over the wire
-    Signal,          // SIGTERM / SIGINT
-    StartupFailure,  // a startup step failed after partial state was created
+    ClientRequest,    // host.shutdown with no recognized reason (admission-checked)
+    Signal,           // SIGTERM / SIGINT
+    StartupFailure,   // a startup step failed after partial state was created
+    LastSupervisor,   // the last owner's confirmed exit (§4.4)
+    NoOwners,         // owner watchdog: K(d) false for owner_grace (§5.1)
+    WorkspaceStop,    // `ymh workspace stop` administrative override (§4.6)
 };
 
 // Daemon startup/operation error carrying a `protocol::HostErrorCode` (04 §2.2).
