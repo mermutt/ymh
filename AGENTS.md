@@ -37,6 +37,18 @@ no open HIGH/MEDIUM findings and pinned interface sketches. Loop:
 - **Phase-2 features are implemented** (specs `13`–`15`, all Oracle-verified):
   context compaction (`13`), the PTY capability behind the execution-environment
   seam (`14`), and the MCP adapter into the shared tool registry (`15`).
+- **Spec `16-daemon-ownership.md` is verified but NOT implemented.** It replaces
+  "supervisor-independent" daemons with **supervisor-owned** ones: the last
+  supervisor's clean exit prompts and tears the daemons down, and every crash path
+  is backstopped by a daemon-side owner watchdog. It **supersedes** `04` H8/H9 and
+  §3.2/§6.5/§14.1(f), `00` §54 D23 and §9.8/§9.9, `10` §2.1, `11` §8.2 D20.3, and
+  amends `03`/`04`/`05` (A15/A16) with a new `supervisors` registry table
+  (schema 1→2). Verified over 5 gate rounds by an adversarial critic plus Oracle
+  (both PASS, zero open HIGH/MEDIUM). Implementation is the next large wave.
+- **Architecture facts below describe the SHIPPED code**, which still implements
+  the pre-16 (daemon-survives-TUI-exit) model until that wave lands. When reading
+  §"Architecture facts", treat `16-daemon-ownership.md` as the authoritative
+  successor for anything about daemon lifetime and ownership.
 - `00-architecture.md` is the single authoritative architecture source; the raw
   `drafts/` files were merged into it and are optional reference only.
 
