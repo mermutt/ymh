@@ -16,12 +16,29 @@ be written for this component until the gate in `HANDOFF.md` §7 passes
 (`DESIGN_STATUS.md` row 15). The design-first rule (`AGENTS.md`) applies: the
 interfaces here are **pinned** and must not churn after verification.
 
-Two additive amendments to already-verified specs are **required** for this
-design to be implementable as written; they are called out in §4.8 (a
-post-`freeze()` adapter namespace on `ToolRegistry`) and §5.1 (a streaming
-`ProcessService::spawn`). Both are additive (no existing signature changes) and
-are recorded as open items in §12.2 for the next re-verification pass. If either
-is rejected, the conservative fallback in §12.1(ad) applies.
+Amendments to already-verified specs are **required** for this design to be
+implementable as written. They are called out at their point of use and
+enumerated with exact diffs in the **amendment ledger (§12.3)**:
+
+- **AM-0a / AM-0b** — the two additive `07` seams: a post-`freeze()` adapter
+  namespace on `ToolRegistry` (§4.8) and a streaming `ProcessService::spawn`
+  (§5.1). Additive, no existing signature changes.
+- **AM-1** — MCP live status and its supervisor projection: a live event added
+  to the `00 §8.1` live set and the `01` live-event taxonomy, a
+  `HostNoticeKind::McpServerStatus` added to `05 §5.3`/`§2.1`, and its handling
+  in `10 §5.2` (§4.7).
+- **AM-2** — the `04 §3.3` startup order gains the `ToolRegistry` construction
+  and `freeze()` step MCP needs (§5.2). `04` currently has neither.
+- **AM-3** — the `09 §3.3`/`§3.4` NO-MATCH default tier: `PermissionConfig`
+  gains `tool_defaults` so a per-server MCP `default_verdict` is a true fallback
+  below every operator rule (§6.1, §12.3). Additive.
+
+If AM-0a/AM-0b are rejected, the conservative fallback in §12.1(ad) applies; if
+AM-1 is rejected, the fallback in §12.1(p) applies; AM-2 is load-bearing (no
+registry ⇒ no tools ⇒ the component is unimplementable as written); if AM-3 is
+rejected, `McpServerConfig::default_verdict` is dropped and operators must write
+explicit `[[permissions.rule]]` entries for `mcp.*` (the built-in `[permissions]
+default` still applies).
 
 ---
 
@@ -99,7 +116,7 @@ design (`00 §27`: "The agent should not know that a tool came from MCP").
 - **Permission policy rules and the decision flow.** Owned by `09` (`§19`,
   `§3.2`); the adapter references the `PermissionPolicy` seam and never decides
   policy. It *does* own the **default verdict applied to MCP tools** as a
-  config-provided rule input (§6.1).
+  config-provided **NO-MATCH fallback** input (AM-3, §6.1).
 - **Daemon process model, `ResourceCaps`, `ResourceGovernor`, and child
   reaping.** Owned by `04` (`§3`, `§8`); the adapter owns MCP server children
   *inside* the daemon's tree, per `07 §9`.
@@ -108,8 +125,8 @@ design (`00 §27`: "The agent should not know that a tool came from MCP").
   codec (§2.3).
 - **LLM/provider behavior.** Owned by `08`; the adapter exposes schemas, not
   messages.
-- **UI projection of MCP status.** Owned by `10`; the adapter emits bounded
-  live events (§4.7) and never `UiEvent`s.
+- **UI projection of MCP status.** Owned by `10`; the adapter emits the bounded
+  live status event defined in §4.7 (AM-1) and never `UiEvent`s.
 - **MCP `resources/*`, `prompts/*`, `sampling/*`, `roots/*`, and elicitation.**
   Out of scope for v1 (§12.2 OQ-5); only `tools/*` is adapted.
 
@@ -120,13 +137,13 @@ design (`00 §27`: "The agent should not know that a tool came from MCP").
 | `ToolCall` / `ToolResult` payloads | 01 (`01 §4.5`) | produces `ToolResult`; never appends |
 | `ToolOutcome` enum | 01 (`01 §4.5`) | reuses `{Ok, Error, Denied, Cancelled}` verbatim |
 | `ToolRegistry` / `ToolSchema` | 07 (`07 §3`, `§4`) | registers adapter tools; adds `AdapterScope` (§4.8) |
-| `ToolContext` / `ToolConfig` | 07 (`07 §5`) | consumes; adds MCP bounds in `McpConfig` (§4.1) |
+| `ToolContext` / `ToolConfig` | 07 (`07 §5`) | `ToolConfig` injected into `McpManager` by ctor; no `ToolContext::config()` (§4.1/§4.6) |
 | `ProcessService` | 07 (`07 §6.4`) | consumes; adds streaming `spawn` (§5.1) |
-| `ResourceGovernor` / `ResourceCaps` | 04 (`04 §8`, `§2.1`) | consumes; MCP caps proposed in `McpConfig` (§6.6) |
-| Daemon lifecycle / startup order | 04 (`04 §3.3`) | inserts `McpManager::start()` before `freeze()` (§5.2) |
-| Permission decision flow | 09 (`09 §3`, `§4`) | supplies per-server default verdict; never decides (§6.1) |
-| Transport conventions (`namespace.verb`, `data.kind`) | 05 (`05 §2.2`, `§5.6`) | MCP has its own method namespace; `05` is untouched |
-| Live status events | 01 (live set), 10 (projection) | emits `McpServerStatusChanged` live-only (§4.7) |
+| `ResourceGovernor` / `ResourceCaps` | 04 (`04 §8`, `§2.1`) | **not** used for MCP call slots; MCP caps live in `McpConfig` (§6.6) |
+| Daemon lifecycle / startup order | 04 (`04 §3.3`) | requires AM-2: add `ToolRegistry` + `McpManager` + `freeze()` (§5.2, §12.3) |
+| Permission decision flow | 09 (`09 §3`, `§4`) | supplies per-server default verdict as a NO-MATCH fallback (AM-3); never decides (§6.1) |
+| Transport conventions (`namespace.verb`, `data.kind`) | 05 (`05 §2.1`, `§2.2`) | MCP has its own method namespace; `05` frame codec untouched |
+| Live status events | 01 (live set), 05 (`HostNoticeKind`), 10 (projection) | defines `payload::McpServerStatusChanged`; requires AM-1 (§4.7, §12.3) |
 
 ---
 
@@ -173,9 +190,11 @@ enum class McpServerState : std::uint8_t {
     Disabled,      // config present, enabled=false; no client constructed
     Starting,      // transport starting / handshake in progress
     Ready,         // initialize done; tools registered; calls allowed
-    Degraded,      // Ready but a non-fatal problem occurred (e.g. tools skipped)
+    Degraded,      // handshake done, zero usable tools (none advertised, or all
+                   // skipped); non-terminal but NOT callable — no tool is
+                   // registered. A partial skip stays Ready (§5.2).
     Disconnected,  // transport closed; reconnect scheduled
-    Failed,        // terminal for this daemon lifetime (config/required/backoff)
+    Failed,        // terminal for this daemon lifetime (config/spawn/backoff)
     Stopped,       // shutdown completed
 };
 
@@ -293,7 +312,7 @@ supported revision, accepts the server's echoed revision if it is in the set,
 and otherwise fails the handshake (`HandshakeRejected`, MCP-F3). The supported
 set is pinned at implementation time (OQ-1). Capabilities are negotiated but
 only `tools` is required: a server that does not advertise `tools` is `Degraded`
-with zero tools, not `Failed`.
+with zero tools (or `StartupRejected` when `required`; §5.2), not `Failed`.
 
 ---
 
@@ -356,10 +375,10 @@ event. Across servers, collisions are impossible because `<server>` is unique.
 
 **Collision with a local tool.** A translated name that already exists in the
 registry as a non-adapter tool (e.g. a local plugin registered `mcp.foo.bar`)
-is a **startup failure** (`ConfigInvalid` → `McpServerState::Failed` for that
-server if `required`, otherwise the server is `Degraded` and the colliding tool
-is skipped). Local tools always win; an adapter may never shadow a non-adapter
-tool (M3).
+**fails loud** (`ConfigInvalid`): the colliding tool is skipped, the server is
+`Failed` (`StartupRejected` when `required`), and it is never silently degraded
+to `Ready`. Local tools always win; an adapter may never shadow a non-adapter
+tool (M3, MCP-F8).
 
 ### 3.3 Transparency rules
 
@@ -396,8 +415,12 @@ struct McpServerConfig {
 
     // ---- enablement / failure policy --------------------------------------
     bool                   enabled{true};
-    // required=true: a failed start/required-tool-skip fails daemon startup
-    // (StartupRejected). required=false: the daemon starts Degraded (M6).
+    // required=true: the server MUST reach Ready with >=1 translated tool by
+    // startup_deadline. Any other outcome — spawn/handshake/list failure,
+    // deadline exceeded, zero tools advertised, or every tool skipped — fails
+    // daemon startup with StartupRejected (04 §2.1, M6). required=false: the
+    // same outcomes leave the server Failed (on failure) or Degraded (zero
+    // usable tools) and the daemon proceeds. The full condition table is §5.2.
     bool                   required{false};
 
     // ---- transport ---------------------------------------------------------
@@ -443,7 +466,8 @@ struct McpConfig {
     std::size_t            max_inflight_calls_per_server{4}; // MCP-F12, §6.6
 
     // Startup is bounded: the sum of per-server startup work may not exceed
-    // this; servers not Ready by then are Degraded/Failed (M6, MCP-F2).
+    // this; a server not settled by then is Failed, and a server that settles
+    // with zero usable tools is Degraded (M6, MCP-F2, §5.2).
     std::chrono::milliseconds startup_deadline{5'000};
     std::chrono::milliseconds handshake_timeout{10'000};
     std::chrono::milliseconds list_timeout{5'000};
@@ -454,6 +478,11 @@ struct McpConfig {
     std::chrono::milliseconds reconnect_initial_backoff{500};
     std::chrono::milliseconds reconnect_max_backoff{30'000};
     double                 reconnect_jitter{0.25};
+    // A connection is "stable" once it has stayed Ready this long; only then
+    // does a successful ping reset reconnect_attempt to zero (§4.3/§5.4).
+    std::chrono::milliseconds reconnect_stable_window{30'000};
+    // Liveness probe cadence while Ready; ping is never on the call path.
+    std::chrono::milliseconds ping_interval{15'000};
 
     // Shutdown: stdin close + SIGTERM, then SIGKILL after grace (M15).
     std::chrono::milliseconds shutdown_grace{2'000};
@@ -470,22 +499,32 @@ struct McpConfig {
 
 Rules:
 
-- `McpConfig` is validated **once at startup**; an unknown transport, a missing
-  `command` for `Stdio`, a malformed `McpServerId`, a duplicate server id, a
-  `max_result_bytes` above `ToolConfig::tool_result_max_bytes`, or an enabled
+- `McpConfig` is validated **once at startup** by `McpManager`, which receives
+  the process `ToolConfig` by constructor injection (there is no
+  `ToolContext::config()`; `07 §5.1`): an unknown transport, a missing `command`
+  for `Stdio`, a malformed `McpServerId`, a duplicate server id, a
+  `max_result_bytes` above `tools.tool_result_max_bytes`, or an enabled
   `HttpSse` when `allow_network_servers == false` is a `ConfigError` (startup),
   never a runtime surprise (MCP-F14). This matches the strict loader in
   `config.hpp` (unknown TOML keys already throw).
 - `McpServerConfig::max_result_bytes` is clamped at runtime to
-  `ToolConfig::tool_result_max_bytes` (`07 §5.5`) minus envelope headroom, so an
-  MCP result can never trigger `PayloadTooLarge` (M11).
+  `tools.tool_result_max_bytes` (`07 §5.5`, injected into `McpManager`) minus
+  envelope headroom, so an MCP result can never trigger `PayloadTooLarge` (M11).
+  The effective clamp is passed to each `McpTool` at construction (§4.6).
 - `McpServerConfig::default_verdict` is **input** to the policy layer; the
   adapter never evaluates it. `Allow` is only reachable when the operator writes
-  it explicitly (M7).
+  it explicitly (M7). The daemon's config assembly lowers each enabled server's
+  `default_verdict` into one `PermissionConfig::ToolDefault{prefix =
+  "mcp.<server>.", verdict = default_verdict, id = "mcp.<server>.default"}`
+  (AM-3, §6.1, §12.3); `McpManager`'s constructor is unchanged and holds no
+  policy reference. Because the value is a NO-MATCH fallback (not a
+  specificity-ranked rule), an operator's `[[permissions.rule]]` for `mcp.*`
+  always outranks it.
 
 ### 4.2 `McpTransport`
 
-One transport per `McpClient`. It owns byte-level framing and connection
+One transport **at a time** per `McpClient`: a reconnect replaces the transport
+object inside the *same* client (§5.4). It owns byte-level framing and connection
 lifetime; it knows nothing about MCP methods.
 
 ```cpp
@@ -510,7 +549,7 @@ public:
     // Send one JSON-RPC message. Framing is transport-specific (§2.3).
     virtual Task<void> send(const nlohmann::json& message, CancellationToken) = 0;
 
-    // Exactly one handler; invoked on the transport's own thread, in order.
+    // Exactly one handler; invoked on the daemon io_context, in order (04 §9).
     virtual void setMessageHandler(std::function<void(nlohmann::json)>) = 0;
     virtual void setCloseHandler(std::function<void(McpDisconnectReason)>) = 0;
 
@@ -531,8 +570,9 @@ Implementations:
   **argv-first** through the additive `ProcessService::spawn` seam (§5.1), with
   `cwd = ExecutionEnvironment::resolve(cwd)` (empty ⇒ `root()`), a sanitized
   environment, and its own process group. Reads newline-delimited JSON from the
-  child's stdout on a dedicated reader; writes newline-delimited JSON to its
-  stdin under a write mutex. It is a long-lived child, not a one-shot
+  child's stdout as an async descriptor on the daemon's one `io_context`, and
+  writes newline-delimited JSON to its stdin serialized on that same loop
+  (`04 §9`, `07 §10`). It is a long-lived child, not a one-shot
   `ProcessService::run` (`07 §6.4`), which is why §5.1 is required.
 - **`HttpSseMcpTransport` (deferred).** Streamable HTTP with an SSE response
   stream and `Mcp-Session-Id`; disabled unless `allow_network_servers` is set.
@@ -541,9 +581,10 @@ Implementations:
 
 ### 4.3 `McpClient`
 
-`McpClient` is the MCP session state machine. It owns exactly one transport and
-serializes request/response pairing, notifications, cancellation, and
-reconnect.
+`McpClient` is the MCP session state machine. It owns exactly one transport at a
+time (a reconnect recreates the transport inside the same client; the client
+object is stable for the server's daemon lifetime, §5.4) and serializes
+request/response pairing, notifications, cancellation, and reconnect.
 
 ```cpp
 namespace ymh {
@@ -601,13 +642,30 @@ public:
                                          const McpCallOptions&,
                                          CancellationToken) = 0;
 
-    // Best-effort ping; never changes state or gates work.
-    virtual void ping() = 0;
+    // Per-server in-flight `tools/call` slot (M11, §6.6). The client owns the
+    // counter, bounded by max_inflight_calls_per_server. RAII: releasing on
+    // destruction is the only release path, so no exit path can leak (MCP-F17).
+    class CallSlot {
+    public:
+        CallSlot(CallSlot&&) noexcept;
+        CallSlot& operator=(CallSlot&&) noexcept;
+        ~CallSlot();                                  // releases the slot
+    };
+
+    // nullopt => saturated; McpTool::execute maps it to Error{ResourceExhausted}
+    // (MCP-F12). Never blocks.
+    [[nodiscard]] virtual std::optional<CallSlot> tryAcquireCallSlot() = 0;
+
+    // Liveness probe. Returns true iff the server answered `ping` within
+    // `list_timeout`; false on timeout / transport error (the caller treats a
+    // false as a disconnect, §5.4). It never changes state() and is never on
+    // the tools/call path — a call never waits for a ping ("never gates work").
+    virtual Task<bool> ping() = 0;
 
     // Close the transport and stop the child. Idempotent.
     virtual Task<void> shutdown(std::chrono::milliseconds grace) = 0;
 
-    // Called on the transport thread for every server notification (MCP-F11).
+    // Called on the daemon io_context for every server notification (MCP-F11).
     virtual void setNotificationHandler(
         std::function<void(std::string_view method, const nlohmann::json& params)>,
         std::function<void()> on_tools_changed) = 0;
@@ -616,7 +674,8 @@ public:
 };
 
 // Factory seam for tests: production builds StdioMcpTransport; tests inject a
-// scripted transport or a fake client (07 pattern, §11).
+// scripted transport or a fake client (07 pattern, §11). Called only at startup;
+// a reconnect never constructs a new client (§5.4).
 using McpClientFactory =
     std::function<std::unique_ptr<McpClient>(const McpServerConfig&,
                                              McpConfig&,
@@ -630,9 +689,12 @@ using McpClientFactory =
 Rules:
 
 - **Handshake before use (M5).** No `tools/list` or `tools/call` is issued
-  before `initialize` succeeds and `notifications/initialized` is sent. A call
-  to a non-`Ready` client throws `McpError` (mapped to `Error`, M9) — it never
-  blocks waiting for readiness.
+  before `initialize` succeeds and `notifications/initialized` is sent.
+  **`Ready` is the only callable state.** A call reaching a client in any other
+  state throws `McpError` immediately (mapped to `Error`, M9) — it never blocks
+  waiting for readiness. `Degraded` registers zero tools, so no `McpTool` exists
+  to call; `Failed` keeps its previously-registered tools in the schema
+  (§12.1(o)) but every call fails closed with `Error`.
 - **Request/response pairing.** Every request gets a monotonic `McpRequestId`.
   A response whose `id` is unknown, or that carries neither `result` nor
   `error`, is a `ProtocolViolation` and is dropped (the pending call times out
@@ -646,6 +708,13 @@ Rules:
   entry, and throws `McpErrorCode::Cancelled` (M10).
 - **`status()` is a snapshot** safe to read from any thread; it is never a
   control path.
+- **In-flight slots are client-owned (M11).** The per-server
+  `max_inflight_calls_per_server` counter lives in `McpClient`;
+  `McpTool::execute` acquires via `tryAcquireCallSlot()` and releases by RAII.
+  `ResourceGovernor` has no MCP slot API and is not consulted (§6.6).
+- **`ping()` is a probe, not a gate.** A `false` result is a disconnect; a
+  `true` result after a stable `Ready` window resets the reconnect backoff
+  (§5.4). It is never required before `tools/call` and never changes `state()`.
 
 ### 4.4 Schema translation (both directions)
 
@@ -656,7 +725,8 @@ subset (`07 §3.2`). Translation is a **downcast with an explicit allowlist**:
 ```text
 translate(inputSchema, remote_name) -> Result<ToolSchema, McpErrorCode>
   1. require an object with "type" == "object"; else SchemaIncompatible
-  2. copy "description" (bounded to ToolConfig::tool_description_max_bytes)
+  2. copy "description" (bounded to the injected ToolConfig::
+     tool_description_max_bytes; §4.1)
   3. for each property:
        copy "description", "default", "enum" (scalar only)
        map "type" ∈ {object,string,integer,number,boolean,array}
@@ -716,7 +786,8 @@ callTool(remote, args):
 - **Images/audio/binary are never materialized into `output`** — only a typed
   placeholder. This is a §40 redaction rule as much as a size rule (M12).
 - **Size.** The projection is clamped on the **serialized** payload size below
-  `ToolConfig::tool_result_max_bytes` (`07 §5.2`, X10). Clamping sets
+  the `ToolConfig::tool_result_max_bytes` value injected into `McpManager` and
+  passed to each `McpTool` (§4.1/§4.6; `07 §5.2`, X10). Clamping sets
   `truncated = true`. A response whose raw frame exceeds
   `McpConfig::max_frame_bytes` is rejected as `ResultTooLarge` (M11, MCP-F10)
   rather than buffered unbounded.
@@ -743,13 +814,14 @@ public:
     McpTool(std::shared_ptr<McpClient> client,
             McpServerConfig           server,
             ToolSchema                schema,
-            McpRemoteToolName         remote_name);
+            McpRemoteToolName         remote_name,
+            std::size_t               result_max_bytes);   // injected (§4.1)
 
     ToolSchema schema() const override;                    // cached, immutable
 
-    // Builds McpCallOptions from ctx, calls the client, maps the result.
-    // Observes ctx.cancellation(); acquires an in-flight call slot from the
-    // governor before the call and releases it on every exit path (M10/M11).
+    // Builds McpCallOptions from ctx, acquires the per-server in-flight slot
+    // from client_, calls the client, maps the result. Observes
+    // ctx.cancellation(); the RAII slot releases on every exit path (M10/M11).
     // Never appends, never touches the UI, never decides policy (07 §3.1).
     Task<ToolResult> execute(const ToolContext&,
                              const ToolArguments&) override;
@@ -759,6 +831,7 @@ private:
     McpServerConfig            server_;
     ToolSchema                 schema_;
     McpRemoteToolName          remote_name_;
+    std::size_t                result_max_bytes_{0};  // injected (§4.1)
 };
 
 } // namespace ymh
@@ -773,8 +846,13 @@ Rules:
   general (`07 §3.1` rule). A retry is a new model turn, not an adapter action.
 - `execute` may `ctx.emit(...)` progress live events derived from
   `notifications/progress`; those are best-effort and coalesced (`07 §8.2`).
-- `execute` reads `ctx.governor()` for the per-server in-flight slot and
-  `ctx.cancellation()` for the token; it reads nothing else from the daemon.
+- `execute` acquires its in-flight slot from `client_` (`McpClient::
+  tryAcquireCallSlot()`) and reads `ctx.cancellation()` for the token. It never
+  calls `ctx.governor()`: `ResourceGovernor` has no MCP slot API (§6.6, M11).
+  Saturation (`nullopt`) is `Error{ResourceExhausted}` (MCP-F12). It reads
+  nothing else from the daemon, and it never reads a `ToolConfig` from
+  `ToolContext` (`07 §5.1` has no `config()`): `result_max_bytes_` is injected at
+  construction.
 
 ### 4.7 `McpManager`
 
@@ -787,6 +865,7 @@ namespace ymh {
 class McpManager {
 public:
     McpManager(McpConfig               config,
+               const ToolConfig&       tools,
                ExecutionEnvironment&   environment,
                ResourceGovernor&       governor,
                ToolRegistry&           registry,
@@ -796,8 +875,9 @@ public:
 
     // Start every enabled server within startup_deadline, handshake, list,
     // translate, and install tools via AdapterScope. Non-throwing for
-    // non-required servers (they become Degraded/Failed); throws ConfigError
-    // only for invalid config and McpError for a failed required server (M6).
+    // non-required servers (they become Failed, or Degraded when zero tools
+    // translated); throws ConfigError only for invalid config and McpError for
+    // a failed required server (M6, §5.2).
     Task<void> start(CancellationToken);
 
     // Re-list and atomically replace one server's tool namespace. Called on
@@ -831,14 +911,50 @@ private:
 } // namespace ymh
 ```
 
-**Live status events.** `McpManager` emits a **live-only**
-`payload::McpServerStatusChanged{server, state, tool_count, reason}` on every
-state transition (start, ready, degraded, disconnected, failed, stopped) through
-the `EventBus`, routed like any other live event (`06 §5.5`, `07 §5.1`). It is
-never durable and carries no arguments or results (M12). This is additive to
-`01`'s live-event taxonomy; the projection is `10`'s concern. The daemon may
-also surface it via `host.event` (`05 §5.6`), which is `05`'s decision, not this
-spec's.
+**Live status events.** `McpManager` emits a **live-only** event on every state
+transition (start, ready, degraded, disconnected, failed, stopped). The payload
+has no home in the existing event model, so it is defined here and its required
+cross-spec amendments are recorded as **AM-1** (§12.3):
+
+```cpp
+namespace ymh::payload {
+
+// Live-only; never appended to the session log (00 §8.1 persistence rule).
+// Carries no arguments, results, or secrets (M12).
+struct McpServerStatusChanged {
+    McpServerId     server;
+    McpServerState  state;
+    std::size_t     tool_count{0};
+    std::string     reason;      // bounded, redacted (MCP-F14)
+};
+
+} // namespace ymh::payload
+```
+
+- **Delivery (AM-1).** The event travels on the shared `EventBus` to **global
+  subscribers only** (`00 §8.3`): MCP status is daemon/workspace-scoped, has no
+  `SessionId`, and is therefore **not** routed through a per-session mailbox.
+  The daemon's host-event forwarder projects it to the supervisor as
+  `protocol::HostNotice{kind = HostNoticeKind::McpServerStatus}` (`05 §5.3`,
+  `10 §5.2`). The projection reuses the existing `HostNotice.detail` for a
+  bounded, redacted status token (`id`, `state`, `tool_count`); the full
+  structured status stays in `McpManager::statuses()` and is not carried on the
+  wire, so no new `HostNotice` field is required. Both the live-set entry
+  (`00 §8.1`, `01 §4.1`) and the
+  `HostNoticeKind` (`05 §5.3`/`§2.1`) are **amendments, not existing homes**;
+  see §12.3 (AM-1).
+- **Fallback.** If AM-1 is rejected, `McpManager` emits the existing live
+  `Progress` event with a bounded status token, and `statuses()` remains the
+  only structured snapshot (§12.1(p)).
+- It is never durable and carries no arguments or results (M12); the UI
+  projection is `10`'s concern.
+
+**Constructor injection.** `tools` (the process `ToolConfig`) supplies the
+description/result bounds used by translation and result clamping
+(§4.1/§4.4/§4.5); it is passed to each `McpTool` as `result_max_bytes`.
+`governor` is retained only because `McpClientFactory` (`§4.3`) requires it; v1
+acquires **no** `ResourceGovernor` cap for MCP — server processes are bounded by
+`max_servers` and call slots by the client (§6.6).
 
 ### 4.8 Additive seam: `ToolRegistry::AdapterScope` (requires a 07 errata)
 
@@ -903,10 +1019,10 @@ Rules:
   tools disjoint from local tools and from other adapters (M3).
 - `~AdapterScope` removes its tools and bumps the generation; it is the
   unregister path (§5.3).
-- **This is a `07` amendment**, recorded as OQ-3. If the reviewer rejects it,
-  the conservative fallback is §12.1(ad): tools are discovered once before
-  `freeze()`, `tools/list_changed` is ignored, and a reconnect that changes the
-  set is deferred to a daemon restart.
+- **This is a `07` amendment**, recorded as **AM-0a** (OQ-3) in §12.3. If the
+  reviewer rejects it, the conservative fallback is §12.1(ad): tools are
+  discovered once before `freeze()`, `tools/list_changed` is ignored, and a
+  reconnect that changes the set is deferred to a daemon restart.
 
 ---
 
@@ -970,12 +1086,14 @@ public:
 
 This seam is what makes M15 (process ownership) and §6.3 (timeout/kill)
 implementable without bypassing the daemon's process layer. It is recorded as
-OQ-3 alongside the registry seam.
+**AM-0b** (OQ-3) alongside the registry seam (§12.3).
 
-### 5.2 Startup order (amends `04 §3.3`)
+### 5.2 Startup order (requires the `04 §3.3` amendment AM-2)
 
-`04 §3.3` step 6 builds the in-process runtime. MCP inserts **one** step, and it
-is load-bearing:
+`04 §3.3` step 6 builds the in-process runtime, but as written it contains **no
+`ToolRegistry` construction and no `freeze()`** (the string `ToolRegistry` does
+not appear in `04` at all). MCP therefore requires step 6 to be extended; the
+added lines are marked `+` and the exact diff is recorded as **AM-2** in §12.3.
 
 ```text
  6. build the in-process runtime:
@@ -983,12 +1101,13 @@ is load-bearing:
       bus      := EventBus()                                   (§8.3)
       governor := ResourceGovernor(caps)                       (§9.11)
       sessions := SessionManager(store, bus, env, governor)    (01 §8)
-      registry := ToolRegistry(); register local tools (07 §4.3)
-      mcp      := McpManager(mcp_config, env, governor, registry, bus, log)
++     registry := ToolRegistry(); register local tools         (07 §4.3)
++     mcp      := McpManager(mcp_config, tool_config, env, governor,
++                            registry, bus, log)               (§4.7)
  6a. (async) mcp.start(...)   # bounded by startup_deadline (M6)
       -> openAdapter("mcp.<id>.") per enabled server, handshake, tools/list,
          translate, replace()
- 6b. registry.freeze()        # only after 6a settles; M5/X5
++6b. registry.freeze()        # only after 6a settles; M5/X5
  7. bind + listen ...
 ```
 
@@ -996,12 +1115,31 @@ is load-bearing:
   scopes are opened in 6a, `freeze()` runs in 6b, and a later reconnect or
   `list_changed` uses `replace()` (M14).
 - **`freeze()` waits for MCP discovery, but only up to `startup_deadline`.** A
-  slow/unresponsive server cannot hold the daemon hostage: servers not `Ready`
-  by the deadline are marked `Degraded`/`Failed`, their tools are simply absent,
-  and the daemon proceeds (M6, MCP-F2). This is the MCP instance of the
-  "bootstrap must not block" rule (`11 §12.6`).
-- **A `required` server that fails** fails startup with `StartupRejected`
-  (`04 §2.1`), never a silently degraded daemon.
+  slow/unresponsive server cannot hold the daemon hostage: a server not settled
+  by the deadline is marked `Failed`, a server that settles with zero usable
+  tools is `Degraded`, their tools are simply absent, and the daemon proceeds
+  (M6, MCP-F2). This is the MCP instance of the "bootstrap must not block" rule
+  (`11 §12.6`).
+- **`required` is defined by this table** (evaluated once, at the end of 6a):
+
+  | Outcome by `startup_deadline` | `required = false` | `required = true` |
+  |---|---|---|
+  | handshake done, ≥ 1 tool translated | `Ready` | `Ready` |
+  | handshake done, ≥ 1 tool translated, ≥ 1 skipped | `Ready` (`skipped_tools` non-empty) | `Ready` |
+  | handshake done, 0 tools translated (none advertised, or all skipped) | `Degraded` | `StartupRejected` |
+  | spawn / handshake / `tools/list` failure | `Failed` (terminal) | `StartupRejected` |
+  | not settled by the deadline | `Failed` (terminal) | `StartupRejected` |
+
+  A **skipped** tool is one dropped by translation, filtering, or collision
+  (§4.4, MCP-F4/MCP-F8); it is recorded in `status().skipped_tools` but does
+  **not** demote the server as long as ≥ 1 tool translated. `Degraded` is the
+  **zero-usable-tools** state: it is non-terminal (a later reconnect or
+  `list_changed` can promote it to `Ready`) but it registers no tools, so it is
+  **not callable** (M9). `Failed` is terminal for the daemon lifetime; it keeps
+  its previously-registered tools in the schema for the running turn's sake but
+  every call fails closed with `Error` (§12.1(o)). `StartupRejected` (`04
+  §2.1`) is the only outcome that aborts the daemon; a `required` server that
+  fails is never a silently degraded daemon.
 - MCP never `chdir()`s. The daemon's single `chdir(root)` (`04 §3.3` step 2)
   already happened; a stdio server's cwd is `resolve(cwd)` under that root
   (M8, `§6.2`).
@@ -1046,17 +1184,27 @@ on disconnect:
      state := Failed (terminal until daemon restart); emit live status
   else:
      sleep(base * 2^attempt, capped at max_backoff, ± jitter)   [timer, not a thread]
-     state := Starting; start transport; handshake
-     on success: listTools; AdapterScope::replace (atomic); state := Ready
+     state := Starting; recreate transport in the SAME client; handshake
+     on success: listTools; AdapterScope::replace (atomic);
+                 state := Ready, or Degraded if zero tools translated (§5.2)
      on failure: attempts++; schedule again
 ```
 
 - **In-flight calls never survive a crash.** They fail fast with `Error{Io}`
   (MCP-F7); they are not retried (MCP-§4.6). The model sees the error and
   decides.
+- **Client identity is stable across reconnect.** A reconnect recreates the
+  **transport inside the existing `McpClient`**; it never constructs a new
+  client (`McpClientFactory` is a startup-only seam). Every retained `McpTool`
+  holds a `shared_ptr` to that same client, so a retained tool can never point
+  at a replaced or dead client; `AdapterScope::replace` installs new `McpTool`s
+  that share it. A new client object is built only at daemon startup (or after a
+  config change, which requires a restart; §5.6).
 - **Backoff is timer-driven** on the daemon's loop, never a dedicated thread
-  (`04 §9`). `reconnect_attempts` resets to zero after a stable `Ready` window
-  (one successful `ping`).
+  (`04 §9`). `reconnect_attempt` resets to zero only after the connection has
+  been continuously `Ready` for `reconnect_stable_window` **and** a `ping()` in
+  that window returned `true`; a `false` ping is a disconnect and schedules the
+  next backoff. A `ping()` never gates a `tools/call` (§4.3).
 - **A reconnect that changes the tool set is atomic** (§5.5); a reconnect that
   yields the same set still bumps the generation (the snapshot is rebuilt).
 - **A `Failed` server keeps its tools registered but non-callable** (state
@@ -1073,7 +1221,9 @@ On `notifications/tools/list_changed` the manager runs `refresh(server)`:
    `denied_tools`), skip collisions (`skipped_tools`).
 2. Build the new `McpTool` set.
 3. `AdapterScope::replace(new_tools)` — **atomic**, generation-bumping (M14).
-4. Emit a live status event with the new tool count.
+4. Emit a live status event with the new tool count; if the new set is empty,
+   the server becomes `Degraded` (non-callable, §5.2) and the empty replacement
+   still bumps the generation.
 
 The schema change is observed by the loop only at its next
 `ContextAssembler::tools()` call (`06 §5.2`); a turn already in flight keeps the
@@ -1128,12 +1278,27 @@ Rules:
 - **Secrets live in environment variables, never in `Config`** (`config.hpp`,
   `08 §6.4`). `env`/`header_env` values are `${VAR}` references resolved at
   spawn time; the resolved values are never logged (M12, §6.5).
-- **Project config may add servers but not weaken global ones.** A project
-  layer may override a server's `allowed_tools`/`denied_tools`/`default_verdict`
-  only in the *more restrictive* direction; a project layer cannot set
-  `default_verdict = "allow"` for a server the global layer marked `ask`
-  (defense against a malicious workspace config). This is the MCP instance of
-  the layering rule in `09 §3.3`.
+- **Layering follows `§37` and `09 §3.4` exactly — no MCP-specific merge.**
+  MCP settings are ordinary layered config. On a tie a later layer wins, and
+  `09 §3.4` orders `... Project > Global > Builtin`, so a project layer **can**
+  set `default_verdict = "allow"` where the global layer said `ask` (`09 §3.4`
+  property: "a workspace-local `allow` ... can override a global ... = ask").
+  An earlier draft of this spec claimed the opposite; that claim is
+  **withdrawn** because it contradicts `09 §3.4`/`§3.5`. MCP does not add a
+  stricter merge rule — doing so would change `09`'s precedence fold. The
+  residual malicious-workspace risk is real and is recorded as **OQ-13** for
+  the `09`/`config.hpp` owners; if a cross-layer guard is wanted it must be
+  specified in `09`, and this spec will then reference it.
+- **Per-server default lowering (AM-3).** After the layered `Config` is
+  resolved, the daemon config assembly lowers each enabled
+  `McpServerConfig::default_verdict` into one `PermissionConfig::ToolDefault`
+  (§6.1, §12.3); the fold and the broker are otherwise untouched.
+- **Array semantics are pinned here (replace, not merge).** `§37` does not state
+  array-merge behavior, so MCP pins it: `servers`, `args`, `env`, `header_env`,
+  `allowed_tools`, and `denied_tools` are **replaced wholesale** by a later
+  layer (no concatenation), matching the scalar last-wins rule. Consequence: a
+  project layer that lists `allowed_tools` replaces the global list entirely
+  (see OQ-13).
 - **Config changes require a daemon restart** (`§54 D11`: no hot reload). There
   is no `mcp.reload` RPC in v1 (OQ-7).
 
@@ -1152,10 +1317,15 @@ LLM output → Tool parser → Permission policy → ToolRegistry → McpTool::e
 
 - `09 §3.1`'s `PermissionPolicy::evaluate` classifies a `PermissionRequest`
   whose `tool` is `mcp.<server>.<tool>` and whose `arguments` are the model's
-  arguments verbatim. `McpManager` contributes **one** rule-shaped input per
-  server: `McpServerConfig::default_verdict` (default `Ask`). An operator can
-  write ordinary `[[permissions.rule]]` entries for `mcp.*` globs; the MCP
-  component adds no rule syntax.
+  arguments verbatim. The per-server `McpServerConfig::default_verdict` (default
+  `Ask`) is lowered **once, at config assembly, by the daemon** — not by
+  `McpManager` — into one `PermissionConfig::ToolDefault` (AM-3, §12.3):
+  `prefix = "mcp.<server>."`, `verdict = default_verdict`,
+  `id = "mcp.<server>.default"`. `evaluate` consults `tool_defaults` only at
+  step 3 (NO MATCH) of the `09 §3.4` fold, so an operator's ordinary
+  `[[permissions.rule]]` entry for `mcp.*` **always outranks the server
+  default**; the default is a fallback, never a specificity-ranked rule. The MCP
+  component adds no rule syntax, and `McpManager` never sees the policy.
 - **MCP tools default to `Ask`.** There is no implicit `Allow` for a server
   (`09 §3.3`: "never `allow` by default"). A `trust = "allow"` server is an
   explicit operator decision.
@@ -1214,9 +1384,9 @@ Every MCP operation is bounded; there is no unbounded wait anywhere:
 |---|---|---|
 | transport start / spawn | `handshake_timeout` | `SpawnFailed`/`HandshakeTimeout` |
 | `initialize` | `handshake_timeout` | `HandshakeTimeout` (MCP-F2) |
-| `tools/list` (all pages) | `list_timeout` | `McpError{CallTimeout}` → server `Degraded` |
+| `tools/list` (all pages) | `list_timeout` | `McpError{CallTimeout}` → `Failed` at startup; previous set retained on refresh (§6.3) |
 | `tools/call` | `server.call_timeout` | `notifications/cancelled`; `Error{Timeout}` (MCP-F6) |
-| whole startup (all servers) | `startup_deadline` | unready servers `Degraded`; daemon proceeds (M6) |
+| whole startup (all servers) | `startup_deadline` | unsettled servers `Failed`, zero-tool servers `Degraded`; daemon proceeds (M6) |
 | reconnect backoff | `reconnect_max_backoff` | bounded by attempts |
 | shutdown per server | `shutdown_grace` | SIGKILL the group |
 
@@ -1275,7 +1445,7 @@ should move to `04`'s `ResourceCaps`):
 | concurrent MCP servers | `max_servers` | server stops |
 | in-flight `tools/call` per server | `max_inflight_calls_per_server` | call returns/cancels/times out |
 | inbound frame | `max_frame_bytes` | per frame |
-| projected result | `min(server.max_result_bytes, ToolConfig::tool_result_max_bytes)` | per call |
+| projected result | `min(server.max_result_bytes, tools.tool_result_max_bytes)` | per call |
 | `tools/list` pages | `list_max_pages` | per list |
 | reconnect attempts | `reconnect_max_attempts` | per disconnect |
 
@@ -1284,11 +1454,15 @@ should move to `04`'s `ResourceCaps`):
   daemon services, not per-call tools; charging them to the tool cap would
   starve tools whenever MCP is enabled. They are bounded by `max_servers`
   instead. This is a deliberate split (OQ-4).
-- In-flight call slots are acquired through `McpManager` (not
-  `ResourceGovernor` in v1) and released on **every** exit path — success,
-  `McpError`, cancellation, exception (M11). A slot leak is a defect.
-- Cap exhaustion is a typed error (`Error{ResourceExhausted}`), never a silent
-  queue (`07` E-F8 style).
+- In-flight call slots are owned by each server's `McpClient` (a per-server
+  counter, bounded by `max_inflight_calls_per_server`). `McpTool::execute`
+  acquires one via `McpClient::tryAcquireCallSlot()` and releases it by RAII on
+  **every** exit path — success, `McpError`, cancellation, exception (M11). The
+  `ResourceGovernor` is **not** used: it has no MCP slot API (`04 §8`, `07 §7.1`),
+  and `McpTool` holds no `McpManager` reference. A slot leak is a defect
+  (MCP-F17).
+- Cap exhaustion (`tryAcquireCallSlot()` returns `nullopt`) is a typed error
+  (`Error{ResourceExhausted}`), never a silent queue (`07` E-F8 style, MCP-F12).
 
 ### 6.7 Security model (`§46`)
 
@@ -1307,24 +1481,32 @@ should move to `04`'s `ResourceCaps`):
 
 ## 7. Concurrency and threading
 
-- **One transport thread per `McpClient`**, owned by the client, for
-  reading/writing its transport. Responses and notifications are dispatched on
-  that thread; the pending-request map is guarded by a mutex.
-- **`tools/call` runs on the turn thread** (the `TurnExecutor` worker,
-  `11 §3.2`), not the transport thread. It posts the request and awaits a
-  `Task` resolved by the transport thread. This mirrors the
-  `PermissionBroker::resolve` pattern (`11 §7.2`): never block the io loop.
-- **The transport thread never runs tool logic or permission logic.** It only
+MCP follows the **single-`io_context` model** (`04 §9`: "one main Asio loop per
+daemon … no thread per session, no thread per client"; `07 §10`; `11 §3.2`). It
+adds **no thread per server and no thread per call**.
+
+- **Transports are async streams on the daemon's one loop.** A stdio child's
+  stdout/stdin are registered as async descriptors (`ChildProcessHandle::
+  readStdout`/`writeStdin`, §5.1) on the daemon `io_context`; the HTTP+SSE
+  transport uses the same loop. Reads, writes, and timers are loop-affine; a
+  blocking syscall is offloaded (`07 §10`), never run on the loop thread.
+- **Responses and notifications are dispatched on the daemon loop**, in arrival
+  order; the pending-request map is guarded by a mutex.
+- **`tools/call` runs on the turn executor** (the `TurnExecutor` worker,
+  `11 §3.2`), never on the io loop. It posts the request and awaits a `Task`
+  resolved on the loop. This mirrors the `PermissionBroker::resolve` pattern
+  (`11 §7.2`): never block the io loop.
+- **The transport path never runs tool logic or permission logic.** It only
   frames, pairs, and enqueues.
 - **`McpManager` state** (`slots_`, states, reconnect timers) is owned by the
-  daemon loop; `statuses()` is a snapshot safe for the UI/transport thread to
+  daemon loop; `statuses()` is a snapshot safe for the UI/transport paths to
   read. State transitions are posted to the daemon loop; no lock is held across
   a `replace()`.
 - **`AdapterScope::replace`** is serialized by the registry's own write
   discipline; a concurrent `schemas()` sees a whole generation (M14).
-- **No thread per server beyond its transport thread**, and no thread per
-  call: calls are tasks on the existing turn executor. `max_servers` bounds the
-  transport threads.
+- **No thread per server and no thread per call:** transport I/O is async on the
+  shared loop and calls are tasks on the existing turn executor. `max_servers`
+  bounds concurrent transports, not threads.
 
 ---
 
@@ -1355,22 +1537,27 @@ D23)
 registered before `tools/list`. (`§4.3`, `§5.2`)
 
 **M6 — Bounded startup.** MCP discovery cannot block daemon startup beyond
-`startup_deadline`; an unready server is `Degraded`/`Failed` and the daemon
-starts. A `required` server that fails fails startup. (`04 §3.3`, `11 §12.6`,
-MCP-F2)
+`startup_deadline`. For `required = false`, a server with zero usable tools is
+`Degraded` (or `Failed` on failure) and the daemon starts; for `required = true`,
+any outcome other than `Ready` with ≥ 1 translated tool — including zero usable
+tools (`Degraded`) — is `StartupRejected` (§5.2 table). (`04 §3.3` + AM-2,
+`11 §12.6`, MCP-F2)
 
 **M7 — Permission before execution.** Every MCP call records a
 `PermissionDecision` before `McpTool::execute`; the default verdict for MCP
-tools is never `Allow` unless configured. (`§6.1`, `07` X7, `09 §3.1`)
+tools is never `Allow` unless configured, and it enters the policy only as the
+NO-MATCH fallback AM-3. (`§6.1`, `07` X7, `09 §3.1`, `§3.4` + AM-3)
 
 **M8 — Path-safety honesty.** `resolve()` does not constrain an MCP server's
 filesystem access; stdio servers are rooted by `cwd` and argv-first spawn, and
 MCP tools carry no resolved `path` in `PermissionRequest`. No doc, schema, or
 log claims containment. (`§6.2`, `07` X16)
 
-**M9 — Fail-closed on disconnect.** A call to a non-`Ready` client returns
+**M9 — Fail-closed unless `Ready`.** `Ready` is the only callable state. A call
+reaching any other state (`Degraded`/`Disconnected`/`Failed`/`Stopped`) returns
 `Error` immediately; it never blocks waiting for readiness and never hangs.
-(`§4.3`, `§5.4`, MCP-F7)
+`Degraded` holds zero tools, so no `McpTool` can reach it; `Failed` retains its
+schema entry but fails closed. (`§4.3`, `§5.2`, `§5.4`, MCP-F7)
 
 **M10 — Cancellation propagation.** Cancelling a turn sends
 `notifications/cancelled` for exactly that call and yields `Cancelled`; no
@@ -1438,9 +1625,9 @@ shorthand "`M-F#`" is read as `MCP-F#`; this is recorded as OQ-1.
 | MCP-F# | Failure | Detection | Required behavior |
 |---|---|---|---|
 | **MCP-F1** | Server spawn failure | `spawn()` throws / exec fails | `McpError{SpawnFailed}`; server `Failed`; tools absent or non-callable; `required` ⇒ startup failure (M6) |
-| **MCP-F2** | Handshake timeout | no `initialize` response within `handshake_timeout` | `HandshakeTimeout`; server `Degraded`/`Failed`; daemon proceeds; live status (M6) |
+| **MCP-F2** | Handshake timeout | no `initialize` response within `handshake_timeout` | `HandshakeTimeout`; server `Failed` (terminal); daemon proceeds; live status (M6, §5.2) |
 | **MCP-F3** | Protocol/revision mismatch | echoed `protocolVersion` unsupported / `initialize` error | `HandshakeRejected`; server `Failed`; never proceed on a guess |
-| **MCP-F4** | Schema incompatibility | `translate()` returns `SchemaIncompatible` | skip that tool; record in `skipped_tools`; server `Degraded` (MCP-F4 row, §4.4) |
+| **MCP-F4** | Schema incompatibility | `translate()` returns `SchemaIncompatible` | skip that tool; record in `skipped_tools`; server stays `Ready` while ≥ 1 tool translated, else `Degraded` (§5.2) |
 | **MCP-F5** | Tool call JSON-RPC error | response has `error` | `McpError{RpcError}` → `Error{Internal}`; message redacted (§6.5) |
 | **MCP-F6** | Tool call timeout | `call_timeout` fires | send `notifications/cancelled`; `Error{Timeout}`; slot released (M11) |
 | **MCP-F7** | Server crash mid-call | stdout EOF / stream close | in-flight calls `Error{Io}`; `Disconnected`; backoff reconnect (M9, §5.4) |
@@ -1471,7 +1658,7 @@ it as follows.
 | Tool invocation context | `ToolContext` (unchanged) | `07 §5`, §4.6 |
 | Execution world / capability seam | `ExecutionEnvironment` (stdio spawn root) | `§18`, §5.1/§6.2 |
 | Subprocess provider | `ProcessService` (+ additive `spawn`) | `07 §6.4`, §5.1 |
-| Approvals | `PermissionPolicy` / `PermissionBroker` (unchanged) | `09 §3`, §6.1 |
+| Approvals | `PermissionPolicy` / `PermissionBroker` (+AM-3 NO-MATCH tier) | `09 §3`, §6.1 |
 | Append-only trace | loop appends `ToolCall`/`ToolResult`; adapter never appends | D2, `01 §4.5`, M2 |
 | Plugin lifecycle | static config only; no dynamic server loading | `§7.1`, D11, §6.7 |
 
@@ -1516,7 +1703,8 @@ offline; the live layer is opt-in and gated (`§44`, `§45`).
   - strict loader rejects unknown `[mcp]` keys, bad `McpServerId`, duplicate
     ids, missing `command`, `HttpSse` without `allow_network_servers`,
     `max_result_bytes > tool_result_max_bytes` (MCP-F14).
-  - project-layer override may tighten but not loosen `default_verdict` (§5.6).
+  - project-layer override follows `09 §3.4` (later layer wins); array values
+    replace wholesale, not concatenated (§5.6).
   - `${ENV}` resolution; a missing variable is a startup error; values never
     logged (M12).
 - **Client state machine (scripted transport)**
@@ -1582,8 +1770,9 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
   for a fixture server (ordering, translated names, translated schemas) (M13).
 - **Event stream.** Golden `ToolCall`/`PermissionDecision`/`ToolResult` for a
   scripted MCP turn, including `Error` and `Cancelled` fixtures.
-- **Status transitions.** Golden sequence of `McpServerStatusChanged` live
-  events for a start → ready → disconnect → reconnect scenario.
+- **Status transitions.** Golden sequence of `payload::McpServerStatusChanged`
+  live events and their `HostNoticeKind::McpServerStatus` projections (AM-1)
+  for a start → ready → disconnect → reconnect scenario.
 
 ### 11.4 Replay tests
 
@@ -1680,7 +1869,8 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
 - **(h) Images/audio/binary become typed placeholders; base64 is never
   materialized or logged** (`§4.5`, `§6.5`, M12).
 - **(i) MCP tools default to `Ask`.** There is no implicit allow; `destructive`
-  is a hint only; the existing policy/broker flow is unchanged (`§6.1`, M7).
+  is a hint only; the existing policy/broker flow is unchanged apart from the
+  additive NO-MATCH default tier AM-3 (`§6.1`, M7, §12.3).
 - **(j) Path containment is not claimed for MCP servers.** `resolve()` roots the
   spawn cwd only; the server's own I/O is outside `ymh`'s confinement. This is
   documented, not hidden (`§6.2`, M8, `07` X16 style).
@@ -1698,16 +1888,21 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
 - **(o) A `Failed` server keeps its tools registered but non-callable** so a
   running turn's schema does not change under it; calls return `Error`
   (`§5.4`, OQ-6).
-- **(p) MCP status is a live-only event.** No durable MCP event; replay needs no
-  server (`§4.7`, `§3.3`, M2).
+- **(p) MCP status is live-only and daemon-scoped.** The payload
+  `payload::McpServerStatusChanged` is delivered as a live event and projected
+  as `HostNoticeKind::McpServerStatus` (AM-1); it is never durable, so replay
+  needs no server (`§4.7`, `§3.3`, M2). Fallback if AM-1 is rejected: emit the
+  existing live `Progress` event with a bounded status token and keep
+  `statuses()` as the only structured snapshot.
 - **(q) Configuration is layered and strict.** `[mcp]` is part of the known
-  schema; project layers may only tighten; secrets are env references, never
-  logged (`§5.6`, M12, `config.hpp`).
+  schema; layering follows `§37`/`09 §3.4` (later layer wins; OQ-13); arrays
+  replace wholesale; secrets are env references, never logged (`§5.6`, M12,
+  `config.hpp`).
 - **(r) There is no hot reload and no dynamic server loading.** Config changes
   require a daemon restart (`§54 D11`, §6.7, OQ-7).
 - **(s) Two additive `07` seams are required:** `ToolRegistry::AdapterScope`
   (`§4.8`) and `ProcessService::spawn` (`§5.1`). Both are additive; both are
-  OQ-3.
+  OQ-3 (AM-0a/AM-0b in §12.3).
 - **(t) The `M-F#` namespace is taken by `11 §15`; this spec uses `MCP-F#`.**
   Invariants use `M1…` (free) (`§9.2`).
 - **(u) `initialize.instructions` is stored in status but not injected into the
@@ -1718,8 +1913,9 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
   vocabulary (`§4.1`).
 - **(w) Server-initiated requests are answered `MethodNotFound`.** v1 advertises
   no client capabilities; an MCP server cannot drive the model (`§4.3`, §6.1).
-- **(x) One transport thread per client; calls run on the turn executor.**
-  Never block the daemon io loop (`§7`, `11 §3.2`, `11 §7.2` pattern).
+- **(x) MCP adds no thread.** Transports are async on the daemon's single
+  `io_context`; calls run on the turn executor. Never block the daemon io loop
+  (`§7`, `04 §9`, `07 §10`, `11 §3.2`, `11 §7.2` pattern).
 - **(y) MCP results are clamped on the serialized payload size**, so an MCP
   result can never raise `PayloadTooLarge` (`§4.5`, `07` X10, M11).
 - **(z) `ymh run` (headless) gets the same `McpManager`** as the daemon path;
@@ -1728,18 +1924,22 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
   previous namespace is retained (`§6.3`, M14).
 - **(ab) Backoff is timer-driven on the daemon loop, never a thread per
   reconnect** (`§5.4`, `04 §9`).
-- **(ac) Reconnect attempts reset after a stable `Ready` window** (one
-  successful `ping`) (`§5.4`).
+- **(ac) Reconnect attempts reset after a stable `Ready` window**
+  (`reconnect_stable_window`) **and** a successful `ping()`; a `false` ping is a
+  disconnect and does not reset (`§5.4`, §4.3).
 - **(ad) Conservative fallback if either `07` amendment is rejected:**
   discovery happens once before `freeze()`, `tools/list_changed` is ignored, and
   a reconnect that changes the set is deferred to a daemon restart. This keeps
   v1 implementable without touching `07`, at the cost of runtime tool-set
   changes (OQ-3).
-- **(ae) Project config may only tighten MCP policy**, mirroring the `09 §3.3`
-  layering discipline, so a malicious workspace cannot auto-approve its own
-  servers (`§5.6`).
+- **(ae) MCP config layering follows `§37`/`09 §3.4` exactly; there is no
+  MCP-specific tightening rule.** A project layer can override a global
+  `default_verdict` (09 §3.4); the malicious-workspace risk is OQ-13, not a
+  silent divergence (`§5.6`).
 
 ### 12.2 Open questions
+
+The required cross-spec amendments are enumerated separately in **§12.3**.
 
 - **OQ-1 — Failure-mode namespace.** `11 §15` already uses `M-F1`–`M-F12`. This
   spec uses `MCP-F#` to avoid the collision; the task brief's `M-F#` shorthand
@@ -1748,10 +1948,10 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
   HTTP+SSE; `Mcp-Session-Id` handling; OAuth/mTLS. v1 ships stdio only and
   rejects `http_sse` unless `allow_network_servers`. The exact HTTP contract is
   deferred.
-- **OQ-3 — The two additive `07` seams.** `ToolRegistry::AdapterScope` (§4.8)
-  and `ProcessService::spawn` (§5.1) are required for the design as written.
-  They are additive (no existing signature changes) but amend verified `07`.
-  Approve, or apply fallback (ad).
+- **OQ-3 — The two additive `07` seams (AM-0a/AM-0b).** `ToolRegistry::
+  AdapterScope` (§4.8) and `ProcessService::spawn` (§5.1) are required for the
+  design as written. They are additive (no existing signature changes) but amend
+  verified `07`. Approve, or apply fallback (ad). See §12.3.
 - **OQ-4 — Where do MCP caps live?** Proposed in `McpConfig` (`max_servers`,
   `max_inflight_calls_per_server`) rather than `04`'s `ResourceCaps`, because
   they are not tool subprocesses. Confirm with `04`/`07` owners.
@@ -1783,6 +1983,92 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
 - **OQ-12 — Lazy per-session server start.** v1 starts all enabled servers at
   daemon startup (M4). A daemon hosting many workspaces pays `max_servers`
   processes each; lazy start/stop is a future optimization, deferred.
+- **OQ-13 — Cross-layer MCP policy tightening.** §5.6 follows `09 §3.4`
+  (Project > Global), so a project config can weaken a global MCP
+  `default_verdict` (e.g. set `allow` over a global `ask`). An earlier draft
+  claimed MCP forbids this; that claim is withdrawn because it contradicts
+  `09 §3.4`/`§3.5`. Decide with the `09`/`config.hpp` owners whether a
+  cross-layer guard is wanted; if so it belongs in `09`, not here. The same
+  question applies to array replace-vs-concatenate semantics (§5.6).
+
+### 12.3 Amendment ledger (required cross-spec changes)
+
+This spec cannot be implemented as written without the following changes to
+already-verified specs. None may be silently assumed: each is an explicit gate
+item for the next re-verification pass. (OQ-3 covers AM-0a/AM-0b.)
+
+**AM-0a — `07` `ToolRegistry::AdapterScope` (§4.8).** Additive: a new nested
+`AdapterScope` type plus `openAdapter()` on `ToolRegistry` (`07 §4.1`). No
+existing signature changes; `add`/`remove` stay frozen after `freeze()`.
+Fallback if rejected: §12.1(ad).
+
+**AM-0b — `07` streaming `ProcessService::spawn` (§5.1).** Additive: a new
+`spawn()` method plus `ChildProcessHandle` (`07 §6.4`). No existing signature
+changes. Fallback if rejected: §12.1(ad) (no long-lived stdio child ⇒ no stdio
+transport).
+
+**AM-1 — live MCP status + supervisor projection (§4.7).** Four coordinated
+edits; the spec's pinned choice is to add a new live event *and* a host notice:
+  - `00 §8.1` — add `McpServerStatusChanged` to the **live** set. `00 §8.1`'s
+    existing errata explicitly covers only the **durable** set (its lines
+    592–597); the live set has no errata, so this amendment must also state the
+    rule for extending the live set (mirroring the durable errata).
+  - `01 §4.1`/`§4.3` — add the live event to the live-event list and pin its
+    `EventType`/routing. **Routing caveat:** MCP status is daemon/workspace-
+    scoped and has no `SessionId`, so it must be delivered to **global
+    subscribers only**, not through a per-session mailbox (`00 §8.3`); the
+    amendment must say so explicitly (a session-less live event, or a
+    host-scoped live-event variant).
+  - `05 §5.3` + `§2.1` — add `HostNoticeKind::McpServerStatus` and its wire
+    string (`"mcp_server_status"`). `05 §2.1`'s `wire_name()`/`parse_*()` are
+    total-and-rejecting, so the enum and the wire-string table must be extended
+    together or the string is rejected as `InvalidParams`. No new `HostNotice`
+    field is needed: the notice reuses `HostNotice.detail` for a bounded status
+    token (§4.7).
+  - `10 §5.2` — `UiEventAdapter::onHostNotice` must handle the new kind and
+    project it into the status model (no signature change; a new branch).
+  Fallback if rejected: §12.1(p) — reuse the existing live `Progress` event with
+  a bounded status token, and drop the new `HostNoticeKind` (status is then
+  readable only via `McpManager::statuses()`).
+
+**AM-2 — `04 §3.3` startup order (§5.2).** `04 §3.3` step 6 has **no**
+`ToolRegistry` construction and **no** `freeze()` (the string `ToolRegistry`
+does not appear in `04` at all). Add: construct `ToolRegistry`, register local
+tools (`07 §4.3`), construct `McpManager`, run async discovery (6a), and
+`freeze()` after discovery settles (6b). Without this amendment MCP cannot
+register a single tool and the component is unimplementable as written.
+
+**AM-3 — `09 §3.3`/`§3.4` NO-MATCH default tier for per-server verdicts
+(§6.1).** Additive. `PermissionConfig` (`09 §3.3`) gains one field:
+  - `std::vector<ToolDefault> tool_defaults;` where
+    `struct ToolDefault { std::string prefix; PolicyVerdict verdict;
+    std::string id; };` — `prefix` is a **literal** tool-name prefix (e.g.
+    `"mcp.github."`), `verdict` is `Allow | Ask | Deny`, `id` is provenance
+    (e.g. `"mcp.github.default"`).
+  - `09 §3.4` step 3 (NO MATCH) becomes: if some `tool_defaults.prefix` is a
+    literal prefix of `request.tool`, return the verdict of the **longest**
+    such prefix; otherwise return `config.default_verdict`.
+  **Why not a synthesized `PolicyRule`** with `tool = "mcp.<server>.*"`: the
+  `§3.4` fold is **specificity-first**, so that glob would outrank an operator's
+  broader `mcp.*` rule and could never be relaxed — violating "applies when no
+  explicit rule matches". A dedicated NO-MATCH tier keeps `evaluate` pure and
+  total and leaves the rule fold and `PermissionPolicy`'s interface untouched;
+  only `PermissionConfig` gains the field and §3.4 gains the step.
+  Fallback if rejected: drop `McpServerConfig::default_verdict` and require
+  explicit `[[permissions.rule]]` entries for `mcp.*`.
+
+**Not amended (deliberately).** `00 §8.3`'s per-session mailbox contract and
+`01`'s durable `EventType` are **not** changed: no durable MCP event exists and
+MCP status is not session-scoped. `09`'s precedence fold is **not** changed
+(§5.6, OQ-13) beyond the additive NO-MATCH default tier AM-3 above; the
+rule-match fold and its total order are untouched. `07 §5.1`'s `ToolContext` is
+**not** changed: no `config()` accessor is added; bounds are injected into
+`McpManager`/`McpTool` instead (§4.1/§4.6).
+
+**Threading — reconciled, not amended.** §7 is aligned with the single
+`io_context` model (`04 §9`: "no thread per client"; `07 §10`; `11 §3.2`): MCP
+transports are async streams on the daemon's one loop and add no thread per
+server or per call. No amendment to `04`/`07`/`11` is required.
 
 ---
 
@@ -1799,21 +2085,23 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
   (testing), §45 (Fake LLM), §46 (security model), §49 (source tree), §50 (MVP),
   §51–§53 (phases), §54 (D1–D23, F1–F12), §55 (dsh comparison), §57
   (implementation order), §58 (milestones).
-- `01-session.md` §2.1 (identifiers), §4.5 (`ToolCall`/`ToolResult`,
-  `ToolOutcome`, `PermissionDecisionKind`), §6.3 (`deriveMessages`), I4/I11/I12
-  (append/pairing invariants), §13.2 (S-failure modes), §15 (test plan).
+- `01-session.md` §2.1 (identifiers), §4.1 (live vs. durable event split), §4.5
+  (`ToolCall`/`ToolResult`, `ToolOutcome`, `PermissionDecisionKind`), §5
+  (`EventBus` routing), §6.3 (`deriveMessages`), I4/I11/I12 (append/pairing
+  invariants), §13.2 (S-failure modes), §15 (test plan).
 - `02-persistence.md` §4.1 (`max_payload_bytes`), §4.4 (`append`), §6.2 (chunk
   coalescing).
 - `03-workspace-registry.md` (workspace identity and the canonical root the
   environment is built from).
 - `04-workspace-host-daemon.md` §2.1 (`ResourceCaps`, `HostState`,
-  `HostExitCode`), §3.2 (`setsid`), §3.3 (startup order), §3.5 (shutdown), §3.6
+  `HostExitCode`), §3.2 (`setsid`), §3.3 (startup order; AM-2), §3.5 (shutdown), §3.6
   (signals), §3.7 (what the daemon hosts), §4.1 (`HostConfig`), §4.4 (state
   machine), §8 (`ResourceGovernor`), §9 (concurrency), §10 (invariants), §11
   (failure modes).
-- `05-transport.md` §2.2 (`RpcCode`/`AppCode`, `data.kind`), §3.1 (socket
-  convention), §3.3 (length-prefixed framing — deliberately **not** reused),
-  §4.1 (`host.hello`), §5.6 (`host.event`), §7.6 (`permission.request`).
+- `05-transport.md` §2.1 (wire names; total-and-rejecting `parse_*`), §2.2
+  (`RpcCode`/`AppCode`, `data.kind`), §3.1 (socket convention), §3.3
+  (length-prefixed framing — deliberately **not** reused), §4.1 (`host.hello`),
+  §5.3 (`HostNoticeKind`/`host.event`; AM-1), §7.6 (`permission.request`).
 - `06-agent-loop.md` §1.4 (seam ownership), §3.5 (cancellation), §5.1
   (turn/step cycle), §5.2 (`ContextAssembler::tools`), §5.5 (tool pipeline),
   §5.6 (terminal events), §7 (subagents), §10 (invariants), §11 (failure modes).
@@ -1829,10 +2117,12 @@ Two fakes, mirroring `§45`'s Fake LLM discipline:
   §6.4 (secret handling).
 - `09-permissions.md` §2.2 (verdict vs. kind), §2.3 (scope model), §3.1
   (`PermissionPolicy`), §3.2 (`PermissionRequest`), §3.3 (rule model and
-  config), §3.7 (`PermissionHandle`), §4.1 (decision flow), §5 (background
-  policy), §6.1 (mandatory chain), §6.2 (redaction), §8 (invariants).
-- `10-supervisor-tui.md` §2.3 (entry), §4.1 (browse), §5.3 (idempotent apply),
-  §11.1 (permission re-broadcast) — MCP status projection is its concern.
+  config; AM-3), §3.4 (precedence fold; AM-3), §3.7 (`PermissionHandle`), §4.1
+  (decision flow), §5 (background policy), §6.1 (mandatory chain), §6.2
+  (redaction), §8 (invariants).
+- `10-supervisor-tui.md` §2.3 (entry), §4.1 (browse), §5.2 (`UiEventAdapter::
+  onHostNotice`; AM-1), §5.3 (idempotent apply), §11.1 (permission
+  re-broadcast) — MCP status projection is its concern.
 - `11-m2-errata.md` §2.2 (`TransportServer`), §3.2 (`TurnExecutor`), §3.3 (child
   status), §7.2 (`PermissionBroker`, `ClockReader`), §7.3 (frozen permission
   rules), §11.2 (destruction order), §14 (E1–E21), §15 (M-F1–M-F12).

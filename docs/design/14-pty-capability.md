@@ -40,8 +40,10 @@ terminal tool (this spec, registered in ToolRegistry 07 §4)
 PtySession (this spec)
    │  master fd  ──► PtyPump on the daemon's io_context (04 §3.4, 11 §3.2)
    │  slave fd   ──► child process group (setpgid + TIOCSCTTY)
-   │  output     ──► PtyOutputRing (bounded) + PtyEventSink (live TerminalOutput)
-   │  exit       ──► pidfd / specific-pid waitpid (E8; no global SIGCHLD reaper)
+   │  output     ──► PtyOutputRing (bounded) + PtyEventSink (in-process live
+   │                  TerminalOutput; not on the M2 wire, E-P1)
+   │  exit       ──► pidfd readiness / non-blocking specific-pid tryReap
+   │                  (E8; no global SIGCHLD reaper, no loop-blocking waitpid)
    ▼
 ToolResult  ──► loop appends payload::ToolResult (01 §4.5, 06 §5.1)
 ```
@@ -55,21 +57,21 @@ or sandbox provider later (§18, `§4.4`, `D6`).
 ### 1.2 Owned responsibilities
 
 - The concrete `PtySession` lifecycle: spawn, `write`, `resize`, `terminate`,
-  output consumption, exit status (07 §6.5 forward-declared the seam; this spec
-  owns its realization).
+  `kill`, output consumption, exit status (07 §6.5 forward-declared the seam;
+  this spec owns its realization).
 - `PtyService`: the per-daemon factory and the daemon-local `PtySession`
   registry (`find`/`list`/`closeSession`).
 - `PtyRequest` spawn options (argv, env, cwd, initial size, TERM) and the spawn
   sequence (`openpty`/`forkpty`, `setsid`, `TIOCSCTTY`, `O_NOCTTY`, fd hygiene).
 - The async I/O model: the `PtyPump` on the daemon's single `io_context`, the
   `Executor` marshalling seam, and the thread-affinity rules.
-- The bounded PTY output ring and the live `TerminalOutput` emission seam
-  (`PtyEventSink`), including coalescing and truncation.
+- The bounded per-PTY output ring and the **in-process** live `TerminalOutput`
+  emission seam (`PtyEventSink`), including coalescing and truncation.
 - PTY cap accounting: `PtySlot` held for the **PTY lifetime** (not the tool
   call), and the per-daemon/per-session caps (F8, §9.11).
-- PTY process-tree ownership: process group, `pidfd`/specific-pid reaping,
-  teardown on `terminate`, session end, and daemon shutdown (the 07 half of
-  `04` OQ-6; `11` E8).
+- PTY process-tree ownership: process group, `pidfd`/non-blocking specific-pid
+  reaping, teardown on `terminate`, session end, and daemon shutdown (the 07
+  half of `04` OQ-6; `11` E8).
 - The model-facing `terminal` tool schema and its action state machine.
 - PTY failure modes (`P-F1…`) and the PTY test plan.
 
@@ -78,8 +80,9 @@ or sandbox provider later (§18, `§4.4`, `D6`).
 - **`resolve()` and rooting.** Owned by 07 §6.2 / `§18`; this spec calls
   `resolve()` and never re-implements containment.
 - **`OutputSink`/`OutputRing`, live coalescing, `ToolConfig`.** Owned by 07
-  §5.2/§5.5/§8.2; this spec reuses the sink discipline and adds only the PTY
-  ring (which is a distinct buffer, §5.4).
+  §5.2/§5.5/§8.2; this spec reuses the `OutputRing` storage discipline (and its
+  `sanitize_utf8` boundary) but defines a distinct `PtyOutputRing` with a FIFO
+  read cursor (§5.2, E-P4); no 07 type amendment is needed.
 - **`ResourceGovernor` and `ResourceCaps`.** Owned by 04 §8/§2.1; this spec
   consumes `tryAcquirePty`/`releasePty` and never re-implements a cap.
 - **Daemon lifecycle, `io_context` ownership, signal policy, destruction
@@ -88,39 +91,57 @@ or sandbox provider later (§18, `§4.4`, `D6`).
   supplies the `terminal` tool's `destructive` hint and the argument projection.
 - **Tool registry and `ToolContext`.** Owned by 07 §3/§5; this spec registers
   one tool and consumes the context.
-- **UI projection of terminal output (ANSI rendering).** Owned by 10
-  (`§20.10`, `TerminalLayer` `§20.19`); this spec emits bounded live events and
-  a bounded durable result, never `UiEvent`s.
-- **Transport / RPC surface.** Owned by 05; `TerminalOutput` reaches the
-  supervisor as a live event, not a new RPC.
+- **UI projection of terminal output.** Owned by 10 (`§8.2` renderers, `§20.10`
+  tool-output streaming); this spec emits bounded live events and a bounded
+  durable result, never `UiEvent`s. v1 renders **sanitized text** (control/ANSI
+  sequences escaped or stripped) in the tool-output view; a terminal emulator is
+  deferred (decision (p), OQ-P8). `TerminalLayer` (10 §8.3, arch `§20.19`) is
+  **not** an emulator and is not the PTY renderer.
+- **Transport / RPC surface.** Owned by 05; this spec adds **no** RPC and **no**
+  wire frame. `TerminalOutput` is an **in-process** live event only: 05 §5.1
+  carries live events **not** as `Event` frames, and `event.subscribe` streams
+  committed durable events only (05 §6.1). In M2 (separate supervisor process)
+  there is no live wire path for PTY output; the supervisor observes terminal
+  state through the **durable bounded `ToolResult` snapshots** returned by
+  `read`/`close` (§8.3, E-P1). Cross-process live streaming is deferred (OQ-P8).
 
 ### 1.4 Seam ownership relative to 01/04/05/06/07/09/10/11
 
 | Concern | Owner | This spec's role |
 |---|---|---|
 | `ExecutionEnvironment::pty()` | 07 §6.1 (`§18`) | realizes `LocalPtyService` behind it |
-| `PtyService`/`PtySession` seam | 07 §6.5 | pins the concrete lifecycle/additive methods |
-| `OutputSink`/`OutputRing`, UTF-8 boundary | 07 §5.2/§8.2 | adds `PtyOutputRing` + live emission |
-| `ResourceGovernor::tryAcquirePty` | 04 §8 | acquires at `open`, releases at PTY close |
-| `io_context` / `Executor` post | 04 §3.4, 11 §3.2 (E2/E6) | pump is loop-affine; tools marshal via `post()` |
-| SIGCHLD / one reaper | 11 §3.3 (E8), `signal_policy.hpp` | specific-pid reap only; no global sweep |
-| Graceful shutdown step 4 | 04 §3.5 | supplies PTY terminate/reap mechanics |
-| `TerminalOutput` live event | 00 §8.1, 05, 10 | emits it via `PtyEventSink` |
+| `PtyService`/`PtySession` seam | 07 §6.5 | pins the concrete lifecycle + additive `find`/`list`/`closeSession`/`closeAll`/`available` (E-P10) |
+| `OutputSink`/`OutputRing`, UTF-8 boundary | 07 §5.2/§8.2 | adds a distinct per-PTY `PtyOutputRing` (shared storage discipline + `sanitize_utf8`, no 07 type change) + in-process live emission (E-P4) |
+| `ResourceGovernor::tryAcquirePty` | 04 §8 | acquires at `open`, releases at PTY `Closed` (E-P6) |
+| `io_context` / `Executor` post | 04 §3.4, 11 §3.2 (E2/E6); `Executor` shape pinned here (E-P3) | pump is loop-affine; tools marshal via `post()` |
+| SIGCHLD / one reaper | 11 §3.3 (E8), `signal_policy.hpp` | non-blocking specific-pid `tryReap` **via the process layer** (E-P5); no global sweep, no loop-blocking `waitpid` |
+| Graceful shutdown step 4 | 04 §3.5, 11 §11.3 | terminate+reap **before** `TransportServer::stop()` (E-P2) |
+| `TerminalOutput` live event | 00 §8.1; **in-process only** (05 §5.1, E-P1) | emits it via `PtyEventSink`; never on the M2 wire |
 | Permission gating | 09 | `terminal` is `ASK`; `ReadOnly` denies |
 | `payload::ToolResult` append | 01 §4.5, 06 | returns a result; never appends |
-| Destruction ordering | 11 §11.2 (E18) | PTY sessions outlive tools, die before store close |
+| Destruction ordering | 11 §11.2 (E18) | PTY sessions outlive tools; reaped at coordinator step 4b before stop/store close (E-P2) |
 
 ### 1.5 Relationship to spec 07
 
 07 §6.5 pins the seam and states the Phase-2 schedule. This spec is the
-realization of that seam and **amends nothing in 07's pinned signatures**:
-`PtySession`'s four §17 methods and `PtyService::open` keep their exact shapes.
-All additions in this spec are **additive** (the same pattern 06 used for the
-`§10.1` handle and 11 used for post-freeze amendments) and are marked as such.
-One recorded interface delta is required at the environment wiring level
-(§4.5): `LocalEnvironment` must accept an injected `PtyService*` so the daemon
-can supply a loop-aware `LocalPtyService` instead of the v1
-`UnavailablePtyService`.
+realization of that seam. `PtySession`'s four §17 methods and `PtyService::open`
+keep their exact shapes; every method this spec adds to `PtyService`
+(`find`/`list`/`closeSession`/`closeAll`/`available`) is **additive**,
+following the same pattern 06 used for the `§10.1` handle and 11 used for
+post-freeze amendments.
+
+Two additive deltas nevertheless touch 07's frozen text and are recorded as
+errata (not hand-waved as "no signature change"):
+
+- **`LocalEnvironment` ctor (07 §6.1, E-P7).** The ctor gains a defaulted
+  `PtyService* pty = nullptr` parameter so the daemon can inject a loop-aware
+  `LocalPtyService` instead of the internal `UnavailablePtyService`. It is
+  source-compatible (defaulted) but it **is** a change to a 07-pinned signature;
+  §4.5 and P16 are worded accordingly.
+- **`ToolConfig::pty_write_queue_cap` (07 §5.5, E-P8).** The write-queue bound
+  gains an owner in the pinned `ToolConfig`.
+
+`PtySession`'s four methods and `PtyService::open` remain byte-identical (P16).
 
 ---
 
@@ -145,8 +166,8 @@ struct PtySessionId {
 // Terminal lifecycle. `Exited` still retains buffered output; `Closed` is
 // terminal (master fd closed, child reaped).
 enum class PtyState : std::uint8_t {
-    Starting,   // master created; child not yet confirmed as controlling proc
-    Running,    // slave is the child's controlling terminal
+    Starting,   // forked; awaiting the child's status-pipe exec handshake
+    Running,    // child confirmed the slave as its controlling terminal
     Exited,     // child reaped; ring may still hold unread output
     Closed,     // master closed; id no longer resolvable
 };
@@ -181,9 +202,15 @@ Rules:
 ### 2.2 PTY error taxonomy
 
 Every fallible PTY operation surfaces a code so callers, the tool layer, and
-tests share names. `PtyError` derives from the execution error family so the
-registry maps it to `ToolResult{outcome = Error, error = to_string(code)}` via
-the existing 07 §3.1 path (E-F16).
+tests share names. `PtyError` is **not** a `ToolError` and cannot be: `ToolError`
+is `final` (`include/ymh/execution/errors.hpp`), and the registry catches
+`const ToolError&` before `const std::exception&`
+(`src/tools/tool_registry.cpp`). A bare `PtyError : std::runtime_error` would
+therefore fall through to the `std::exception` arm and be reported as `Internal`,
+losing the `PtyErrorCode`. The `terminal` tool is the translation boundary: it
+catches `PtyError` and throws `ToolError{to_tool_error_code(code),
+std::string(to_string(code))}`, after which the existing 07 §3.1 / E-F16
+registry path yields `ToolResult{outcome = Error, error = to_string(mapped)}`.
 
 ```cpp
 namespace ymh {
@@ -207,6 +234,11 @@ public:
 
 [[nodiscard]] std::string_view to_string(PtyErrorCode) noexcept;
 
+// PTY → tool-layer code translation, called by the `terminal` tool's catch
+// block so a known `PtyErrorCode` never degrades to `ToolError{Internal}`.
+// Total over `PtyErrorCode` (07 §2.2 vocabulary; E-F16 path stays meaningful).
+[[nodiscard]] ToolErrorCode to_tool_error_code(PtyErrorCode) noexcept;
+
 } // namespace ymh
 ```
 
@@ -222,6 +254,26 @@ Rules:
   (`P-F5`). Only spawn failure, closed master, and cap exhaustion are errors.
 - **No `errno` crosses the seam.** The concrete message is short and redacted;
   the code is what callers switch on (`11` E12 spirit).
+- **Tool-layer translation is pinned and total.** The `terminal` tool catches
+  `PtyError` in its `execute` and throws `ToolError`; the mapping is fixed so no
+  known `PtyErrorCode` is lost to `Internal`:
+
+  | `PtyErrorCode` | `ToolErrorCode` | Note |
+  |---|---|---|
+  | `SpawnFailed` | `Io` | `openpty`/`fork`/`execve` failure (P-F1) |
+  | `NotFound` | `NotFound` | unknown/foreign/`Closed` id (P-F9) |
+  | `Closed` | `Io` | read/write on a dead channel (P-F10) |
+  | `Eio` | `Io` | terminal hangup (P-F2) |
+  | `WouldBlock` | `ResourceExhausted` | bounded write queue (P-F4) |
+  | `CapExceeded` | `ResourceExhausted` | PTY cap exhausted (P-F6, F8) |
+  | `ResizeFailed` | `Io` | unexpected live-session resize failure |
+  | `Internal` | `Internal` | invariant violation |
+
+- **The original code survives in the message.** `to_tool_error_code` supplies
+  the durable `ToolErrorCode`; the `PtyErrorCode`'s `to_string` is passed as the
+  `ToolError` message for logs/tests. The durable `error` string is the mapped
+  `ToolErrorCode` (07 §2.2). `WouldBlock` may instead be surfaced directly as
+  the bounded P-F4 `ToolResult`; the mapping is the fallback.
 
 ---
 
@@ -240,6 +292,8 @@ struct PtyRead {
     std::string data;       // valid UTF-8; ANSI/control bytes preserved
     bool        truncated = false;   // ring evicted older bytes since last read
     bool        eof       = false;   // child exited and ring drained
+    bool        cancelled = false;   // wait cancelled: `data` empty, nothing
+                                     // consumed, session untouched (F9, §5.3)
 };
 
 class PtySession {
@@ -253,6 +307,11 @@ public:
     virtual void                terminate() = 0;   // SIGHUP -> grace -> SIGKILL
 
     // ---- additive (this spec) ---------------------------------------------
+    // Immediate force teardown: close master -> kill(-pgid, SIGKILL) -> reap,
+    // with no SIGHUP grace wait. Backs the `terminal` tool's close with
+    // `signal = "kill"` (§3.5, §8.2). Additive to the §17 seam (E-P12).
+    virtual void         kill() = 0;
+
     virtual PtySessionId id() const noexcept = 0;
     virtual SessionId    session() const noexcept = 0;
     virtual int          pid() const noexcept = 0;       // diagnostic only
@@ -261,13 +320,19 @@ public:
     // Bounded, optionally-waiting pull from the session's output ring. Blocks
     // the calling tool thread (a TurnExecutor worker), never the daemon loop.
     // Consumes what it returns. `eof` is set once the child has exited and the
-    // ring is drained.
+    // ring is drained. `cancel` is the tool's token: if it fires before any
+    // byte is consumed, returns `PtyRead{cancelled = true}` with `data` empty,
+    // nothing consumed, and the session untouched (§5.3, F9).
     virtual Task<PtyRead> read(std::size_t max_bytes,
-                               std::chrono::milliseconds wait) = 0;
+                               std::chrono::milliseconds wait,
+                               CancellationToken cancel) = 0;
 
-    // Blocking exit wait, bounded by `timeout` (0 => wait until exit). Returns
-    // the cached status once the child has been reaped. Used by `close`/tests.
-    virtual Task<PtyExit> wait(std::chrono::milliseconds timeout) = 0;
+    // Blocking exit wait, bounded by `timeout` (0 => wait until exit) and by
+    // `cancel`. Returns the cached status once the child has been reaped; if
+    // `cancel` fires first it throws `CancellationError` and leaves the session
+    // open (§3.6, F9). Used by `close`/tests.
+    virtual Task<PtyExit> wait(std::chrono::milliseconds timeout,
+                               CancellationToken cancel) = 0;
 };
 
 } // namespace ymh
@@ -275,16 +340,22 @@ public:
 
 Rules:
 
-- **`write`/`resize`/`terminate` are thread-safe** and may be called from a
-  TurnExecutor worker (the tool thread). They marshal onto the daemon loop; the
+- **`write`/`resize`/`terminate`/`kill` are thread-safe** and may be called from
+  a TurnExecutor worker (the tool thread). They marshal onto the daemon loop; the
   caller does not touch the master fd (`P11`).
 - **`output()` is the live push channel** (§3.3), not the tool's read path. The
   `terminal` tool uses `read()`; the UI/live layer subscribes to `output()`.
 - **`read` is the only consumer of the ring.** Interleaving `read` calls from
   two threads is not supported; per-session tool calls are serialized in v1
   (07 §10), so this holds (`P15`).
-- **`terminate` is idempotent.** Calling it on an `Exited`/`Closed` session is a
-  no-op; it never throws for a missing child (`P9`).
+- **`read`/`wait` carry the tool's `CancellationToken`.** Both are additive
+  (this spec) and take `cancel` explicitly; `read` returns
+  `PtyRead{cancelled = true}` when it fires before any byte is consumed (§5.3),
+  and `wait` throws `CancellationError` (§3.6). Neither mutates the session on
+  cancellation (`F9`); the field, not an exception, is `read`'s pinned signal.
+- **`terminate`/`kill` are idempotent.** Calling either on an
+  `Exited`/`Closed` session is a no-op; neither throws for a missing child
+  (`P9`). `kill` is the force variant: same close/reap, no SIGHUP grace (§3.5).
 - **A `PtySession` is owned by its `PtyService`**, not by the tool. The tool
   holds only a borrowed pointer obtained via `find()` and valid for the
   duration of one serialized call (`P15`).
@@ -296,19 +367,33 @@ write(bytes):
   state = state()
   if state == Exited or state == Closed -> throw PtyError{Closed}
   if bytes.empty()                       -> return (no-op)
-  post to the loop:
-     if outbound_queue.size() + bytes > write_queue_cap -> signal WouldBlock
-     else append; arm async_write if idle
-  if the post could not be made (loop stopped) -> throw PtyError{Internal}
+  if Executor::stopped()                 -> throw PtyError{Internal}
+  lock session mutex:                    # CALLER thread, NOT the loop
+     if bytes.size() > pty_write_queue_cap
+         or outbound_queue.size() + bytes.size() > pty_write_queue_cap
+       -> throw PtyError{WouldBlock}     # synchronous, before any post
+     append bytes; note whether a write is already in flight
+  if not post(arm async_write)           # loop stopped in the race window
+     -> roll back the appended bytes; throw PtyError{Internal}
 ```
 
-- **Bounded outbound queue.** `write_queue_cap` defaults to 256 KiB per session
-  (a `ToolConfig`-adjacent constant, §6.2). Exceeding it yields
-  `PtyError{WouldBlock}` on a **subsequent** `write`; the pump drains the queue
-  as the child reads. A single `write` larger than the cap is chunked, not
-  rejected.
-- **No partial-write surprises.** `write` is all-or-nothing from the caller's
-  view: either the whole chunk is queued or `WouldBlock` is raised.
+- **Admission is checked on the caller under the mutex.** The cap test runs on
+  the tool worker (the caller), not inside a loop-posted closure, so
+  `WouldBlock` is raised **synchronously** as 07 §7.2-style backpressure. The
+  loop only arms `async_write_some`; it never decides admission.
+- **Bounded outbound queue.** `pty_write_queue_cap` is `ToolConfig`-owned
+  (07 §5.5; additive field, default 256 KiB; E-P8). The pump drains the queue in
+  `async_write_some` chunks (≤ 64 KiB) as the child reads.
+- **All-or-nothing admission.** A `write` is admitted only if the **whole** byte
+  string fits in the free queue space; otherwise it throws `WouldBlock` and
+  nothing is enqueued. There is no silent truncation and no partial enqueue. A
+  payload larger than `pty_write_queue_cap` therefore cannot be admitted in one
+  call — the tool splits large input across multiple `write` actions. "Chunked"
+  refers to the pump's `async_write_some` drain of an already-admitted queue, not
+  to admission.
+- **Stopped loop is an error, not a leak.** `Executor::post` returns false after
+  `stopped()`; `write` rolls back any bytes it just appended and throws
+  `PtyError{Internal}` (a dropped closure would strand bytes, §5.1).
 - **Backpressure is observable but never fatal.** The `terminal` tool maps
   `WouldBlock` to a bounded error result (`P-F4`); the PTY remains `Running`.
 
@@ -323,10 +408,25 @@ push stream** backed by shared state; the session holds the producer side.
 namespace ymh {
 
 template <class T>
-class StreamWriter;   // producer side, owned by PtySession
+class StreamSubscription;   // consumer handle (stream-local; see below)
 
-// A lightweight handle over shared stream state (copyable, move-only semantics
-// not required). Exactly one consumer may subscribe.
+// Producer side, owned by PtySession and never handed to the tool. Loop-affine:
+// `push`/`finish` are called by the pump on the daemon loop.
+template <class T>
+class StreamWriter {
+public:
+    StreamWriter() = default;
+    StreamWriter(StreamWriter&&) noexcept = default;
+    StreamWriter& operator=(StreamWriter&&) noexcept = default;
+    StreamWriter(const StreamWriter&) = delete;
+    StreamWriter& operator=(const StreamWriter&) = delete;
+
+    void push(T value);   // append one chunk (bounded; oldest evicted on overflow)
+    void finish();        // signal EOF; `closed()` becomes true after the drain
+};
+
+// A lightweight handle over shared stream state (move-only). Exactly one
+// consumer may subscribe.
 template <class T>
 class Stream {
 public:
@@ -339,11 +439,30 @@ public:
     Stream& operator=(const Stream&) = delete;
 
     // Single consumer. The handler runs on the daemon loop, serially, in
-    // order. Registering again replaces the previous handler (no fan-out).
-    Subscription subscribe(Handler handler);
+    // order. Registering again replaces the previous handler (no fan-out); the
+    // replaced handle becomes inert.
+    [[nodiscard]] StreamSubscription<T> subscribe(Handler handler);
 
     [[nodiscard]] bool        closed() const noexcept;   // EOF seen
     [[nodiscard]] std::size_t buffered() const noexcept; // chunks pending
+};
+
+// Stream-local RAII handle. This is NOT `core/event_bus.hpp`'s `Subscription`
+// (different type, different header). It owns the single consumer slot:
+// destroying or `reset()`ing it detaches the handler iff it is still the
+// current one (a handle replaced by a later `subscribe` is inert).
+template <class T>
+class StreamSubscription {
+public:
+    StreamSubscription() noexcept = default;
+    ~StreamSubscription();
+    StreamSubscription(StreamSubscription&&) noexcept;
+    StreamSubscription& operator=(StreamSubscription&&) noexcept;
+    StreamSubscription(const StreamSubscription&) = delete;
+    StreamSubscription& operator=(const StreamSubscription&) = delete;
+
+    void reset() noexcept;                       // detach now; idempotent
+    [[nodiscard]] bool active() const noexcept;  // still the current handler
 };
 
 } // namespace ymh
@@ -356,6 +475,11 @@ Rules:
 - **Single consumer, replace-on-resubscribe.** Two subscribers do not fan out;
   the second replaces the first. The `terminal` tool is not a subscriber (it
   uses `read()`); the live emitter is.
+- **The handle is stream-local.** `StreamSubscription<T>` is defined here and is
+  **not** `core/event_bus.hpp`'s `Subscription`; the name overlap is deliberate
+  but they are unrelated types. Dropping the handle detaches the handler; a
+  handle replaced by a later `subscribe` is inert. `StreamWriter<T>` is the
+  producer the `PtySession` holds; no consumer ever sees it.
 - **`Stream<T>` is live-only.** It is not durable and not itself an event;
   nothing here is appended to the session log (`P8`).
 - **If a general async stream lands later**, it must satisfy this shape; this
@@ -383,17 +507,36 @@ resize(rows, cols):
 - **Initial size is applied at spawn** (`PtyRequest::rows/cols`, §4.2) before
   the child execs, so the first paint is correct.
 
-### 3.5 `terminate`
+### 3.5 `terminate` and `kill`
 
 ```text
 terminate():
   if state is Exited/Closed -> return (idempotent)
+  if Executor::stopped():            # loop gone: synchronous OFF-LOOP fallback
+     1. close(master)
+     2. kill(-pgid, SIGKILL)          # cannot be ignored
+     3. blocking reap(pid) via the process layer (§7.2, E-P5)  # off-loop: OK
+     4. state := Closed; return
   post to the loop:
      1. close(master)                  # delivers SIGHUP to the fg group
      2. signal the child's process group: kill(-pgid, SIGHUP)
      3. wait terminate_grace (ToolConfig, default 2 s)
      4. if still alive: kill(-pgid, SIGKILL)
-     5. reap by specific pid (P6); state := Closed
+     5. non-blocking tryReap(pid); if not yet a zombie, retry on a bounded loop
+        timer (kPtyReapPollInterval); then state := Closed   # never blocks
+
+kill():                              # force path: no SIGHUP grace wait
+  if state is Exited/Closed -> return (idempotent)
+  if Executor::stopped():            # loop gone: synchronous OFF-LOOP fallback
+     1. close(master)
+     2. kill(-pgid, SIGKILL)
+     3. blocking reap(pid) via the process layer (§7.2, E-P5)  # off-loop: OK
+     4. state := Closed; return
+  post to the loop:
+     1. close(master)                  # delivers SIGHUP to the fg group
+     2. kill(-pgid, SIGKILL)           # immediately; never waits the grace
+     3. non-blocking tryReap(pid); if not yet a zombie, retry on a bounded loop
+        timer (kPtyReapPollInterval); then state := Closed   # never blocks
 ```
 
 - **Close-master-first.** Closing the master makes the slave read `EIO` and
@@ -402,20 +545,40 @@ terminate():
   hangup.
 - **Grace then SIGKILL.** The grace is `ToolConfig::terminate_grace` (07 §5.5,
   default 2 s), matching `ProcessService`'s teardown.
-- **Reaping is specific-pid only** (E8). No global `waitpid(-1)` sweep, ever
-  (`P6`, `P-F5`).
+- **`kill` is the force variant.** It runs the same close-master/reap sequence
+  but goes straight to `kill(-pgid, SIGKILL)` — no explicit `SIGHUP`, no
+  `terminate_grace` wait. (Closing the master still delivers an incidental
+  `SIGHUP` to the fg group; the difference is that `kill` never *waits* on it.)
+  This is the seam behind the `terminal` tool's `close` with `signal = "kill"`
+  (§8.2) and is additive to the §17 seam (E-P12); it is idempotent like
+  `terminate` (`P9`).
+- **Reaping is specific-pid and non-blocking on the loop** (E8, E-P5). No
+  global `waitpid(-1)` sweep, ever; the loop uses `tryReap` (`WNOHANG`) only,
+  and the blocking `reap` is reserved for the off-loop fallback above (`P6`,
+  `P-F5`).
 - **`terminate` never blocks the loop.** The grace wait is a timer on the loop;
-  the SIGKILL and reap run in a loop-posted continuation.
+  the SIGKILL runs in a loop-posted continuation and the reap is the
+  non-blocking `tryReap` (`WNOHANG`, §7.2), never a blocking `waitpid`.
+- **A stopped loop does not defeat `terminate`/`kill`.** When
+  `Executor::stopped()` is true, either method runs its synchronous fallback
+  above instead of posting (a post after stop is dropped, §5.1). That fallback
+  is **off-loop**, so its blocking `reap(pid)` is permitted (the child was
+  `SIGKILL`ed first); the loop path uses `tryReap`. This is the path used by
+  `~LocalPtyService` and late `closeSession` calls (§7.3, E-P2).
 
 ### 3.6 Exit status and `wait()`
 
 - The child's exit is observed by the pump: on `pidfd` readiness (Linux ≥ 5.3)
-  or, as a fallback, by a dedicated per-session reap step (specific pid). The
-  status is stored on the session and exposed by `wait()`.
-- **`wait(timeout)`** returns the cached `PtyExit` once reaped; a `timeout` of 0
-  waits indefinitely (bounded by the caller's cancellation token). A timeout
-  expiry returns `PtyExit{exit_code = -1}` with `signalled = false` and does
-  **not** close the session — the caller decides whether to `terminate`.
+  or, as a fallback, by a bounded `WNOHANG` poll step (specific pid). Both
+  invoke the process layer's single **non-blocking** `tryReap(int pid)` (E-P5),
+  never a blocking `waitpid` on the loop and never a second `waitpid`
+  implementation. The status is stored on the session and exposed by `wait()`.
+- **`wait(timeout, cancel)`** returns the cached `PtyExit` once reaped; a
+  `timeout` of 0 waits indefinitely (bounded by `cancel`). A timeout expiry
+  returns `PtyExit{exit_code = -1}` with `signalled = false` and does **not**
+  close the session — the caller decides whether to `terminate`. If `cancel`
+  fires first, `wait` throws `CancellationError` and leaves the session open
+  (the in-flight action aborts; `F9`).
 - **Natural exit keeps the ring.** A child that exits on its own leaves the
   master readable until drained; the pump drains to `EIO`/EOF, sets
   `eof = true`, and transitions to `Exited`. `read` still returns buffered
@@ -424,17 +587,21 @@ terminate():
 ### 3.7 Lifecycle state machine
 
 ```text
-        open()                child confirmed
+        open()                status-pipe EOF
 Starting ──────────────► Running ──────────────► Exited ──────────► Closed
-   │  spawn failure          │  child exits          │  close/drain     ▲
+   │  fork failure           │  child exits          │  close/drain     ▲
    └──────────► (no session)  │  or terminate()       └──────────────────┘
-                              └──────────────────────────────────────────►
-                                     terminate() closes from Running/Exited
+   │  exec failure (status byte) ──► Exited (exit 127)
+   └─ terminate()/kill() closes from Running/Exited
 ```
 
-- **`Starting`** exists only between `open()`'s return and the pump's first
-  successful `TIOCSCTTY`/pidfd registration; a tool never observes it for long,
-  but `state()` is well-defined throughout.
+- **`Starting` is observable (E-P11).** `open()` returns after `fork`, before
+  the child's status-pipe handshake (§4.3), so a tool may briefly observe it.
+  The pump sets `Running` only on the status pipe's **EOF** (the `O_CLOEXEC`
+  write end closed by a successful `execve`, after `setsid`/`TIOCSCTTY`); a
+  **status byte** means the child failed at `execve`, and the session transitions
+  to `Exited` with exit 127. `state()` is well-defined throughout; the parent
+  never sets `Running` at `fork`.
 - **`Exited`** retains the ring and the exit status; `read`/`wait` are valid.
 - **`Closed`** is terminal: `find()` no longer resolves the id, the governor
   slot is released, and the pid has been reaped.
@@ -469,8 +636,18 @@ public:
     virtual std::vector<PtySessionId> list(SessionId) const = 0;
 
     // Terminate + reap every PTY of one session. Idempotent, noexcept; called
-    // on session end/close and on cancellation scoping (P10, F9).
+    // on session end/close and on cancellation scoping (P10, F9). Uses the
+    // loop-independent fallback when the loop is stopped (§7.3).
     virtual void closeSession(SessionId) noexcept = 0;
+
+    // Capability query for registration. `find()` is a session-scoped lookup,
+    // NOT a capability test; this is the capability test (E-P10, §4.4).
+    virtual bool available() const noexcept = 0;
+
+    // Terminate + reap EVERY PTY (all sessions) synchronously, without posting
+    // to the loop. Idempotent, noexcept. Used by the shutdown coordinator
+    // before TransportServer::stop() and by ~LocalPtyService (E-P2, §7.3).
+    virtual void closeAll() noexcept = 0;
 };
 
 } // namespace ymh
@@ -486,9 +663,13 @@ Rules:
   `PtySessionId` alone is not a capability (decision (g)).
 - **`list` is deterministic** (ascending `PtySessionId`) so golden/replay tests
   are stable.
-- **`closeSession` is noexcept and idempotent**; it is the single cleanup entry
-  point used by session end, daemon shutdown, and the cancellation scope
-  (`P10`).
+- **`closeSession` is noexcept and idempotent**; it is the per-session cleanup
+  entry point used by session end (and the cancellation scope, `P10`). On a live
+  loop it posts the teardown; on a stopped loop it takes the synchronous
+  fallback (§7.3).
+- **`closeAll` is the daemon-shutdown/destructor entry point.** It terminates
+  and reaps **every** PTY synchronously and loop-independently, so the shutdown
+  coordinator can finish teardown before `TransportServer::stop()` (E-P2).
 
 ### 4.2 `PtyRequest` — spawn options
 
@@ -540,6 +721,7 @@ LocalPtyService::open(request, cancel):
  4. openpty(&master, &slave, nullptr, nullptr, &ws)   # ws from rows/cols
       failure -> release slot; throw PtyError{SpawnFailed}
  5. mark master O_NONBLOCK + O_CLOEXEC; ensure slave is NOT O_CLOEXEC until dup
+    pipe2(status_pipe, O_CLOEXEC)        # child->parent exec handshake
  6. fork()
       child:
         setsid()                         # new session, no controlling terminal
@@ -550,12 +732,14 @@ LocalPtyService::open(request, cancel):
         setenv TERM/PWD (overlay)
         close all fds > 2 not O_CLOEXEC   # 04 §3.2 fd hygiene
         execve(executable, argv, env)
-          failure -> _exit(127)
+          success -> kernel closes status_pipe_w (O_CLOEXEC) # EOF == exec OK
+          failure -> write(status_pipe_w, "E", 1)            # fixed status byte
+                     _exit(127)                              # then status EOF
       parent:
-        close slave
-        register master + pidfd on the daemon loop (PtyPump)
-        state := Running
- 7. return the PtySession
+        close slave; close status_pipe_w
+        register master + pidfd + status_pipe_r on the daemon loop (PtyPump)
+        state := Starting                 # NOT Running at fork
+ 7. return the PtySession (state Starting)
 ```
 
 Rules:
@@ -570,9 +754,25 @@ Rules:
   leader), so `kill(-pgid, …)` signals the whole terminal tree (07 §9.2, X13).
 - **fd hygiene matches `04 §3.2`.** `O_CLOEXEC` on every daemon fd; the slave is
   duped to 0/1/2 then closed.
-- **`execve` failure is not silent**: the child `_exit(127)`s; the pump observes
-  the exit and the session reports `PtyExit{exit_code = 127}`. A `fork` failure
-  is `SpawnFailed`.
+- **Status-pipe exec handshake (E-P11).** The child writes **nothing** on the
+  success path: the status pipe's write end is `O_CLOEXEC`, so a successful
+  `execve` closes it and the parent reads **EOF** — that EOF is the ready signal
+  (the `setsid`/`TIOCSCTTY` ctty claim already happened before `execve`). A
+  failed `execve` writes a single fixed status byte (`'E'`) before `_exit(127)`,
+  so the parent reads a byte instead of EOF. `Starting` is therefore a real,
+  observable state rather than a parent-side guess about a child-side `ioctl`.
+- **`execve` failure is not silent**: the child writes the status byte and
+  `_exit(127)`s; the pump reads the byte, reaps the child, and the session
+  reports `PtyExit{exit_code = 127}` and transitions to `Exited`. A `fork`
+  failure is `SpawnFailed`.
+- **Post-fork parent failure kills and reaps (P-F17).** If any parent step after
+  `fork` fails (status-pipe/master registration on the loop, or a bounded
+  `Starting`-handshake timeout), the parent MUST `kill(-pgid, SIGKILL)` and reap
+  the child (specific pid via the process layer, E-P5) **before** releasing the
+  slot and throwing `PtyError{SpawnFailed}`. On the loop this is the
+  non-blocking `tryReap` with a bounded retry until the zombie appears; only the
+  off-loop teardown fallback (§3.5, §7.3) uses the blocking `reap`. Releasing
+  the slot without killing and reaping would leak a live child and a zombie.
 - **No `forkpty` shortcut is required.** `openpty` + `fork` + explicit
   `setsid`/`TIOCSCTTY` is pinned because it makes the process-group and
   controlling-terminal behavior observable and testable; `forkpty` is an
@@ -594,7 +794,8 @@ public:
                     ResourceGovernor& governor,
                     PtyEventSink& events,
                     ToolConfig config = {});
-    ~LocalPtyService() override;   // closes all sessions; no live child remains
+    ~LocalPtyService() override;   // closes all sessions via the loop-independent
+                                   // fallback (§7.3); asserts no live child remains
     // ... PtyService overrides ...
 };
 
@@ -608,6 +809,8 @@ public:
     PtySession* find(PtySessionId) noexcept override { return nullptr; }
     std::vector<PtySessionId> list(SessionId) const override { return {}; }
     void closeSession(SessionId) noexcept override {}
+    bool available() const noexcept override { return false; }
+    void closeAll() noexcept override {}
 };
 
 } // namespace ymh
@@ -617,13 +820,20 @@ Rules:
 
 - **`LocalPtyService` outlives every `PtySession` it owns** and is destroyed
   before `ResourceGovernor` and the `EventBus` (11 E18 destruction order). Its
-  destructor calls `closeSession` for every session and asserts no live child.
+  destructor calls `closeAll()` and then asserts no live child. Because it may
+  run **after** `TransportServer::stop()` (11 E18), `closeAll()` is synchronous
+  and loop-independent (`kill(-pgid, SIGKILL)` + blocking specific-pid reap,
+  §7.3) and never `post`s (§7.3, E-P2).
+- **`available()` is the capability query (E-P10).** `LocalPtyService` returns
+  true; `UnavailablePtyService` returns false. Registration must not probe
+  `find()` for "presence": `find` is a session-scoped id lookup, not a
+  capability test.
 - **`UnavailablePtyService` stays the v1 default** so the environment compiles
   and the `terminal` tool is simply absent from the registry while PTY is
   unbuilt (07 §4.3: Phase-2 tools are absent until the backing service exists).
-- **The `terminal` tool is registered only when `pty()` is a real service.**
-  Registration is decided by the daemon at startup (`pty().find` presence or a
-  capability flag); the model is never offered a tool that cannot run.
+- **The `terminal` tool is registered only when `pty().available()` is true.**
+  Registration is decided by the daemon at startup; the model is never offered a
+  tool that cannot run.
 
 ### 4.5 Wiring the loop-aware service into the environment
 
@@ -649,14 +859,19 @@ public:
 Rules:
 
 - **Borrowed, not owned.** The daemon constructs one `LocalPtyService` (with its
-  `io_` adapter, governor, and event sink) and passes it to
-  `LocalEnvironment`; `WorkspaceRuntime` must expose it so the environment can
-  be built with it (an additive injection seam, the same philosophy as 11 §3.5's
-  store injection, D9).
-- **This is the only interface delta.** It is additive with a default; existing
-  constructions compile unchanged. It is recorded here because 04/07's frozen
-  text does not name it; a future errata pass (like 11) may restate it in 04's
-  seam table. It does **not** change any 07 signature (`P16`).
+  `io_` adapter, governor, and event sink) and passes it to `LocalEnvironment`.
+- **`WorkspaceRuntime` seam (E-P7).** `WorkspaceRuntime` (11 §11.2; defined in
+  `include/ymh/agent/workspace_runtime.hpp`) owns the `LocalPtyService` and
+  builds the `LocalEnvironment` with it. Pin the declaration order inside
+  `WorkspaceRuntime::Impl`: `LocalPtyService` is declared **before**
+  `LocalEnvironment`, so reverse-order destruction destroys the environment
+  first and the PTY service next, before `ResourceGovernor` and `EventBus`
+  (11 E18). The public seam is `WorkspaceRuntime::environment().pty()`; no new
+  public accessor is required. This mirrors 11 §3.5's store injection seam (D9).
+- **Two additive deltas, recorded as errata.** The `PtyService* pty = nullptr`
+  parameter is source-compatible (defaulted), but it **does** amend a signature
+  pinned in 07 §6.1; `ToolConfig::pty_write_queue_cap` amends 07 §5.5. Both are
+  recorded as E-P7/E-P8; no other 07/04 signature changes.
 - **`lsp()`'s `nullptr` pattern is the precedent** (07 §6.1): an absent
   capability is null/unavailable, never a fake that silently no-ops.
 
@@ -675,13 +890,20 @@ Asio headers directly.
 ```cpp
 namespace ymh {
 
-// Thin adapter over the daemon's single io_context. Owned by 04; consumed by
-// this spec. `post` is thread-safe and never starts a thread (11 E1/E2).
+// Thin adapter over the daemon's single io_context. The SHAPE is pinned here
+// (E-P3): 04 §3.4 names the one-loop model but defines no `Executor` type, so
+// this spec owns the seam and 04 owns the concrete adapter.
 class Executor {
 public:
     virtual ~Executor() = default;
 
-    virtual void post(std::function<void()>) = 0;
+    // Enqueue onto the loop. Thread-safe; never starts a thread (11 E1/E2).
+    // Returns false (and does NOT invoke) when the loop has stopped.
+    virtual bool post(std::function<void()>) = 0;
+
+    // True once the loop's runner has stopped; makes stopped-loop detection
+    // explicit instead of inferred (E-P3).
+    virtual bool stopped() const noexcept = 0;
 
     // True iff the calling thread is the loop's runner thread. Used by asserts
     // and TSan tests (11 E2).
@@ -694,13 +916,17 @@ public:
 Rules:
 
 - **`post` is the only cross-thread entry.** `PtySession::write`/`resize`/
-  `terminate` called from a tool worker `post` a closure onto the loop; they
-  never touch the master fd from the worker (`P11`).
-- **The concrete adapter is 04's** (an `AsioExecutor` over `io_context`). This
-  spec does not define it; it pins only the seam.
-- **A `post` after loop stop is dropped** (returns without invoking). The PTY
-  methods detect a stopped loop via the service and raise `PtyError{Internal}`
-  rather than leaking a closure (mirrors 11's post-after-stop rule).
+  `terminate`/`kill` called from a tool worker `post` a closure onto the loop;
+  they never touch the master fd from the worker (`P11`).
+- **`post` is bool-returning (E-P3).** A `post` after stop returns false and
+  invokes nothing; callers MUST check it and either take the synchronous
+  fallback (`terminate`/`kill`/`closeSession`, §3.5/§7.3) or raise
+  `PtyError{Internal}` (`write`, §3.2). This replaces the previously undefined
+  "detect a stopped loop" behavior.
+- **Ownership (E-P3).** The seam is pinned here; the concrete `AsioExecutor`
+  over `io_context` is owned by 04's daemon (04 §3.4). Because 04 does not name
+  `Executor`, this is recorded as errata E-P3; 11 §3.2 E2 keeps the
+  one-loop/one-runner invariant.
 
 ### 5.2 The `PtyPump`
 
@@ -710,7 +936,7 @@ One pump per `PtySession`, running entirely on the loop.
 PtyPump (loop-affine, one per session)
  ├── master read:  asio::posix::stream_descriptor.async_read_some
  ├── master write: asio::posix::stream_descriptor.async_write_some
- ├── child exit:   pidfd readiness (preferred) or a specific-pid reap step
+ ├── child exit:   pidfd readiness (preferred) or a bounded WNOHANG poll step
  ├── resize:       ioctl(TIOCSWINSZ) posted from the tool worker
  └── terminate:    timer chain (SIGHUP -> grace -> SIGKILL -> reap)
 ```
@@ -719,17 +945,78 @@ PtyPump (loop-affine, one per session)
   sanitizes to UTF-8 (`sanitize_utf8`, 07 §5.2), appends to the bounded
   `PtyOutputRing`, pushes to the live `Stream<std::string>`, and emits a
   coalesced live `TerminalOutput` via `PtyEventSink` (§5.4).
+- **The PTY ring is pinned (E-P4).** `PtyOutputRing` is a **distinct PTY-local
+  type** defined here, **not** an `OutputRing` composition. `OutputRing`
+  (07 §5.2) cannot express a consuming cursor: it exposes only `tail()` (a copy
+  of the newest bytes), carries no byte offset, and its `truncated()` latches
+  permanently on first eviction — so it can serve neither FIFO consumption nor a
+  per-read "bytes evicted since the previous read" signal. `PtyOutputRing`
+  therefore reuses 07 §5.2's *storage discipline* (bounded, tail-keeping,
+  non-blocking, UTF-8-only, live-only) but owns its own storage and a FIFO read
+  cursor. It is **one per `PtySession`, owned by that `PtySession`**, with
+  capacity `ResourceCaps::pty_output_ring_bytes` (default 256 KiB; E-P4). It is
+  **not** `ResourceGovernor::ringFor(SessionId)`: that per-session ring
+  coalesces a tool call's stdout/stderr and is append-only/tail-only, whereas
+  `read()` must consume a per-terminal cursor and a session may own several
+  terminals (`max_session_ptys = 2`) whose output must not interleave. PTY bytes
+  never enter `ringFor()`. The pump sanitizes each chunk with 07 §5.2's
+  `sanitize_utf8` **before** appending; a tty merges stdout/stderr, so the ring
+  has a single channel (no `is_stderr` tag). Because the type is distinct,
+  **no 07 §5.2 type amendment is required** — only the shared discipline and
+  `sanitize_utf8` are reused.
+
+```cpp
+namespace ymh {
+
+// PTY-local bounded ring with a FIFO consuming cursor (E-P4). Distinct from
+// 07 §5.2's OutputRing: it tracks a monotonic append count and an unread
+// offset so `read` consumes oldest-first and reports eviction since the
+// previous read (OutputRing has neither). Storage discipline matches 07 §5.2.
+class PtyOutputRing {
+public:
+    explicit PtyOutputRing(std::size_t capacity_bytes);
+
+    // Append one already-sanitized UTF-8 chunk. On overflow evicts the oldest
+    // bytes; eviction of any unread byte marks the next read truncated.
+    void append(std::string_view chunk);
+
+    // Consume up to max_bytes from the cursor, oldest-first, trimmed to a
+    // UTF-8 boundary (a trailing partial codepoint is left for the next read).
+    // `truncated` is set iff unread bytes were evicted since the previous read
+    // (not latched): it feeds the caller's `PtyRead::truncated`.
+    std::string read(std::size_t max_bytes, bool& truncated);
+
+    [[nodiscard]] std::size_t size() const noexcept;    // retained bytes
+    [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] bool        empty() const noexcept;   // no unread bytes
+    void clear() noexcept;
+};
+
+} // namespace ymh
+```
 - **Writes drain a bounded queue** (§3.2). The pump arms `async_write_some` only
-  when the queue is non-empty and no write is in flight.
-- **Child exit** is observed without a global SIGCHLD handler: on Linux ≥ 5.3
-  the pump registers the child's `pidfd` with the loop and, on readiness, calls
-  `waitpid(pid, WNOHANG)` (specific pid). On platforms without `pidfd`, the
-  service uses a dedicated, bounded reap step that calls `waitpid(pid, …)` for
-  that one child — still never `waitpid(-1)` (`P6`, 11 E8, M-F5).
+  when the queue is non-empty and no write is in flight; it drains in
+  `async_write_some` chunks of at most 64 KiB.
+- **Child exit** is observed without a global SIGCHLD handler and without
+  blocking the loop:
+  - **Primary (Linux ≥ 5.3):** the pump registers the child's `pidfd` with the
+    loop; on readiness (the child is already a zombie) it calls the process
+    layer's non-blocking `tryReap(pid)` (`src/execution/process.cpp`, exposed
+    additively per E-P5) and must get a status immediately.
+  - **Fallback (no `pidfd`):** a per-session loop timer polls the same
+    non-blocking `tryReap(pid)` at a bounded interval (`kPtyReapPollInterval`,
+    50 ms, a pump-local constant; the timer is disarmed once the child is
+    reaped). `tryReap` is `WNOHANG`-only, so each poll returns promptly and the
+    loop never waits.
+
+  Neither path uses `waitpid(-1)` or a second `waitpid` implementation; the
+  blocking `reap(pid)` is off-loop-only and is never called here (`P6`, 11 E8,
+  E-P5, M-F5).
 - **The pump is the sole reader and sole writer of the master fd.** No other
   code path reads or writes it (`P11`).
-- **The pump never blocks the loop.** No `read`/`write`/`waitpid` blocking call
-  runs on the loop; `pidfd` readiness and async I/O are the mechanism.
+- **The pump never blocks the loop.** No blocking `read`/`write`/`waitpid` runs
+  on the loop: I/O is async and the reap seam is `tryReap` (`WNOHANG`) only;
+  `pidfd` readiness (or the bounded poll) is the trigger.
 
 ### 5.3 Tool-thread interaction
 
@@ -738,22 +1025,30 @@ with the session through the thread-safe façade:
 
 ```text
 tool worker                          daemon loop
-  write(bytes)  ──post──────────────► enqueue + async_write
-  resize(r,c)   ──post──────────────► ioctl(TIOCSWINSZ)
-  read(max,wait)─┐                     pump appends to ring + notifies
-                │  (blocks on a       │
-                │   condition var /   │
-                └── future) ◄─────────┘  notify on chunk/eof/timeout
-  terminate()   ──post──────────────► timer chain -> reap
+  write(bytes)          ──post──────► enqueue + async_write
+  resize(r,c)           ──post──────► ioctl(TIOCSWINSZ)
+  read(max,wait,cancel) ─┐             pump appends to ring + notifies
+                        │ (blocks on a │
+                        │  condition   │
+                        └─ var/future)◄┘ notify on chunk/eof/timeout/cancel
+  wait(timeout,cancel)  ─┐             reap readiness (pidfd/poll)
+                        └─ cached or   │
+                           throws ◄────┘ notify on exit/cancel
+  terminate()/kill()    ──post──────► timer chain (grace) / immediate -> reap
+                        └─ if stopped ► synchronous kill(-pgid)+reap (§3.5)
 ```
 
 - **`read` blocks the worker, never the loop.** The pump notifies a per-session
   condition variable (or resolves a promise) when a chunk is appended, the
   child exits, or the wait timer fires; the worker wakes and drains the ring.
   This mirrors `ProcessService::run` blocking its worker (07 §6.4).
-- **The wait is bounded and cancellable.** `read` observes the tool's
-  `CancellationToken`; cancellation wakes the worker and returns
-  `outcome = Cancelled` (F9).
+- **The wait is bounded and cancellable.** `read` takes the tool's
+  `CancellationToken` as its third argument and observes it; cancellation wakes
+  the worker and returns `PtyRead{cancelled = true}` with `data` empty and
+  nothing consumed (the session is untouched). The `terminal` tool maps that to
+  `ToolResult{outcome = Cancelled}` (F9). `PtyRead::cancelled` is the pinned
+  field; there is no separate `CancelledError`. `wait` takes the same token and
+  throws `CancellationError` on cancellation (§3.6).
 - **No lock is held across `post`.** The façade takes the session mutex only to
   touch the queue/ring; the loop callback re-takes it briefly.
 
@@ -763,8 +1058,9 @@ tool worker                          daemon loop
 namespace ymh {
 
 // Injected by the daemon at LocalPtyService construction. Live-only,
-// best-effort, session-routed. The daemon wires it to the EventBus (§8.1) and
-// the supervisor's TerminalLayer (10 §20.19). Never durable.
+// best-effort, session-routed. The daemon wires it to the in-process EventBus
+// (00 §8.1); it is NOT a wire frame (05 §5.1) and does NOT reach a separate
+// supervisor process (E-P1). Never durable.
 class PtyEventSink {
 public:
     virtual ~PtyEventSink() = default;
@@ -790,6 +1086,14 @@ Rules:
   the durable `ToolResult` is the authoritative record (`F3`, `P8`).
 - **No durable append.** `PtyEventSink` publishes live events; the loop remains
   the sole appender of `payload::ToolResult` (X8).
+- **In-process only (E-P1).** The sink is an `EventBus` seam in the **same
+  process** as the pump. It is not a `protocol` notification and has no M2 wire
+  encoding: 05 §5.1 states live events are not carried as `Event` frames, and
+  `event.subscribe` streams committed durable events only (05 §6.1). An M2
+  supervisor therefore does **not** receive `TerminalOutput`; it sees terminal
+  state through durable `ToolResult` snapshots (§8.3). In M2 the daemon may
+  inject a no-op sink (or an unobserved `EventBus`); that is not a defect. A
+  live cross-process channel would be a 05 amendment and is deferred (OQ-P8).
 
 ---
 
@@ -823,6 +1127,12 @@ max_session_ptys    2     F8   (04 §2.1)
   terminal is persistent across tool calls. The `PtySession` owns a `PtySlot`
   RAII guard; the guard releases on natural exit, `terminate`, `closeSession`,
   daemon shutdown, and every exception path (`P5`, X11).
+- **Errata to 07 §7.2/§7.4 (E-P6).** 07 §7.4 says "a cancelled child releases
+  its subprocess/PTY slot through the §7.2 RAII guard". For a **persistent PTY**
+  that is amended: a turn cancellation aborts only the in-flight action
+  (decision (h)) and does **not** release the PTY slot; the slot releases when
+  the PTY reaches `Closed`. The RAII guard's release-on-throw still holds for
+  the `open` path (P-F16).
 - **Acquire before spawn.** `tryAcquirePty` runs before `openpty`/`fork`; a
   `false` returns `PtyError{CapExceeded}` with **no** child created (`P-F6`).
 - **Exhaustion is durable.** The loop appends the `ToolResult` carrying
@@ -878,9 +1188,13 @@ max_session_ptys    2     F8   (04 §2.1)
   session event log keeps the bounded, sanitized terminal bytes because the UI
   must render them. If an operator enables output redaction, it applies at the
   event-projection boundary, not inside the pump.
-- **ANSI/control characters are preserved** in the ring and `ToolResult.output`
-  (the TUI renders them); the *log* path must never interpolate them raw. The
-  TUI's `TerminalLayer` (10 §20.19) owns render-time sanitization.
+- **ANSI/control characters are preserved** in the ring and `ToolResult.output`;
+  the *log* path must never interpolate them raw. v1 renders them as
+  **sanitized text** in the tool-output view — control/ANSI sequences are
+  escaped or stripped by the tool-output renderer (10 §8.2/§20.10), never
+  interpreted. `TerminalLayer` (10 §8.3, arch `§20.19`) is **not** an emulator
+  and is not the PTY renderer; full ANSI emulation is deferred (decision (p),
+  OQ-P8).
 
 ---
 
@@ -907,10 +1221,30 @@ introduces no new process-level owner.
   (or a no-op `signal_set` that never calls `waitpid`); `SIG_IGN`/`SA_NOCLDWAIT`
   is forbidden (11 §3.3, E8). This spec **honors** that: it never installs a
   SIGCHLD handler and never sweeps the child table (`P6`).
-- **One reaper per child.** The PTY child is reaped by the pump/service via a
-  specific-pid `waitpid(pid, WNOHANG)` (on `pidfd` readiness) or a specific-pid
-  blocking reap on a dedicated step. It is the only path that produces the
-  `PtyExit` (E8).
+- **One reaper per child, one `waitpid` owner (E8, E-P5).** 11 §3.3 pins child
+  status as owned **exclusively by `src/execution/process.cpp`**, which reaps by
+  specific pid. The PTY path therefore adds **no** second `waitpid`
+  implementation: it routes through the process layer's specific-pid reap seam,
+  exposed additively as the **non-blocking** `tryReap(int pid)` in
+  `include/ymh/execution/process.hpp` (E-P5). `tryReap` is `WNOHANG`-only: it
+  returns `std::nullopt` while the child is still running and the status once it
+  is a zombie, so it is safe on the loop. The existing blocking `reap(int pid)`
+  (used by `ProcessService::run`'s off-loop wait) is **never** called on the
+  loop. It is the only path that produces the `PtyExit`.
+
+  ```cpp
+  // Additive (E-P5). The process layer's single specific-pid reaper, exposed so
+  // the PTY pump can collect one child without a second `waitpid`.
+  //   * tryReap — `waitpid(pid, &st, WNOHANG)`; nullopt while running. Loop-safe.
+  //   * reap    — blocking `waitpid(pid, &st, 0)`; OFF-LOOP callers only.
+  [[nodiscard]] std::optional<ProcessResult> tryReap(int pid);
+  [[nodiscard]] ProcessResult                reap(int pid);
+  ```
+- **E8 errata (one owner per child).** 11 §3.3's "exclusively `process.cpp`" is
+  amended by reference to allow the PTY service to **invoke** that single
+  reaper. The invariant remains "exactly one `waitpid` implementation", not
+  "exactly one caller" (E-P5). A direct `waitpid` in `execution/pty` is a defect
+  (`P6`).
 - **`reap_guard.hpp` is unrelated.** The existing `reapClaimUnderLock` helper is
   a registry-claim TOCTOU guard (11 §12.5, D26), not a child reaper. PTY child
   reaping does not use it; the name overlap is explicitly disambiguated here to
@@ -924,18 +1258,48 @@ introduces no new process-level owner.
   ending session (01 §9.8 lifecycle). Every PTY of that session is terminated
   (SIGHUP → grace → SIGKILL) and reaped; slots are released. No PTY outlives its
   session (`P10`).
-- **Daemon graceful shutdown (04 §3.5 step 4):** this spec supplies the
-  mechanics — for each live PTY: close master → SIGHUP the group → wait
-  `terminate_grace` → SIGKILL → reap. The bounded wait is `04`'s
-  `shutdown_grace` (default 10 s). After `Stopped`, no PTY child remains (`P10`).
+- **Daemon graceful shutdown (04 §3.5 step 4, 11 §11.3; E-P2):** this spec
+  supplies the mechanics and **pins where they run**. The shutdown coordinator
+  (11 §11.3, a non-io thread) executes, in order:
+
+  ```text
+  1-3. Draining; post DaemonShuttingDown; waitForDrain(shutdown_grace)  (11 §11.3)
+  4a.  drain TurnExecutor (join workers)   # no tool worker can post afterwards
+  4b.  pty().closeAll()                    # <-- THIS SPEC, loop still live
+         for each live PTY: close master -> SIGHUP the group ->
+         bounded wait terminate_grace -> SIGKILL the group -> specific-pid reap
+         # synchronous + loop-independent; returns only when all are reaped
+  4c.  TransportServer::stop()             # 11 §11.3 step 4: joins the io runner
+  5.   store.close(); releaseHost; unlink socket   # 11 §11.3 step 5
+  ```
+
+  PTY teardown MUST complete **before** `TransportServer::stop()` (which joins
+  and destroys the io runner) and while the daemon loop is still live. A
+  `terminate`/reap posted after `stop()` would be silently dropped
+  (post-after-stop rule, §5.1) and leak the child; the `LocalPtyService`
+  destructor would then fire its "no live child" assert. The bounded wait is
+  `04`'s `shutdown_grace` (default 10 s); after `Stopped`, no PTY child remains
+  (`P10`, P-F7).
+- **Loop-independent teardown fallback.** Teardown must not require a live loop.
+  `closeAll()` is synchronous and loop-independent by construction; and when
+  `Executor::stopped()` is true (a late `closeSession`, a destructor that runs
+  after `stop()`, or crash-path cleanup), `terminate`/`closeSession` take the
+  same **synchronous off-loop** path: `kill(-pgid, SIGKILL)` then a blocking
+  specific-pid reap through the process layer (§7.2, E-P5) — never a `post`.
+  This makes the destructor's "no live child" assert satisfiable even though it
+  runs last (11 E18, §4.4).
 - **Cancellation scoping (F9):** cancelling a turn aborts the in-flight
   `terminal` action (a blocking `read`/`open`), but **does not** close a
   persistent PTY. The PTY lives until `close`, session end, or shutdown. This
   is deliberate: a turn cancel is not a terminal-close (decision (h)). A session
   delete/close is what calls `closeSession`.
-- **Destruction order (11 E18):** `LocalPtyService` is destroyed before the
-  `EventBus` and before `store.close()`, so no pump can emit after the bus is
-  gone and no child outlives the store.
+- **Destruction order (11 E18; E-P2).** `WorkspaceRuntime` (which owns
+  `LocalPtyService`) is destroyed **last**, after `TransportServer::stop()` and
+  after the coordinator's `store.close()` (step 5). PTY children are therefore
+  torn down **eagerly** at coordinator step 4b via `closeAll()`, while the loop
+  is live and before `store.close()`; the later destructor is a no-op
+  (`closeAll` is idempotent). No pump emits after the `EventBus` is gone and no
+  child outlives the store.
 
 ### 7.4 Crash and orphan behavior
 
@@ -945,21 +1309,24 @@ introduces no new process-level owner.
   no "kill by `ps` evidence" (04 §7.3/§7.5, 07 §9.4).
 - **Detach:** a supervisor detach does not touch PTYs; the daemon keeps its
   in-flight sessions and their terminals running (`§9.9`, D23).
-- **`LocalPtyService` destructor** closes all sessions and asserts none remain
-  live; a leak is a defect (`P10`).
+- **`LocalPtyService` destructor** closes all sessions via the loop-independent
+  fallback (§7.3) and asserts none remain live; a leak is a defect (`P10`). It
+  runs after `TransportServer::stop()` under 11 E18, so it must never `post`.
 
 ### 7.5 Background output between tool calls
 
 A persistent PTY keeps producing output while no tool call is active (§9.9's
 "a workspace runs whenever it has pending work").
 
-- **The pump keeps running** and appends to the bounded `PtyOutputRing`.
-- **Live events continue best-effort** at the coalesced cadence, so an attached
-  TUI sees activity without a `read` call.
+- **The pump keeps running** and appends to the bounded `PtyOutputRing` (E-P4).
+- **Live events continue best-effort** at the coalesced cadence to the
+  **in-process** `EventBus` (E-P1). In M1 (in-process TUI) that is visible
+  without a `read` call; an M2 supervisor, being a separate process, does not
+  receive it and sees only the next durable `ToolResult` (§8.3).
 - **The ring is bounded**; overflow evicts the oldest bytes and latches
   `truncated`, which the next `read` reports (`P-F4`, F5).
 - **No durable growth.** Between calls nothing is appended to the session log;
-  only the bounded ring and live events exist (`P8`).
+  only the bounded ring and in-process live events exist (`P8`).
 - **No automatic PTY close on idleness** in v1. An idle terminal holds its cap
   slot until closed/session end; caps bound the cost (`max_session_ptys = 2`).
   Idle-reaping is a recorded open question (§14.2 OQ-P1).
@@ -1011,7 +1378,7 @@ terminal {
   append_newline?: boolean    # write: default true
   wait_ms?: integer           # read: bounded wait for output; default 0
   max_bytes?: integer         # read: cap on returned bytes; default 64 KiB
-  signal?: "term" | "kill"    # close: default "term"
+  signal?: "term" | "kill"    # close: "term" -> terminate(); "kill" -> kill()
 }
 ```
 
@@ -1021,7 +1388,7 @@ rules:
 ```text
 open    requires exactly one of {command, argv}; returns {terminal_id, pid, rows, cols}
 write   requires terminal_id + input; returns bytes queued (bounded status)
-read    requires terminal_id; returns data (+ truncated/eof flags)
+read    requires terminal_id; returns data (+ truncated/eof/cancelled flags)
 resize  requires terminal_id + rows + cols; returns the new geometry
 close   requires terminal_id; returns the exit status
 list    requires nothing; returns the session's open terminal ids
@@ -1036,28 +1403,35 @@ list    requires nothing; returns the session's open terminal ids
   A wait that expires with no data is `Ok` with empty `data`.
 - **`max_bytes`** is clamped to `tool_result_max_bytes` and the ring capacity;
   the returned `data` is a valid-UTF-8 tail snapshot.
-- **`close`** terminates and reaps; `signal = "kill"` skips the SIGHUP grace.
+- **`close`** terminates and reaps. `signal = "term"` (default) calls
+  `terminate()` (close master → SIGHUP → `terminate_grace` → SIGKILL);
+  `signal = "kill"` calls `kill()` (close master → immediate SIGKILL, no SIGHUP
+  grace). Both reap before returning (§3.5).
 - **`list`** returns only the calling session's ids (deterministic order).
 
 ### 8.3 Output streaming into the event log
 
 ```text
 PTY pump ──► PtyOutputRing (bounded, tail)          [read path]
-        └──► PtyEventSink ──► live TerminalOutput   [live path]
+        └──► PtyEventSink ──► live TerminalOutput   [live path: in-process only]
                                    │
-tool returns ToolResult.output ◄── read() snapshot  [durable path]
+tool returns ToolResult.output ◄── read() snapshot  [durable path: M2-visible]
                                    │
 loop appends payload::ToolResult ──┘
 ```
 
-- **Live:** `TerminalOutput` (00 §8.1) is emitted via `PtyEventSink` at the
-  coalesced cadence; the supervisor projects it through `TerminalLayer` (10
-  §20.19). Live events are best-effort and never durable (`P8`).
-- **Durable:** each `terminal` action returns a bounded `ToolResult.output`
-  snapshot (from `read`/`close`); the loop appends it. The tool never appends
-  (X8).
+- **Live (in-process only, E-P1):** `TerminalOutput` (00 §8.1) is emitted via
+  `PtyEventSink` at the coalesced cadence to the **same-process** `EventBus`.
+  It is not a `protocol` notification and does not cross the M2 socket (05
+  §5.1/§6.1); a separate supervisor does not receive it. Live events are
+  best-effort and never durable (`P8`).
+- **Durable (the M2-visible record):** each `terminal` action returns a bounded
+  `ToolResult.output` snapshot (from `read`/`close`); the loop appends it. The
+  tool never appends (X8). In M2 the supervisor reconstructs terminal state from
+  these committed `ToolResult`s (plus explicit `read` calls), never from a live
+  channel.
 - **Between calls:** live events continue; nothing durable accumulates (§7.5).
-- **No new durable event type.** PTY output rides the existing live
+- **No new durable event type.** PTY output rides the existing in-process live
   `TerminalOutput` and the existing durable `ToolResult`; this spec adds no
   `EventType` (decision (d)). Replay reconstructs terminal state from the
   bounded `ToolResult` snapshots, not from a per-chunk log.
@@ -1071,8 +1445,10 @@ loop appends payload::ToolResult ──┘
 - **UTF-8 boundary.** Raw PTY bytes are lossy-converted to valid UTF-8 before
   entering the ring or a live event (`sanitize_utf8`, 07 §5.2/§8.2); invalid
   sequences become U+FFFD and set the loss flag (`P14`, `P-F11`).
-- **ANSI/control bytes are preserved** for rendering; the TUI sanitizes at
-  render time (10 §20.19). The log path never interpolates them (§6.5).
+- **ANSI/control bytes are preserved** in the ring/`ToolResult`; v1 renders them
+  as sanitized text in the tool-output view (10 §8.2/§20.10 — escape/strip, no
+  interpretation). The log path never interpolates them (§6.5); a terminal
+  emulator is deferred (decision (p), OQ-P8).
 - **Redaction.** The `terminal` tool's permission projection shows the command
   (or argv), never the output; PTY output never reaches `host.log` (§6.5,
   `P13`).
@@ -1117,9 +1493,9 @@ ReadOnly   + terminal  -> Deny (hard, not grantable)
   sequentially (07 §10), so at most one `terminal` action runs per session at a
   time; `find`/`read` are therefore single-consumer per session (`P15`).
   Parallel tool calls (Phase 2) must respect F8 and per-session ordering.
-- **Cross-thread marshalling.** `write`/`resize`/`terminate` `post` to the loop;
-  `read` waits on a condition variable/promise. No master-fd access off the loop
-  (`P11`).
+- **Cross-thread marshalling.** `write`/`resize`/`terminate`/`kill` `post` to the
+  loop; `read`/`wait` wait on a condition variable/promise. No master-fd access
+  off the loop (`P11`).
 - **Cap counters** are loop-affine acquire/release through the governor's
   existing synchronization (04 §8); PTY adds no new global lock.
 - **`PtyService` registry** is guarded by one service-level mutex; lookups are
@@ -1149,24 +1525,30 @@ master, which is not a controlling terminal. (04 §3.2 H3, `§17`)
 
 **P5 — Caps before spawn, held for the PTY lifetime.** `tryAcquirePty` runs
 before `openpty`/`fork`; the `PtySlot` is held until `Closed` and released on
-every path (exit, terminate, closeSession, shutdown, exception). (04 §8, 07 X11,
-F8)
+every path (exit, terminate, closeSession, shutdown, exception). A turn
+cancellation does **not** release it (E-P6). (04 §8, 07 X11, F8)
 
-**P6 — One reaper per child.** The PTY child is reaped by a specific-pid
-`waitpid`; there is no global SIGCHLD handler and no `waitpid(-1)` sweep. (11
-E8, M-F5, `signal_policy.hpp`)
+**P6 — One reaper per child.** The PTY child is reaped by the process layer's
+single specific-pid, **non-blocking** reap (`tryReap(int pid)`, `WNOHANG`,
+E-P5); there is no global SIGCHLD handler, no `waitpid(-1)` sweep, no blocking
+`waitpid` on the loop, and no second `waitpid` implementation in
+`execution/pty`. (11 E8, E-P5, M-F5, `signal_policy.hpp`)
 
-**P7 — Bounded output.** PTY output is bounded by `PtyOutputRing` (tail-keeping)
-and the durable snapshot is clamped on the serialized payload size; no PTY path
-allocates unbounded memory. (07 X10, F5)
+**P7 — Bounded output.** PTY output is bounded by `PtyOutputRing` (a distinct
+PTY-local ring with a FIFO read cursor per PTY, capacity
+`ResourceCaps::pty_output_ring_bytes`; E-P4) and the durable snapshot is clamped
+on the serialized payload size; no PTY path allocates unbounded memory.
+(07 X10, F5)
 
-**P8 — Live-only streaming.** PTY output is emitted as live `TerminalOutput`
-events; the loop is the sole durable appender of `payload::ToolResult`. (00
-§8.1, 07 X8)
+**P8 — Live-only streaming.** PTY output is emitted as **in-process** live
+`TerminalOutput` events (never a wire frame, E-P1); the loop is the sole durable
+appender of `payload::ToolResult`, which is the M2-visible record. (00 §8.1,
+05 §5.1/§6.1, 07 X8)
 
-**P9 — Idempotent terminate.** `terminate` on an `Exited`/`Closed` session is a
-no-op; close-master → SIGHUP → grace → SIGKILL is the pinned order. (`§17`,
-07 §9.3)
+**P9 — Idempotent terminate.** `terminate` (and its force variant `kill`) on an
+`Exited`/`Closed` session is a no-op; close-master → SIGHUP → grace → SIGKILL is
+the pinned order for `terminate`, and `kill` is the same without the grace wait.
+(`§17`, 07 §9.3, E-P12)
 
 **P10 — No orphan after close.** Every PTY is terminated and reaped on session
 end, `closeSession`, or daemon shutdown; after `Stopped` no PTY child remains.
@@ -1189,9 +1571,12 @@ lossy-converted to valid UTF-8; the durable `ToolResult.output` is valid UTF-8.
 **P15 — Session-scoped handles.** A `PtySessionId` resolves only within its
 owning session; `find` is borrowed and valid for one serialized call. (07 §10)
 
-**P16 — No signature churn.** `PtySession`'s four §17 methods and
-`PtyService::open` are byte-identical to 07 §6.5; all additions are additive.
-(07 §6.5, `§1.5`)
+**P16 — No signature churn on the frozen seam.** `PtySession`'s four §17 methods
+and `PtyService::open` are byte-identical to 07 §6.5; additions to `PtySession`
+(e.g. `kill()`, E-P12) and `PtyService` are additive. The two recorded additive
+deltas outside that seam (`LocalEnvironment` ctor, E-P7;
+`ToolConfig::pty_write_queue_cap`, E-P8) are errata, not churn.
+(07 §6.5, `§1.5`, Appendix A)
 
 **P17 — Deterministic ids.** `PtySessionId` is monotonic per daemon; `list` is
 ordered; golden/replay tests are stable. (07 X14)
@@ -1208,7 +1593,7 @@ ordered; golden/replay tests are stable. (07 X14)
 | F2 | background permission | a background session's `terminal` `ASK` uses the existing attention/auto-deny path; no deadlock (P12, §6.3) |
 | F3 | late event after close | live `TerminalOutput` is best-effort and dropped for a closing session; the durable result is the record (P8) |
 | F4 | edge-triggered attention | out of scope; PTY emits no attention state (spec 10) |
-| F5 | output ring buffers | `PtyOutputRing` is bounded and tail-keeping (P7) |
+| F5 | output ring buffers | `PtyOutputRing` (a distinct PTY-local ring + FIFO cursor per PTY, E-P4) is bounded and tail-keeping (P7) |
 | F6 | input/keybinding focus | out of scope (spec 10) |
 | F7 | per-session dirty flags | out of scope; live coalescing is per-session (spec 10) |
 | F8 | resource caps | global/per-session PTY caps; `PtySlot` held for the PTY lifetime (P5) |
@@ -1219,9 +1604,14 @@ ordered; golden/replay tests are stable. (07 X14)
 
 ### 11.2 Component-local failure modes (`P-F#`)
 
-**P-F1 — Spawn failure.** `openpty`/`fork`/`execve` fails. Detection: syscall
-error. Handling: release the slot; throw `PtyError{SpawnFailed}`; the registry
-maps it to `Error` (E-F5 analogue). No session is returned.
+**P-F1 — Spawn failure.** `openpty`/`fork` fails (pre-session), or a post-fork
+parent step fails. Detection: syscall error. Handling: release the slot; throw
+`PtyError{SpawnFailed}`; the `terminal` tool translates it to `ToolError{Io}`
+(§2.2), which the registry maps to `Error` (E-F5 analogue). No
+session is returned. A child-side `execve` failure is **not** this path: the
+child writes a status byte on the status pipe and the returned session
+transitions `Starting → Exited` with exit 127 (the status-pipe EOF is the
+success signal, §4.3, E-P11).
 
 **P-F2 — EIO on write/read.** The master reports `EIO` (slave gone). Detection:
 `read`/`write` errno. Handling: drain, close, transition to `Exited`, reap;
@@ -1234,14 +1624,15 @@ Detection: `EIO`/`ESRCH`/`ENOTTY`. Handling: tolerate as a no-op; never crash;
 
 **P-F4 — Output backpressure.** The ring is full (tail eviction + `truncated`)
 or the outbound queue is full (`WouldBlock`). Detection: capacity checks.
-Handling: evict oldest + latch `truncated`; `write` raises `PtyError{WouldBlock}`
-on a subsequent call; the tool returns a bounded error result; the session stays
-`Running`.
+Handling: evict oldest + latch `truncated`; `write` raises
+`PtyError{WouldBlock}` **synchronously** on the caller under the mutex (§3.2);
+the tool returns a bounded error result; the session stays `Running`.
 
 **P-F5 — Child death.** The child exits naturally or is signalled. Detection:
-`pidfd` readiness / specific-pid `waitpid`. Handling: drain to EOF, cache
+`pidfd` readiness (or a bounded `WNOHANG` poll), then the process layer's
+non-blocking specific-pid `tryReap` (E-P5). Handling: drain to EOF, cache
 `PtyExit`, set `eof`, transition to `Exited`, release the slot on `Closed`;
-never a global sweep (E8, M-F5).
+never a global sweep (E8, E-P5, M-F5).
 
 **P-F6 — Cap exceeded.** `tryAcquirePty` returns `false`. Detection: governor.
 Handling: throw `PtyError{CapExceeded}` before any spawn; the loop appends a
@@ -1293,9 +1684,14 @@ construction leaks a PTY slot. Detection: RAII guard; cap accounting test.
 Handling: `PtySlot` releases on every path; `open` acquires before spawn and
 transfers the guard to the session only on success (P5).
 
-**P-F17 — Loop stopped mid-open.** `open` runs while the daemon is draining.
-Detection: service state. Handling: throw `PtyError{Internal}` (or
-`CapExceeded` during drain); no partial spawn; the slot is released.
+**P-F17 — Loop stopped mid-open / post-fork failure.** `open` runs while the
+daemon is draining, or a parent step after `fork` fails (status-pipe/master
+registration on the loop, or a `Starting`-handshake timeout). Detection:
+`Executor::stopped()` or the failing step. Handling: if the child exists,
+`kill(-pgid, SIGKILL)` + specific-pid reap via the process layer (E-P5) **before**
+releasing the slot; then throw `PtyError{Internal}` (draining) or
+`PtyError{SpawnFailed}` (post-fork failure). No partial spawn, no leaked child,
+no zombie.
 
 ### 11.3 Failure-mode coverage matrix
 
@@ -1317,7 +1713,7 @@ Detection: service state. Handling: throw `PtyError{Internal}` (or
 | P-F14 | TSan (concurrent read/write) |
 | P-F15 | static/log audit |
 | P-F16 | unit (throw between acquire/spawn) |
-| P-F17 | integration (drain mid-open) |
+| P-F17 | integration (drain mid-open; post-fork failure kills+reaps) |
 
 ---
 
@@ -1333,10 +1729,10 @@ seam.
 | execution world | `ExecutionEnvironment` (`§18`); `pty()` returns the PTY capability |
 | capability seam | `PtyService`/`PtySession`; a remote/sandbox provider replaces `LocalPtyService` without tool changes |
 | service for capabilities | `pty()->open(...)`; events for interception (permission via `§19`) |
-| session/turn/step taxonomy | PTY output rides live `TerminalOutput` and durable `ToolResult`; no new event type |
-| append-only session log | `ToolResult` snapshots are durable; live terminal chunks are not (P8) |
+| session/turn/step taxonomy | PTY output rides **in-process** live `TerminalOutput` and durable `ToolResult`; no new event type (E-P1) |
+| append-only session log | `ToolResult` snapshots are durable and M2-visible; live terminal chunks are not (P8) |
 | plugin loop separation | the `terminal` tool is a `Tool`; the pump is a service, not the loop (X8) |
-| provider-agnostic seams | PTY output is bytes; the UI renders via `TerminalLayer` (10) |
+| provider-agnostic seams | PTY output is bytes; v1 renders sanitized text via the tool-output renderer (10 §8.2/§20.10), not an emulator (decision (p)) |
 
 **Omitted deliberately** (matching `§55`): a dsh-compatible PTY plugin config,
 hot reload of the PTY provider, and a browser terminal client.
@@ -1356,24 +1752,60 @@ layers run offline against fakes; the live layer is opt-in and API-key gated
   - empty `executable`/`argv`/`cwd` → `ToolError{InvalidArguments}`;
     `cwd` outside root → `ToolError{PathEscape}` (P1).
   - `rows`/`cols` non-positive → `InvalidArguments`.
-- **`PtyError` mapping**
-  - each `PtyErrorCode` → `to_string`; `PtyError` → `ToolResult{Error}` via the
-    registry path (E-F16 analogue).
-- **`PtyOutputRing`**
-  - under cap ⇒ no truncation; over cap ⇒ tail retained + `truncated`;
-    `read` consumes; interleaved stdout semantics; `max_bytes` clamp.
+- **`PtyError` translation**
+  - each `PtyErrorCode` → `to_string`; `to_tool_error_code` is total and pins
+    `CapExceeded → ResourceExhausted` and `NotFound → NotFound`; the `terminal`
+    tool's `execute` throws `ToolError` (never `PtyError`), so the registry path
+    yields `ToolResult{Error, error = to_string(mapped)}` (07 §3.1, E-F16) and a
+    known `PtyErrorCode` is never reported as `Internal`.
+- **`PtyOutputRing` (E-P4, distinct type)**
+  - under cap ⇒ no truncation; over cap ⇒ oldest evicted, FIFO cursor consumes
+    oldest-first, and `truncated` is reported only for the read that lost unread
+    bytes (not latched); `max_bytes` clamps to a UTF-8 boundary; capacity ==
+    `ResourceCaps::pty_output_ring_bytes`.
   - non-UTF-8 fixture ⇒ valid UTF-8 + loss flag (P14, P-F11).
+  - two terminals in one session keep independent rings (no interleave).
 - **`Stream<T>`**
-  - single consumer; resubscribe replaces; loop-affine handler ordering;
-    `closed()` after `finish`; `buffered()` bound.
-- **`PtySessionId` / `list`**
-  - monotonic minting; `list` ordered; foreign id → `nullptr` (P-F9, P17).
+  - single consumer; resubscribe replaces; dropping/resetting
+    `StreamSubscription` detaches and a stale handle is inert; loop-affine
+    handler ordering; `closed()` after `finish`; `buffered()` bound.
+- **`PtySessionId` / `list` / `available`**
+  - monotonic minting; `list` ordered; foreign id → `nullptr` (P-F9, P17);
+    `UnavailablePtyService::available() == false` and
+    `LocalPtyService::available() == true` (E-P10).
 - **Caps**
   - `tryAcquirePty`/`releasePty` global + per-session; `PtySlot` release on
-    success/throw/terminate/close; no double-release (P5, P-F6, P-F16).
+    success/throw/terminate/close; no release on turn cancellation (E-P6); no
+    double-release (P5, P-F6, P-F16).
 - **State machine**
-  - `Starting→Running→Exited→Closed`; `write` after `Exited` → `Closed`;
-    `terminate` idempotent (P9, P-F10).
+  - `Starting→Running→Exited→Closed`; `open` returns `Starting`; `Running` only
+    on the status-pipe EOF (a successful `execve`); exec failure (status byte)
+    → `Exited` exit 127 (E-P11); `write` after `Exited` → `Closed`; `terminate`
+    idempotent (P9, P-F10).
+- **`read`/`wait` cancellation (F9)**
+  - a `read(max, wait, cancel)` whose `cancel` fires before any byte is consumed
+    returns `PtyRead{cancelled = true}` with empty `data` and consumes nothing; a
+    subsequent `read` still returns the buffered bytes (session untouched).
+  - a `wait(timeout, cancel)` whose `cancel` fires throws `CancellationError`
+    and leaves the session open (not `Closed`).
+- **`kill` force path (§3.5)**
+  - `kill()` skips the SIGHUP grace: it closes the master, `SIGKILL`s the group
+    immediately, and reaps; `wait()` reports `signalled = true, signal =
+    SIGKILL`; calling it on an `Exited`/`Closed` session is a no-op (P9).
+- **`write` backpressure**
+  - `WouldBlock` is raised synchronously on the caller when the whole payload
+    does not fit (`pty_write_queue_cap`); nothing is enqueued; a payload larger
+    than the cap always raises; stopped loop → `Internal` (P-F4, E-P3, E-P8).
+- **Reap seam (E-P5)**
+  - `tryReap(pid)` returns `std::nullopt` while the child runs and the status
+    once it is a zombie; a loop-thread guard (or TSan) asserts the blocking
+    `reap(pid)` is never called on the loop; the no-`pidfd` fallback's bounded
+    poll terminates once reaped (P6, §5.2).
+- **Stopped-loop teardown**
+  - `closeAll()` is synchronous/idempotent and reaps every PTY without `post`
+    (off-loop, so its blocking `reap` is permitted); with
+    `Executor::stopped() == true`, `terminate`/`closeSession` also kill the
+    group and reap synchronously without `post` (P-F17, E-P2).
 - **`resize` validation**
   - non-positive → `InvalidArguments`; resize on `Closed` → no-op (P-F3).
 
@@ -1395,9 +1827,14 @@ layers run offline against fakes; the live layer is opt-in and API-key gated
   `ResourceExhausted`; a durable `ToolResult` is appended (P-F6, X11).
 - **Cancellation scoping.** Cancelling session A's turn aborts A's in-flight
   `terminal` action and does not touch session B's PTY (F9, P10).
-- **Shutdown mid-PTY.** Trigger `host.shutdown` with a live PTY; assert the
-  child is terminated within `shutdown_grace` and none remain after `Stopped`
+- **Shutdown mid-PTY (ordering, E-P2).** Trigger `host.shutdown` with a live
+  PTY; assert PTY terminate+reap completes **before** `TransportServer::stop()`
+  (loop still live), within `shutdown_grace`, and none remain after `Stopped`
   (P-F7, P10).
+- **Post-fork failure (P-F17).** Inject a failure after `fork` (e.g. a fake
+  registration failure); assert the child is SIGKILLed and reaped via the
+  process layer, the slot is released, and `SpawnFailed` is thrown — no zombie,
+  no leak.
 - **Loop affinity.** Assert `Executor::onLoopThread()` inside the pump; assert a
   tool worker never touches the master fd (P11).
 
@@ -1414,6 +1851,9 @@ in the default suite.
 - **Teardown.** `terminate()` closes the master, delivers SIGHUP, and reaps;
   `wait()` returns `signalled = true, signal = SIGHUP` when the child did not
   handle it.
+- **Force teardown.** A child that traps/ignores SIGHUP is killed by
+  `kill()` without waiting `terminate_grace`; `wait()` returns `signalled =
+  true, signal = SIGKILL` (§3.5, §8.2).
 - **No zombies.** After a batch of open/close cycles, `waitpid(-1, WNOHANG)`
   returns `ECHILD` (no children left) and the daemon's fd count is unchanged
   (P6, P-F8).
@@ -1428,15 +1868,17 @@ in the default suite.
 - Build the execution/PTY targets with `-fsanitize=thread` and run a test that
   hammers `write`/`read`/`resize`/`close` from a worker while the pump runs on
   the loop; assert no data races and correct ordering (P11, P-F14).
-- Assert no `post()` after loop stop and no handler invocation after the bus is
-  destroyed (11 E1/E2, P-F12).
+- Assert `post()` returns false after loop stop (no handler invocation) and the
+  teardown fallback still reaps; no handler invocation after the bus is
+  destroyed (11 E1/E2, E-P3, P-F12).
 
 ### 13.5 Golden tests (UI-visible)
 
-- Given a recorded live `TerminalOutput` stream, render via spec 10's
-  `TerminalLayer` and compare the terminal representation (00 §44 golden
-  pattern). Assert ANSI escapes are interpreted, not emitted raw, and control
-  bytes are sanitized at render time (10 §20.19).
+- Given a recorded terminal `ToolResult` snapshot, render via spec 10's
+  tool-output renderer (10 §8.2/§20.10) and compare the representation (00 §44
+  golden pattern). Assert ANSI/control sequences are **escaped or stripped as
+  sanitized text**, never interpreted and never emitted raw (decision (p));
+  `Terminal` (10 §8.3) is not an emulator.
 - A truncation fixture renders the tail + a truncation marker.
 
 ### 13.6 Replay tests
@@ -1465,7 +1907,7 @@ in the default suite.
 | P6 | integration no-zombies + static SIGCHLD audit |
 | P7 | unit ring cap |
 | P8 | integration no-append; static check |
-| P9 | unit terminate idempotence |
+| P9 | unit terminate/kill idempotence + force-path SIGKILL |
 | P10 | integration session-end + shutdown |
 | P11 | TSan + loop-affinity assert |
 | P12 | integration policy deny |
@@ -1491,8 +1933,9 @@ in the default suite.
 - **(c) `Stream<T>` is pinned here** (bounded, loop-affine, single-consumer push
   stream) because PTY is the first consumer of 07 §6.5's forward declaration
   (§3.3). A future general async stream must satisfy this shape.
-- **(d) No new durable event type.** PTY output rides live `TerminalOutput` and
-  durable `ToolResult` snapshots; replay reconstructs from snapshots (§8.3).
+- **(d) No new durable event type.** PTY output rides in-process live
+  `TerminalOutput` and durable `ToolResult` snapshots; the latter is the only
+  M2-visible record and replay reconstructs from it (§8.3, E-P1).
 - **(e) `openpty` + `fork` + `setsid` + `TIOCSCTTY` is the pinned spawn
   sequence**; `forkpty` is an internal optimization only if observably identical
   (§4.3, P4).
@@ -1504,22 +1947,33 @@ in the default suite.
 - **(h) Cancelling a turn aborts the in-flight action but does not close a
   persistent PTY.** PTYs close on `close`, session end, or shutdown (§7.3).
 - **(i) The PTY cap slot is held for the PTY lifetime**, not the tool call — a
-  deliberate refinement of 07 §7.2 for persistent terminals (§6.2, P5).
+  deliberate refinement of 07 §7.2/§7.4 for persistent terminals, recorded as
+  E-P6 (§6.2, P5). Cancellation does not release it.
 - **(j) `terminal` is `ASK` as a whole in v1**; per-action permission is
   deferred (OQ-P3), and `ReadOnly` hard-denies it (§8.5, P12).
-- **(k) Reaping is specific-pid only** (`pidfd` preferred, dedicated reap step
-  as fallback); no SIGCHLD handler and no `waitpid(-1)` (11 E8, P6).
+- **(k) Reaping is specific-pid only and routed through the process layer**
+  (`pidfd` preferred, dedicated reap step as fallback); no SIGCHLD handler, no
+  `waitpid(-1)`, and no second `waitpid` implementation (11 E8, E-P5, P6).
 - **(l) Live PTY output is emitted through a `PtyEventSink` seam** wired by the
-  daemon to the `EventBus`; the pump never appends durable events (§5.4, P8).
+  daemon to the **in-process** `EventBus`; it is not carried as a wire frame
+  (05 §5.1) and is not visible to a separate M2 supervisor. The pump never
+  appends durable events; M2 terminal visibility is via durable `ToolResult`
+  snapshots (§5.4, §8.3, E-P1, P8).
 - **(m) PTY output bytes never reach `host.log`**; logs carry metadata only
   (§6.5, P13).
-- **(n) `LocalEnvironment` gains an additive `PtyService*` injection** so the
-  daemon can supply a loop-aware service; `nullptr` keeps
-  `UnavailablePtyService` (§4.5). This is the only interface delta and it does
-  not touch any 07 signature (P16).
-- **(o) The `terminal` tool is registered only when a real `PtyService` is
-  injected**; the model is never offered a PTY tool backed by
-  `UnavailablePtyService` (§4.4, 07 §4.3).
+- **(n) `LocalEnvironment` gains an additive, defaulted `PtyService*`
+  injection** so the daemon can supply a loop-aware service; `nullptr` keeps
+  `UnavailablePtyService` (§4.5). It is source-compatible but amends a
+  07-pinned signature, recorded as E-P7; `ToolConfig::pty_write_queue_cap` is
+  E-P8. These are the only interface deltas; P16 is scoped to
+  `PtySession`/`PtyService::open`.
+- **(o) The `terminal` tool is registered only when `pty().available()` is
+  true**; the model is never offered a PTY tool backed by
+  `UnavailablePtyService` (§4.4, E-P10, 07 §4.3).
+- **(p) v1 renders PTY output as sanitized text.** ANSI/control sequences are
+  escaped or stripped by the tool-output renderer (10 §8.2/§20.10); `Terminal`
+  (10 §8.3) is not an emulator, so no terminal emulation is claimed. Full ANSI
+  emulation and a cross-process live channel are deferred (OQ-P8).
 
 ### 14.2 Open questions
 
@@ -1547,6 +2001,11 @@ in the default suite.
 - **OQ-P7 — Window-size propagation from the TUI.** The initial `rows`/`cols`
   come from the model or a default; a future refinement propagates the
   supervisor's actual terminal size when the PTY is opened for display.
+- **OQ-P8 — Cross-process live streaming and ANSI emulation.** A live
+  `TerminalOutput` channel over the M2 wire (a 05 amendment, E-P1) and full ANSI
+  emulation in the supervisor are both deferred; v1 shows sanitized text derived
+  from durable `ToolResult` snapshots (decision (p)). The wire shape and the
+  emulator boundary are unpinned.
 
 ---
 
@@ -1558,23 +2017,69 @@ in the default suite.
   §17 (PTY), §18 (execution environment), §19 (permissions), §40 (logging),
   §44 (testing), §45 (Fake LLM), §51 (Phase 2), §54 (F1–F12, D6/D18/D23), §55
   (dsh comparison).
-- `docs/design/04-workspace-host-daemon.md` — §2.1 (`ResourceCaps`), §3.2
-  (spawn/fd hygiene), §3.3 (startup), §3.4 (one `io_context`), §3.5 (graceful
-  shutdown), §3.6 (signals), §4.1 (`HostConfig`), §8 (`ResourceGovernor`),
-  OQ-6, decision (r).
+- `docs/design/04-workspace-host-daemon.md` — §2.1 (`ResourceCaps`; E-P4 adds
+  `pty_output_ring_bytes`), §3.2 (spawn/fd hygiene), §3.3 (startup), §3.4 (one
+  `io_context`; E-P3 pins `Executor`), §3.5 (graceful shutdown; E-P2 pins the PTY
+  step), §3.6 (signals), §4.1 (`HostConfig`), §8 (`ResourceGovernor`), OQ-6,
+  decision (r).
 - `docs/design/07-tools-execution.md` — §3 (`Tool`), §4.3 (initial tool set),
-  §5 (`ToolContext`, `OutputSink`, `ToolConfig`), §6.1–§6.5
-  (`ExecutionEnvironment`, `resolve()`, `ProcessService`, `PtyService`), §6.8
-  (sandbox modes), §7 (caps), §8.2 (coalescing), §9 (subprocess/PTY ownership),
-  §10 (concurrency), §11 (X1–X16), §12 (E-F#), §15 (decisions).
+  §5 (`ToolContext`, `OutputSink`, `ToolConfig`; E-P8 adds
+  `pty_write_queue_cap`), §6.1–§6.5 (`ExecutionEnvironment`; E-P7 adds the ctor
+  parameter; `resolve()`, `ProcessService`, `PtyService` seam), §6.8 (sandbox
+  modes), §7 (caps; E-P6 amends slot release), §8.2 (coalescing), §9
+  (subprocess/PTY ownership), §10 (concurrency), §11 (X1–X16), §12 (E-F#), §15
+  (decisions).
+- `docs/design/05-transport.md` — §5.1 (live events are **not** carried as
+  `Event` frames), §6.1 (`event.subscribe` streams committed durable events
+  only) — the basis for E-P1.
+- `docs/design/10-supervisor-tui.md` — §5.1/§5.2 (`UiEvent`/`UiEventAdapter` do
+  not consume `TerminalOutput`), §8.2/§8.3 (`Terminal` is not an emulator),
+  `§20.10` (tool-output streaming) — the basis for E-P1 and decision (p).
 - `docs/design/09-permissions.md` — §3.3 (rule model), §3.1 (policy), §3.5
   (`ReadOnly` hard deny), decision (p) (argument projection).
 - `docs/design/11-m2-errata.md` — §3.2 (`TurnExecutor`, E6/E7), §3.3 (child
-  status, E8, M-F5), §11 (destruction order, E18), §12.2 (`host.log` redaction),
-  §14 (E1–E21), §15 (M-F1–M-F12).
+  status, E8, M-F5; E-P5 amends "exclusively process.cpp"), §11.2/§11.3
+  (destruction order and the `host.shutdown` coordinator, E18/E19; E-P2 pins the
+  PTY step), §12.2 (`host.log` redaction), §14 (E1–E21), §15 (M-F1–M-F12).
 - `docs/design/12-m1-drift-errata.md` — M1 spec-text ↔ code reconciliation
   (the existing `PtyService` stub and `signal_policy.hpp`).
 - `include/ymh/execution/services.hpp` — the forward-declared
   `PtySession`/`PtyService` seam this spec realizes.
 - `include/ymh/execution/signal_policy.hpp` — the SIGCHLD policy PTY must honor.
-- `include/ymh/execution/resource_governor.hpp` — `PtySlot` and the PTY caps.
+- `include/ymh/execution/resource_governor.hpp` — `PtySlot` and the PTY caps
+  (E-P4 adds a cap field).
+- `include/ymh/execution/process.hpp` / `src/execution/process.cpp` — the single
+  specific-pid `reap(int pid)` owner (E-P5).
+- `include/ymh/execution/config.hpp` — `ToolConfig` (E-P8 adds
+  `pty_write_queue_cap`).
+- `include/ymh/agent/workspace_runtime.hpp` — the `WorkspaceRuntime` seam that
+  owns the injected `PtyService` (E-P7).
+
+---
+
+## Appendix A — Cross-spec amendment ledger (errata)
+
+This spec is additive by default (§1.5). The following amendments touch text
+frozen by other specs and are recorded here because this spec may not edit them
+(the same convention `11-m2-errata.md` uses for `04`/`05`). Each row names the
+target, the change, and the invariant it preserves. No implementation code may
+depend on an errata row until the owning spec is updated.
+
+| # | Target | Amendment | Rationale / invariant |
+|---|---|---|---|
+| **E-P1** | 05 §5.1/§6.1; 10 §5.1 | Live `TerminalOutput` is **in-process only**; it is not a wire frame. An M2 supervisor derives terminal state from durable `ToolResult` snapshots. A cross-process live channel would be a 05 amendment and is deferred (OQ-P8). | 05 §5.1: live events are not `Event` frames; `event.subscribe` is durable-only. Keeps T4/T5 (no frontend type on the wire). |
+| **E-P2** | 04 §3.5 step 4; 11 §11.3 | PTY terminate+reap runs on the shutdown coordinator **after** `TurnExecutor` drain and **before** `TransportServer::stop()`, while the loop is live. `~LocalPtyService`/late `closeSession` use a loop-independent fallback (`kill(-pgid, SIGKILL)` + specific-pid reap). | Preserves 11 E18/E19 and P10: no dropped `post` after stop, no leaked child, dtor assert holds. |
+| **E-P3** | 04 §3.4; 11 §3.2 (E2) | The `Executor` seam is pinned here: `bool post(...)` (false after stop), `stopped()`, `onLoopThread()`. 04 owns the concrete `AsioExecutor`; 04 currently names no such type. | Makes stopped-loop detection defined; keeps 11 E1/E2 (one runner, no thread from `post`). |
+| **E-P4** | 04 §2.1 | `ResourceCaps` gains `pty_output_ring_bytes` (default 256 KiB), the capacity of the per-PTY `PtyOutputRing` (a distinct PTY-local ring with its own storage + FIFO read cursor, §5.2). | Pins the ring's capacity source without duplicating 07 §5.2's per-session `OutputRing` (different type/purpose). Distinct type ⇒ **no 07 §5.2 type amendment**; only the storage discipline and `sanitize_utf8` are shared. |
+| **E-P5** | 11 §3.3 (E8) | Child status stays owned by **one** `waitpid` implementation in `process.cpp`; the PTY service **invokes** it via an additively exposed **non-blocking** `tryReap(int pid)` (`WNOHANG`) in `process.hpp`. The existing blocking `reap(int pid)` is retained for off-loop callers and MUST NOT run on the daemon loop. A second `waitpid` in `execution/pty` is a defect. | E8 becomes "one reaper implementation, one owner per child", not "one caller"; preserves the "no blocking `waitpid` on the loop" invariant (§5.2, P6). |
+| **E-P6** | 07 §7.2/§7.4 | A persistent PTY slot is released at `Closed`, **not** on turn cancellation; cancellation aborts only the in-flight action. | Reconciles 07's release-on-cancellation with 14 decision (h)/(i); P5/P10. |
+| **E-P7** | 07 §6.1 | `LocalEnvironment` ctor gains a defaulted `PtyService* pty = nullptr`; `WorkspaceRuntime::Impl` declares `LocalPtyService` before `LocalEnvironment`. | Source-compatible injection; E18 destruction order. P16 scoped to the `PtySession`/`PtyService` seam. |
+| **E-P8** | 07 §5.5 | `ToolConfig` gains `pty_write_queue_cap` (default 256 KiB), the owner of the outbound write bound. | Gives §3.2's bound a pinned owner instead of a "`ToolConfig`-adjacent constant". |
+| **E-P9** | 10 §8.2/§8.3; arch §20.10/§20.19 | v1 renders PTY output as **sanitized text** via the tool-output renderer; no ANSI emulation is claimed. | 10 §8.3 states `Terminal` is not an emulator; keeps the UI boundary honest (decision (p), OQ-P8). |
+| **E-P10** | 07 §6.5 | `PtyService` gains an additive `available()` capability query; registration keys on it, not on `find()` presence. | `find()` is a session-scoped id lookup, not a capability test. |
+| **E-P11** | 14 §2.1/§3.7/§4.3 (self) | A `O_CLOEXEC` status-pipe handshake makes `Starting`/`Running` observable and `execve` failure detectable: the parent sets `Running` only on the pipe **EOF** (successful `execve` closed the write end); an exec-failure **status byte** → `Exited(127)`; post-fork failures kill+reap. | Fixes the parent/child asymmetry of `TIOCSCTTY`; a pre-`execve` ready byte could not distinguish exec failure; P-F17. |
+| **E-P12** | 07 §6.5 | `PtySession` gains an additive `kill()` force-teardown method (close master → `kill(-pgid, SIGKILL)` → reap, no SIGHUP grace). The four §17 methods and `PtyService::open` remain byte-identical; this is additive, like the other additive `PtySession` accessors (§3.1). | Gives the `terminal` tool's `close` `signal = "kill"` (§8.2) a real seam instead of silently falling back to `terminate()`; preserves P16 and P9. |
+
+**Ordering of application.** E-P1/E-P9 are documentation-only (no type change).
+E-P2/E-P3/E-P4/E-P5/E-P6/E-P7/E-P8/E-P10/E-P12 are interface errata the owning
+specs must absorb before PTY code lands. E-P11 is internal to this spec.

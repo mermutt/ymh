@@ -10,8 +10,8 @@ This document pins the compaction trigger policy, the boundary-selection rule,
 the summarization call through the frozen LLM seam (`08`) under the frozen
 `LLMPool` discipline (`06 §5.9`, A12), the `ContextCompaction` event semantics
 (the payload itself is pinned by `01 §4.5`), the projection rule that
-`deriveMessages()` already folds (`01 §6.3`), invariants (`C1`–`C18`), failure
-modes (`F1`–`F12` plus local `C-F1`–`C-F16`), the DeepSeek Harness (dsh)
+`deriveMessages()` already folds (`01 §6.3`), invariants (`C1`–`C19`), failure
+modes (`F1`–`F12` plus local `C-F1`–`C-F17b`), the DeepSeek Harness (dsh)
 mapping, and the test plan.
 
 It follows `00-architecture.md` (cited inline as `§n`), `01-session.md`
@@ -58,9 +58,10 @@ Status: **written** · verified: — · reviewer: — (tracked in `DESIGN_STATUS
    └───────┬───────────────────────────┬──────────────────┬────────────────┘
            │ append (lease-checked)    │ LLM call          │ usage
            ▼                           ▼                   ▼
-   Session (01)                LLMProvider + LLMPool   CompactionUsageSink
-   deriveMessages() folds      (06 §5.9, 08 §3.4)      → payload::TokenUsage
-   the compaction (01 §6.3)                             (01 §4.5, §33)
+   Session (01)                LLMProvider + LLMPool   CompactionResult::usage
+   deriveMessages() folds      (06 §5.9, 08 §3.4)      → loop appends
+   the compaction (01 §6.3)                             payload::TokenUsage
+                                                        (06 §8, 01 §4.5, §33)
            │
            ▼
    SessionStore / SessionPersistence (02): append txn + snapshot refresh (02 §6.4)
@@ -83,8 +84,10 @@ This spec pins:
 - **What is summarized** — the boundary-selection rule: a `Sequence` that is a
   *compaction point* (a completed turn's terminal event), leaving
   `keep_recent_turns` turns intact (§3.3).
-- **The resulting compacted context generation** — the fold that produces
-  `[system prompt] + [summary(System)] + messages(after boundary)` (§3.4, §4.2).
+- **The resulting compacted context generation** — the projection fold that
+  produces `[summary(System)] + messages(after boundary)`, with the assembler's
+  system prompt re-added at assembly time (outside `tokenEstimate`) (§3.4,
+  §4.2).
 - **The `ContextCompaction` event semantics** — payload pinned by `01 §4.5`;
   this spec pins its meaning, the projection rule, and replay faithfulness
   (§4).
@@ -170,13 +173,17 @@ value of `effective_context` immediately after that event is appended.
 - **`summary`** — the durable summary text, produced by the summarizer model.
   Projected as a `Role::System` message (`01 §6.3`).
 - **`tokenEstimate`** — the estimator's estimate of the **compacted context**
-  after the fold (summary + retained tail), *not* the summarizer call's usage.
-  The summarizer call's usage is accounted separately as `TokenUsage` (§5.7).
+  after the fold (`summary + retained tail`, §3.4), *not* the summarizer call's
+  usage. The assembler-added system prompt is outside the session projection and
+  is **not** counted (C15). The summarizer call's usage is returned in
+  `CompactionResult.usage` and appended by the loop (§5.7).
 - **`model`** — the effective summarizer model, resolved per `08 §5.2`
   (explicit per-request override first).
 - **`createdAt`** — the wall-clock instant the compaction event was created,
-  read from the injected clock (`11 §7.2` `ClockReader`, E21), never from a
-  direct `system_clock::now()` inside the pure projection.
+  read from the injected `WallClock` (§5.2) — a distinct
+  `std::function<std::chrono::system_clock::time_point()>` seam, **not** the
+  broker's `steady_clock`-based `ClockReader` (`11 §7.2`, E21) — and never from
+  a direct `system_clock::now()` inside the pure projection (C5).
 
 `ContextCompaction` carries no `TurnId`; it is attributed to its enclosing turn
 by position in the log (I11). The summarizer's `Usage`, by contrast, is
@@ -324,9 +331,12 @@ select_boundary(session, policy):
   prefix := deriveMessages(header, events[0 .. candidate])   # 01 §6.3 free fn
   if prefix.size() < policy.min_prefix_messages:
       return NotNeeded                              # C-F14
+  full   := deriveMessages(header, events)          # current effective projection
+  # The effective projection is exactly the summarize set followed by the
+  # retained tail, so the tail count is the difference (§3.4).
   return CompactionPlan{ boundary = candidate,
                          prefix_messages = prefix.size(),
-                         kept_messages   = <count after candidate> }
+                         kept_messages   = full.size() - prefix.size() }
 ```
 
 Rules:
@@ -362,20 +372,48 @@ After the summarization call returns text `S`, the compactor produces:
 payload::ContextCompaction{
     boundary      = candidate,
     summary       = S,
-    tokenEstimate = estimator.estimate( compacted_context ),   # §2.3
+    tokenEstimate = estimator_.estimate( compacted_context ),  # §2.3, C15
     model         = resolved_summarizer_model,                 # 08 §5.2
-    createdAt     = clock.now()                                # 11 §7.2
+    createdAt     = clock_()                                   # WallClock, §5.2
 }
 ```
 
-where, conceptually (the loop re-assembles; the compactor estimates):
+`compacted_context` is the **projection-level** value the new compaction folds
+to — i.e. what `deriveMessages()` returns immediately after the event is
+appended (the loop re-assembles; the compactor only estimates):
 
 ```text
 compacted_context =
-      [assembler system prompt]                                  # 06 §5.2
-    + [Message{ Role::System, text = S }]                        # summary
-    + projected messages whose origin Sequence > candidate       # tail
+      [Message{ Role::System, text = S }]                    # summary (C-D6)
+    + projected messages whose origin Sequence > candidate   # retained tail
 ```
+
+**Tail computation (pinned).** The compactor does **not** need per-message origin
+`Sequence` values, which the assembled `std::vector<Message>` does not carry.
+The assembled list is exactly
+
+```text
+messages = [leading assembler messages]   # e.g. the system prompt (06 §5.2)
+         + [effective projection]         # deriveMessages(), 01 §6.3
+```
+
+so, using the plan's counts (§3.3):
+
+```text
+lead := messages.size() - (plan.prefix_messages + plan.kept_messages)
+tail := messages[lead + plan.prefix_messages ..]
+        # exactly plan.kept_messages entries, in projection order
+```
+
+`lead` is the number of leading non-projected messages the assembler prepends;
+it is `0` for an empty system prompt and `1` for the single system prompt
+`SessionContextAssembler` prepends (`include/ymh/agent/context_assembler.cpp`).
+`tail` is the retained suffix; together with `summary` it is the estimate basis.
+
+**System prompt.** The assembler re-adds its system prompt on re-assembly
+(`06 §5.1` step 3, §6.2). That prompt is part of the LLM-visible generation but
+is **outside the session projection**, so it is **excluded** from
+`compacted_context` and from `tokenEstimate` (C15).
 
 The loop appends the payload and then re-assembles via `ContextAssembler`
 (`06 §5.1` step 3). `deriveMessages()` performs the actual fold; the compactor's
@@ -415,9 +453,10 @@ Compaction is a fold over the log in sequence order (`01 §6.3`). Consequences:
 
 - **Composition.** After compaction A (boundary `bA`) and later compaction B
   (boundary `bB > bA`), the effective context is `[summary_B] + messages(>
-  bB)`. Summary A is itself inside B's summarize set (its origin sequence is `<=
-  bB`), so the effective projection uses only the latest summary. This is the
-  "latest boundary wins for overlapping ranges" rule of `01 §6.3`.
+  bB)`. Summary A is itself inside B's summarize set: its origin is A's own
+  `Sequence` (`§4.2`), which is `< bB`, so the effective projection uses only
+  the latest summary. This is the "latest boundary wins for overlapping ranges"
+  rule of `01 §6.3`.
 - **No double counting.** Each compaction event is folded exactly once, in
   sequence order. The projection never sums summaries.
 - **Chains are deterministic.** Given the same log, the same effective context
@@ -467,8 +506,10 @@ for rec in events():                    # ascending Sequence
         # drop every projected message derived from an event with seq <= boundary
         keep messages[i] where origins[i] > payload.boundary
         prepend Message{ Role::System, content = [Text(payload.summary)] }
-        # the synthetic summary has no origin Sequence; a later compaction
-        # whose boundary is >= this one supersedes it (01 §6.3)
+        # The synthetic summary's origin Sequence is this ContextCompaction
+        # event's own `record.seq` (existing `Session::deriveMessages`,
+        # src/session/session.cpp), so a later compaction whose boundary is
+        # >= that seq drops it and supersedes it (01 §6.3, §3.6).
 ```
 
 The rule is a **pure function** of `(header, events())` (01 I7). It is the only
@@ -546,27 +587,38 @@ disambiguate the failure case (`06 §5.3`, A-F10). The existing `NullCompactor`
 ```cpp
 namespace ymh {
 
+// Injectable WALL clock for `ContextCompaction.createdAt` (§2.3, C5). This is
+// deliberately NOT the broker's `ClockReader` (11 §7.2), which is
+// `std::chrono::steady_clock`-based: a steady clock has no wall-clock epoch and
+// cannot produce the durable `system_clock::time_point` the payload stores
+// (`include/ymh/session/events.hpp`). `system_clock::now` is the default, so
+// production construction is unchanged; tests inject a fixed/`ManualWallClock`
+// reader.
+using WallClock = std::function<std::chrono::system_clock::time_point()>;
+
 // Concrete compactor implementing the frozen `Compactor` seam (06 §5.3).
-// One instance per agent (or per daemon with per-agent turn context); it holds
-// no mutable cross-turn state except the counters in §5.4, which the loop
-// resets per turn.
+// One instance per workspace daemon, shared by every agent (the daemon's
+// `AgentServices` bundle; src/agent/workspace_runtime.cpp). It is stateless
+// across turns AND sessions: `session` is passed in per call and usage is
+// returned (never appended), so the shared instance cannot misattribute.
 class ContextCompactor final : public Compactor {
 public:
     ContextCompactor(LLMProvider&            provider,
                      LLMPool&                pool,
                      const TokenEstimator&   estimator,
                      CompactionPolicy        policy,
-                     CompactionUsageSink*    usage,      // may be null (tests)
-                     ClockReader             clock,
-                     std::string             system_prompt);
+                     WallClock               clock = std::chrono::system_clock::now);
 
     // Frozen seam adapter (06 §5.3): delegates to compact(); returns the
-    // payload iff the outcome is Compacted.
+    // payload iff the outcome is Compacted. The frozen `optional` return drops
+    // `CompactionResult::usage`; callers that need usage call `compact()`.
     std::optional<payload::ContextCompaction>
     run(const Session&, const std::vector<Message>&, CancellationToken) override;
 
     // Rich API: the manual path (/compact) and tests use this to distinguish
-    // Compacted / NotNeeded / Cancelled / Failed (§5.3).
+    // Compacted / NotNeeded / Cancelled / Failed (§5.3; `Queued` is produced
+    // only by requestCompaction, §6.7). Synchronous: it calls `.get()` on the
+    // eager `Task`s (§5.5).
     CompactionResult compact(const Session&, const std::vector<Message>&,
                              CancellationToken);
 
@@ -582,24 +634,29 @@ private:
     LLMPool&              pool_;
     const TokenEstimator& estimator_;
     CompactionPolicy      policy_;
-    CompactionUsageSink*  usage_;
-    ClockReader           clock_;
-    std::string           system_prompt_;
+    WallClock             clock_;
 };
 
 } // namespace ymh
 ```
 
 - **Ownership.** The daemon's wiring constructs one `ContextCompactor` and
-  injects it through the loop's service bundle (`AgentServices::compactor`,
-  existing code; `06 §4.1`). The compactor is a leaf service: it touches the
-  provider seam, the pool, the estimator, the clock, and the usage sink — never
-  the store, the bus, or the registry directly (the usage sink owns the one
-  append it needs, §5.7).
+  injects it through the loop's service bundle as an additive
+  `AgentServices::context_compactor` (`ContextCompactor*`; see §6.7/§11.3;
+  the frozen `AgentServices::compactor` (`Compactor*`) remains for the legacy
+  seam). The compactor is a leaf service: it touches the provider seam, the
+  pool, the estimator, and the clock — never the store, the bus, the registry,
+  or the session log. It does not append events (the loop owns every append,
+  §5.7).
 - **Single-threaded per agent.** `compact()` runs on the turn thread, like the
   provider call it wraps (`06 §9`, `08 §9`). No locking is added.
 - **`run()` vs `compact()`.** `run()` exists only to satisfy the frozen seam;
-  new code calls `compact()`.
+  new code calls `compact()`. Because `run()` cannot return usage, the automatic
+  loop path calls `compact()` too (§6.1, §6.7).
+- **No duplicated system prompt.** The compactor no longer takes or stores the
+  assembler's system prompt (`SessionContextAssembler::systemPrompt_`,
+  `include/ymh/agent/context_assembler.cpp`); that would duplicate assembler
+  state. The system prompt is excluded from `tokenEstimate` (§3.4).
 
 ### 5.3 `CompactionResult` and `CompactionError`
 
@@ -611,6 +668,8 @@ enum class CompactionOutcome : std::uint8_t {
     NotNeeded,   // no boundary advances the effective boundary (or disabled)
     Cancelled,   // the token fired; nothing was appended
     Failed,      // summarization failed; nothing was appended
+    Queued,      // requestCompaction only: the immediate RPC ack; the loop
+                 // always services it as a dedicated maintenance turn (§6.7)
 };
 
 struct CompactionError {
@@ -635,6 +694,7 @@ struct CompactionError {
 struct CompactionResult {
     CompactionOutcome                         outcome = CompactionOutcome::NotNeeded;
     std::optional<payload::ContextCompaction> compaction;   // set iff Compacted
+    std::optional<Usage>                      usage;        // summarizer usage, if reported
     CompactionError                           error;
 };
 
@@ -642,9 +702,28 @@ struct CompactionResult {
 ```
 
 `CompactionResult` is **not** a durable type; it is a return value for the
-manual path and tests. The automatic path (`run`) collapses it to an
-`optional` (the frozen seam) and lets the loop's estimate re-check decide
-whether to fail the turn (C13).
+manual path, the automatic loop path, and tests. `usage` carries the
+summarizer's provider-reported `Usage` (if any) back to the loop, which owns
+the `TokenUsage` append (`06 §8`, §5.7, C10); the compactor never appends it.
+The frozen `run()` adapter collapses the result to an `optional` (the frozen
+seam), dropping `usage`, and lets the loop's estimate re-check decide whether to
+fail the turn (C13).
+
+`CompactionError::Code::LeaseLost` / `StoreUnavailable` are declared for
+completeness but are **not** produced by `compact()`, which performs no append.
+The only append in this flow is the loop's post-compaction
+`Session::append(payload)` / `append(TokenUsage)`, whose failure surfaces as a
+turn-level failure (C-F10/C-F11), not through `CompactionResult`.
+
+The manual path needs to report the outcome after the queued maintenance work
+has run. There is **no** separate non-durable completion handle, and the RPC
+result is only the immediate `Queued` acknowledgement (§6.8): the final outcome
+**crosses the supervisor↔daemon boundary on the existing session event stream** —
+the durable events the TUI already consumes (`05 §5.2` `SessionEnvelope` →
+`10 §4.5`, adapted by `10 §5.2`) — because the manual request always runs as a
+dedicated maintenance turn whose committed events encode the outcome (§6.7). No
+new `EventType`, no `protocol::HostNotice`, and no `HostNoticeKind` extension are
+introduced.
 
 ### 5.4 `CompactionPlan` and the per-turn guard
 
@@ -668,55 +747,73 @@ A second attempt in the same turn after a successful compaction is a no-op
 
 ### 5.5 The summarization request through the LLM pool
 
-`compact()` performs exactly one provider call, bracketed by exactly one
-`LLMPool` slot (`06 §5.9`, A12):
+`compact()` is **synchronous** and performs exactly one provider call, bracketed
+by exactly one `LLMPool` slot (`06 §5.9`, A12). `Task<T>` is an *eager* value
+type (`include/ymh/core/task.hpp`): `pool_.acquire(...)` returns
+`Task<std::optional<Slot>>` and `provider_.stream(...)` returns
+`Task<LLMResponse>`, so both are consumed with `.get()`, not `co_await`.
+Provider text is delivered **only** through the `StreamSink`; `LLMResponse` has
+no `text` field (`include/ymh/llm/llm_provider.hpp`), so `compact()` accumulates
+it in a pinned collector.
 
 ```text
 compact(session, messages, cancel):
   if not policy_.is_enabled():
-      return { NotNeeded, {}, { Disabled } }
+      return { NotNeeded, {}, {}, { Disabled } }
   plan := select_boundary(session, policy_)              # §3.3, pure
   if not plan.valid:
-      return { NotNeeded, {}, { NoBoundary | PrefixTooSmall } }
+      return { NotNeeded, {}, {}, { NoBoundary | PrefixTooSmall } }
 
   prefix  := deriveMessages(header, events[0 .. plan.boundary])   # 01 §6.3
   prompt  := build_summary_prompt(prefix)                         # §3.5, pure
   request := LLMRequest{ model = resolve_summarizer_model(policy_, session),
                          messages = prompt, tools = {}, parameters = {} }
 
-  slot := pool_.acquire(cancel)                          # 06 §5.9, cancellable
+  slot := pool_.acquire(cancel).get()                    # 06 §5.9; eager Task
   if not slot.has_value():
-      return { Cancelled, {}, { Cancelled } }            # C-F7/C-F9
+      return { Cancelled, {}, {}, { Cancelled } }        # C-F7/C-F9
 
-  response := co_await provider_.stream(request, collect_text, cancel)
+  # Text is delivered only through the sink; accumulate the summary here.
+  summary_text := ""
+  collect := [&](const StreamEvent& event) {
+      if TextDelta* delta := std::get_if<TextDelta>(&event):
+          summary_text += delta->text
+      return SinkFlow::Continue
+  }
+  response := provider_.stream(request, collect, cancel).get()
   # slot destroyed here on every path (A12)
 
   if response.outcome == Cancelled:
-      return { Cancelled, {}, { Cancelled } }
+      return { Cancelled, {}, {}, { Cancelled } }
   if response.outcome == Failed:
       code := (response.error.code == ContextLengthExceeded)
                   ? SummarizerOverflow : SummarizerFailed
-      return { Failed, {}, { code } }
+      return { Failed, {}, {}, { code } }
 
-  if usage_ && response.usage.has_value():
-      usage_->record( TokenUsage{ *response.usage, enclosing_turn(session) } )
-      # C10, §5.7
-
-  summary := bound_summary(response.text)                 # §3.5, C8
+  summary := bound_summary(summary_text)                 # §3.5, C8
   if summary.bytes > policy_.max_summary_bytes:
-      return { Failed, {}, { OversizedSummary } }        # C-F3
+      return { Failed, {}, {}, { OversizedSummary } }    # C-F3
 
-  compacted := summary + tail(messages, plan.boundary)    # §3.4
+  # Tail from the plan counts (§3.4); summary + tail is the estimate basis.
+  lead      := messages.size() - (plan.prefix_messages + plan.kept_messages)
+  tail      := messages[lead + plan.prefix_messages ..]
+  compacted := summary + tail                            # §3.4
   payload := ContextCompaction{ plan.boundary, summary,
                                 estimator_.estimate(compacted),
                                 request.model, clock_() }
-  return { Compacted, payload, {} }
+  return { Compacted, payload, response.usage, {} }      # usage -> loop (§5.7)
 ```
 
-- **`enclosing_turn(session)`** is derived from the log: the last `TurnStarted`
-  without a matching terminal (`01 §4.5`, I11). Compaction is always inside an
-  open turn (C12), so this is well-defined; for a manual out-of-turn request
-  that is modeled as a maintenance turn (§6.7), it is the maintenance turn.
+- **Usage is returned, not appended.** The compactor has no session identity and
+  is shared across agents (`AgentServices::context_compactor`), so it cannot
+  append `TokenUsage` itself: `TokenUsage.turn` is session-local. The loop —
+  which owns the enclosing turn and already appends `TokenUsage` (`06 §8`) —
+  appends `payload::TokenUsage{*result.usage, turn}` when `usage` is set
+  (§5.7, C10). This is why the loop calls `compact()`, not the frozen `run()`.
+- **`enclosing_turn` is owned by the loop**, not the compactor: it is the last
+  `TurnStarted` without a matching terminal (`01 §4.5`, I11), i.e. the open turn
+  that called `compact()`; for the manual path it is the maintenance turn
+  (§6.7). Compaction is always inside an open turn (C12).
 - **Retry.** The provider's own retry policy (`08 §3.7`) applies inside
   `stream()`; `compact()` never retries. A retryable provider failure that
   exhausts `max_attempts` is `SummarizerFailed`.
@@ -745,37 +842,37 @@ public:
 - `tokenEstimate` in the payload is the same estimator applied to the
   compacted context (§2.3).
 
-### 5.7 Auxiliary usage accounting seam
+### 5.7 Auxiliary usage accounting (loop-owned)
 
 The summarization call consumes tokens like any other request and must not
-drift the session's cost accounting (`§33`, C10). Because the frozen
-`Compactor::run` returns only the payload, the concrete `ContextCompactor` takes
-a narrow sink at construction:
+drift the session's cost accounting (`§33`, C10). The compactor cannot append
+the event itself: `payload::TokenUsage` carries `turn`, which is *session-local*,
+while `ContextCompactor` is a single shared instance across agents
+(`AgentServices::context_compactor`; `src/agent/workspace_runtime.cpp`), so a
+compactor-side append would be misattributed. Instead:
 
-```cpp
-namespace ymh {
+- **The compactor returns usage.** `compact()` copies
+  `LLMResponse::usage` into `CompactionResult::usage` (`std::optional<Usage>`,
+  §5.3) and appends nothing.
+- **The loop appends it.** On `Compacted` with `usage.has_value()`, the loop
+  appends `payload::TokenUsage{*result.usage, turn}` for the turn it owns,
+  before `StepEnded` — exactly the existing `TokenUsage` rule (`06 §8`,
+  `01 §4.5`, `§33`). The frozen `Compactor::run` path drops usage by design, so
+  the automatic path calls `compact()` (§6.1, §6.7).
 
-// The one write the compactor needs. The agent loop/registry supplies an
-// implementation that appends payload::TokenUsage to the session for the
-// enclosing turn (01 §4.5, §33). Tests supply a recording fake.
-class CompactionUsageSink {
-public:
-    virtual ~CompactionUsageSink() = default;
-    virtual void record(payload::TokenUsage) = 0;
-};
+Rules:
 
-} // namespace ymh
-```
-
-- **Attribution.** `TokenUsage.turn` is the enclosing turn's id; `nullopt` is
-  only used if a future out-of-turn compaction is allowed (not in v1). This
-  keeps `01` I11 (TokenUsage occurs inside an open turn).
+- **Attribution.** `TokenUsage.turn` is the enclosing turn's id, known to the
+  loop (the open turn, or the maintenance turn §6.7); it is never `nullopt` in
+  v1. This keeps `01` I11 (TokenUsage occurs inside an open turn) and removes
+  the shared-instance ambiguity.
 - **One event per request.** At most one `TokenUsage` is appended per
   summarization request (`08 §3.5`, L8/L17); absent usage ⇒ no event.
 - **No drift.** The main request's `Usage` and the summarizer's `Usage` are
   distinct events; the loop never adds them together (C10, C-F6).
-- **Fake.** `FakeLLM` (`§45`) may report usage; tests assert the sink saw
-  exactly one record with the expected turn and values.
+- **Fake.** `FakeLLM` (`§45`) may report usage; tests assert the loop appended
+  exactly one auxiliary `TokenUsage` with the expected turn and values, and that
+  the main request's `TokenUsage` is unchanged.
 
 ### 5.8 How the loop consumes the latest compaction
 
@@ -784,14 +881,20 @@ already folds every committed compaction (`01 §6.3`), so after `compact()`
 returns `Compacted` the loop simply:
 
 1. appends the payload (`session.append(payload)`, `01 §6.1`, I4/I11);
-2. re-assembles via `ContextAssembler::assemble(session, turn, step)` (`06
+2. if `result.usage` is set, appends `payload::TokenUsage{*usage, turn}` for the
+   open turn (`06 §8`, §5.7, C10);
+3. re-assembles via `ContextAssembler::assemble(session, turn, step)` (`06
    §5.2`) — the new summary is now part of the projection;
-3. optionally requests `checkpoint(session)` (`02 §6.4`) if the snapshot
+4. optionally requests `checkpoint(session)` (`02 §6.4`) if the snapshot
    threshold is met;
-4. proceeds to the provider call.
+5. proceeds to the provider call.
 
 This is exactly the existing `runCompaction` → re-assemble sequence
-(`agent_loop.cpp`); this spec pins its semantics and failure mapping.
+(`agent_loop.cpp`), extended to carry usage from `compact()`; this spec pins its
+semantics and failure mapping. The loop holds the rich compactor as
+`AgentServices::context_compactor` (`ContextCompactor*`), so it can call
+`compact()`; the frozen `Compactor*` seam remains for the legacy path (§6.7,
+§11.3).
 
 ---
 
@@ -800,7 +903,13 @@ This is exactly the existing `runCompaction` → re-assemble sequence
 ### 6.1 Agent loop / `TurnExecutor` (`06 §5.1`)
 
 - **Call sites.** The threshold check before the provider call and the
-  `ContextLengthExceeded` retry (`06 §5.1`). The loop owns the
+  `ContextLengthExceeded` retry (`06 §5.1`). When
+  `AgentServices::context_compactor` is set, the loop calls
+  `context_compactor->compact(...)` (rich API, §5.2), not the frozen
+  `Compactor::run`, so it receives `CompactionResult` and appends `TokenUsage`
+  itself (§5.7). When it is null the loop falls back to the frozen
+  `AgentServices::compactor->run(...)` (no usage), preserving the existing
+  `Compactor` seam and its test doubles. The loop owns the
   `max_compactions_per_turn` guard and the `CompactionFailed` mapping.
 - **Terminal mapping.** A summarizer failure that leaves the context unable to
   fit maps to `TurnFailed{CompactionFailed}` (`06 §5.7`, A-F10); a successful
@@ -820,8 +929,10 @@ The assembler remains the **only** place history is selected/trimmed
 (`06 §5.2`). Compaction changes what the assembler sees via the session
 projection, not by an assembler API. After a compaction the loop re-assembles;
 no assembler method is added. The assembler-added system prompt is never part of
-the summarize set (§3.3) and is always present in the compacted generation
-(§3.4).
+the summarize set (§3.3), is re-added on every assembly (`06 §5.1` step 3), and
+is therefore present in the LLM-visible generation but **excluded** from
+`tokenEstimate` (§3.4, C15). The compactor does not take or duplicate the
+assembler's `systemPrompt_`.
 
 ### 6.3 Session events (`01`)
 
@@ -859,8 +970,10 @@ the summarize set (§3.3) and is always present in the compacted generation
 - **Model resolution.** `LLMRequest.model` is resolved with the per-request
   override first (`08 §5.2`, step 1), so the summarizer may use a cheaper
   model. The resolved model is recorded in `ContextCompaction.model`.
-- **Usage.** Provider-reported usage becomes a `TokenUsage` event via the sink
-  (§5.7, `08 §3.5`); it is never fabricated or estimated (`08 §3.5`).
+- **Usage.** Provider-reported usage is returned in `CompactionResult::usage`
+  and appended as a `TokenUsage` event by the loop, which owns the enclosing
+  turn (§5.7, `06 §8`, `08 §3.5`); it is never fabricated or estimated
+  (`08 §3.5`).
 
 ### 6.6 Permissions and configuration
 
@@ -888,23 +1001,137 @@ surface is:
   reclaim context" }`. `InputView` detects the leading `/` and delegates; no
   command is hard-coded in `InputView` (`§26`, `10 §9.2`).
 - **Core contract.** The command maps to the additive RPC `session.compact`
-  (Interactive profile, §6.8), which the daemon dispatches to
-  `AgentRegistry::requestCompaction(SessionId)` (additive, §6.8).
-- **Semantics.**
-  - If a turn is in flight, the request sets a per-session flag that the loop
-    honors at the next step boundary (before the provider call), exactly like
-    the threshold trigger.
-  - If the agent is idle, the loop runs a **maintenance turn** (decision C-D2):
-    `TurnStarted{origin = TurnOrigin::Injection}` → `StepStarted` → the
-    summarization call → `ContextCompaction` (+ `TokenUsage` if reported) →
-    `StepEnded` → `TurnEnded`. The maintenance turn appends **no**
-    `AssistantMessage`; its single step *is* the summarization. This keeps all
-    durable compaction events inside an open turn (I11) without adding a
-    `TurnOrigin` value (which would amend `01 §4.5`).
-- **Feedback.** The command's result is a `HostNotice`/result payload carrying
-  `CompactionOutcome` (`Compacted` with `boundary`/`tokenEstimate`, or
-  `NotNeeded`/`Failed` with a redacted reason). The TUI surfaces it as a
-  transient notice; it does not block.
+  (Interactive profile, §6.8), which the daemon's `HostRuntime` handles by
+  submitting the enqueue body to its `TurnExecutor`; the worker body calls
+  `AgentRegistry::requestCompaction(SessionId)` (additive, §6.8), which looks up
+  the registered `AgentLoop` and calls the **public**
+  `AgentLoop::requestCompaction()` (additive; the pinned enqueue target,
+  §6.8/§11.3 A5). `Agent` (`§10.1`) is not extended (C-D2).
+- **The loop holds the rich compactor.** Both the automatic and the manual path
+  need `ContextCompactor::compact()` and `CompactionResult` (for usage, §5.7),
+  which the frozen `Compactor*` seam cannot provide. The loop/registry therefore
+  hold the additive `AgentServices::context_compactor` (`ContextCompactor*`,
+  §5.2, §11.3); the frozen `AgentServices::compactor` (`Compactor*`) remains for
+  the legacy path.
+- **Activation (pinned).** The `session.compact` handler runs in the daemon's
+  `HostRuntime`, which owns the bounded `TurnExecutor`
+  (`include/ymh/agent/turn_executor.hpp`, M-F4). It **submits a worker body and
+  never touches the loop's inbox on the io/dispatch thread**: the inbox is
+  executor-thread-confined and has no lock (`06 §3.2`; `AgentLoop` holds a bare
+  `std::deque<InboxItem> inbox_`), so it may only be mutated on the executor
+  thread. The submitted body — running on an executor worker — **enqueues** the
+  `InboxKind::Compact` item. This is exactly the
+  `agentPrompt`/`agentFollowup` shape: `HostRuntime::agentPrompt` submits a body
+  that calls `agent->send(parsed)` on the worker
+  (`src/host/host_runtime.cpp` ~:546), so no handler enqueues from the
+  io/dispatch thread (`include/ymh/transport/protocol_server.hpp`: "handlers
+  must not block").
+
+  The worker body calls `AgentRegistry::requestCompaction(SessionId)`, which is
+  **enqueue-only** and runs on the executor thread. It looks up the registered
+  `AgentLoop` (the registry owns `std::unique_ptr<AgentLoop>` in `agents_`, so no
+  `Agent` method is added) and calls the **public**
+  `AgentLoop::requestCompaction()` (A5), which enqueues the `InboxKind::Compact`
+  item. `enqueue()` then calls `activate()` itself when no turn is running, so
+  the maintenance turn runs on that same worker without a separate `activate()`
+  submission:
+  - **Idle.** The body enqueues the item; `enqueue()` sees no running turn and
+    calls `activate()`, running the **maintenance turn** (below) on the worker.
+  - **In flight.** The body enqueues the item while a turn is running;
+    `enqueue()` does not re-enter `activate()`. The manual request is **never
+    folded into the running turn**: when that turn closes, `activate()`'s
+    `while (hasTurnTrigger())` loop re-checks the inbox and runs the maintenance
+    turn on the same worker. This is what makes the outcome uniformly observable
+    as the maintenance turn's own committed events (below). The *automatic*
+    threshold path is unaffected: it still compacts inside the current step
+    (§6.1).
+
+  `AgentLoop::hasTurnTrigger()` returns `true` for a queued
+  `InboxKind::Compact` item, so `hasPendingWork()`
+  (`hasTurnTrigger() || turnInFlight()`) is `true` once the worker body has
+  enqueued it; an accepted compaction is therefore pending work, not a side flag
+  that `hasPendingWork()` would ignore. The handler returns
+  `CompactionOutcome::Queued` as soon as `TurnExecutor::submit()` accepts the
+  body. If `submit()` returns `false` (queue full / draining) the handler maps
+  that to `AgentErrorCode::InboxFull` / `RpcCode::InternalError` (E7, C-F17);
+  because the item is enqueued **inside** the accepted body, a rejected submit
+  enqueues nothing, so there is **no orphaned `Compact` item** and
+  `hasPendingWork()` never becomes permanently true. No path runs the loop
+  synchronously on the caller. If the worker body's loop-inbox enqueue is instead
+  rejected, the `Compact` item is not queued and no compaction turn opens; the
+  two rejection reasons are handled distinctly so no path ever opens a second
+  turn on top of a live one (`01` I11):
+  - **`AgentDisposed`** (`disposed_`). `requestCompaction()` returns
+    `AgentErrorCode::AgentDisposed` and appends **nothing**: post-dispose ops
+    produce no durable event (`06` A14, A-F14; `06 §3.2` "a rejected op …
+    produces none"; this spec §8.1 F3). A disposed agent has no live turn stream
+    to carry a failure turn, and appending one would itself be a post-dispose
+    append.
+  - **`InboxFull`** (`inbox_.size() >= config_.max_inbox`). The inbox is full, so
+    the `Compact` item cannot be queued. A full inbox does **not** by itself imply
+    an in-flight turn: `enqueue()` only calls `activate()` when `!running_`
+    (`src/agent/agent_loop.cpp:132-147`), and `activate()`'s drain loop is gated on
+    `hasTurnTrigger()`, which is false for `Inject` items with `startsTurn ==
+    false` (`:83-98`, `:149-162`); an **idle** loop can therefore hold a full
+    inbox of non-starting injects that no turn will drain. Appending
+    `TurnStarted{origin = Maintenance}` → `TurnFailed` inline is nevertheless
+    unsafe: if a turn *is* in flight it would interleave two open turns, which the
+    single-`openTurn` projection and `validateLog` reject (`01 §6.3`, I11). The
+    failure is therefore **deferred to the loop's single-open-turn discipline**
+    via a loop-internal **deferred maintenance-failure trigger**
+    (executor-thread-confined; counted by `hasTurnTrigger()`/`hasPendingWork()`):
+    the body records the trigger and then **guarantees consumption** — if
+    `running_` is false (the idle case above, or `state_ == Error`) it resets
+    `Error → Idle` (mirroring `enqueue()`, `:139-141`) and calls `activate()`,
+    which emits the zero-step maintenance **failure turn** immediately; if
+    `running_` is true the already-running `activate()` loop emits it at the top
+    of its next iteration — i.e. **after** the in-flight turn has closed with its
+    own terminal event (and even when that turn closed with `TurnFailed`). Exactly
+    one turn is open at a time and the failure still reaches the same event-stream
+    carrier (§6.8, C-F17b, C19).
+- **Semantics (manual path).** Whether the agent is idle or a turn is in flight,
+  the queued `InboxKind::Compact` item is serviced as a **dedicated maintenance
+  turn** (decision C-D2), never folded into another turn. A `TurnExecutor` worker
+  runs:
+  `TurnStarted{origin = TurnOrigin::Maintenance}` → `StepStarted` → the
+  summarization call → `ContextCompaction` (only when the outcome is `Compacted`)
+  → `TokenUsage` (if reported, §5.7) → `StepEnded` → terminal event
+  (`TurnEnded`/`TurnCancelled`/`TurnFailed`). The maintenance turn appends **no**
+  `AssistantMessage`; its single step *is* the summarization. This keeps all
+  durable compaction events inside an open turn (I11, C12). `TurnOrigin::Maintenance`
+  is an **added** enumerator (it amends `01 §4.5`; recorded in §11.3 A1) — the
+  existing `TurnOrigin::Injection` is reserved for a `ContextInjected` that
+  materializes as a turn (`01 §4.5`, `include/ymh/session/events.hpp`) and is
+  **not** overloaded here, because a compaction maintenance turn appends no
+  `ContextInjected`.
+- **Feedback — the wire carrier (pinned).** The immediate RPC result of
+  `session.compact` is the acknowledgement `{outcome: "Queued"}` (§6.8); it is
+  **not** the final `CompactionOutcome`. The final outcome crosses the
+  supervisor↔daemon boundary on the **existing session event stream** — the same
+  durable `Event`s the TUI already consumes (`05 §5.2` `SessionEnvelope` →
+  `10 §4.5`, adapted by `UiEventAdapter` `10 §5.2`) — because the manual request
+  always runs as its own maintenance turn. The committed events of that turn are
+  the carrier:
+
+  | `CompactionOutcome` | committed events of the maintenance turn |
+  |---|---|
+  | `Compacted` | `TurnStarted{Maintenance}` … `ContextCompaction` (boundary / `tokenEstimate` / `model`) … `TurnEnded` |
+  | `NotNeeded` | `TurnStarted{Maintenance}` … `TurnEnded` with **no** `ContextCompaction` |
+  | `Cancelled` | `TurnCancelled` (reason) |
+  | `Failed` | `TurnFailed` (`code`, `message`) — including the zero-step maintenance failure turn emitted when the post-ack loop-inbox enqueue is rejected `InboxFull`: after any in-flight turn closes, or immediately when the loop is idle (including an idle inbox full of non-starting injects). A post-ack `AgentDisposed` rejection emits **no** turn — post-dispose ops produce no event (`06` A14/A-F14) (§6.8, C-F17b, C19) |
+
+  The supervisor's `UiEventAdapter` (`10 §5.2`) correlates the
+  `TurnOrigin::Maintenance` turn (A1/A2) with its terminal event and the
+  presence/absence of `ContextCompaction`, and emits a **frontend-only**,
+  transient `UiEvent` notice (`UiEvent::CompactionOutcomeNotice`, additive —
+  §11.3 A11); the notice does **not** block. Because `UiEvent` never crosses the
+  wire (`§54 D15`, T4), the notice is "supervisor-local" only in that sense; its
+  *content* is derived entirely from wire-carried durable events. It is **not** a
+  wire `protocol::HostNotice`: this spec does **not** extend the frozen
+  `HostNoticeKind` (exactly 4 values:
+  `SessionClosed`/`SessionCreated`/`LeaseLost`/`DaemonShuttingDown`,
+  `include/ymh/transport/protocol.hpp`), and it introduces **no** new
+  `EventType`.
 - **Rendering (additive).** The `ConversationModel` (`§20.8`) gains an additive
   `CompactionMarker` view derived from the `ContextCompaction` event: a
   collapsed system entry ("⋯ compacted history up to #N · summary ~T tokens ·
@@ -921,24 +1148,146 @@ is an **additive** extension to the frozen M2 catalog (`11`), recorded as
 decision C-D2:
 
 ```text
-session.compact   params: { session }   result: { outcome, boundary?, token_estimate?,
-                                                  model?, reason? }   (Interactive)
+session.compact   params: { session }   result: { outcome: "Queued" }   (Interactive)
 ```
+
+The `result` is the immediate acknowledgement only: the maintenance turn runs
+asynchronously via `TurnExecutor`, and the final outcome arrives on the **session
+event stream** as the maintenance turn's own committed events (§6.7), never as a
+deferred RPC result and never as a "supervisor-local notice" with no wire
+carrier.
 
 - **Profile.** `session.compact` is Interactive-only, like `session.activate` /
   `session.suspend` (`05 §7.4`, `11 §6.3`); an Automation-profile caller gets
   `MethodNotAllowedForProfile` (`05` T10, T-F18) before any effect.
-- **Domain mapping.** The result is a value, not an error: `Compacted`,
-  `NotNeeded`, `Cancelled`, or `Failed` (with a redacted `reason`). A
-  `CompactionFailed` that instead surfaces as a turn failure maps to
-  `RpcCode::InternalError` with `data.kind = "CompactionFailed"` (`11 §4.4`).
+- **Domain mapping.** The immediate result is always the value `Queued`
+  (accepted; the daemon submitted the enqueue body to `TurnExecutor`). The final
+  `Compacted`, `NotNeeded`, `Cancelled`, or `Failed` outcome is **not** returned
+  by this RPC — it is delivered on the session event stream (§6.7) as the
+  maintenance turn's `ContextCompaction` / `TurnEnded` / `TurnCancelled` /
+  `TurnFailed` events. A `CompactionFailed` that instead surfaces as a turn
+  failure maps to `RpcCode::InternalError` with `data.kind = "CompactionFailed"`
+  (`11 §4.4`).
 - **Additive method.** Adding a method does not alter any frozen method's
   signature or semantics; it is documented here so the catalog stays the single
   authority (`05 §7`, `11 §1`).
-- **Core additive method.** `AgentRegistry::requestCompaction(SessionId)
-  -> std::expected<CompactionOutcome, AgentError>` is additive to the frozen
-  `AgentRegistry` (`06 §4.1`); it does not change `Agent` (`§10.1`) or any
-  existing method.
+- **Core additive methods (pinned enqueue target).** Two additive methods, both
+  **enqueue-only** and executor-thread-confined:
+  - `AgentLoop::requestCompaction() -> std::expected<CompactionOutcome, AgentError>`
+    — **public** (additive to `include/ymh/agent/agent_loop.hpp`; A5). It
+    enqueues the `InboxKind::Compact` work item and returns
+    `CompactionOutcome::Queued`, or `AgentErrorCode::InboxFull` when the loop's
+    bounded inbox is full, or `AgentErrorCode::AgentDisposed` after `dispose()`.
+    Neither rejection path appends inline: `AgentDisposed` appends **nothing**
+    (`06` A14/A-F14, `06 §3.2`, §8.1 F3), and `InboxFull` records a **deferred**
+    maintenance-failure trigger that is **guaranteed to be consumed** (idle:
+    `requestCompaction()` calls `activate()` itself; in-flight: the running
+    `activate()` loop consumes it after the current turn closes; `Error`: the
+    `Error → Idle` reset precedes `activate()`) and emitted as a dedicated
+    zero-step maintenance turn (`01` I11; C-F17b, C19). The pinned algorithm is
+    below. This is the exact enqueue target; `AgentLoop::enqueue()` stays private
+    and is never called from the registry.
+  - `AgentRegistry::requestCompaction(SessionId) -> std::expected<CompactionOutcome, AgentError>`
+    — additive to the frozen `AgentRegistry` (`06 §4.1`; A5). It looks up the
+    registered `AgentLoop` (the registry owns `std::unique_ptr<AgentLoop>` in
+    `agents_`) and delegates to `AgentLoop::requestCompaction()`.
+
+  Neither changes `Agent` (`§10.1`) or any existing method. Both are invoked
+  **inside** the `TurnExecutor` worker body (§6.7), so the inbox is only mutated
+  on the executor thread; neither carries a `TurnExecutor` dependency (the submit
+  lives in `HostRuntime`, A10).
+
+  **Post-ack enqueue rejection (pinned contract).** `Queued` is the *executor*
+  admission only (`TurnExecutor::submit()` accepted the body, §6.7); the
+  loop-inbox enqueue runs later, on the worker. If it is rejected, **no `Compact`
+  item is queued and no compaction maintenance turn opens**. The two reasons are
+  handled distinctly so that no path opens a second turn while one is already
+  open (`01` I11):
+
+  - **`AgentDisposed`.** `requestCompaction()` returns
+    `AgentErrorCode::AgentDisposed` and appends **nothing**. Post-dispose ops
+    produce no durable event (`06` A14, A-F14; `06 §3.2` "a rejected op …
+    produces none"; this spec §8.1 F3). The acknowledged request is refused at
+    the loop boundary; a disposed agent has no live stream to carry a failure
+    turn, and appending one would itself be a post-dispose append.
+  - **`InboxFull`** (`inbox_.size() >= config_.max_inbox`). The `Compact` item
+    cannot be queued. A full inbox does **not** imply an in-flight turn: an idle
+    loop only drains **turn triggers**, and `hasTurnTrigger()` is false for
+    `Inject` items with `startsTurn == false` (`src/agent/agent_loop.cpp:83-98`),
+    so an idle agent can hold a full inbox of non-starting injects indefinitely
+    (`06 §3.2`: "with the default `startsTurn == false` it does not by itself
+    create pending work"). Appending `TurnStarted`/`TurnFailed` inline would
+    interleave two open turns **only if** a turn is in flight, which the
+    single-`openTurn` projection and `validateLog` reject (`01 §6.3`, I11). The
+    failure is therefore routed through the loop's single-open-turn discipline via
+    a loop-internal **deferred maintenance-failure trigger**
+    (executor-thread-confined; counted by `hasTurnTrigger()`/`hasPendingWork()`),
+    and **consumption is guaranteed regardless of loop state**:
+
+    ```text
+    requestCompaction():                          # executor thread, no lock
+      if (disposed_)            return AgentDisposed     # append nothing
+      if (inbox_.size() >= max_inbox):
+          pending_maintenance_failure_ = true            # deferred trigger
+          if (!running_):                                # idle or Error: consume now
+              if (state_ == AgentState::Error) state_ = AgentState::Idle
+              activate()                                 # emits the failure turn
+          return AgentErrorCode::InboxFull
+      enqueue(InboxKind::Compact)                # idle: enqueue() calls activate()
+      return CompactionOutcome::Queued
+
+    activate():                                   # amended loop head
+      if (disposed_ || running_) return
+      running_ = true
+      while (!disposed_ && hasTurnTrigger()):
+          if (pending_maintenance_failure_):             # serviced before inbox
+              pending_maintenance_failure_ = false
+              emit TurnStarted{origin = TurnOrigin::Maintenance}
+              emit TurnFailed{code = InboxFull, message}  # state_ = Error
+              continue
+          if (state_ == AgentState::Error) break         # a normal turn failed
+          runTurn()
+      running_ = false
+      if (state_ != AgentState::Error) state_ = AgentState::Idle
+      flushIdleCallbacks()
+
+    hasTurnTrigger() -> true if any Send/FollowUp/Steer item, any startsTurn
+        Inject item, any Compact item, or pending_maintenance_failure_
+    dispose():    ... existing teardown ... ; pending_maintenance_failure_ = false
+    ```
+
+    The trigger is cleared when the failure turn's `TurnFailed` is appended (and
+    by `dispose()`), so the `activate()` cycle terminates and no post-dispose
+    event is ever emitted. Because `state_ == Error` is reset before `activate()`
+    and the loop services the trigger before the `Error` break, the trigger is
+    consumed whether the loop was idle, in flight, or already in `Error`; and if
+    the in-flight turn itself closes `TurnFailed` (setting `Error`) the running
+    loop still services the pending trigger before exiting. A `TurnFailed`
+    terminal leaves `state_ = Error`; the next accepted inbox op resets it to
+    `Idle` in `enqueue()` (`:139-141`), so a rejected `/compact` never wedges the
+    agent. Cancellation is orthogonal: the zero-step failure turn makes no
+    provider call and observes no `CancellationToken`, and a `TurnCancelled`
+    close leaves `state_ = Idle`, so the running `activate()` loop consumes a
+    pending trigger on its next iteration (C11 is unaffected).
+
+  In the `InboxFull` case the failure is a real, durable, wire-carried carrier
+  that the supervisor's `UiEventAdapter` correlates to `CompactionOutcome::Failed`
+  (§6.7) — no new `EventType`, no `HostNotice`, no separate completion handle —
+  so a `Queued`-acknowledged `/compact` is never lost silently. In the
+  `AgentDisposed` case no event is emitted (A14); the teardown/tombstone
+  lifecycle (`06 §3.4`, F3) is the signal.
+- **Submit wiring (pinned).** The submit belongs to `HostRuntime`, the daemon
+  component that owns the bounded `TurnExecutor` and already dispatches
+  `agent.prompt` / `agent.followup` this way (`src/host/host_runtime.cpp` ~:546).
+  The new `session.compact` handler submits a body that calls
+  `runtime_.agents().requestCompaction(id)`; `TurnExecutor::submit()` returning
+  `false` (queue full / draining) yields `AgentErrorCode::InboxFull` /
+  `RpcCode::InternalError` **before any item is enqueued**, so a rejected submit
+  leaves no orphaned work (§6.7, C-F17). This is recorded as amendment A10; no
+  `TurnExecutor` parameter is added to `AgentRegistry`'s constructors.
+- **No `HostNoticeKind` extension.** Feedback travels in this RPC result (the
+  `Queued` ack) and on the session event stream (the final outcome, §6.7); the
+  frozen 4-value `HostNoticeKind` is untouched, and no new `EventType` is added.
 
 ---
 
@@ -986,29 +1335,35 @@ the compaction rather than emitting an over-cap payload. (§3.5, `01` S10, C-F3)
 `LLMPool` slot, released on completion, cancellation, and failure. (`06 §5.9`,
 A12, C-F9)
 
-**C10 — Usage attribution.** The summarizer's reported `Usage` is appended as a
-`TokenUsage` event attributed to the enclosing turn; it is never merged into the
-main request's usage, and the main request's `Usage` is unaffected. (§5.7,
-`08 §3.5`, C-F6)
+**C10 — Usage attribution.** The summarizer's reported `Usage` is returned in
+`CompactionResult::usage` and appended by the loop as a `TokenUsage` event
+attributed to the loop-owned enclosing turn; the compactor (shared across
+sessions) never appends it. It is never merged into the main request's usage,
+and the main request's `Usage` is unaffected. (§5.7, `06 §8`, `08 §3.5`, C-F6)
 
 **C11 — Cancellation.** `compact()` observes the turn's `CancellationToken` at
 the pool acquire and during streaming; on cancellation it appends nothing and
 returns `Cancelled`. (`§34`, C-F7)
 
 **C12 — In-turn durability.** Every durable compaction event is appended inside
-an open turn (`01` I11). The manual idle path uses a maintenance turn (§6.7).
+an open turn (`01` I11). The manual path always uses a dedicated maintenance
+turn opened with `TurnOrigin::Maintenance` (§6.7, §11.3 A1).
 
-**C13 — Best-effort failure.** A failed compaction does not fail a turn whose
-context still fits; the turn fails with `TurnFailed{CompactionFailed}` only when
-the re-assembled context still overflows. (`06 §5.3`, `06 §5.7`, A-F10, C-F1)
+**C13 — Best-effort failure (automatic path).** On the automatic path a failed
+compaction does not fail a turn whose context still fits; the turn fails with
+`TurnFailed{CompactionFailed}` only when the re-assembled context still
+overflows. The manual maintenance turn is the exception: its single step *is*
+the summarization, so a failure closes it with `TurnFailed{CompactionFailed}`
+(§6.7). (`06 §5.3`, `06 §5.7`, A-F10, C-F1)
 
 **C14 — Model recorded.** `ContextCompaction.model` is the effective summarizer
 model actually used, resolved per `08 §5.2` (override first). It is never
 empty when the outcome is `Compacted`. (L11)
 
 **C15 — Estimate semantics.** `tokenEstimate` is the estimator's estimate of
-the resulting compacted context (summary + retained tail), not the summarizer
-call's usage. (§2.3, §3.4)
+the resulting compacted context — `summary + retained tail` (§3.4), computed
+from the plan counts, with the assembler-added system prompt excluded — not the
+summarizer call's usage. (§2.3, §3.4)
 
 **C16 — Snapshot refresh.** After a committed compaction, the loop requests a
 checkpoint when the snapshot threshold is met; the store replaces the snapshot
@@ -1022,6 +1377,17 @@ or no-op'd (`max_compactions_per_turn`). (`01` I18, C-F5)
 validated at load; no global mutable state and no hidden defaults outside
 `CompactionPolicy`. (`09 §3.3` pattern)
 
+**C19 — Deferred failure delivery.** An `InboxFull` rejection of a `Compact`
+request never silently drops the acknowledged request: it sets the deferred
+maintenance-failure trigger, and `activate()` **always** consumes it — idle:
+`requestCompaction()` resets `Error → Idle` and calls `activate()` itself;
+in-flight: the running `activate()` loop services it after the current turn
+closes (including after a `TurnFailed` or `TurnCancelled` close); the loop
+services the trigger before its `Error` break. Consumption emits exactly one zero-step
+`TurnStarted{origin = Maintenance}` → `TurnFailed{code = InboxFull}` turn, then
+clears the trigger. `dispose()` clears the trigger without emitting anything, so
+no post-dispose turn exists. (§6.7/§6.8, C-F17b, `01` I11)
+
 ---
 
 ## 8. Failure modes
@@ -1033,13 +1399,13 @@ The compaction layer's responsibilities for the existing findings:
 | F# | Finding | Compaction-layer handling |
 |---|---|---|
 | **F1** | path/process isolation | Compaction performs no path resolution and no process spawn; the summarize set is the projected message list only. It cannot read a file or leave the workspace. (`§9.7`, `§18`) |
-| **F3** | late event after close | `dispose()` stops new work; no compaction is attempted after disposal; a compaction in flight is cancelled and appends nothing (C11, A14). |
+| **F3** | late event after close | `dispose()` stops new work, clears any pending deferred maintenance-failure trigger, and emits no turn after disposal; no compaction is attempted after disposal; a compaction in flight is cancelled and appends nothing (C11, A14, C19). |
 | **F5** | output ring buffers | The summary is bounded by `max_summary_tokens`/`max_summary_bytes` (C8); it cannot grow the durable payload without bound. (`§9.11`) |
 | **F8** | resource caps | The summarization call holds one `LLMPool` slot (C9); a full pool suspends the caller cancellably, never spawns a thread (`06 §5.9`). |
 | **F9** | cancellation scoping | Only the enclosing turn's token is observed; a cancel never affects another session (C11, `06` A9). |
-| **F12** | flash clock in model | `createdAt` is read from the injected `ClockReader` (`11 §7.2`, E21); the pure projection never reads `system_clock::now()`. |
+| **F12** | flash clock in model | `createdAt` is read from the injected `WallClock` (`system_clock`, §5.2), **not** the broker's `steady_clock` `ClockReader` (`11 §7.2`, E21); the pure projection never reads `system_clock::now()`. |
 
-### 8.2 Component-local failure modes (C-F1–C-F16)
+### 8.2 Component-local failure modes (C-F1–C-F17b)
 
 These are **component-local** to the compaction layer and are not part of the
 top-level F1–F12 set. They are numbered `C-F#` and must be covered by tests
@@ -1052,17 +1418,19 @@ top-level F1–F12 set. They are numbered `C-F#` and must be covered by tests
 | **C-F3** | Oversized summary | summary bytes/tokens exceed the policy bound | Truncate to `max_summary_tokens` deterministically at a block boundary; if the serialized form still exceeds `max_summary_bytes`, fail `OversizedSummary` and append nothing (C8, `01` S10, `02` P-F15). |
 | **C-F4** | Boundary off-by-one / invalid boundary | selected `Sequence` is not a compaction point, or is not committed in the resolved view | Never emitted: `select_boundary` only returns turn-terminal sequences; a manually supplied invalid boundary is rejected at append/validate (`01` S7) or clamped to the nearest earlier compaction point (C2, C-F15). |
 | **C-F5** | Concurrent / duplicate compaction | two triggers in one turn, or a second attempt after a successful one | Single in-flight guard + `max_compactions_per_turn`; the second attempt is `NotNeeded` (boundary no longer advances, C3, C17). |
-| **C-F6** | Usage accounting drift | summarizer usage added to, or replacing, the main request's `Usage` | Distinct `TokenUsage` events via the sink; tests assert the main request's usage is unchanged and exactly one auxiliary record exists (C10, §5.7). |
+| **C-F6** | Usage accounting drift | summarizer usage added to, or replacing, the main request's `Usage` | The compactor returns usage in `CompactionResult`; the loop appends exactly one auxiliary `TokenUsage` for the enclosing turn. Tests assert the main request's usage is unchanged (C10, §5.7). |
 | **C-F7** | Compaction during cancel | token fires at pool acquire or mid-stream (`08 §3.6`) | Append nothing; return `Cancelled`; the turn closes `TurnCancelled`, not `TurnFailed` (C11, `06` A10). |
 | **C-F8** | Compaction loop (no net reduction) | estimate still exceeds the threshold after a successful compaction | `max_compactions_per_turn` bounds attempts; proceed if it fits, else `TurnFailed{CompactionFailed}` (C13). |
 | **C-F9** | Pool exhaustion during compaction | `LLMPool::acquire` waits or the token fires | Cancellable acquire; if cancelled ⇒ C-F7; the slot is never leaked to a cancelled waiter (`06 §5.9`, C9). |
 | **C-F10** | Lease lost during compaction | `Session::append` throws `LeaseLost` (`01` I5, `02 §5.7`) | Degrade to read-only; append nothing; surface to the supervisor (`01` S4, `06` A11). |
 | **C-F11** | Store append failure | `StoreUnavailable` from `append` (`01` S11, `02` P-F#) | No durable compaction; the turn fails `StoreUnavailable` (A-F#), not `CompactionFailed`. |
 | **C-F12** | Summary decode failure on replay | `from_json` fails for `ContextCompaction` (`01` S3) | Fail loud on the offending record; never silently skip (no lossy replay, C5, C6). |
-| **C-F13** | Clock unavailable / non-monotonic | `ClockReader` returns an unexpected value | `createdAt` is diagnostic only; it never affects boundary selection or the fold (C5). No failure path. |
+| **C-F13** | Clock unavailable / non-monotonic | injected `WallClock` returns an unexpected value | `createdAt` is diagnostic only; it never affects boundary selection or the fold (C5). No failure path. |
 | **C-F14** | Nothing to compact | prefix `< min_prefix_messages`, or no complete turn beyond `keep_recent_turns` | `NotNeeded`; append nothing; the loop proceeds uncompacted (§3.3). |
 | **C-F15** | Manual request with no valid boundary | `/compact` when no boundary advances | Return `NotNeeded` with a redacted reason; never append a no-op compaction (C3). |
 | **C-F16** | Estimator unavailable / misconfigured | `AgentServices::estimator == nullptr`, or policy disabled | Compaction is skipped (`NotNeeded`); no crash, no guess. The loop's `compaction_threshold_tokens == 0` gate already implements this (§3.2, C18). |
+| **C-F17** | Executor submit rejected (manual path) | `TurnExecutor::submit()` returns `false` (queue full / draining) in the `session.compact` handler | Return `AgentErrorCode::InboxFull` / `RpcCode::InternalError` (E7). The `Compact` item is enqueued **inside** the accepted body, so a rejected submit enqueues nothing: no orphaned item, `hasPendingWork()` stays false. Never run the loop synchronously on the caller (§6.7, §6.8, A10). |
+| **C-F17b** | Loop-inbox enqueue rejected (manual path) | The worker body's `AgentLoop::requestCompaction()` returns `InboxFull` (`inbox_.size() >= config_.max_inbox`) or `AgentDisposed` **after** the RPC already acked `Queued` | The `Compact` item is not queued and no compaction turn opens. **`AgentDisposed`**: return `AgentDisposed` and append **nothing** — post-dispose ops produce no event (`06` A14/A-F14, `06 §3.2`, §8.1 F3); the teardown/tombstone lifecycle (`06 §3.4`) is the signal. **`InboxFull`**: the `Compact` item cannot be queued (the inbox may be full while the loop is **idle**, e.g. holding only non-starting `Inject`s, or while a turn is in flight), so the failure is **deferred** to the loop's single-open-turn discipline — `requestCompaction()` sets a pending maintenance-failure trigger (counted by `hasTurnTrigger()`/`hasPendingWork()`) and **guarantees consumption**: it resets `Error → Idle` and calls `activate()` when `!running_` (emitting the zero-step maintenance failure turn `TurnStarted{Maintenance}` → `TurnFailed{InboxFull, message}` immediately), and the running `activate()` loop services the trigger after the in-flight turn closes (even if that turn closed `TurnFailed`). Exactly one turn is open (`01 §6.3`, I11) and the failure crosses the session event stream as `CompactionOutcome::Failed`. Never interleave two open turns and never drop the acknowledged request silently (§6.7, §6.8, C19). |
 
 ---
 
@@ -1120,9 +1488,14 @@ by the hermetic suite.
 - **Summary bounding.** Truncation at `max_summary_tokens`; `OversizedSummary`
   at `max_summary_bytes`; truncation is deterministic.
 - **`ContextCompactor` construction.** Disabled policy ⇒ `NotNeeded`; null
-  estimator ⇒ `NotNeeded`; null usage sink ⇒ still compacts.
-- **`tokenEstimate` semantics.** Equals the estimator applied to the compacted
-  context, not the summarizer usage (C15).
+  estimator ⇒ `NotNeeded`; a `WallClock` stub fixes `createdAt`; `compact()`
+  returns usage without appending anything.
+- **`tokenEstimate` semantics.** Equals the estimator applied to
+  `summary + tail` (§3.4), not the summarizer usage; the system prompt is
+  excluded (C15).
+- **Tail computation.** The assembled list is `[lead] + projection`; `tail`
+  derived from `plan.prefix_messages`/`plan.kept_messages` equals the projected
+  suffix after the boundary for `lead ∈ {0, 1}` (§3.4).
 
 ### 10.2 Integration tests (Fake LLM, `§45`)
 
@@ -1138,18 +1511,64 @@ Using `FakeLLM` and a scripted `Compactor`/provider:
 - **No-op paths.** Disabled policy, nothing to compact, boundary not advancing
   ⇒ no `ContextCompaction` event; the turn is unaffected.
 - **Usage attribution.** `FakeLLM` reports usage on the summarization call;
-  exactly one auxiliary `TokenUsage` is appended with the enclosing turn; the
-  main request's `TokenUsage` is unchanged (C10, C-F6).
+  `compact()` returns it in `CompactionResult::usage`; the loop appends exactly
+  one auxiliary `TokenUsage` with the enclosing turn; the main request's
+  `TokenUsage` is unchanged (C10, C-F6).
 - **Cancellation.** Cancel during the summarization call: nothing appended,
   `TurnCancelled`, not `TurnFailed` (C11, C-F7).
 - **Pool discipline.** A one-slot pool with a concurrent request: the
   summarizer waits and releases; no slot leak (C9, C-F9).
 - **Lease loss.** Drop the lease before the append: `LeaseLost`, read-only,
   no compaction event (C-F10).
-- **Manual path.** `session.compact` while idle runs a maintenance turn and
-  appends exactly one `ContextCompaction`; while a turn is in flight it is
-  serviced at the next step boundary; the maintenance turn emits no
-  `AssistantMessage` (C12, §6.7).
+- **Manual path.** `session.compact` submits the enqueue to `TurnExecutor` and
+  returns the `Queued` acknowledgement without running the loop on the dispatch
+  thread; the worker body enqueues the `Compact` item via the public
+  `AgentLoop::requestCompaction()` (so `hasPendingWork()` is true once it runs
+  and the agent runs a maintenance turn with
+  `TurnStarted{origin = TurnOrigin::Maintenance}`, appending exactly one
+  `ContextCompaction`). If a turn is in flight when the request arrives, the
+  maintenance turn runs **after** that turn (never folded into its step
+  boundary). The maintenance turn emits no `AssistantMessage` (C12, §6.7).
+- **Manual path, outcome carrier.** Drive each outcome through `session.compact`
+  and assert the final `CompactionOutcome` is observable **only** on the session
+  event stream (never a deferred RPC result): `Compacted` ⇒ `ContextCompaction`
+  committed inside the maintenance turn; `NotNeeded` ⇒ maintenance-turn
+  `TurnEnded` with no `ContextCompaction`; `Cancelled` ⇒ `TurnCancelled`;
+  `Failed` ⇒ `TurnFailed{CompactionFailed}`. Assert the RPC result stays
+  `{outcome: "Queued"}` and that no `HostNotice`/new `HostNoticeKind`/new
+  `EventType` is emitted (§6.7/§6.8, A7/A11).
+- **Manual path, full queue.** A full/draining `TurnExecutor` queue rejects the
+  submit with `AgentErrorCode::InboxFull` **before** any item is enqueued: no
+  orphaned `Compact` item, `hasPendingWork()` stays false (C12, §6.7, C-F17).
+- **Manual path, full loop inbox (in flight).** With `inbox_.size() ==
+  config_.max_inbox` while a turn is in flight, `session.compact` still acks
+  `Queued` (the executor accepted the body); the worker body records the deferred
+  maintenance-failure trigger instead of dropping the request, and the loop emits
+  the zero-step maintenance failure turn (`TurnStarted{Maintenance}` →
+  `TurnFailed{code=InboxFull}`) only **after** the in-flight turn's terminal event.
+  Assert: no `Compact` item queued; `hasPendingWork()` is `true` while the trigger
+  is pending and `false` after the failure turn; `validateLog` accepts the log
+  (single `openTurn`, `01` I11); the outcome is observable on the event stream and
+  maps to `CompactionOutcome::Failed` (C-F17b, §6.7/§6.8, C19).
+- **Manual path, full loop inbox (idle).** Fill `inbox_` to `config_.max_inbox`
+  with non-starting `Inject` items while the agent is **idle** (`running_ ==
+  false`, `hasTurnTrigger() == false`), then issue `session.compact`. The worker
+  body must not strand the trigger: `requestCompaction()` resets `Error → Idle`
+  (if needed) and calls `activate()`, so the zero-step failure turn is emitted
+  **immediately** with no in-flight turn to wait for. Assert: no `Compact` item
+  queued; the failure turn is emitted in the same call; `hasPendingWork()` is
+  `false` afterward; `validateLog` accepts the log; maps to
+  `CompactionOutcome::Failed` (C-F17b, C19).
+- **Manual path, full loop inbox after a failed turn.** With a turn in flight and
+  a deferred trigger pending, let the in-flight turn close `TurnFailed` (setting
+  `AgentState::Error`): the running `activate()` loop must still service the
+  pending trigger (it is checked before the `Error` break) and emit the zero-step
+  failure turn. Assert: two terminal `TurnFailed` events in order, each inside its
+  own open turn (`01` I11); no stranded trigger (C19).
+- **Manual path, disposed agent.** A `session.compact` whose worker body reaches
+  `AgentLoop::requestCompaction()` after `dispose()` gets
+  `AgentErrorCode::AgentDisposed` and appends **nothing**; assert no new event and
+  no `TurnStarted` (C-F17b, §8.1 F3, `06` A14/A-F14).
 - **Composition.** Two compactions in one session: the effective context uses
   only the latest summary; the fold is deterministic (§3.6).
 - **Snapshot refresh.** After a committed compaction, `checkpoint` runs and the
@@ -1176,8 +1595,10 @@ Using `FakeLLM` and a scripted `Compactor`/provider:
   §6.7).
 - **Command palette.** `/compact` appears in `CommandRegistry::complete("/")`
   and its schema renders in the palette (`§26`).
-- **Notice.** A `Compacted`/`NotNeeded`/`Failed` result renders the expected
-  transient notice.
+- **Notice.** Given a maintenance-turn event stream, `UiEventAdapter` emits the
+  expected transient `CompactionOutcomeNotice` for each outcome (`Compacted` /
+  `NotNeeded` / `Cancelled` / `Failed`) derived from the `ContextCompaction` /
+  `TurnEnded` / `TurnCancelled` / `TurnFailed` events (§6.7, A11).
 
 ### 10.5 Live end-to-end tests (real LLM, opt-in, `§44`)
 
@@ -1208,6 +1629,8 @@ Using `FakeLLM` and a scripted `Compactor`/provider:
 | C-F14 | unit | nothing to compact ⇒ `NotNeeded` |
 | C-F15 | integration + golden | `/compact` with no valid boundary |
 | C-F16 | unit | null estimator / disabled policy |
+| C-F17 | integration | `session.compact` on a full/draining `TurnExecutor` ⇒ `InboxFull`, no enqueue, `hasPendingWork()` false |
+| C-F17b | integration | `session.compact` with a full loop inbox ⇒ `Queued` ack, then a zero-step maintenance failure turn (`TurnStarted{Maintenance}` → `TurnFailed{InboxFull}`) — after the in-flight turn closes, immediately when idle (full of non-starting injects), or after a failed in-flight turn; no `Compact` item, single `openTurn` (`01` I11), maps to `Failed`; post-`dispose()` ⇒ `AgentDisposed`, no event, trigger cleared |
 
 ### 10.7 Invariant coverage
 
@@ -1229,6 +1652,7 @@ Using `FakeLLM` and a scripted `Compactor`/provider:
 | C16 (snapshot) | integration + replay |
 | C17 (single in-flight) | integration |
 | C18 (config authority) | unit |
+| C19 (deferred failure delivery) | integration (idle / in-flight / failed-turn / disposed) |
 
 ---
 
@@ -1242,18 +1666,45 @@ does not rename the frozen interface. New code calls `ContextCompactor::
 compact()`; `run()` is the thin frozen adapter.
 
 **C-D2 — Manual `/compact` surface.** The manual path is an **additive**
-extension: RPC `session.compact` (Interactive, `05 §7`) →
-`AgentRegistry::requestCompaction` (additive to `06 §4.1`) → the loop. If idle,
-it runs a **maintenance turn** (`TurnOrigin::Injection`) whose single step is
-the summarization, so every durable compaction event remains inside an open turn
-(`01` I11). No `TurnOrigin` value and no `Agent`/`§10.1` method is added. If a
-turn is in flight, the request is honored at the next step boundary. Recorded
-here rather than silently, because the frozen M2 catalog has no such method.
+extension: RPC `session.compact` (Interactive, `05 §7`) → `HostRuntime` (which
+owns the `TurnExecutor`) submits a worker body → `AgentRegistry::requestCompaction`
+(additive to `06 §4.1`) → the **public** `AgentLoop::requestCompaction()`
+(additive; the pinned enqueue target, A5), **enqueue-only on the executor
+thread**. The enqueue happens **inside** the submitted body, never on the
+io/dispatch thread, because the loop's inbox is executor-thread-confined and
+unlocked (`06 §3.2`); this is the `agentPrompt`/`agentFollowup` shape
+(`src/host/host_runtime.cpp` ~:546). It **enqueues pending work**
+(`InboxKind::Compact`, counted by `hasTurnTrigger()`/`hasPendingWork()`), so the
+maintenance turn runs on the worker (never on the io/dispatch thread); the
+  request returns the `Queued` acknowledgement as soon as `TurnExecutor::submit()`
+  accepts the body (or `AgentErrorCode::InboxFull` when the executor queue is full
+  — in which case nothing is enqueued and no work is orphaned). A later rejection
+  of the loop-inbox enqueue (post-ack) is handled without opening a second turn
+  (`01` I11): `AgentDisposed` returns `AgentDisposed` and appends **nothing**
+  (`06` A14/A-F14), while `InboxFull` records a deferred maintenance-failure
+  trigger that is **guaranteed to be consumed** — `requestCompaction()` resets
+  `Error → Idle` and calls `activate()` when the loop is idle, and the running
+  `activate()` loop services it after an in-flight turn closes (even after a
+  `TurnFailed` close) — emitting a zero-step maintenance failure turn
+  (`TurnStarted{Maintenance}` → `TurnFailed`), delivered on the session event
+  stream (§6.7/§6.8, C-F17b, C19). The manual request
+is **always serviced as a dedicated maintenance turn** (`TurnOrigin::Maintenance`,
+an **added** enumerator — §11.3 A1), whether the agent is idle or a turn is in
+flight; if a turn is in flight, the maintenance turn runs after it. The
+maintenance turn's single step is the summarization, so every durable compaction
+event remains inside an open turn (`01` I11). The **final outcome crosses the
+supervisor↔daemon boundary on the session event stream** (the maintenance turn's
+own committed events), not as a "supervisor-local notice" and not as a deferred
+RPC result (§6.7/§6.8, A7). No `Agent`/`§10.1` method is added; the enqueue
+target is the additive public `AgentLoop::requestCompaction()`. Recorded here
+rather than silently, because the frozen M2 catalog has no such method.
 
 **C-D3 — Auxiliary usage accounting.** The summarizer's reported `Usage` is
-appended as a `TokenUsage` event via a `CompactionUsageSink` constructor
-dependency of `ContextCompactor`, attributed to the enclosing turn. The frozen
-`Compactor::run` return type is unchanged (C10).
+returned in `CompactionResult::usage`; the loop — which owns the enclosing turn
+and the `TokenUsage` append (`06 §8`) — appends the event. No
+`CompactionUsageSink` and no per-session compactor construction is needed (the
+shared-instance misattribution is removed). The frozen `Compactor::run` return
+type is unchanged (C10, §5.7).
 
 **C-D4 — Disabled by default.** `CompactionPolicy.enabled` defaults to `false`;
 the existing `AgentConfig::compaction_threshold_tokens == 0` maps to disabled.
@@ -1310,6 +1761,56 @@ re-checks.
 A genuine cross-document contradiction, if review finds one, reopens this
 subsection rather than being resolved silently.
 
+### 11.3 Required cross-spec / code amendments (errata ledger)
+
+This spec is frozen against the M1/M2 code and specs `01`, `06`, `10`, `11`.
+The re-review fixes below force a small set of **additive** amendments outside
+this file; they are recorded here (this spec does not edit those documents) so
+the catalog stays the single authority. None of them changes an existing
+method signature or semantics.
+
+> **Re-review fixes (M3 — post-ack rejection: single-open-turn / post-dispose).**
+> Two MEDIUM findings forced a correction to the post-ack rejection contract
+> (§6.7/§6.8, C-F17b):
+>
+> 1. **`AgentDisposed` no longer appends.** The previous text opened a
+>    `TurnStarted{Maintenance}` → `TurnFailed` turn after `dispose()`,
+>    contradicting `06` A14/A-F14 ("post-dispose ops return `AgentDisposed`; no
+>    event"), `06 §3.2` ("a rejected op … produces none"), and §8.1 F3. The
+>    `AgentDisposed` path now returns `AgentDisposed` and appends **nothing**.
+>    **No carve-out is required** — the spec now conforms to the frozen
+>    lifecycle instead of overriding it.
+> 2. **`InboxFull` no longer appends inline.** The previous text appended a
+>    failure turn from `requestCompaction()` with no ordering against an
+>    already-open turn; when a turn *is* in flight that interleaves two open
+>    turns, which `01`'s single-`openTurn` projection / `validateLog` (I11)
+>    rejects. (A full inbox does **not** imply an in-flight turn — `enqueue()`
+>    only calls `activate()` when `!running_` and `hasTurnTrigger()` is false for
+>    non-starting `Inject`s, so an idle loop can hold a full inbox; the earlier
+>    citation `src/agent/agent_loop.cpp:132-146` proved neither claim.) The
+>    failure is now **deferred** to the loop's single-open-turn discipline: a
+>    loop-internal maintenance-failure trigger (A4) whose consumption is
+>    guaranteed in every state — `requestCompaction()` resets `Error → Idle` and
+>    calls `activate()` when idle, and the running `activate()` loop services it
+>    after an in-flight turn closes (even a `TurnFailed` close) — is emitted as
+>    the failure turn exactly once. This is an **additive code amendment**
+>    (A4/A5), **not** a carve-out against `01` — it *restores* conformance with
+>    I11.
+
+| # | Target | Required amendment | Why (finding) |
+|---|---|---|---|
+| A1 | `include/ymh/session/events.hpp`, `01 §4.5`, `src/session/events.cpp` | Add `TurnOrigin::Maintenance` (5th enumerator) plus its `turn_origin_name`/`parse_turn_origin` mapping. | §6.7 maintenance turn; `TurnOrigin::Injection` is reserved for a `ContextInjected` turn and must not be overloaded. |
+| A2 | `10` (TUI) turn-origin rendering | Map `TurnOrigin::Maintenance` to the maintenance/compaction view (no user/steer/injection semantics). | A1. |
+| A3 | `include/ymh/agent/agent_loop.hpp` (`AgentServices`) | Add `ContextCompactor* context_compactor = nullptr;` (additive; frozen `Compactor* compactor` retained). | §5.2/§5.8/§6.7: the loop needs `compact()`/`CompactionResult`. |
+| A4 | `include/ymh/agent/agent_loop.hpp`/`.cpp` | Add `InboxKind::Compact` (no completion handle) counted by `hasTurnTrigger()`/`hasPendingWork()`; service it **always** as a dedicated maintenance turn (after any in-flight turn), never folded into another turn; `runCompaction` calls `compact()` and appends `TokenUsage` from `result.usage`; the turn closes `TurnEnded` (`Compacted` or `NotNeeded`), `TurnCancelled`, or `TurnFailed{CompactionFailed}` accordingly. Also add a loop-internal **deferred maintenance-failure trigger** (set by `requestCompaction()` on `InboxFull`) counted by `hasTurnTrigger()`/`hasPendingWork()`, and amend `activate()` to service it **before** the `Error` break; `requestCompaction()` resets `Error → Idle` and calls `activate()` when `!running_`, so the zero-step `TurnStarted{Maintenance}` → `TurnFailed{InboxFull, message}` turn is emitted exactly once whether the loop was idle, in flight, or in `Error` (`01` I11); `dispose()` clears the trigger without emitting. | §6.7 activation + §5.7 usage ownership + the event-stream outcome carrier (§6.7/§6.8) + the single-`openTurn` fix for C-F17b/C19. |
+| A5 | `include/ymh/agent/agent_loop.hpp`, `include/ymh/agent/agent_registry.hpp` / `06 §4.1` | Add **public** `AgentLoop::requestCompaction() -> std::expected<CompactionOutcome, AgentError>` — the pinned enqueue target: enqueue the `InboxKind::Compact` work item (on the executor thread) and return `Queued`; on a rejected enqueue it never appends inline — `AgentDisposed` returns `AgentDisposed` and appends **nothing** (`06` A14/A-F14, `06 §3.2`), while `InboxFull` sets the deferred maintenance-failure trigger (A4) that is **guaranteed to be consumed** — immediately via `activate()` when idle (after an `Error → Idle` reset), or by the running `activate()` loop after an in-flight turn closes (even a `TurnFailed` close) — emitting a zero-step maintenance failure turn (`TurnStarted{Maintenance}` → `TurnFailed{InboxFull, message}`), so exactly one turn is open (`01` I11) and the acked request is never silently dropped (§6.8, C-F17b, C19). Add `AgentRegistry::requestCompaction(SessionId) -> std::expected<CompactionOutcome, AgentError>` that looks up the registered `AgentLoop` (`agents_`) and delegates to it. `AgentLoop::enqueue()` stays private; no `Agent` (`§10.1`) method is added. Neither takes a `TurnExecutor` dependency; the submit lives in `HostRuntime` (A10). | §6.7/§6.8 manual path; C-D2 forbids an `Agent` method and `enqueue()` is private. |
+| A6 | `06 §5.1`, `§5.3`, `§5.7` prose | State that the compaction call site uses the rich `ContextCompactor::compact()` and that the loop appends the summarizer `TokenUsage`; `run()` remains the frozen adapter. | §5.7/§6.1. |
+| A7 | `10 §4.5`/`§5.2` (feedback) | The `/compact` outcome is **not** a "supervisor-local notice" with no wire carrier: it crosses the boundary on the **session event stream** — the maintenance turn's own committed events (`ContextCompaction` / `TurnEnded` / `TurnCancelled` / `TurnFailed`) that the TUI already consumes (`05 §5.2` `SessionEnvelope` → `10 §4.5`, adapted by `10 §5.2`). No `protocol::HostNotice`, no `HostNoticeKind` extension, no new `EventType`. | §6.7/§6.8 HIGH finding: the previous text claimed a supervisor-local notice but defined no wire carrier, so `NotNeeded`/`Cancelled`/`Failed` could never cross the process boundary. |
+| A8 | `01 §6.3` (prose clarification) | State explicitly that the synthetic summary's origin `Sequence` is the `ContextCompaction` event's own `record.seq` (matching `src/session/session.cpp`). | §4.2/§3.6 correction. |
+| A9 | `11 §7.2` (clarification, no change) | `ClockReader` is `steady_clock`-based; it is **not** a wall clock and is not reused here. Compaction pins a distinct `WallClock = std::function<system_clock::time_point()>`. | §2.3/§5.2 finding 1. |
+| A10 | `include/ymh/host/host_runtime.hpp`/`.cpp` (new `session.compact` handler), `05 §7` catalog | The handler submits a `TurnExecutor` worker body that calls `runtime_.agents().requestCompaction(id)`; the enqueue happens **inside** the body, so a rejected submit (`InboxFull`) enqueues nothing (no orphan, `hasPendingWork()` stays false). Mirrors `agentPrompt`/`agentFollowup` (`src/host/host_runtime.cpp` ~:546). No `TurnExecutor` parameter is added to `AgentRegistry`. | §6.7/§6.8 finding: `AgentRegistry` has no `TurnExecutor`; the submit owner is the daemon. |
+| A11 | `10 §5.1`/`§5.2` (`UiEvent`, `UiEventAdapter`) | Add a frontend-only `UiEvent::CompactionOutcomeNotice` variant (session + `CompactionOutcome` + boundary/`tokenEstimate`/model/reason) and have `UiEventAdapter` emit it by correlating the `TurnOrigin::Maintenance` turn (A1/A2) with its terminal event and the presence/absence of `ContextCompaction` (A7). `UiEvent` remains wire-free (`§54 D15`, T4). | A7: the `/compact` outcome needs a supervisor-side rendering target derived from the wire-carried durable events. |
+
 ---
 
 ## 12. References
@@ -1350,5 +1851,21 @@ subsection rather than being resolved silently.
 - `10-supervisor-tui.md` §3.2 (layered architecture / `UiController`), §3.4
   (pure rendering), §4.7 (`AggregateStatusModel`), §8.2 (renderers), §9.2
   (`InputView`, slash-command delegation), §9.3 (draft/history).
-- `11-m2-errata.md` §4.4 (typed error mapping), §7.2 (`ClockReader`), E21.
+- `11-m2-errata.md` §4.4 (typed error mapping), §7.2 (injectable clock-reader
+  pattern; `ClockReader` is `steady_clock`-based and is **not** reused — §11.3
+  A9), E21.
 - `07-tools-execution.md` §5.5 (`ToolConfig` pattern).
+- Existing code verified against this spec: `include/ymh/permission/
+  permission_broker.hpp` (`ClockReader` = `steady_clock`), `include/ymh/session/
+  events.hpp` (`ContextCompaction.createdAt` = `system_clock`, `TurnOrigin`,
+  `TokenUsage`), `include/ymh/llm/llm_provider.hpp` (`LLMResponse` has no
+  `text`; `stream` returns `Task<LLMResponse>`), `include/ymh/core/task.hpp`
+  (eager `Task<T>::get()`), `include/ymh/agent/llm_pool.hpp`
+  (`acquire` → `Task<std::optional<Slot>>`), `include/ymh/agent/
+  context_assembler.hpp`/`src/agent/context_assembler.cpp`
+  (`SessionContextAssembler::systemPrompt_`, `Compactor`), `include/ymh/agent/
+  agent_loop.hpp` (`AgentServices::compactor`), `src/agent/agent_loop.cpp`
+  (`hasPendingWork`, `runCompaction`), `src/agent/workspace_runtime.cpp`
+  (shared service bundle), `src/session/session.cpp` (summary origin =
+  `record.seq`), `include/ymh/transport/protocol.hpp` (`HostNoticeKind`, 4
+  values).
