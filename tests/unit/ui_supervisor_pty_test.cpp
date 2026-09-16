@@ -323,6 +323,9 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ASSERT_TRUE(child.wait_for("alpha", 25s));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 10s))
         << "supervisor did not auto-create a session";
+    ASSERT_TRUE(child.wait_for("tui", 10s)) << "header did not show the session title";
+    ASSERT_TRUE(child.wait_for("active ·", 10s))
+        << "bottom line did not show aggregate counts";
 
     child.write("\x13");
     ASSERT_TRUE(child.wait_for("beta", 10s));
@@ -377,6 +380,19 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     child.write("/clear\r");
     ASSERT_TRUE(child.wait_for_since(clear_mark, "Type a message and press Enter", 10s))
         << child.text();
+
+    const std::size_t complete_mark = child.raw_size();
+    child.write("/he\t");
+    ASSERT_TRUE(child.wait_for_since(complete_mark, "/help ", 10s)) << child.text();
+
+    child.write("\x15");
+    const std::size_t cycle_mark = child.raw_size();
+    child.write("/\t\t");
+    ASSERT_TRUE(child.wait_for_since(cycle_mark, "/new", 10s)) << child.text();
+    const std::size_t step_mark = child.raw_size();
+    child.write("\t");
+    ASSERT_TRUE(child.wait_for_since(step_mark, "/clear", 10s)) << child.text();
+    child.write("\x15");
 
     const std::size_t recall_mark = child.raw_size();
     child.write("\x1b[A");

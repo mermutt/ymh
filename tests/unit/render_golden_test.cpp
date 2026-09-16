@@ -168,6 +168,13 @@ TEST(RenderGolden, TuiRoutesAssistantMarkdownAndToolDiff) {
                           "# Title\n\n```cpp\nint x = 1;\n```\n", "", "", false});
     session->conversation.entries.push_back(
         ConversationEntry{ConversationRole::Tool, kSampleDiff, "git_diff", "call", false});
+    ToolCallView call;
+    call.id = "call";
+    call.name = "git_diff";
+    call.output = kSampleDiff;
+    call.expanded = true;
+    session->tools.by_id["call"] = session->tools.calls.size();
+    session->tools.calls.push_back(std::move(call));
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{60, 40}, Theme{false}));
@@ -175,6 +182,27 @@ TEST(RenderGolden, TuiRoutesAssistantMarkdownAndToolDiff) {
     EXPECT_NE(rendered.find("int x = 1;"), std::string::npos);
     EXPECT_NE(rendered.find("src/foo.cpp"), std::string::npos);
     EXPECT_NE(rendered.find("-    return 1;"), std::string::npos);
+}
+
+TEST(RenderGolden, TuiCollapsedToolRendersOneLineAndNoBody) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel& workspace = model.workspaces[model.activeWorkspaceId];
+    workspace.id = model.activeWorkspaceId;
+    workspace.activeSessionId = SessionId{"session"};
+    model.ensureSession(SessionId{"session"});
+
+    SessionUiState* session = model.session(SessionId{"session"});
+    ASSERT_NE(session, nullptr);
+    session->conversation.entries.push_back(
+        ConversationEntry{ConversationRole::Tool, kSampleDiff, "git_diff", "call", false});
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{60, 40}, Theme{false}));
+    EXPECT_NE(rendered.find("tool: git_diff"), std::string::npos);
+    EXPECT_EQ(rendered.find("(expanded)"), std::string::npos);
+    EXPECT_EQ(rendered.find("src/foo.cpp"), std::string::npos);
+    EXPECT_EQ(rendered.find("-    return 1;"), std::string::npos);
 }
 
 } // namespace

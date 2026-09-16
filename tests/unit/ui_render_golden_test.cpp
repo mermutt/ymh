@@ -145,14 +145,15 @@ UiModel build_model() {
 }
 
 const char* kGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
-│ymh · /work                                                           │
-├──────────────────────────────────────────────────────────────────────┤
-│you:                                                                  │
-│hello there                                                           │
-│assistant                                                             │
+│ymh · /work                                                   golden-s│
+├┬─────────────────────────────────────────────────────────────────────┤
+││ hello there                                                         │
 │Hello world                                                           │
 │tool: read_file                                                       │
-│file-body                                                             │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
 │                                                                      │
 │                                                                      │
 │                                                                      │
@@ -160,7 +161,6 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 │                                                                      │
 │                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│[golden-s o]                                                          │
 │> _                                                                   │
 │idle · test-model · ↑12 ↓3 ⚡0                    0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
@@ -334,6 +334,152 @@ TEST(UiRenderGolden, SubagentPanelRendered) {
     EXPECT_NE(rendered.find("subagents:"), std::string::npos);
     EXPECT_NE(rendered.find("sub-1"), std::string::npos);
     EXPECT_NE(rendered.find("exploring"), std::string::npos);
+}
+
+TEST(UiRenderGolden, CollapsedToolShowsOnlyHeaderNoBody) {
+    const UiModel model = build_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("tool: read_file"), std::string::npos);
+    EXPECT_EQ(rendered.find("(expanded)"), std::string::npos);
+    EXPECT_EQ(rendered.find("file-body"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ExpandAllFoldsShowsBodies) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->expand_all_folds = true;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("tool: read_file (expanded)"), std::string::npos);
+    EXPECT_NE(rendered.find("file-body"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ReasoningFoldSummaryAndExpandAll) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->conversation.entries.clear();
+    state->conversation.by_message.clear();
+    state->conversation.by_reasoning_message.clear();
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "deep thought", true}});
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "the answer"}});
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "the answer", std::nullopt}});
+
+    const std::string collapsed =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(collapsed);
+    EXPECT_NE(collapsed.find("reasoning (Ctrl+O to expand)"), std::string::npos);
+    EXPECT_EQ(collapsed.find("deep thought"), std::string::npos);
+    EXPECT_NE(collapsed.find("the answer"), std::string::npos);
+
+    state->expand_all_folds = true;
+    const std::string expanded =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(expanded);
+    EXPECT_NE(expanded.find("reasoning (expanded)"), std::string::npos);
+    EXPECT_NE(expanded.find("deep thought"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ReasoningStreamingSummaryStrings) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->conversation.entries.clear();
+    state->conversation.by_message.clear();
+    state->conversation.by_reasoning_message.clear();
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "partial", true}});
+
+    const std::string collapsed =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(collapsed);
+    EXPECT_NE(collapsed.find("reasoning (streaming · Ctrl+O to expand)"),
+              std::string::npos);
+    EXPECT_EQ(collapsed.find("partial"), std::string::npos);
+
+    state->expand_all_folds = true;
+    const std::string expanded =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(expanded);
+    EXPECT_NE(expanded.find("reasoning (expanded · streaming)"), std::string::npos);
+    EXPECT_NE(expanded.find("partial"), std::string::npos);
+}
+
+TEST(UiRenderGolden, HeaderShowsSessionTitleRightAligned) {
+    UiModel model = build_model();
+    model.setCellTitle(WorkspaceId{"workspace"}, kSession, "golden-title");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    const std::size_t first = rendered.find('\n');
+    const std::size_t second = rendered.find('\n', first + 1);
+    const std::string header = rendered.substr(first + 1, second - first - 1);
+    SCOPED_TRACE(header);
+    EXPECT_NE(header.find("golden-title"), std::string::npos);
+    const std::size_t at = header.rfind("golden-title");
+    EXPECT_EQ(header.substr(at), "golden-title│");
+}
+
+TEST(UiRenderGolden, HeaderFallsBackToShortIdWhenTitleEmpty) {
+    const UiModel model = build_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    const std::size_t first = rendered.find('\n');
+    const std::size_t second = rendered.find('\n', first + 1);
+    const std::string header = rendered.substr(first + 1, second - first - 1);
+    SCOPED_TRACE(header);
+    EXPECT_NE(header.find("golden-s│"), std::string::npos);
+}
+
+TEST(UiRenderGolden, BottomLineCountsOnlyNoSessionList) {
+    const UiModel model = build_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("0 active · 0 waiting"), std::string::npos);
+    EXPECT_EQ(rendered.find("[golden-s o]"), std::string::npos);
+}
+
+TEST(UiRenderGolden, SwitcherAttentionBadgeStillRenders) {
+    UiModel model = build_model();
+    model.workspaces[model.activeWorkspaceId].title = "alpha";
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-beta"};
+    beta.title = "beta";
+    beta.cwd = "/work/beta";
+    beta.activeSessionId = SessionId{"beta-session"};
+    SessionCell beta_cell;
+    beta_cell.id = SessionId{"beta-session"};
+    beta_cell.title = "notes";
+    beta_cell.state = AgentState::WaitingForInput;
+    beta_cell.attention = true;
+    beta.sessions.push_back(beta_cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    model.openSwitcher();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("notes !"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UserBlockBackgroundGatedByTheme) {
+    UiModel model = build_model();
+
+    const std::string colored =
+        render_to_ansi(model, TerminalSize{72, 20}, Theme{true, true});
+    EXPECT_NE(colored.find("\x1b[48;2;"), std::string::npos);
+    EXPECT_NE(colored.find("│"), std::string::npos);
+
+    const std::string no_block =
+        render_to_ansi(model, TerminalSize{72, 20}, Theme{true, false});
+    EXPECT_EQ(no_block.find("\x1b[48;2;"), std::string::npos);
+    EXPECT_NE(no_block.find("│"), std::string::npos);
 }
 
 } // namespace

@@ -35,6 +35,8 @@ public:
     [[nodiscard]] const std::vector<Command>& commands() const noexcept { return commands_; }
     [[nodiscard]] const Command* find(const std::string& name) const;
     [[nodiscard]] std::vector<const Command*> complete(const std::string& prefix) const;
+    [[nodiscard]] static std::string longest_common_prefix(
+        const std::vector<const Command*>& commands);
     // True when `line` is a command line (leading '/'), recognized or not. A
     // system notice is appended either way; non-command lines return false.
     bool dispatch(const std::string& line, CommandContext& context) const;

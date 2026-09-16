@@ -199,6 +199,7 @@ public:
             state->input.draft.clear();
             state->input.cursor = 0;
             state->input.saved_draft.clear();
+            state->input.completion.reset();
             state->command_hints.clear();
             model_.dirty.mark(workspace->activeSessionId, UiDirtyFlag::Input);
         }
@@ -297,9 +298,8 @@ private:
                 }
                 const auto connection_it = connections_.find(workspace);
                 if (connection_it != connections_.end()) {
-                    for (const auto& [session, title] : sessions) {
-                        (void)title;
-                        connection_it->second->track(session);
+                    for (const auto& entry : sessions) {
+                        connection_it->second->track(entry.first);
                     }
                 }
                 enqueue([this, workspace, sessions] {
@@ -308,12 +308,12 @@ private:
                         return;
                     }
                     for (const auto& [session, title] : sessions) {
-                        (void)title;
                         SessionUiState& state = model_.ensureSessionIn(workspace, session);
                         if (state.status.model.empty()) {
                             state.status.model = options_.config.agent.model;
                         }
                         model_.ensureCellIn(workspace, session);
+                        model_.setCellTitle(workspace, session, title);
                     }
                     if (it->second.activeSessionId.value.empty()) {
                         if (!sessions.empty()) {
@@ -381,6 +381,9 @@ private:
                     if (!queued.empty()) {
                         prompt(workspace, SessionId{session}, queued);
                     }
+                    // 17 §6 (RB-10): re-list so the created session's title
+                    // ("tui") populates its cell via the pinned setCellTitle path.
+                    refresh_sessions(workspace);
                 });
             });
     }
@@ -479,6 +482,65 @@ private:
         }
     }
 
+    // 17 §5 (RB-08): Tab completes a bare `/prefix`. A unique match terminates
+    // with a trailing space; a multi-match step stores the cycle and emits
+    // "/" + name with no trailing space so the next Tab keeps cycling. While a
+    // cycle is active for the current draft it takes precedence over the
+    // unique-match terminal case (otherwise the first stepped-to name, itself a
+    // complete command, would end the cycle — contradicting the pinned test
+    // plan "third Tab = names[1]").
+    bool complete_command(SessionUiState& state) {
+        InputModel& input = state.input;
+        const std::string& draft = input.draft;
+        if (draft.empty() || draft.front() != '/' ||
+            draft.find_first_of(" \t") != std::string::npos) {
+            return false;
+        }
+        if (input.completion.has_value() && input.completion->draft == input.draft) {
+            CompletionCycle& cycle = *input.completion;
+            input.draft = "/" + cycle.names[cycle.index];
+            input.cursor = input.draft.size();
+            cycle.index = (cycle.index + 1) % cycle.names.size();
+            cycle.draft = input.draft;
+            set_command_hints(state, cycle.names);
+            return true;
+        }
+        const std::vector<const Command*> matches = registry_.complete(draft.substr(1));
+        if (matches.empty()) {
+            return false;
+        }
+        if (matches.size() == 1) {
+            input.draft = "/" + matches.front()->name + " ";
+            input.cursor = input.draft.size();
+            input.completion.reset();
+            state.command_hints.clear();
+            return true;
+        }
+        input.draft = "/" + CommandRegistry::longest_common_prefix(matches);
+        input.cursor = input.draft.size();
+        CompletionCycle cycle;
+        cycle.draft = input.draft;
+        cycle.names.reserve(matches.size());
+        state.command_hints.clear();
+        for (const Command* command : matches) {
+            cycle.names.push_back(command->name);
+            state.command_hints.push_back(CommandHint{command->name, command->description});
+        }
+        input.completion = std::move(cycle);
+        return true;
+    }
+
+    void set_command_hints(SessionUiState& state, const std::vector<std::string>& names) {
+        state.command_hints.clear();
+        for (const std::string& name : names) {
+            const Command* command = registry_.find(name);
+            if (command != nullptr) {
+                state.command_hints.push_back(
+                    CommandHint{command->name, command->description});
+            }
+        }
+    }
+
     void scroll_by(bool up, bool page) {
         SessionUiState* state = active();
         if (state == nullptr) {
@@ -514,13 +576,12 @@ private:
         model_.dirty.mark(state->id, UiDirtyFlag::Conversation);
     }
 
-    void toggle_last_tool() {
+    void toggle_folds() {
         SessionUiState* state = active();
-        if (state == nullptr || state->tools.calls.empty()) {
+        if (state == nullptr) {
             return;
         }
-        ToolCallView& call = state->tools.calls.back();
-        call.expanded = !call.expanded;
+        state->expand_all_folds = !state->expand_all_folds;
         model_.dirty.mark(state->id, UiDirtyFlag::Tools | UiDirtyFlag::Conversation);
     }
 
@@ -623,6 +684,7 @@ private:
                 input.draft.clear();
                 input.cursor = 0;
                 input.saved_draft.clear();
+                input.completion.reset();
                 state->command_hints.clear();
                 model_.dirty.mark(state->id, UiDirtyFlag::Input | UiDirtyFlag::Conversation);
                 return true;
@@ -630,10 +692,18 @@ private:
             submit(text);
             return true;
         }
+        if (event == ftxui::Event::Tab) {
+            if (complete_command(*state)) {
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
+            return false;
+        }
         if (event == ftxui::Event::Backspace) {
             if (input.cursor > 0) {
                 input.draft.erase(input.cursor - 1, 1);
                 --input.cursor;
+                input.completion.reset();
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
             }
@@ -688,6 +758,7 @@ private:
         if (event.is_character()) {
             input.draft.insert(input.cursor, event.character());
             input.cursor += event.character().size();
+            input.completion.reset();
             refresh_hints(*state);
             model_.dirty.mark(state->id, UiDirtyFlag::Input);
             return true;
@@ -723,7 +794,7 @@ private:
             return true;
         }
         if (event == ftxui::Event::CtrlO) {
-            toggle_last_tool();
+            toggle_folds();
             return true;
         }
         if (event == ftxui::Event::PageUp) {

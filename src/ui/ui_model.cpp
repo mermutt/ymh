@@ -21,6 +21,42 @@ void append_bounded(std::string& target, const std::string& chunk, std::size_t m
     }
 }
 
+// 17 §4 (RB-02, U-RB02-1): route a reasoning delta into one folded Reasoning
+// entry per message, ordered immediately before that message's Assistant entry
+// whether the Assistant entry already exists (empty or non-empty) or not.
+void apply_reasoning_delta(ConversationModel& conversation, const AssistantTextDelta& delta) {
+    const std::size_t existing = conversation.find_reasoning_message(delta.message);
+    if (existing != kNoEntry) {
+        conversation.entries[existing].text += delta.text;
+        conversation.entries[existing].streaming = true;
+        return;
+    }
+    ConversationEntry entry;
+    entry.role = ConversationRole::Reasoning;
+    entry.text = delta.text;
+    entry.streaming = true;
+    const std::size_t assistant = conversation.find_message(delta.message);
+    if (assistant == kNoEntry) {
+        conversation.by_reasoning_message[delta.message] = conversation.entries.size();
+        conversation.entries.push_back(std::move(entry));
+        return;
+    }
+    conversation.entries.insert(conversation.entries.begin() +
+                                    static_cast<std::ptrdiff_t>(assistant),
+                                std::move(entry));
+    for (auto& pair : conversation.by_message) {
+        if (pair.second >= assistant) {
+            ++pair.second;
+        }
+    }
+    for (auto& pair : conversation.by_reasoning_message) {
+        if (pair.second >= assistant) {
+            ++pair.second;
+        }
+    }
+    conversation.by_reasoning_message[delta.message] = assistant;
+}
+
 } // namespace
 
 void DirtySet::mark(const SessionId& session, UiDirtyFlag flag) {
@@ -75,6 +111,11 @@ std::size_t ConversationModel::find_message(const std::string& id) const {
     return it == by_message.end() ? kNoEntry : it->second;
 }
 
+std::size_t ConversationModel::find_reasoning_message(const std::string& id) const {
+    const auto it = by_reasoning_message.find(id);
+    return it == by_reasoning_message.end() ? kNoEntry : it->second;
+}
+
 std::size_t ToolModel::find(const std::string& id) const {
     const auto it = by_id.find(id);
     return it == by_id.end() ? kNoEntry : it->second;
@@ -103,6 +144,7 @@ bool InputModel::history_up() {
     --history_pos;
     draft = history[history_pos];
     cursor = draft.size();
+    completion.reset();
     return true;
 }
 
@@ -113,6 +155,7 @@ bool InputModel::history_down() {
     ++history_pos;
     draft = history_pos == history.size() ? saved_draft : history[history_pos];
     cursor = draft.size();
+    completion.reset();
     return true;
 }
 
@@ -121,12 +164,14 @@ bool InputModel::delete_forward() {
         return false;
     }
     draft.erase(cursor, 1);
+    completion.reset();
     return true;
 }
 
 void InputModel::clear_line() {
     draft.clear();
     cursor = 0;
+    completion.reset();
 }
 
 bool InputModel::delete_word() {
@@ -138,6 +183,9 @@ bool InputModel::delete_word() {
     while (cursor > 0 && draft[cursor - 1] != ' ') {
         draft.erase(cursor - 1, 1);
         --cursor;
+    }
+    if (draft.size() != before) {
+        completion.reset();
     }
     return draft.size() != before;
 }
@@ -346,6 +394,21 @@ void UiModel::refreshCellIn(const WorkspaceId& workspace, const SessionId& id) {
     }
 }
 
+void UiModel::setCellTitle(const WorkspaceId& workspace, const SessionId& id,
+                           std::string title) {
+    const auto workspace_it = workspaces.find(workspace);
+    if (workspace_it == workspaces.end()) {
+        return;
+    }
+    for (SessionCell& cell : workspace_it->second.sessions) {
+        if (cell.id == id) {
+            cell.title = std::move(title);
+            dirty.mark(id, UiDirtyFlag::Layout | UiDirtyFlag::SessionBar);
+            return;
+        }
+    }
+}
+
 void UiModel::setSessionReadOnly(const SessionId& id, bool read_only) {
     const auto state = sessions.find(id);
     if (state == sessions.end()) {
@@ -405,17 +468,21 @@ void UiModel::apply(const UiEvent& event) {
                 }
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, AssistantTextDelta>) {
-                std::size_t index = state.conversation.find_message(e.message);
-                if (index == kNoEntry) {
-                    ConversationEntry entry;
-                    entry.role = ConversationRole::Assistant;
-                    entry.streaming = true;
-                    index = state.conversation.entries.size();
-                    state.conversation.by_message[e.message] = index;
-                    state.conversation.entries.push_back(std::move(entry));
+                if (e.reasoning) {
+                    apply_reasoning_delta(state.conversation, e);
+                } else {
+                    std::size_t index = state.conversation.find_message(e.message);
+                    if (index == kNoEntry) {
+                        ConversationEntry entry;
+                        entry.role = ConversationRole::Assistant;
+                        entry.streaming = true;
+                        index = state.conversation.entries.size();
+                        state.conversation.by_message[e.message] = index;
+                        state.conversation.entries.push_back(std::move(entry));
+                    }
+                    state.conversation.entries[index].text += e.text;
+                    state.conversation.entries[index].streaming = true;
                 }
-                state.conversation.entries[index].text += e.text;
-                state.conversation.entries[index].streaming = true;
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, AssistantMessageFinished>) {
                 std::size_t index = state.conversation.find_message(e.message);
@@ -430,6 +497,11 @@ void UiModel::apply(const UiEvent& event) {
                     state.conversation.entries[index].text = e.text;
                 }
                 state.conversation.entries[index].streaming = false;
+                const std::size_t reasoning =
+                    state.conversation.find_reasoning_message(e.message);
+                if (reasoning != kNoEntry) {
+                    state.conversation.entries[reasoning].streaming = false;
+                }
                 if (e.usage.has_value()) {
                     state.status.input_tokens = e.usage->input_tokens;
                     state.status.output_tokens = e.usage->output_tokens;
