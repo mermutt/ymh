@@ -86,19 +86,6 @@ std::string read_until_eof(PtySession& session) {
     return output;
 }
 
-std::optional<ProcessResult> try_reap_any() {
-    int status = 0;
-    const pid_t child = ::waitpid(-1, &status, WNOHANG);
-    if (child <= 0) {
-        return std::nullopt;
-    }
-    ProcessResult result;
-    result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-    result.signalled = WIFSIGNALED(status);
-    result.signal = result.signalled ? WTERMSIG(status) : 0;
-    return result;
-}
-
 TEST(PtyIntegration, BasicIoAndExitStatus) {
     PtyIoFixture          fixture;
     ymh::test::TempWorkspace workspace("pty_basic");
@@ -210,19 +197,28 @@ TEST(PtyIntegration, NoZombiesAfterOpenCloseCycles) {
     NoopPtyEventSink      sink;
     LocalPtyService       pty(fixture.executor(), governor, sink);
 
+    std::vector<pid_t> children;
     for (int cycle = 0; cycle < 3; ++cycle) {
         auto session =
             pty.open(shell_request(workspace.path(), "echo done"), CancellationToken{})
                 .get();
         wait_running(*session);
+        children.push_back(session->pid());
         (void)read_until_eof(*session);
         session->terminate();
         (void)session->wait(2s, CancellationToken{}).get();
     }
 
-    EXPECT_FALSE(try_reap_any().has_value());
-    EXPECT_EQ(::waitpid(-1, nullptr, WNOHANG), -1);
-    EXPECT_EQ(errno, ECHILD);
+    // A global `waitpid(-1)` sweep is forbidden (execution/signal_policy.hpp):
+    // in a shared test process it steals other owners' child status. Check the
+    // exact pids this test opened instead, so an unrelated child (e.g. a
+    // two-process daemon) cannot make this assertion fail.
+    for (const pid_t child : children) {
+        EXPECT_GT(child, 0);
+        EXPECT_EQ(::waitpid(child, nullptr, WNOHANG), -1)
+            << "pty child " << child << " was not reaped";
+        EXPECT_EQ(errno, ECHILD);
+    }
 }
 
 TEST(PtyIntegration, NaturalExitDrainsBufferedOutput) {
