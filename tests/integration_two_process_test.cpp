@@ -997,14 +997,21 @@ TEST_F(TwoProcess, MultiSupervisorFanOutPermissionFirstWins) {
     EXPECT_FALSE(denied.ok) << "a duplicate decision must not re-resolve";
     EXPECT_EQ(denied.error_code, static_cast<int>(protocol::RpcCode::InvalidParams));
 
-    ASSERT_TRUE(first_events.wait_for(
+    // Both supervisors observe the same ordered stream, but each has its own
+    // pump thread and socket, so one can trail the other by a few milliseconds.
+    // `TurnEnded` is the final event of the turn (agent_loop.cpp), so waiting
+    // for *both* collectors to see it synchronises the fan-out before the
+    // snapshots below: comparing as soon as `first` alone is caught up is racy.
+    const auto saw_turn_ended =
         [](const std::vector<protocol::SessionEnvelope>& envelopes) {
             return std::any_of(envelopes.begin(), envelopes.end(), [](const auto& envelope) {
                 return envelope.event.type == EventType::TurnEnded;
             });
-        },
-        15s))
+        };
+    ASSERT_TRUE(first_events.wait_for(saw_turn_ended, 15s))
         << "the allowed turn never completed";
+    ASSERT_TRUE(second_events.wait_for(saw_turn_ended, 15s))
+        << "the second supervisor never observed the turn end";
 
     const std::set<std::string> first_ids  = event_ids(first_events.snapshot());
     const std::set<std::string> second_ids = event_ids(second_events.snapshot());

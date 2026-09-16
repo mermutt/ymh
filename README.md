@@ -7,11 +7,16 @@ permission policy, and an event-sourced session log. It is SSH-friendly,
 low-overhead, and provider-agnostic (any OpenAI-compatible endpoint; DeepSeek by
 default).
 
-The current code is the **Milestone 1 single-process MVP**: supervisor and agent
-run in one process. The Milestone 2 split (supervisor TUI + one `WorkspaceHost`
-daemon per workspace, JSON-RPC over a length-prefixed Unix socket) is designed
-but not yet implemented. Architecture and component specs live in
-`docs/design/`.
+Both milestones are implemented and green. **Milestone 1** is the single-process
+MVP: core event bus, event-sourced session log with SQLite persistence, LLM
+providers (OpenAI-compatible, DeepSeek default) plus a deterministic `FakeLLM`,
+the execution environment with tools, permissions, the agent loop, CLI +
+headless (`ymh run`), an FTXUI TUI, and markdown/syntax/diff rendering.
+**Milestone 2** splits the supervisor TUI from one `WorkspaceHost` daemon per
+workspace: JSON-RPC 2.0 over a length-prefixed Unix domain socket, with a shared
+`registry.db`. **Phase 2** adds context compaction, PTY support behind the
+execution-environment seam, and an MCP adapter into the shared tool registry.
+Architecture and component specs live in `docs/design/`.
 
 ## Build prerequisites
 
@@ -37,22 +42,22 @@ libcmark-gfm-dev`.
 ## Build and test
 
 ```sh
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
 First-party targets compile with `-Wall -Wextra -Wpedantic -Werror`; the build is
-warning-clean by policy. The test suite is hermetic (no network) and covers the
-event system, session store, LLM adapters, tools, permissions, agent loop, CLI,
-and TUI render/PTY paths.
+warning-clean by policy. The default test suite is hermetic (no network) and
+covers the event system, session store, LLM adapters, tools, permissions, agent
+loop, CLI, and TUI render/PTY paths.
 
 ## Running
 
 The binary is `build/ymh`.
 
 ```sh
-ymh                                   # interactive TUI (default)
+ymh                                   # attach to / spawn the cwd workspace daemon, then TUI
 ymh run "Find the bug in src/foo.cpp" # headless, prints assistant text + tool activity
 ymh --resume <session-id>             # TUI, resumed
 ymh run --resume <session-id> "task"  # headless, resumed
@@ -60,13 +65,21 @@ ymh list                              # sessions in the workspace
 ymh show <session-id>                 # projected messages
 ymh replay <session-id>               # raw event log
 ymh fork <session-id>                 # fork a session
+ymh workspace add <path>              # register a workspace in the shared registry
+ymh workspace list                    # list registered workspaces
+ymh workspace stop <id|path>          # stop a workspace daemon
+ymh config path                       # print the global config file path
+ymh --host --workspace <uuid> --root <canonical-root> --socket <path>  # daemon entry (spawned by the supervisor)
 ymh --version
 ymh --help
 ```
 
 The workspace defaults to the current directory; override with `--workspace
 PATH`. A workspace is identified by its `.ymh/` directory, which holds the
-session store (`sessions.db`) and optional config.
+session store (`sessions.db`) and optional config. With no arguments, `ymh`
+attaches to (or spawns) that workspace's `WorkspaceHost` daemon, which owns the
+cwd and survives the TUI; running workspaces are tracked in a shared
+`${XDG_STATE_HOME}/ymh/registry.db`.
 
 ## Configuration
 
@@ -104,8 +117,8 @@ level = "info"
 ```
 
 `[llm]` may also be written as `[llm.default]`. Environment overrides include
-`YMH_LLM_MODEL`, `YMH_LLM_BASE_URL`, `YMH_API_KEY_ENV`, `YMH_AGENT_MAX_STEPS`,
-and `YMH_LOG_LEVEL`.
+`YMH_LLM_PROVIDER`, `YMH_LLM_MODEL`, `YMH_LLM_BASE_URL`, `YMH_API_KEY_ENV`,
+`YMH_REASONING_EFFORT`, `YMH_AGENT_MAX_STEPS`, and `YMH_LOG_LEVEL`.
 
 ### API key
 
@@ -135,16 +148,17 @@ shell = "allow"
 
 ## Live tests (real DeepSeek API)
 
-The default suite is offline. A small live layer (real `LLMProvider`, real PTY)
-is gated behind an explicit opt-in and is skipped, not failed, when the key or
-flag is absent:
+The default suite is offline: 707 hermetic tests plus 16 opt-in live tests (real
+`LLMProvider`, real PTY). The live layer is gated behind an explicit opt-in and
+is skipped, not failed, when the key or flag is absent:
 
 ```sh
 set -a; . "$HOME/.apikey.deepseek"; set +a
 YMH_LIVE_LLM=1 ctest --test-dir build -R 'Live' --output-on-failure
 ```
 
-Optional: `YMH_LIVE_LLM_MODEL` overrides the model used by the live tests.
+Optional: `YMH_LIVE_LLM_MODEL` overrides the model used by the live tests
+(default `deepseek-flash`).
 
 ## License
 
