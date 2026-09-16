@@ -18,6 +18,9 @@ coded after it is marked **verified** here.
 | 10 | `10-supervisor-tui.md` | yes | **verified** | Oracle component gate: GATE PASS (8 findings fixed; no open HIGH/MEDIUM) | 1626 lines; U1–U18 + U-F1–U-F20; focus-independent flash |
 | 11 | `11-m2-errata.md` | yes | **verified** | Oracle G0 interface-freeze gate: PASS (21 findings fixed; no open HIGH/MEDIUM) | 1426 lines; M2 interfaces frozen; amends 03/04/05/09/10; post-gate additive §7.2 `ClockReader` amendment (track E) + E21 |
 | 12 | `12-m1-drift-errata.md` | yes | — (register; not a component spec) | track F (self), pending review | 204 lines; M1 spec-text ↔ code reconciliation register DR1–DR6; defers to 11 (no new semantics) |
+| 13 | `13-context-compaction.md` | yes | **verified** | Oracle component gate: GATE PASS (8 review rounds; no open HIGH/MEDIUM) | 1567+ lines; context compaction (projection, never deletion); `ContextCompaction` event |
+| 14 | `14-pty-capability.md` | yes | **verified** | Oracle component gate: GATE PASS (4 review rounds; no open HIGH/MEDIUM) | 1865+ lines; `PtySession`/`PtyService` behind the execution-environment seam |
+| 15 | `15-mcp-adapter.md` | yes | **verified** | Oracle component gate: GATE PASS (3 review rounds; no open HIGH/MEDIUM) | 2051 lines; MCP client adapter into the shared tool registry; namespaced `mcp.<server>.<tool>` |
 
 ## Open top-level items (`HANDOFF.md` §5)
 
