@@ -28,6 +28,11 @@ namespace ymh::ui {
 // collide on a shared file.
 [[nodiscard]] protocol::ClientInstanceId process_client_instance();
 
+// 16 §4.1 orphaning predicate. `live_supervisors` is a raw count INCLUDING the
+// caller, so `== 1` means "just me"; `other_fresh_owners` already excludes the
+// caller. Display/exit logic only; never writes the registry.
+[[nodiscard]] bool is_orphaning_view(const protocol::OwnershipView& view) noexcept;
+
 // Owns this supervisor's `supervisors` row: register at start, heartbeat on a
 // timer, deregister on clean exit. Never dereferences another supervisor's row.
 class SupervisorPresence {

@@ -482,4 +482,111 @@ TEST(UiRenderGolden, UserBlockBackgroundGatedByTheme) {
     EXPECT_NE(no_block.find("│"), std::string::npos);
 }
 
+UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int running) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel workspace;
+    workspace.id = model.activeWorkspaceId;
+    workspace.cwd = "/work";
+    workspace.title = "alpha";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.activeSessionId = SessionId{"active-session"};
+    SessionCell active;
+    active.id = SessionId{"active-session"};
+    active.title = "active-session";
+    workspace.sessions.push_back(active);
+    SessionCell other;
+    other.id = SessionId{"other-session"};
+    other.title = "other-session";
+    workspace.sessions.push_back(other);
+    model.workspaces.emplace(workspace.id, workspace);
+    model.ensureSession(SessionId{"active-session"});
+
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-beta"};
+    beta.title = "beta";
+    beta.cwd = "/work/beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.activeSessionId = SessionId{"beta-session"};
+    SessionCell beta_cell;
+    beta_cell.id = SessionId{"beta-session"};
+    beta_cell.title = "beta-session";
+    beta.sessions.push_back(beta_cell);
+    model.workspaces.emplace(beta.id, beta);
+    model.ensureSessionIn(beta.id, SessionId{"beta-session"});
+
+    model.exitConfirm.open = true;
+    model.exitConfirm.orphaning = std::move(orphaning);
+    model.exitConfirm.sessions = sessions;
+    model.exitConfirm.running = running;
+    model.mode = UiMode::ExitConfirm;
+    return model;
+}
+
+TEST(UiRenderGolden, ExitConfirmPromptZeroOneTwoDaemons) {
+    for (int count = 0; count <= 2; ++count) {
+        std::vector<WorkspaceId> orphaning;
+        if (count >= 1) {
+            orphaning.push_back(WorkspaceId{"workspace"});
+        }
+        if (count >= 2) {
+            orphaning.push_back(WorkspaceId{"workspace-beta"});
+        }
+        const UiModel model = exit_prompt_model(std::move(orphaning), count, 0);
+        const std::string rendered =
+            normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+        SCOPED_TRACE(rendered);
+        EXPECT_NE(rendered.find("Exiting will terminate " + std::to_string(count)),
+                  std::string::npos);
+        EXPECT_NE(rendered.find(count == 1 ? "workspace daemon:" : "workspace daemons:"),
+                  std::string::npos);
+        EXPECT_NE(rendered.find(std::to_string(count) + " session"), std::string::npos);
+        EXPECT_NE(rendered.find("Terminate and exit"), std::string::npos);
+        EXPECT_NE(rendered.find("Cancel"), std::string::npos);
+        EXPECT_EQ(rendered.find("other-session"), std::string::npos)
+            << "the prompt must not render a per-session list";
+        EXPECT_EQ(rendered.find("beta-session"), std::string::npos)
+            << "the prompt must not render a per-session list";
+        if (count >= 1) {
+            EXPECT_NE(rendered.find("alpha"), std::string::npos);
+        }
+        if (count >= 2) {
+            EXPECT_NE(rendered.find("beta"), std::string::npos);
+        }
+    }
+}
+
+TEST(UiRenderGolden, SwitcherShowsOwnershipMarks) {
+    UiModel model = build_model();
+    model.workspaces[model.activeWorkspaceId].title = "owned-ws";
+    model.workspaces[model.activeWorkspaceId].daemonStatus = DaemonStatus::Attached;
+
+    WorkspaceModel stopping;
+    stopping.id = WorkspaceId{"ws-stopping"};
+    stopping.title = "stopping-ws";
+    stopping.daemonStatus = DaemonStatus::Stopping;
+    model.workspaces.emplace(stopping.id, stopping);
+
+    WorkspaceModel not_running;
+    not_running.id = WorkspaceId{"ws-notrunning"};
+    not_running.title = "notrunning-ws";
+    not_running.daemonStatus = DaemonStatus::NotRunning;
+    model.workspaces.emplace(not_running.id, not_running);
+
+    WorkspaceModel unreachable;
+    unreachable.id = WorkspaceId{"ws-unreachable"};
+    unreachable.title = "unreachable-ws";
+    unreachable.daemonStatus = DaemonStatus::Dead;
+    model.workspaces.emplace(unreachable.id, unreachable);
+
+    model.openSwitcher();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("[owned]"), std::string::npos);
+    EXPECT_NE(rendered.find("[stopping]"), std::string::npos);
+    EXPECT_NE(rendered.find("[not running]"), std::string::npos);
+    EXPECT_NE(rendered.find("[unreachable]"), std::string::npos);
+}
+
 } // namespace

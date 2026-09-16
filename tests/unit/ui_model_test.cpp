@@ -618,4 +618,108 @@ TEST(UiModel, SetCellTitlePopulatesCell) {
     EXPECT_EQ(workspace->second.sessions.front().title, "my title");
 }
 
+TEST(UiModel, WorkspaceEventCarriesSessionId) {
+    WorkspaceEvent event;
+    event.workspace = WorkspaceId{"workspace"};
+    event.kind = WorkspaceEventKind::SessionOpened;
+    event.session = SessionId{"peer-session"};
+
+    EXPECT_TRUE(event.session.has_value());
+    EXPECT_EQ(*event.session, SessionId{"peer-session"});
+}
+
+TEST(UiModel, SessionOpenedInsertsCellAndIsIdempotent) {
+    UiModel model = make_model();
+    const SessionId peer{"peer-session"};
+    WorkspaceEvent event;
+    event.workspace = WorkspaceId{"workspace"};
+    event.kind = WorkspaceEventKind::SessionOpened;
+    event.session = peer;
+
+    model.apply(event);
+    model.apply(event);
+
+    const auto workspace = model.workspaces.find(WorkspaceId{"workspace"});
+    ASSERT_NE(workspace, model.workspaces.end());
+    std::size_t matches = 0;
+    for (const SessionCell& cell : workspace->second.sessions) {
+        if (cell.id == peer) {
+            ++matches;
+        }
+    }
+    EXPECT_EQ(matches, 1u) << "double-applied SessionCreated must be idempotent";
+    EXPECT_NE(model.session(peer), nullptr);
+    EXPECT_EQ(model.session(peer)->workspace, WorkspaceId{"workspace"});
+}
+
+TEST(UiModel, SessionClosedErasesCellAndState) {
+    UiModel model = make_model();
+    const SessionId peer{"peer-session"};
+    WorkspaceEvent opened;
+    opened.workspace = WorkspaceId{"workspace"};
+    opened.kind = WorkspaceEventKind::SessionOpened;
+    opened.session = peer;
+    model.apply(opened);
+
+    WorkspaceEvent closed;
+    closed.workspace = WorkspaceId{"workspace"};
+    closed.kind = WorkspaceEventKind::SessionClosed;
+    closed.session = peer;
+    model.apply(closed);
+
+    const auto workspace = model.workspaces.find(WorkspaceId{"workspace"});
+    ASSERT_NE(workspace, model.workspaces.end());
+    for (const SessionCell& cell : workspace->second.sessions) {
+        EXPECT_NE(cell.id, peer);
+    }
+    EXPECT_EQ(model.session(peer), nullptr);
+}
+
+TEST(UiModel, SessionClosedClearsActiveSession) {
+    UiModel model = make_model();
+    WorkspaceEvent closed;
+    closed.workspace = WorkspaceId{"workspace"};
+    closed.kind = WorkspaceEventKind::SessionClosed;
+    closed.session = kSession;
+    model.apply(closed);
+
+    EXPECT_TRUE(model.workspaces.at(WorkspaceId{"workspace"}).activeSessionId.value.empty());
+    EXPECT_EQ(model.session(kSession), nullptr);
+}
+
+TEST(UiModel, OwnershipMarkDerivesFromDaemonStatus) {
+    EXPECT_EQ(ownership_mark(DaemonStatus::Attached), OwnershipMark::Owned);
+    EXPECT_EQ(ownership_mark(DaemonStatus::Stopping), OwnershipMark::Stopping);
+    EXPECT_EQ(ownership_mark(DaemonStatus::NotRunning), OwnershipMark::NotRunning);
+    EXPECT_EQ(ownership_mark(DaemonStatus::Connecting), OwnershipMark::Unreachable);
+    EXPECT_EQ(ownership_mark(DaemonStatus::Detached), OwnershipMark::Unreachable);
+    EXPECT_EQ(ownership_mark(DaemonStatus::Dead), OwnershipMark::Unreachable);
+}
+
+TEST(UiModel, SwitcherNodesCarryOwnershipMark) {
+    UiModel model = make_model();
+    const SessionId second{"session-2"};
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-2"};
+    beta.title = "beta";
+    beta.daemonStatus = DaemonStatus::Dead;
+    beta.activeSessionId = second;
+    SessionCell cell;
+    cell.id = second;
+    cell.title = "second";
+    beta.sessions.push_back(cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-2"}, second);
+
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 2u);
+    for (const WorkspaceNode& node : model.switcher.workspaces) {
+        if (node.id == WorkspaceId{"workspace"}) {
+            EXPECT_EQ(node.mark, OwnershipMark::Owned);
+        } else {
+            EXPECT_EQ(node.mark, OwnershipMark::Unreachable);
+        }
+    }
+}
+
 } // namespace

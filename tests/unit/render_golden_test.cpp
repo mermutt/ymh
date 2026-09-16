@@ -205,4 +205,36 @@ TEST(RenderGolden, TuiCollapsedToolRendersOneLineAndNoBody) {
     EXPECT_EQ(rendered.find("-    return 1;"), std::string::npos);
 }
 
+TEST(RenderGolden, TuiExitConfirmOverlayCountsAndOwnershipMark) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel& workspace = model.workspaces[model.activeWorkspaceId];
+    workspace.id = model.activeWorkspaceId;
+    workspace.title = "alpha";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.activeSessionId = SessionId{"session"};
+    model.ensureSession(SessionId{"session"});
+
+    model.exitConfirm.open = true;
+    model.exitConfirm.orphaning = {WorkspaceId{"workspace"}};
+    model.exitConfirm.sessions = 3;
+    model.exitConfirm.running = 1;
+    model.mode = UiMode::ExitConfirm;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("Exiting will terminate 1 workspace daemon"), std::string::npos);
+    EXPECT_NE(rendered.find("3 sessions · 1 running"), std::string::npos);
+    EXPECT_NE(rendered.find("Terminate and exit"), std::string::npos);
+
+    model.exitConfirm = ExitConfirmState{};
+    model.mode = UiMode::Conversation;
+    model.openSwitcher();
+    const std::string switcher =
+        normalize(render_to_ansi(model, TerminalSize{80, 30}, Theme{false}));
+    SCOPED_TRACE(switcher);
+    EXPECT_NE(switcher.find("[owned]"), std::string::npos);
+}
+
 } // namespace

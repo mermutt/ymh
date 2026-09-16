@@ -235,6 +235,15 @@ struct WorkspaceModel {
     [[nodiscard]] bool hasDaemon() const { return daemonStatus == DaemonStatus::Attached; }
 };
 
+// 16 §3.6 (C4): display-only switcher marker, derived from DaemonStatus. It is
+// supervisor-local and never written to the registry.
+enum class OwnershipMark : std::uint8_t {
+    Owned,
+    NotRunning,
+    Stopping,
+    Unreachable,
+};
+
 struct SessionNode {
     SessionId   id;
     std::string title;
@@ -246,6 +255,7 @@ struct WorkspaceNode {
     WorkspaceId              id;
     std::string              title;
     DaemonStatus             status = DaemonStatus::Connecting;
+    OwnershipMark            mark = OwnershipMark::Unreachable;
     std::vector<SessionNode> sessions;
 };
 
@@ -312,6 +322,17 @@ struct PermissionDialogModel {
     int                 selected = 0;   // 0=Once 1=Session 2=Always 3=Deny
 };
 
+// 16 §7.6 / §4.2: the last-supervisor exit confirmation. Counts and workspace
+// titles only; never a per-session list (C2). `selected` is 0=Terminate,
+// 1=Cancel and defaults to Cancel so a stray Enter cannot tear daemons down.
+struct ExitConfirmState {
+    bool                     open = false;
+    std::vector<WorkspaceId> orphaning;
+    int                      sessions = 0;
+    int                      running = 0;
+    int                      selected = 1;
+};
+
 struct UiModel {
     std::map<WorkspaceId, WorkspaceModel> workspaces;
     WorkspaceId                           activeWorkspaceId;
@@ -319,6 +340,7 @@ struct UiModel {
     AggregateStatusModel                  aggregate;
     SwitcherOverlayModel                  switcher;
     PermissionDialogModel                 dialog;
+    ExitConfirmState                      exitConfirm;
     UiMode                                mode = UiMode::Conversation;
     bool                                  shouldExit = false;
     std::string                           mcp_status;
@@ -338,6 +360,7 @@ struct UiModel {
     void            setCellTitle(const WorkspaceId& workspace, const SessionId& id,
                                  std::string title);
     void            setSessionReadOnly(const SessionId& id, bool read_only);
+    void            eraseSession(const WorkspaceId& workspace, const SessionId& id);
 
     // 15 §4.7 (AM-1): the bounded MCP status token projected from a
     // `HostNoticeKind::McpServerStatus` host notice.
@@ -355,5 +378,8 @@ struct UiModel {
 
 [[nodiscard]] bool is_active_state(AgentState state) noexcept;
 [[nodiscard]] bool is_waiting_state(AgentState state) noexcept;
+
+// 16 §3.6: the switcher's display-only ownership mark for one daemon status.
+[[nodiscard]] OwnershipMark ownership_mark(DaemonStatus status) noexcept;
 
 } // namespace ymh::ui

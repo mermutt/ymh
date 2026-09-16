@@ -335,6 +335,7 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
             WorkspaceEvent event;
             event.workspace = workspace;
             event.kind = WorkspaceEventKind::SessionOpened;
+            event.session = notice.session;
             model_.apply(event);
             break;
         }
@@ -342,13 +343,14 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
             WorkspaceEvent event;
             event.workspace = workspace;
             event.kind = WorkspaceEventKind::SessionClosed;
+            event.session = notice.session;
             model_.apply(event);
             break;
         }
         case protocol::HostNoticeKind::DaemonShuttingDown: {
             WorkspaceEvent event;
             event.workspace = workspace;
-            event.kind = WorkspaceEventKind::DaemonDetached;
+            event.kind = WorkspaceEventKind::DaemonStopping;
             model_.apply(event);
             break;
         }

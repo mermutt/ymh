@@ -79,6 +79,11 @@ void SupervisorConnection::untrack(const SessionId& session) {
 }
 
 void SupervisorConnection::submit(std::string method, nlohmann::json params, ReplyFn reply) {
+    submit(std::move(method), std::move(params), std::move(reply), config_.request_timeout);
+}
+
+void SupervisorConnection::submit(std::string method, nlohmann::json params, ReplyFn reply,
+                                  std::chrono::milliseconds timeout) {
     {
         std::lock_guard lock(mutex_);
         if (stop_requested_) {
@@ -94,7 +99,8 @@ void SupervisorConnection::submit(std::string method, nlohmann::json params, Rep
             }
             return;
         }
-        requests_.push_back(PendingRequest{std::move(method), std::move(params), std::move(reply)});
+        requests_.push_back(PendingRequest{std::move(method), std::move(params), std::move(reply),
+                                           timeout});
     }
     cv_.notify_all();
 }
@@ -340,8 +346,10 @@ void SupervisorConnection::process_requests() {
         SupervisorReply reply;
         try {
             reply.ok = true;
-            reply.result = connection_->request(request.method, std::move(request.params),
-                                                config_.request_timeout);
+            const std::chrono::milliseconds timeout =
+                request.timeout.count() > 0 ? request.timeout : config_.request_timeout;
+            reply.result =
+                connection_->request(request.method, std::move(request.params), timeout);
         } catch (const protocol::RpcException& error) {
             reply.ok = false;
             reply.error_code = error.code();

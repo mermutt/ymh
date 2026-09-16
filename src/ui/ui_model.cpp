@@ -270,6 +270,22 @@ bool is_waiting_state(AgentState state) noexcept {
            state == AgentState::Error;
 }
 
+OwnershipMark ownership_mark(DaemonStatus status) noexcept {
+    switch (status) {
+        case DaemonStatus::Attached:
+            return OwnershipMark::Owned;
+        case DaemonStatus::Stopping:
+            return OwnershipMark::Stopping;
+        case DaemonStatus::NotRunning:
+            return OwnershipMark::NotRunning;
+        case DaemonStatus::Connecting:
+        case DaemonStatus::Detached:
+        case DaemonStatus::Dead:
+            return OwnershipMark::Unreachable;
+    }
+    return OwnershipMark::Unreachable;
+}
+
 void AggregateStatusModel::recompute(const std::map<WorkspaceId, WorkspaceModel>& workspaces,
                                      const std::map<SessionId, SessionUiState>& sessions) {
     AggregateStatus next;
@@ -425,6 +441,23 @@ void UiModel::setSessionReadOnly(const SessionId& id, bool read_only) {
             return;
         }
     }
+}
+
+void UiModel::eraseSession(const WorkspaceId& workspace, const SessionId& id) {
+    sessions.erase(id);
+    const auto workspace_it = workspaces.find(workspace);
+    if (workspace_it == workspaces.end()) {
+        return;
+    }
+    WorkspaceModel& target = workspace_it->second;
+    target.sessions.erase(
+        std::remove_if(target.sessions.begin(), target.sessions.end(),
+                       [&id](const SessionCell& cell) { return cell.id == id; }),
+        target.sessions.end());
+    if (target.activeSessionId == id) {
+        target.activeSessionId = SessionId{};
+    }
+    dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::SessionBar);
 }
 
 void UiModel::setMcpStatus(std::string detail) {
@@ -679,8 +712,18 @@ void UiModel::apply(const WorkspaceEvent& event) {
             case WorkspaceEventKind::DaemonDied:
                 it->second.daemonStatus = DaemonStatus::Dead;
                 break;
+            case WorkspaceEventKind::DaemonStopping:
+                it->second.daemonStatus = DaemonStatus::Stopping;
+                break;
             case WorkspaceEventKind::SessionOpened:
+                if (event.session.has_value()) {
+                    ensureSessionIn(event.workspace, *event.session);
+                }
+                break;
             case WorkspaceEventKind::SessionClosed:
+                if (event.session.has_value()) {
+                    eraseSession(event.workspace, *event.session);
+                }
                 break;
         }
     }
@@ -726,6 +769,7 @@ void SwitcherOverlayModel::open(const UiModel& model) {
         node.id = workspace_id;
         node.title = workspace.title.empty() ? workspace.cwd : workspace.title;
         node.status = workspace.daemonStatus;
+        node.mark = ownership_mark(workspace.daemonStatus);
         for (const SessionCell& cell : workspace.sessions) {
             if (filtering && cell.title.find(*filter) == std::string::npos &&
                 cell.id.value.find(*filter) == std::string::npos) {
