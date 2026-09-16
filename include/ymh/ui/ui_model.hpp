@@ -72,6 +72,7 @@ private:
 enum class ConversationRole : std::uint8_t {
     User,
     Assistant,
+    Reasoning,
     Tool,
     System,
 };
@@ -87,8 +88,12 @@ struct ConversationEntry {
 struct ConversationModel {
     std::vector<ConversationEntry>            entries;
     std::unordered_map<std::string, std::size_t> by_message;
+    // 17 §4 (RB-02): all reasoning deltas of one message coalesce into a single
+    // folded Reasoning entry, indexed here independently of `by_message`.
+    std::unordered_map<std::string, std::size_t> by_reasoning_message;
 
     [[nodiscard]] std::size_t find_message(const std::string& id) const;
+    [[nodiscard]] std::size_t find_reasoning_message(const std::string& id) const;
 };
 
 // Per-session conversation viewport (10 §8.2 refinement). Supervisor-local,
@@ -133,12 +138,21 @@ struct ToolModel {
     [[nodiscard]] std::size_t find(const std::string& id) const;
 };
 
+// 17 §5 (RB-08): Tab-completion cycle state. Names (not Command pointers) keep
+// the model pure and pointer-free; the field is per-session (U9).
+struct CompletionCycle {
+    std::string              draft;
+    std::vector<std::string> names;
+    std::size_t              index = 0;
+};
+
 struct InputModel {
     std::string              draft;
     std::size_t              cursor = 0;
     std::vector<std::string> history;
     std::size_t              history_pos = 0;
     std::string              saved_draft;
+    std::optional<CompletionCycle> completion;
 
     void push_history(std::string line);
     bool history_up();
@@ -194,6 +208,8 @@ struct SessionUiState {
     SubagentModel      subagents;
     ConversationScroll scroll;
     std::vector<CommandHint> command_hints;
+    // 17 §4 (RB-02): global expand-all / collapse-all for foldable entries.
+    bool expand_all_folds = false;
 
     AgentState agent_state = AgentState::Idle;
 };
@@ -319,6 +335,8 @@ struct UiModel {
     void            ensureCellIn(const WorkspaceId& workspace, const SessionId& id);
     void            refreshCell(const SessionId& id);
     void            refreshCellIn(const WorkspaceId& workspace, const SessionId& id);
+    void            setCellTitle(const WorkspaceId& workspace, const SessionId& id,
+                                 std::string title);
     void            setSessionReadOnly(const SessionId& id, bool read_only);
 
     // 15 §4.7 (AM-1): the bounded MCP status token projected from a

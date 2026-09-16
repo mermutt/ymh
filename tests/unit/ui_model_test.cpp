@@ -498,4 +498,124 @@ TEST(UiModel, CommandOutputWhileScrolledRaisesUnseen) {
     EXPECT_TRUE(context.session->scroll.unseen);
 }
 
+TEST(UiModel, ReasoningPrecedesAssistantForBothArrivalOrders) {
+    UiModel reasoning_first = make_model();
+    reasoning_first.apply(UiEvent{AssistantTextDelta{kSession, "a1", "think", true}});
+    reasoning_first.apply(UiEvent{AssistantTextDelta{kSession, "a1", "answer"}});
+    {
+        const SessionUiState* state = reasoning_first.session(kSession);
+        ASSERT_NE(state, nullptr);
+        ASSERT_EQ(state->conversation.entries.size(), 2u);
+        EXPECT_EQ(state->conversation.entries[0].role, ConversationRole::Reasoning);
+        EXPECT_EQ(state->conversation.entries[0].text, "think");
+        EXPECT_EQ(state->conversation.entries[1].role, ConversationRole::Assistant);
+        EXPECT_EQ(state->conversation.entries[1].text, "answer");
+        EXPECT_EQ(state->conversation.find_message("a1"), 1u);
+        EXPECT_EQ(state->conversation.find_reasoning_message("a1"), 0u);
+    }
+
+    UiModel text_first = make_model();
+    text_first.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    text_first.apply(UiEvent{AssistantTextDelta{kSession, "a1", "answer"}});
+    text_first.apply(UiEvent{AssistantTextDelta{kSession, "a1", "think", true}});
+    {
+        const SessionUiState* state = text_first.session(kSession);
+        ASSERT_NE(state, nullptr);
+        ASSERT_EQ(state->conversation.entries.size(), 2u);
+        EXPECT_EQ(state->conversation.entries[0].role, ConversationRole::Reasoning);
+        EXPECT_EQ(state->conversation.entries[0].text, "think");
+        EXPECT_EQ(state->conversation.entries[1].role, ConversationRole::Assistant);
+        EXPECT_EQ(state->conversation.entries[1].text, "answer");
+        EXPECT_EQ(state->conversation.find_message("a1"), 1u);
+        EXPECT_EQ(state->conversation.find_reasoning_message("a1"), 0u);
+    }
+}
+
+TEST(UiModel, ReasoningDeltasCoalesceAndFinishClearsBoth) {
+    UiModel model = make_model();
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "th", true}});
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "ink", true}});
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "answer"}});
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "answer", std::nullopt}});
+
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->conversation.entries.size(), 2u);
+    EXPECT_EQ(state->conversation.entries[0].role, ConversationRole::Reasoning);
+    EXPECT_EQ(state->conversation.entries[0].text, "think");
+    EXPECT_FALSE(state->conversation.entries[0].streaming);
+    EXPECT_EQ(state->conversation.entries[1].role, ConversationRole::Assistant);
+    EXPECT_EQ(state->conversation.entries[1].text, "answer");
+    EXPECT_FALSE(state->conversation.entries[1].streaming);
+}
+
+TEST(UiModel, LongestCommonPrefixOverZeroOneAndManyMatches) {
+    const CommandRegistry registry = CommandRegistry::builtin();
+    EXPECT_EQ(CommandRegistry::longest_common_prefix({}), std::string{});
+
+    const std::vector<const Command*> one = registry.complete("he");
+    ASSERT_EQ(one.size(), 1u);
+    EXPECT_EQ(CommandRegistry::longest_common_prefix(one), "help");
+
+    const std::vector<const Command*> many = registry.complete("c");
+    ASSERT_EQ(many.size(), 2u);
+    EXPECT_EQ(CommandRegistry::longest_common_prefix(many), "c");
+}
+
+TEST(UiModel, CompletionCycleResetsOnDraftMutation) {
+    InputModel input;
+    input.draft = "/c";
+    input.cursor = 2;
+    input.completion = CompletionCycle{"/c", {"clear", "compact"}, 0};
+    EXPECT_FALSE(input.delete_forward());
+    EXPECT_TRUE(input.completion.has_value());
+
+    input.history.push_back("/help");
+    input.history_pos = 1;
+    ASSERT_TRUE(input.history_up());
+    EXPECT_FALSE(input.completion.has_value());
+    EXPECT_EQ(input.draft, "/help");
+
+    input.draft = "/c";
+    input.cursor = 2;
+    input.completion = CompletionCycle{"/c", {"clear", "compact"}, 0};
+    input.clear_line();
+    EXPECT_FALSE(input.completion.has_value());
+
+    input.draft = "/clear now";
+    input.cursor = input.draft.size();
+    input.completion = CompletionCycle{"/clear now", {"clear"}, 0};
+    ASSERT_TRUE(input.delete_word());
+    EXPECT_FALSE(input.completion.has_value());
+}
+
+TEST(UiModel, ClearResetsReasoningIndex) {
+    UiModel model = make_model();
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "think", true}});
+
+    CommandRegistry registry = CommandRegistry::builtin();
+    CommandContext context{model};
+    context.session = model.session(kSession);
+    ASSERT_TRUE(registry.dispatch("/clear", context));
+
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "again", true}});
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->conversation.entries.size(), 1u);
+    EXPECT_EQ(state->conversation.entries[0].role, ConversationRole::Reasoning);
+    EXPECT_EQ(state->conversation.entries[0].text, "again");
+}
+
+TEST(UiModel, SetCellTitlePopulatesCell) {
+    UiModel model = make_model();
+    model.setCellTitle(WorkspaceId{"workspace"}, kSession, "my title");
+
+    const auto workspace = model.workspaces.find(WorkspaceId{"workspace"});
+    ASSERT_NE(workspace, model.workspaces.end());
+    ASSERT_FALSE(workspace->second.sessions.empty());
+    EXPECT_EQ(workspace->second.sessions.front().title, "my title");
+}
+
 } // namespace

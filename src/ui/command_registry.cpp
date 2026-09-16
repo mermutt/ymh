@@ -68,6 +68,26 @@ std::vector<const Command*> CommandRegistry::complete(const std::string& prefix)
     return matches;
 }
 
+std::string CommandRegistry::longest_common_prefix(
+    const std::vector<const Command*>& commands) {
+    if (commands.empty()) {
+        return {};
+    }
+    std::string prefix = commands.front()->name;
+    for (const Command* command : commands) {
+        std::size_t length = 0;
+        while (length < prefix.size() && length < command->name.size() &&
+               prefix[length] == command->name[length]) {
+            ++length;
+        }
+        prefix.resize(length);
+        if (prefix.empty()) {
+            break;
+        }
+    }
+    return prefix;
+}
+
 bool CommandRegistry::dispatch(const std::string& line, CommandContext& context) const {
     if (line.empty() || line.front() != '/') {
         return false;
@@ -108,6 +128,7 @@ CommandRegistry CommandRegistry::builtin() {
             }
             context.session->conversation.entries.clear();
             context.session->conversation.by_message.clear();
+            context.session->conversation.by_reasoning_message.clear();
             context.session->scroll.toBottom();
             context.model.dirty.mark(context.session->id, UiDirtyFlag::Conversation);
         }});

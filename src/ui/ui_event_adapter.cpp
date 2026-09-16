@@ -89,15 +89,17 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
         }
         case EventType::AssistantChunk: {
             const auto payload = event.payload.get<payload::AssistantChunk>();
-            if (payload.kind == payload::AssistantChunkKind::Reasoning || payload.text.empty()) {
+            if (payload.text.empty()) {
                 break;
             }
             if (startedMessages_.find(session) == startedMessages_.end() ||
                 startedMessages_.at(session) != payload.message) {
                 events.push_back(UiEvent{AssistantMessageStarted{session, payload.message}});
             }
+            const bool reasoning =
+                payload.kind == payload::AssistantChunkKind::Reasoning;
             events.push_back(
-                UiEvent{AssistantTextDelta{session, payload.message, payload.text, false}});
+                UiEvent{AssistantTextDelta{session, payload.message, payload.text, reasoning}});
             break;
         }
         case EventType::AssistantMessage: {
