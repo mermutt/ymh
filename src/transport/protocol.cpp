@@ -77,6 +77,21 @@ constexpr std::array<WireEnumEntry<HostState>, 5> kHostStates{{
     {HostState::Failed, "failed"},
 }};
 
+constexpr std::array<WireEnumEntry<ClientRole>, 3> kClientRoles{{
+    {ClientRole::Supervisor, "supervisor"},
+    {ClientRole::Automation, "automation"},
+    {ClientRole::Observer, "observer"},
+}};
+
+constexpr std::array<WireEnumEntry<ShutdownReason>, 6> kShutdownReasons{{
+    {ShutdownReason::ClientRequest, "client_request"},
+    {ShutdownReason::Signal, "signal"},
+    {ShutdownReason::StartupFailure, "startup_failure"},
+    {ShutdownReason::LastSupervisor, "last_supervisor"},
+    {ShutdownReason::NoOwners, "no_owners"},
+    {ShutdownReason::WorkspaceStop, "workspace_stop"},
+}};
+
 [[nodiscard]] std::int64_t to_ms(std::chrono::milliseconds value) noexcept {
     return value.count();
 }
@@ -167,6 +182,28 @@ std::string_view wire_name(HostState state) noexcept {
 
 std::optional<HostState> parse_host_state(std::string_view name) noexcept {
     return parse_wire_enum(kHostStates, name);
+}
+
+std::string_view to_string(ClientRole role) noexcept {
+    return wire_name_of(kClientRoles, role);
+}
+
+std::optional<ClientRole> parse_client_role(std::string_view name) noexcept {
+    return parse_wire_enum(kClientRoles, name);
+}
+
+std::string_view to_string(ShutdownReason reason) noexcept {
+    return wire_name_of(kShutdownReasons, reason);
+}
+
+ShutdownReason parse_shutdown_reason(std::string_view reason) noexcept {
+    const auto parsed = parse_wire_enum(kShutdownReasons, reason);
+    if (parsed.has_value()) {
+        if (*parsed == ShutdownReason::LastSupervisor || *parsed == ShutdownReason::WorkspaceStop) {
+            return *parsed;
+        }
+    }
+    return ShutdownReason::ClientRequest;
 }
 
 void to_json(nlohmann::json& json, const RequestId& id) {
@@ -292,7 +329,8 @@ void from_json(const nlohmann::json& json, UnsubscribedNotice& notice) {
 void to_json(nlohmann::json& json, const HelloParams& params) {
     json = nlohmann::json{{"protocol_version", params.protocol_version},
                           {"profile", std::string{wire_name(params.profile)}},
-                          {"client_instance", params.client_instance.value}};
+                          {"client_instance", params.client_instance.value},
+                          {"role", std::string{to_string(params.role)}}};
     if (params.resume_hint.has_value()) {
         json["resume_hint"] = params.resume_hint->value;
     }
@@ -306,6 +344,15 @@ void from_json(const nlohmann::json& json, HelloParams& params) {
     }
     params.profile = *profile;
     params.client_instance.value = json.at("client_instance").get<std::string>();
+    if (json.contains("role") && !json.at("role").is_null()) {
+        const auto role = parse_client_role(json.at("role").get<std::string>());
+        if (!role.has_value()) {
+            throw std::invalid_argument("unknown client role");
+        }
+        params.role = *role;
+    } else {
+        params.role = ClientRole::Supervisor;
+    }
     if (json.contains("resume_hint") && !json.at("resume_hint").is_null()) {
         params.resume_hint = EventCursor{json.at("resume_hint").get<std::string>()};
     } else {
@@ -522,9 +569,10 @@ void from_json(const nlohmann::json& json, SessionDetail& detail) {
 
 namespace {
 
-constexpr std::array<std::string_view, 28> kMethodCatalog{{
+constexpr std::array<std::string_view, 29> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
+    method::kHostOwnership,
     method::kWorkspaceList,    method::kWorkspaceShow,    method::kSessionList,
     method::kSessionShow,      method::kSessionCreate,    method::kSessionResume,
     method::kSessionFork,      method::kSessionReplay,    method::kSessionActivate,

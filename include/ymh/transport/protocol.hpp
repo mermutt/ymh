@@ -105,6 +105,26 @@ enum class HostErrorCode : std::uint8_t {
     HostUnreachable,
 };
 
+// 16 §7.4 (16-D3). A client's declared role, asserted at hello. Self-asserted
+// and advisory: ownership liveness trusts same-UID peers (§7.4 O-L8).
+enum class ClientRole : std::uint8_t {
+    Supervisor,   // interactive TUI; registers, owns the daemon set
+    Automation,   // `ymh run`; attaches, never registers (§4.5)
+    Observer,     // `ymh workspace stop`; owns nothing (§4.6)
+};
+
+// Transport mirror of ymh::ShutdownReason (workspace_host.hpp), alongside the
+// existing HostState / HostErrorCode mirrors. The daemon maps it one-to-one
+// (16 §7.4). Total and 1:1 with the six daemon reasons.
+enum class ShutdownReason : std::uint8_t {
+    ClientRequest,    // host.shutdown with no recognized reason (admission-checked)
+    Signal,           // SIGTERM / SIGINT
+    StartupFailure,   // a startup step failed after partial state was created
+    LastSupervisor,   // the last owner's confirmed exit (§4.4)
+    NoOwners,         // owner watchdog: K(d) false for owner_grace (§5.1)
+    WorkspaceStop,    // `ymh workspace stop` administrative override (§4.6)
+};
+
 // JSON-RPC 2.0 request id: integer or string, echoed verbatim (T9).
 // `std::monostate` encodes JSON `null`, used only for error responses produced
 // before a request id exists (framing-level errors: 05 §3.3, §5.4).
@@ -166,6 +186,7 @@ enum class AppCode : int {
     RegistryUnavailable        = -32016,
     PermissionDenied           = -32017,
     SessionNotActive           = -32018,
+    NotLastOwner               = -32019,  // any non-override host.shutdown refused (§4.4)
 };
 
 [[nodiscard]] constexpr int code_value(RpcCode code) noexcept {
@@ -255,6 +276,7 @@ struct HelloParams {
     ServerProfile              profile{ServerProfile::Interactive};
     ClientInstanceId           client_instance;
     std::optional<EventCursor> resume_hint;
+    ClientRole                 role{ClientRole::Supervisor};  // additive; default preserves v1
 };
 
 struct HelloResult {
@@ -266,6 +288,23 @@ struct HelloResult {
     ClientId                   client_id;
     TransportLimits            limits;
     std::int64_t               server_time_ms{0};
+};
+
+// `host.ownership` (16 §7.4, new read-only method). No request params: the
+// daemon uses the calling connection's ClientInstanceId (set at hello), so it
+// cannot be spoofed (O-L1).
+struct OwnershipView {
+    struct ClientInfo {
+        std::string client_instance;
+        ClientRole  role{ClientRole::Supervisor};
+        std::int32_t pid{0};
+    };
+
+    std::vector<ClientInfo> clients;             // live, hello-complete, owner roles
+    std::size_t live_supervisors{0};             // RAW count INCLUDING the caller (R-M3)
+    std::size_t live_automation{0};              // RAW count INCLUDING the caller (R-M3)
+    std::size_t other_fresh_owners{0};           // |snapshot − caller|, the only exclusion (R-H1)
+    bool        shutting_down{false};            // HostState::Draining
 };
 
 struct StreamFrom {
@@ -350,6 +389,15 @@ struct SessionDetail {
 [[nodiscard]] std::string_view wire_name(HostState state) noexcept;
 [[nodiscard]] std::optional<HostState> parse_host_state(std::string_view name) noexcept;
 
+[[nodiscard]] std::string_view to_string(ClientRole role) noexcept;
+[[nodiscard]] std::optional<ClientRole> parse_client_role(std::string_view name) noexcept;
+
+// Total parser with a fail-safe fallback (16 §7.4): only `"last_supervisor"`
+// and `"workspace_stop"` are recognized; anything else, including a missing
+// reason, maps to ClientRequest (which admission still checks).
+[[nodiscard]] ShutdownReason parse_shutdown_reason(std::string_view reason) noexcept;
+[[nodiscard]] std::string_view to_string(ShutdownReason reason) noexcept;
+
 // ---------------------------------------------------------------------------
 // JSON codecs
 // ---------------------------------------------------------------------------
@@ -419,6 +467,7 @@ inline constexpr std::string_view kHostDetach       = "host.detach";
 inline constexpr std::string_view kHostStatus       = "host.status";
 inline constexpr std::string_view kHostPing         = "host.ping";
 inline constexpr std::string_view kHostShutdown     = "host.shutdown";
+inline constexpr std::string_view kHostOwnership    = "host.ownership";
 inline constexpr std::string_view kWorkspaceList    = "workspace.list";
 inline constexpr std::string_view kWorkspaceShow    = "workspace.show";
 inline constexpr std::string_view kSessionList      = "session.list";

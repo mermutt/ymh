@@ -38,10 +38,11 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 }
 
 TEST(TransportProtocol, MethodCatalogIsComplete) {
-    EXPECT_EQ(protocol::all_methods().size(), 28u);
+    EXPECT_EQ(protocol::all_methods().size(), 29u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
+    EXPECT_TRUE(protocol::is_known_method("host.ownership"));
     EXPECT_FALSE(protocol::is_known_method("host.nope"));
 }
 
