@@ -231,6 +231,8 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     host_config.config                = std::move(config);
     host_config.provider_factory      = make_provider_factory({});
     host_config.foreground            = false;
+    host_config.require_owner         = true;
+    host_config.watchdog_disabled     = false;
     if (!boot_id.empty()) {
         host_config.boot_id = HostBootId{boot_id};
     }

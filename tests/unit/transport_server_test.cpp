@@ -93,12 +93,13 @@ public:
     }
 
     void hello(Peer& peer, protocol::ServerProfile profile, std::string_view instance,
-               std::int64_t id = 1) {
+               std::int64_t id = 1,
+               protocol::ClientRole role = protocol::ClientRole::Supervisor) {
         nlohmann::json params;
         protocol::to_json(params, protocol::HelloParams{protocol::kProtocolVersion, profile,
                                                         protocol::ClientInstanceId{
                                                             std::string{instance}},
-                                                        std::nullopt});
+                                                        std::nullopt, role});
         send(peer, request(id, protocol::method::kHostHello, params));
     }
 
@@ -132,6 +133,47 @@ TEST(TransportServer, HandshakeAssignsClientId) {
     EXPECT_EQ(result.protocol_version, protocol::kProtocolVersion);
     EXPECT_TRUE(harness.server->isHandshaken(peer->id));
     EXPECT_FALSE(peer->drop_reason.has_value());
+}
+
+TEST(TransportServer, OwnerLivenessSinkCountsOnlyOwnerRoles) {
+    Harness harness;
+    std::size_t                           live = 0;
+    std::size_t                           sink_calls = 0;
+    std::chrono::steady_clock::time_point last{};
+    harness.server->set_owner_liveness_sink(
+        [&](std::size_t count, std::chrono::steady_clock::time_point frame) {
+            live = count;
+            last = frame;
+            ++sink_calls;
+        });
+
+    Peer* supervisor = harness.open();
+    harness.hello(*supervisor, protocol::ServerProfile::Interactive, kInstanceA);
+    EXPECT_EQ(live, 1u);
+    EXPECT_GT(sink_calls, 0u);
+    EXPECT_NE(last, std::chrono::steady_clock::time_point{});
+
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB, 2,
+                  protocol::ClientRole::Automation);
+    EXPECT_EQ(live, 2u);
+
+    Peer* observer = harness.open();
+    harness.hello(*observer, protocol::ServerProfile::Interactive,
+                  "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 3, protocol::ClientRole::Observer);
+    EXPECT_EQ(live, 2u);
+
+    harness.send(*observer, Harness::request(4, protocol::method::kHostPing));
+    EXPECT_EQ(live, 2u);
+
+    harness.server->closeConnection(observer->id);
+    EXPECT_EQ(live, 2u);
+
+    harness.server->closeConnection(automation->id);
+    EXPECT_EQ(live, 1u);
+
+    harness.server->closeConnection(supervisor->id);
+    EXPECT_EQ(live, 0u);
 }
 
 TEST(TransportServer, NonHelloFirstIsRejectedAndClosed) {

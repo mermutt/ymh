@@ -32,8 +32,11 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "ymh/config/config.hpp"
+#include "ymh/core/clock.hpp"
+#include "ymh/core/ownership.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -75,6 +78,13 @@ enum class ShutdownReason : std::uint8_t {
     WorkspaceStop,    // `ymh workspace stop` administrative override (§4.6)
 };
 
+// 16 §7.4 (G3): the two conversions between the daemon reason and its transport
+// mirror. Both are total and 1:1 over the six values (each is a `-Wswitch`-checked
+// switch, so adding a value to either enum without updating the map is a build
+// error). There is exactly one mirror→native map, in the HostRuntime adapter.
+[[nodiscard]] protocol::ShutdownReason to_protocol(ShutdownReason reason) noexcept;
+[[nodiscard]] ShutdownReason from_protocol(protocol::ShutdownReason reason) noexcept;
+
 // Daemon startup/operation error carrying a `protocol::HostErrorCode` (04 §2.2).
 // `create()` throws `HostError{WorkspaceMissing}` on a bad root.
 class HostError final : public std::runtime_error {
@@ -108,6 +118,25 @@ struct HostConfig {
     // Test/debug: run in the caller's process (no fork, no setsid).
     bool foreground{false};
 
+    // ---- ownership watchdog (16 §7.3, R-M2/N2-H1) -------------------------
+    // Armed iff `require_owner && !watchdog_disabled`. `require_owner` defaults
+    // TRUE (fail-closed): a daemon built without an explicit opt-out always has
+    // a watchdog. `foreground` does NOT participate, so the deterministic suite
+    // runs in-process with require_owner=true and injected clocks.
+    bool require_owner{true};
+    bool watchdog_disabled{false};
+
+    // Cadence defaults come from core/ownership.hpp — the single source (N2-L7).
+    std::chrono::milliseconds owner_heartbeat_interval{kOwnerHeartbeatInterval};
+    std::chrono::milliseconds owner_lease_ttl{kOwnerLeaseTtl};
+    std::chrono::milliseconds watchdog_interval{kOwnerWatchdogInterval};
+    std::chrono::milliseconds owner_grace{kOwnerGrace};
+
+    // Two-clock seam (O-M10): the defaults are the real clocks; tests inject
+    // fakes. Read only by the watchdog thread.
+    MonotonicClock  owner_monotonic_clock{default_monotonic_clock()};
+    WallClockReader owner_wall_clock{default_wall_clock()};
+
     // ---- additive seams ----------------------------------------------------
     Config config;  // layered §37 config; the runtime's provider/agent/policy source
 
@@ -124,6 +153,11 @@ struct HostConfig {
     // in-process and across the two-process harness.
     std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)> provider_factory;
 };
+
+// 16 §5.1/§7.3: the owner watchdog is armed iff `require_owner && !watchdog_disabled`.
+[[nodiscard]] inline bool owner_watchdog_armed(const HostConfig& config) noexcept {
+    return config.require_owner && !config.watchdog_disabled;
+}
 
 // The daemon (04 §4.2). `create()` validates and builds the object; `run()` is
 // the only entry point that mutates process state (chdir, flock, socket).
@@ -160,6 +194,12 @@ public:
     [[nodiscard]] ResourceGovernor&     caps();
 
     [[nodiscard]] std::size_t attachedClients() const noexcept;
+
+    // ---- owner watchdog introspection (16 §7.3) ---------------------------
+    // True once the owner watchdog has fired (diagnostics/tests).
+    [[nodiscard]] bool ownerless() const noexcept;
+    // The watchdog's published immutable fresh-owner snapshot (16 §5.1).
+    [[nodiscard]] std::shared_ptr<const std::vector<SupervisorId>> freshOwnerSnapshot() const;
 
     // Single-active-session control (decision (m)).
     void                     activateSession(SessionId session);

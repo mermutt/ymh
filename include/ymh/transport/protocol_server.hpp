@@ -93,6 +93,13 @@ public:
     using SubscribeObserver = std::function<void(const SessionId&, ClientId)>;
     void set_subscribe_observer(SubscribeObserver observer);
 
+    // 16 §7.4 (O-M3/R-M1): io-thread liveness sink, invoked at hello completion,
+    // on every inbound frame, and on drop. It counts only roles
+    // {Supervisor, Automation} — an Observer never holds the daemon alive.
+    using OwnerLivenessSink = std::function<void(std::size_t live_owners,
+                                                 std::chrono::steady_clock::time_point last_frame)>;
+    void set_owner_liveness_sink(OwnerLivenessSink sink);
+
     // E19: blocks the calling (non-io) thread until every attached client's
     // outbound queue is empty, or `grace` elapses. Returns true iff fully
     // drained. Never reads `connections_` off the io thread.
@@ -113,7 +120,9 @@ private:
         bool                     pumping{false};
         bool                     suppress_response{false};
         ServerProfile            profile{ServerProfile::Interactive};
+        ClientRole               role{ClientRole::Supervisor};
         ClientInstanceId         instance;
+        std::chrono::steady_clock::time_point last_frame_at{};
         std::string              read_buffer;
         std::deque<std::string>  outbound;
         std::size_t              outstanding{0};
@@ -143,6 +152,7 @@ private:
     void maybe_close_after_drain(Connection& conn);
     void drop_client(Connection& conn, std::string reason);
     void end_subscriptions(Connection& conn, const SessionId& session, std::string reason);
+    void publish_owner_liveness();
 
     [[nodiscard]] HostStatus compose_status(const Connection& conn) const;
     [[nodiscard]] nlohmann::json stream_notification(SubscriptionId subscription, bool replay,
@@ -157,6 +167,7 @@ private:
     std::uint64_t         next_subscription_{1};
 
     SubscribeObserver            subscribe_observer_;
+    OwnerLivenessSink            owner_liveness_sink_;
     bool                         shutdown_notice_emitted_{false};
     std::atomic<std::size_t>     outstanding_total_{0};
     std::mutex                   drain_mutex_;

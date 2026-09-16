@@ -27,6 +27,7 @@
 #include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/host/host_runtime.hpp"
+#include "ymh/host/workspace_host.hpp"
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
@@ -610,16 +611,16 @@ TEST_F(HostRuntimeTest, HostStateShutdownAndWorkspaceViews) {
     Bridge bridge("hr_state");
     EXPECT_EQ(bridge.host().hostState(), protocol::HostState::Serving);
 
-    bool        hook_called = false;
-    std::string hook_reason;
-    bridge.host().setShutdownHook([&](std::string reason) {
+    bool           hook_called = false;
+    ShutdownReason hook_reason = ShutdownReason::ClientRequest;
+    bridge.host().setShutdownHook([&](ShutdownReason reason) {
         hook_called = true;
-        hook_reason = std::move(reason);
+        hook_reason = reason;
     });
-    bridge.host().requestShutdown("test");
+    bridge.host().requestShutdown(protocol::ShutdownReason::LastSupervisor);
     EXPECT_EQ(bridge.host().hostState(), protocol::HostState::Draining);
     EXPECT_TRUE(hook_called);
-    EXPECT_EQ(hook_reason, "test");
+    EXPECT_EQ(hook_reason, ShutdownReason::LastSupervisor);
 
     const protocol::HostStatusInfo status = bridge.host().hostStatus();
     EXPECT_EQ(status.workspace.value, bridge.identity().workspace.value);
@@ -632,6 +633,44 @@ TEST_F(HostRuntimeTest, HostStateShutdownAndWorkspaceViews) {
     const protocol::WorkspaceDetail detail =
         bridge.host().showWorkspace(protocol::WorkspaceId{bridge.identity().workspace.value});
     EXPECT_EQ(detail.summary.canonical_path, bridge.root().string());
+}
+
+TEST_F(HostRuntimeTest, ShutdownReasonMappingDoesNotDegrade) {
+    Bridge bridge("hr_reason_map");
+    const std::pair<protocol::ShutdownReason, ShutdownReason> cases[] = {
+        {protocol::ShutdownReason::ClientRequest, ShutdownReason::ClientRequest},
+        {protocol::ShutdownReason::Signal, ShutdownReason::Signal},
+        {protocol::ShutdownReason::StartupFailure, ShutdownReason::StartupFailure},
+        {protocol::ShutdownReason::LastSupervisor, ShutdownReason::LastSupervisor},
+        {protocol::ShutdownReason::NoOwners, ShutdownReason::NoOwners},
+        {protocol::ShutdownReason::WorkspaceStop, ShutdownReason::WorkspaceStop},
+    };
+    for (const auto& [wire, expected] : cases) {
+        std::optional<ShutdownReason> seen;
+        bridge.host().setShutdownHook([&](ShutdownReason reason) { seen = reason; });
+        bridge.host().requestShutdown(wire);
+        ASSERT_TRUE(seen.has_value()) << protocol::to_string(wire);
+        EXPECT_EQ(*seen, expected) << protocol::to_string(wire);
+    }
+}
+
+TEST_F(HostRuntimeTest, FreshOwnerSnapshotConvertsSupervisorIds) {
+    Bridge bridge("hr_snapshot");
+    bridge.host().setOwnerSnapshotSource([] {
+        auto ids = std::make_shared<std::vector<SupervisorId>>();
+        ids->push_back(SupervisorId{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"});
+        ids->push_back(SupervisorId{"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"});
+        return std::shared_ptr<const std::vector<SupervisorId>>(std::move(ids));
+    });
+    const std::shared_ptr<const std::vector<protocol::ClientInstanceId>> snapshot =
+        bridge.host().freshOwnerSnapshot();
+    ASSERT_NE(snapshot, nullptr);
+    ASSERT_EQ(snapshot->size(), 2u);
+    EXPECT_EQ((*snapshot)[0].value, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    EXPECT_EQ((*snapshot)[1].value, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+
+    bridge.host().setOwnerSnapshotSource({});
+    EXPECT_TRUE(bridge.host().freshOwnerSnapshot()->empty());
 }
 
 TEST_F(HostRuntimeTest, ActivateSuspendTracksActiveSession) {

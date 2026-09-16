@@ -74,6 +74,9 @@ HostConfig base_config(const std::filesystem::path& root,
     config.persistence.db_path   = root / ".ymh" / "sessions.db";
     config.persistence.lock_path = root / ".ymh" / "sessions.lock";
     config.foreground       = true;
+    // 16 §7.3: the watchdog default is fail-safe (require_owner=true), so the
+    // in-process lifecycle tests opt OUT explicitly.
+    config.require_owner    = false;
     config.heartbeat_interval = std::chrono::milliseconds{100};
     config.shutdown_grace   = std::chrono::milliseconds{2000};
     config.caps.max_llm_concurrency = 2;
@@ -454,6 +457,7 @@ public:
     SpawnResult spawn(const HostConfig& config) override {
         ++spawn_count;
         spawned_socket = config.socket_path;
+        last_config = config;
         return SpawnResult{HostPid{4242}, HostBootId{"fake-boot"}, config.socket_path};
     }
     void requestStop(HostPid pid, ShutdownReason) override { stopped_pid = pid; }
@@ -461,6 +465,7 @@ public:
 
     int                               spawn_count = 0;
     std::filesystem::path             spawned_socket;
+    HostConfig                        last_config;
     HostPid                           stopped_pid = 0;
     bool                              alive = false;
 };
@@ -533,6 +538,199 @@ TEST(WorkspaceHostLease, FakeStoreDaemonSessionLifecycleDoesNotThrow) {
 
     EXPECT_GE(daemon.host().store().list().size(), 1u);
     EXPECT_EQ(daemon.stopAndJoin(), HostExitCode::Ok);
+}
+
+TEST(WorkspaceHostOwnership, WatchdogArmingTruthTable) {
+    HostConfig config;
+    config.require_owner     = true;
+    config.watchdog_disabled = false;
+    EXPECT_TRUE(owner_watchdog_armed(config));
+    config.watchdog_disabled = true;
+    EXPECT_FALSE(owner_watchdog_armed(config));
+    config.require_owner     = false;
+    config.watchdog_disabled = false;
+    EXPECT_FALSE(owner_watchdog_armed(config));
+    config.watchdog_disabled = true;
+    EXPECT_FALSE(owner_watchdog_armed(config));
+
+    HostConfig foreground = config;
+    foreground.foreground        = true;
+    foreground.require_owner     = true;
+    foreground.watchdog_disabled = false;
+    EXPECT_TRUE(owner_watchdog_armed(foreground));
+
+    HostConfig defaults;
+    EXPECT_TRUE(defaults.require_owner);
+    EXPECT_FALSE(defaults.watchdog_disabled);
+    EXPECT_TRUE(owner_watchdog_armed(defaults));
+}
+
+TEST(WorkspaceHostOwnership, FailLoudGuardRejectsBothOptOutArms) {
+    ShortTempRoot root("ymh-host-guard");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+
+    HostConfig require_owner_off = base_config(canonical);
+    require_owner_off.foreground        = false;
+    require_owner_off.require_owner     = false;
+    require_owner_off.watchdog_disabled = false;
+    std::unique_ptr<WorkspaceHost> first = WorkspaceHost::create(std::move(require_owner_off));
+    EXPECT_EQ(first->run(), HostExitCode::StartupRejected);
+
+    HostConfig watchdog_off = base_config(canonical);
+    watchdog_off.foreground        = false;
+    watchdog_off.require_owner     = true;
+    watchdog_off.watchdog_disabled = true;
+    std::unique_ptr<WorkspaceHost> second = WorkspaceHost::create(std::move(watchdog_off));
+    EXPECT_EQ(second->run(), HostExitCode::StartupRejected);
+
+    HostConfig both_off = base_config(canonical);
+    both_off.foreground        = false;
+    both_off.require_owner     = false;
+    both_off.watchdog_disabled = true;
+    std::unique_ptr<WorkspaceHost> third = WorkspaceHost::create(std::move(both_off));
+    EXPECT_EQ(third->run(), HostExitCode::StartupRejected);
+}
+
+TEST(WorkspaceHostOwnership, ProductionConstructorsArmTheWatchdog) {
+    ShortTempRoot root("ymh-host-prod-arming");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "prod-arming");
+
+    FakeLauncher  launcher;
+    HostLifecycle lifecycle(launcher, *registry);
+    EXPECT_THROW(lifecycle.ensureRunning(record.id), HostError);
+    ASSERT_EQ(launcher.spawn_count, 1);
+    EXPECT_TRUE(launcher.last_config.require_owner);
+    EXPECT_FALSE(launcher.last_config.watchdog_disabled);
+    EXPECT_TRUE(owner_watchdog_armed(launcher.last_config));
+}
+
+TEST(WorkspaceHostOwnership, ShutdownReasonMappingIsTotalAndReversible) {
+    const ShutdownReason native[] = {
+        ShutdownReason::ClientRequest, ShutdownReason::Signal, ShutdownReason::StartupFailure,
+        ShutdownReason::LastSupervisor, ShutdownReason::NoOwners, ShutdownReason::WorkspaceStop,
+    };
+    for (const ShutdownReason reason : native) {
+        EXPECT_EQ(from_protocol(to_protocol(reason)), reason);
+    }
+    const protocol::ShutdownReason wire[] = {
+        protocol::ShutdownReason::ClientRequest, protocol::ShutdownReason::Signal,
+        protocol::ShutdownReason::StartupFailure, protocol::ShutdownReason::LastSupervisor,
+        protocol::ShutdownReason::NoOwners, protocol::ShutdownReason::WorkspaceStop,
+    };
+    for (const protocol::ShutdownReason reason : wire) {
+        EXPECT_EQ(to_protocol(from_protocol(reason)), reason);
+    }
+}
+
+TEST(WorkspaceHostOwnership, DeterministicWatchdogFiresNoOwnersAndTearsDown) {
+    ShortTempRoot root("ymh-host-watchdog");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    HostConfig config = base_config(canonical);
+    config.require_owner     = true;
+    config.watchdog_disabled = false;
+    config.watchdog_interval = std::chrono::milliseconds{2};
+    config.owner_grace       = std::chrono::milliseconds{40};
+    config.shutdown_grace    = std::chrono::milliseconds{200};
+
+    auto mono_ms = std::make_shared<std::atomic<std::int64_t>>(0);
+    config.owner_monotonic_clock = [mono_ms] {
+        return std::chrono::steady_clock::time_point{std::chrono::milliseconds{mono_ms->load()}};
+    };
+    config.owner_wall_clock = [] { return std::chrono::system_clock::time_point{}; };
+
+    std::unique_ptr<WorkspaceHost> host = WorkspaceHost::create(std::move(config));
+    HostExitCode                  code = HostExitCode::Internal;
+    std::thread                   runner([&] { code = host->run(); });
+
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (host->state() != protocol::HostState::Serving &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    ASSERT_EQ(host->state(), protocol::HostState::Serving);
+
+    for (std::int64_t step = 0; step <= 200 && !host->ownerless(); ++step) {
+        mono_ms->store(step);
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    EXPECT_TRUE(host->ownerless());
+
+    runner.join();
+    EXPECT_EQ(code, HostExitCode::Ok);
+    EXPECT_FALSE(std::filesystem::exists(canonical / ".ymh" / "host.sock"));
+
+    PersistenceConfig persistence;
+    persistence.db_path   = canonical / ".ymh" / "sessions.db";
+    persistence.lock_path = canonical / ".ymh" / "sessions.lock";
+    persistence.boot_id   = BootId{"after-watchdog"};
+    EXPECT_NO_THROW({
+        std::unique_ptr<SessionPersistence> store = SessionPersistence::open(persistence);
+        store->close();
+    });
+}
+
+TEST(WorkspaceHostOwnership, WatchdogExceptionGuardPublishesEmptyAndContinues) {
+    ShortTempRoot root("ymh-host-watchdog-exc");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    const WorkspaceId workspace_id = register_workspace(canonical, "watchdog-exc");
+    HostConfig config = base_config(canonical, workspace_id.value);
+    config.require_owner     = true;
+    config.watchdog_disabled = false;
+    config.watchdog_interval = std::chrono::milliseconds{2};
+
+    auto throw_now = std::make_shared<std::atomic<bool>>(false);
+    auto mono_ms   = std::make_shared<std::atomic<std::int64_t>>(0);
+    config.owner_monotonic_clock = [throw_now, mono_ms] {
+        if (throw_now->load()) {
+            throw std::runtime_error("injected clock failure");
+        }
+        return std::chrono::steady_clock::time_point{std::chrono::milliseconds{mono_ms->load()}};
+    };
+    config.owner_wall_clock = [] { return std::chrono::system_clock::now(); };
+
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(registry_config_for(canonical));
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+        registry->registerSupervisor(SupervisorRow{
+            SupervisorId{"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}, 4321,
+            "dddddddd-dddd-4ddd-8ddd-dddddddddddd", now, now, std::nullopt});
+    }
+
+    std::unique_ptr<WorkspaceHost> host = WorkspaceHost::create(std::move(config));
+    HostExitCode                  code = HostExitCode::Internal;
+    std::thread                   runner([&] { code = host->run(); });
+
+    const auto wait_for = [](auto predicate, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        return predicate();
+    };
+
+    ASSERT_TRUE(wait_for([&] { return !host->freshOwnerSnapshot()->empty(); },
+                         std::chrono::seconds{2}));
+
+    throw_now->store(true);
+    EXPECT_TRUE(wait_for([&] { return host->freshOwnerSnapshot()->empty(); },
+                         std::chrono::seconds{2}));
+
+    throw_now->store(false);
+    EXPECT_TRUE(wait_for([&] { return !host->freshOwnerSnapshot()->empty(); },
+                         std::chrono::seconds{2}));
+
+    host->requestShutdown(ShutdownReason::Signal);
+    runner.join();
+    EXPECT_EQ(code, HostExitCode::Ok);
 }
 
 } // namespace

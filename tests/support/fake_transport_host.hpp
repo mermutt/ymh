@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -31,6 +32,9 @@ public:
     std::vector<std::string> calls;
     std::optional<nlohmann::json> last_message;
     std::optional<std::string> last_reason;
+    std::optional<protocol::ShutdownReason> last_shutdown_reason;
+    std::shared_ptr<const std::vector<protocol::ClientInstanceId>> owner_snapshot{
+        std::make_shared<const std::vector<protocol::ClientInstanceId>>()};
     std::set<std::string> known_permissions;
 
     // Test seam (D14): when set to a method name, the corresponding host method
@@ -51,9 +55,14 @@ public:
         return info;
     }
 
-    void requestShutdown(std::string reason) override {
+    void requestShutdown(protocol::ShutdownReason reason) override {
         calls.push_back("host.shutdown");
-        last_reason = std::move(reason);
+        last_shutdown_reason = reason;
+    }
+
+    [[nodiscard]] std::shared_ptr<const std::vector<protocol::ClientInstanceId>>
+    freshOwnerSnapshot() const override {
+        return owner_snapshot;
     }
 
     std::vector<protocol::WorkspaceSummary> listWorkspaces() override {

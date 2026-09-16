@@ -26,11 +26,13 @@
 // `TransportServer::post([server, r]{ server->onEventCommitted(r); })`, so the
 // `ProtocolServer` fan-out always runs on the transport io thread (M-F1).
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -55,6 +57,7 @@ class TurnExecutor;
 class Agent;
 struct AgentError;
 enum class WorkspaceRuntimeErrorCode : std::uint8_t;
+enum class ShutdownReason : std::uint8_t;  // workspace_host.hpp; opaque enum is complete
 
 namespace protocol {
 class ProtocolServer;
@@ -116,8 +119,14 @@ public:
     void startForwarding();
 
     // ---- daemon hooks (Wave 3) ---------------------------------------------
-    void setShutdownHook(std::function<void(std::string)> hook);
+    void setShutdownHook(std::function<void(ymh::ShutdownReason)> hook);
     void setState(protocol::HostState state) noexcept;
+
+    // 16 §5.1/§7.4: the daemon's fresh-owner snapshot source, read (never a
+    // SQLite call) by `freshOwnerSnapshot`. Unset yields an empty snapshot.
+    using OwnerSnapshotSource =
+        std::function<std::shared_ptr<const std::vector<SupervisorId>>()>;
+    void setOwnerSnapshotSource(OwnerSnapshotSource source);
 
     // D19.3: publish the live Interactive-subscriber count for a session. The
     // io thread calls this from the subscribe observer; the daemon may also
@@ -133,7 +142,9 @@ public:
     // ---- TransportHost overrides -------------------------------------------
     protocol::HostState      hostState() const override;
     protocol::HostStatusInfo hostStatus() const override;
-    void                     requestShutdown(std::string reason) override;
+    void                     requestShutdown(protocol::ShutdownReason reason) override;
+    [[nodiscard]] std::shared_ptr<const std::vector<protocol::ClientInstanceId>>
+    freshOwnerSnapshot() const override;
 
     std::vector<protocol::WorkspaceSummary> listWorkspaces() override;
     protocol::WorkspaceDetail showWorkspace(const protocol::WorkspaceId& id) override;
@@ -209,9 +220,10 @@ private:
     PermissionBroker&   broker_;
     EventForwarder      forwarder_;
 
-    protocol::HostState             state_{protocol::HostState::Serving};
-    std::optional<SessionId>        active_session_;
-    std::function<void(std::string)> shutdown_hook_;
+    std::atomic<protocol::HostState>       state_{protocol::HostState::Serving};
+    std::optional<SessionId>               active_session_;
+    std::function<void(ymh::ShutdownReason)> shutdown_hook_;
+    OwnerSnapshotSource                    owner_snapshot_source_;
 
     Subscription forward_subscription_;
     bool         forwarding_ = false;

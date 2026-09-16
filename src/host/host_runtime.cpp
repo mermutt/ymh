@@ -17,6 +17,7 @@
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
+#include "ymh/host/workspace_host.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
@@ -241,12 +242,16 @@ void HostRuntime::startForwarding() {
         [this](const Event& event) { handleCommittedEvent(event); });
 }
 
-void HostRuntime::setShutdownHook(std::function<void(std::string)> hook) {
+void HostRuntime::setShutdownHook(std::function<void(ymh::ShutdownReason)> hook) {
     shutdown_hook_ = std::move(hook);
 }
 
+void HostRuntime::setOwnerSnapshotSource(OwnerSnapshotSource source) {
+    owner_snapshot_source_ = std::move(source);
+}
+
 void HostRuntime::setState(protocol::HostState state) noexcept {
-    state_ = state;
+    state_.store(state);
 }
 
 void HostRuntime::publishSubscriberCount(const SessionId& session, std::size_t count) {
@@ -329,12 +334,12 @@ void HostRuntime::releaseLeaseIfDurable(const SessionId& id) {
 }
 
 protocol::HostState HostRuntime::hostState() const {
-    return state_;
+    return state_.load();
 }
 
 protocol::HostStatusInfo HostRuntime::hostStatus() const {
     protocol::HostStatusInfo info;
-    info.state = state_;
+    info.state = state_.load();
     info.workspace = protocol::WorkspaceId{identity_.workspace.value};
     info.boot_id = protocol::HostBootId{identity_.boot_id.value};
     info.pid = identity_.pid;
@@ -342,11 +347,26 @@ protocol::HostStatusInfo HostRuntime::hostStatus() const {
     return info;
 }
 
-void HostRuntime::requestShutdown(std::string reason) {
-    state_ = protocol::HostState::Draining;
+void HostRuntime::requestShutdown(protocol::ShutdownReason reason) {
+    state_.store(protocol::HostState::Draining);
     if (shutdown_hook_) {
-        shutdown_hook_(std::move(reason));
+        shutdown_hook_(from_protocol(reason));
     }
+}
+
+std::shared_ptr<const std::vector<protocol::ClientInstanceId>>
+HostRuntime::freshOwnerSnapshot() const {
+    auto converted = std::make_shared<std::vector<protocol::ClientInstanceId>>();
+    if (owner_snapshot_source_) {
+        const std::shared_ptr<const std::vector<SupervisorId>> source = owner_snapshot_source_();
+        if (source != nullptr) {
+            converted->reserve(source->size());
+            for (const SupervisorId& id : *source) {
+                converted->push_back(protocol::ClientInstanceId{id.value});
+            }
+        }
+    }
+    return converted;
 }
 
 std::vector<protocol::WorkspaceSummary> HostRuntime::listWorkspaces() {
