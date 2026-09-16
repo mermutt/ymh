@@ -179,11 +179,17 @@ TEST(WorkspaceRegistryTest, FreshOpenAppliesPragmasAndSchemaVersion) {
     RawDb db(config.db_path);
     ASSERT_TRUE(db.ok());
     EXPECT_EQ(db.scalar("PRAGMA application_id"), 0x594D4802);
-    EXPECT_EQ(db.scalar("PRAGMA user_version"), 1);
+    EXPECT_EQ(db.scalar("PRAGMA user_version"), 2);
     EXPECT_EQ(db.text("PRAGMA journal_mode"), "wal");
     EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN "
                         "('workspaces','workspace_sessions','pending_mutation','registry_meta')"),
               4);
+    EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                        "name='supervisors'"),
+              1);
+    EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND "
+                        "name='idx_supervisors_heartbeat'"),
+              1);
     EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name IN "
                         "('events','leases','snapshots')"),
               0);
@@ -771,5 +777,187 @@ TEST(WorkspaceRegistryTest, StateDirScaffoldingRespectsXdg) {
         ::unsetenv("XDG_STATE_HOME");
     } else {
         ::setenv("XDG_STATE_HOME", previous.c_str(), 1);
+    }
+}
+
+namespace {
+
+SupervisorRow supervisor_row(const std::string& id, std::int32_t pid, const std::string& boot,
+                             std::int64_t heartbeat,
+                             std::optional<std::string> tty = std::nullopt) {
+    SupervisorRow row;
+    row.id = SupervisorId{id};
+    row.pid = pid;
+    row.bootId = boot;
+    row.startedAtMs = heartbeat;
+    row.heartbeatMs = heartbeat;
+    row.tty = std::move(tty);
+    return row;
+}
+
+const SupervisorRow* find_supervisor(const std::vector<SupervisorRow>& rows,
+                                     const std::string& id) {
+    for (const SupervisorRow& row : rows) {
+        if (row.id.value == id) {
+            return &row;
+        }
+    }
+    return nullptr;
+}
+
+void downgrade_to_v1(const fs::path& db_path) {
+    RawDb db(db_path);
+    ASSERT_TRUE(db.ok());
+    ASSERT_EQ(db.exec("DROP INDEX idx_supervisors_heartbeat"), SQLITE_OK);
+    ASSERT_EQ(db.exec("DROP TABLE supervisors"), SQLITE_OK);
+    ASSERT_EQ(db.exec("PRAGMA user_version = 1"), SQLITE_OK);
+}
+
+} // namespace
+
+TEST(WorkspaceRegistryTest, IsFreshBoundariesTreatNegativeDeltaAsStale) {
+    const std::chrono::milliseconds ttl{15'000};
+    const std::int64_t now = 1'000'000;
+    EXPECT_TRUE(isFresh(supervisor_row("a", 1, "b", now), now, ttl));
+    EXPECT_TRUE(isFresh(supervisor_row("a", 1, "b", now - ttl.count()), now, ttl));
+    EXPECT_FALSE(isFresh(supervisor_row("a", 1, "b", now - ttl.count() - 1), now, ttl));
+    EXPECT_FALSE(isFresh(supervisor_row("a", 1, "b", now + 1), now, ttl));
+}
+
+TEST(WorkspaceRegistryTest, SupervisorCrudHeartbeatExcludeAndPrune) {
+    TempDir dir{"ymh_reg_sup_crud"};
+    const RegistryConfig config = test_config(dir.path());
+    auto registry = WorkspaceRegistry::open(config);
+    const std::chrono::milliseconds ttl{15'000};
+
+    EXPECT_TRUE(registry->listSupervisors().empty());
+
+    registry->registerSupervisor(supervisor_row("sup-a", 11, "boot-a", 1'000, "pts/3"));
+    registry->registerSupervisor(supervisor_row("sup-b", 12, "boot-b", 1'000));
+    std::vector<SupervisorRow> rows = registry->listSupervisors();
+    ASSERT_EQ(rows.size(), 2u);
+    EXPECT_EQ(rows[0].id.value, "sup-a");
+    EXPECT_EQ(rows[0].pid, 11);
+    EXPECT_EQ(rows[0].bootId, "boot-a");
+    EXPECT_EQ(rows[0].tty, std::optional<std::string>{"pts/3"});
+    EXPECT_EQ(rows[1].id.value, "sup-b");
+    EXPECT_FALSE(rows[1].tty.has_value());
+
+    EXPECT_TRUE(registry->heartbeatSupervisor(SupervisorId{"sup-a"}, 2'000));
+    EXPECT_FALSE(registry->heartbeatSupervisor(SupervisorId{"missing"}, 2'000));
+
+    EXPECT_EQ(registry->freshSupervisorCount(2'000, ttl), 2u);
+    EXPECT_EQ(registry->freshSupervisorCount(2'000, ttl, SupervisorId{"sup-a"}), 1u);
+    EXPECT_EQ(registry->freshSupervisorCount(2'000, ttl, SupervisorId{"missing"}), 2u);
+    EXPECT_TRUE(registry->hasFreshSupervisor(2'000, ttl));
+
+    registry->registerSupervisor(supervisor_row("sup-a", 21, "boot-a2", 20'000));
+    rows = registry->listSupervisors();
+    ASSERT_EQ(rows.size(), 2u);
+    const SupervisorRow* superseded = find_supervisor(rows, "sup-a");
+    ASSERT_NE(superseded, nullptr);
+    EXPECT_EQ(superseded->pid, 21);
+    EXPECT_EQ(superseded->bootId, "boot-a2");
+    EXPECT_FALSE(superseded->tty.has_value());
+
+    EXPECT_TRUE(registry->deregisterSupervisor(SupervisorId{"sup-b"}));
+    EXPECT_FALSE(registry->deregisterSupervisor(SupervisorId{"sup-b"}));
+    EXPECT_EQ(registry->listSupervisors().size(), 1u);
+
+    registry->registerSupervisor(supervisor_row("sup-c", 13, "boot-c", 1'000));
+    registry->registerSupervisor(supervisor_row("sup-d", 14, "boot-d", 30'000));
+    EXPECT_EQ(registry->freshSupervisorCount(20'000, ttl), 1u);
+    EXPECT_EQ(registry->pruneStaleSupervisors(20'000, ttl), 2u);
+    rows = registry->listSupervisors();
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].id.value, "sup-a");
+    EXPECT_FALSE(registry->hasFreshSupervisor(40'000, ttl));
+    EXPECT_EQ(registry->pruneStaleSupervisors(40'000, ttl), 1u);
+    EXPECT_TRUE(registry->listSupervisors().empty());
+}
+
+TEST(WorkspaceRegistryTest, MigrationV1ToV2IsAdditiveAndCreatesEmptySupervisors) {
+    TempDir dir{"ymh_reg_migrate"};
+    const RegistryConfig config = test_config(dir.path());
+    WorkspaceId workspaceId;
+    {
+        auto registry = WorkspaceRegistry::open(config);
+        const WorkspaceRecord record = registry->registerWorkspace(dir.path(), "mig-title");
+        workspaceId = record.id;
+        registry->addSession(workspaceId, SessionId{"s1"});
+        registry->addSession(workspaceId, SessionId{"s2"});
+        registry->registerSupervisor(supervisor_row("old-sup", 7, "boot-old", 5'000));
+    }
+    downgrade_to_v1(config.db_path);
+    {
+        RawDb db(config.db_path);
+        ASSERT_TRUE(db.ok());
+        EXPECT_EQ(db.scalar("PRAGMA user_version"), 1);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                            "name='supervisors'"),
+                  0);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM workspaces"), 1);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM workspace_sessions"), 2);
+    }
+
+    {
+        auto registry = WorkspaceRegistry::open(config);
+        const auto record = registry->findById(workspaceId);
+        ASSERT_TRUE(record.has_value());
+        EXPECT_EQ(record->displayTitle, "mig-title");
+        EXPECT_EQ(registry->listSessions(workspaceId).size(), 2u);
+        EXPECT_TRUE(registry->listSupervisors().empty());
+    }
+    {
+        RawDb db(config.db_path);
+        ASSERT_TRUE(db.ok());
+        EXPECT_EQ(db.scalar("PRAGMA user_version"), 2);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND "
+                            "name='supervisors'"),
+                  1);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND "
+                            "name='idx_supervisors_heartbeat'"),
+                  1);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM supervisors"), 0);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM workspaces"), 1);
+        EXPECT_EQ(db.text("SELECT display_title FROM workspaces"), "mig-title");
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM workspace_sessions"), 2);
+        EXPECT_EQ(db.scalar("SELECT COUNT(*) FROM registry_meta WHERE key = 'initialized'"), 1);
+    }
+}
+
+TEST(WorkspaceRegistryTest, ReadOnlyOpenToleratesUnMigratedV1) {
+    TempDir dir{"ymh_reg_ro_v1"};
+    const RegistryConfig config = test_config(dir.path());
+    {
+        auto registry = WorkspaceRegistry::open(config);
+        registry->registerWorkspace(dir.path(), "ro-title");
+    }
+    downgrade_to_v1(config.db_path);
+
+    auto registry = WorkspaceRegistry::openReadOnly(config);
+    ASSERT_TRUE(registry != nullptr);
+    EXPECT_EQ(registry->listWorkspaces().size(), 1u);
+    EXPECT_TRUE(registry->listSupervisors().empty());
+    EXPECT_EQ(registry->freshSupervisorCount(10'000, std::chrono::milliseconds{15'000}), 0u);
+    EXPECT_FALSE(registry->hasFreshSupervisor(10'000, std::chrono::milliseconds{15'000}));
+    EXPECT_THROW(registry->registerSupervisor(supervisor_row("s", 1, "b", 1)), RegistryError);
+}
+
+TEST(WorkspaceRegistryTest, ReadOnlyOpenRejectsNewerSchemaVersion) {
+    TempDir dir{"ymh_reg_ro_newer"};
+    const RegistryConfig config = test_config(dir.path());
+    {
+        RawDb db(config.db_path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+        ASSERT_TRUE(db.ok());
+        ASSERT_EQ(db.exec("PRAGMA journal_mode = WAL"), SQLITE_OK);
+        ASSERT_EQ(db.exec("PRAGMA application_id = 0x594D4802"), SQLITE_OK);
+        ASSERT_EQ(db.exec("PRAGMA user_version = 99"), SQLITE_OK);
+    }
+    try {
+        auto registry = WorkspaceRegistry::openReadOnly(config);
+        FAIL() << "expected SchemaVersion";
+    } catch (const RegistryError& error) {
+        EXPECT_EQ(error.code(), RegistryErrorCode::SchemaVersion);
     }
 }
