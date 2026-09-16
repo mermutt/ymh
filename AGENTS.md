@@ -34,6 +34,9 @@ no open HIGH/MEDIUM findings and pinned interface sketches. Loop:
   cwd workspace daemon; `ymh --host …` is the daemon entry. See
   `docs/design/11-m2-errata.md` (the frozen M2 interfaces) and
   `docs/design/12-m1-drift-errata.md`.
+- **Phase-2 features are implemented** (specs `13`–`15`, all Oracle-verified):
+  context compaction (`13`), the PTY capability behind the execution-environment
+  seam (`14`), and the MCP adapter into the shared tool registry (`15`).
 - `00-architecture.md` is the single authoritative architecture source; the raw
   `drafts/` files were merged into it and are optional reference only.
 
