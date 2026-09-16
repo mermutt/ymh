@@ -180,8 +180,8 @@ its code.
 ## 9. Immediate next steps (in order)
 
 **Milestone 1 MVP and Milestone 2 are implemented and green** — `include/ymh/` +
-`src/` + `tests/`; `ctest` all passing (564 hermetic + 12 opt-in live); 0 orphaned
-daemons. See `README.md` for build/run. The design is complete: specs `01`–`10`
+`src/` + `tests/`; `ctest` all passing (707 hermetic + 16 opt-in live); 0 orphaned
+daemons. See `README.md` for build/run. The design is complete: specs `01`–`15`
 verified plus `11-m2-errata.md` (frozen M2 interfaces) and `12-m1-drift-errata.md`.
 
 Milestone 2 delivers the supervisor TUI + per-workspace `WorkspaceHost` daemons,
@@ -189,3 +189,9 @@ the shared `registry.db`, and JSON-RPC over a length-prefixed Unix socket.
 `ymh` (no args) attaches to / spawns the cwd daemon; `ymh --host …` is the daemon
 entry. Next candidates: remote SSH/TCP transport (§47 Mode B), MCP/LSP/PTY
 (Phase 2, §51), and multi-workspace UI polish.
+
+**Phase-2 features are now implemented too** (specs `13`–`15`, all Oracle-verified
+and marked `verified` in `DESIGN_STATUS.md`): context compaction (`13`), the PTY
+capability behind the execution-environment seam (`14`), and the MCP adapter into
+the shared tool registry (`15`). Remaining candidates: LSP tools (§28), remote
+SSH/TCP transport (§47 Mode B), worktrees, and multi-workspace UI polish.
