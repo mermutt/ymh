@@ -878,11 +878,20 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record) {
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
     std::string last_error;
     while (std::chrono::steady_clock::now() < deadline) {
-        try {
-            return AttachResult{
-                connect_checked(spawned.socketPath, record.id, spawned.bootId), true};
-        } catch (const std::exception& error) {
-            last_error = error.what();
+        // Ordering invariant: the daemon binds its socket before publishing its
+        // claim, so a published claim implies the socket is bound. Gate readiness
+        // on the claim and connect second; the retry loop covers a socket that is
+        // bound but not yet accepting.
+        const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
+        if (current.has_value() && current->host.has_value()) {
+            try {
+                return AttachResult{
+                    connect_checked(spawned.socketPath, record.id, spawned.bootId), true};
+            } catch (const std::exception& error) {
+                last_error = error.what();
+            }
+        } else {
+            last_error = "host claim not yet published";
         }
         if (!launcher_.isAlive(spawned.pid)) {
             break;
