@@ -132,6 +132,134 @@ void terminate_group(int pid, std::chrono::milliseconds grace, ProcessResult& re
     fill_from_status(status, result);
 }
 
+class SpawnedChild final : public ChildProcessHandle {
+public:
+    SpawnedChild(pid_t pid, int stdin_fd, int stdout_fd) noexcept
+        : pid_(pid), stdin_fd_(stdin_fd), stdout_fd_(stdout_fd) {}
+
+    ~SpawnedChild() override {
+        if (stdin_fd_ >= 0) {
+            ::close(stdin_fd_);
+            stdin_fd_ = -1;
+        }
+        if (stdout_fd_ >= 0) {
+            ::close(stdout_fd_);
+            stdout_fd_ = -1;
+        }
+        if (!reaped_) {
+            ::kill(-pid_, SIGKILL);
+            reap();
+        }
+    }
+
+    std::uint64_t pid() const noexcept override {
+        return static_cast<std::uint64_t>(pid_);
+    }
+
+    int stdoutFd() const noexcept { return stdout_fd_; }
+
+    Task<void> writeStdin(std::string_view bytes, CancellationToken cancel) override {
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            cancel.throw_if_cancelled();
+            if (stdin_fd_ < 0) {
+                throw ToolError{ToolErrorCode::Io, "stdin is closed"};
+            }
+            const ssize_t written =
+                ::write(stdin_fd_, bytes.data() + offset, bytes.size() - offset);
+            if (written > 0) {
+                offset += static_cast<std::size_t>(written);
+                continue;
+            }
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                pollfd fd{stdin_fd_, POLLOUT, 0};
+                if (::poll(&fd, 1, 25) < 0 && errno != EINTR) {
+                    throw ToolError{ToolErrorCode::Io,
+                                    std::string{"poll stdin: "} + std::strerror(errno)};
+                }
+                continue;
+            }
+            throw ToolError{ToolErrorCode::Io,
+                            std::string{"write stdin: "} + std::strerror(errno)};
+        }
+        return Task<void>{};
+    }
+
+    void closeStdin() override {
+        if (stdin_fd_ >= 0) {
+            ::close(stdin_fd_);
+            stdin_fd_ = -1;
+        }
+    }
+
+    Task<std::size_t> readStdout(std::span<char> buffer, CancellationToken cancel) override {
+        if (buffer.empty()) {
+            return Task<std::size_t>{0};
+        }
+        for (;;) {
+            cancel.throw_if_cancelled();
+            if (stdout_fd_ < 0) {
+                return Task<std::size_t>{0};
+            }
+            const ssize_t count = ::read(stdout_fd_, buffer.data(), buffer.size());
+            if (count > 0) {
+                return Task<std::size_t>{static_cast<std::size_t>(count)};
+            }
+            if (count == 0) {
+                return Task<std::size_t>{0};
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                pollfd fd{stdout_fd_, POLLIN, 0};
+                if (::poll(&fd, 1, 25) < 0 && errno != EINTR) {
+                    throw ToolError{ToolErrorCode::Io,
+                                    std::string{"poll stdout: "} + std::strerror(errno)};
+                }
+                continue;
+            }
+            throw ToolError{ToolErrorCode::Io,
+                            std::string{"read stdout: "} + std::strerror(errno)};
+        }
+    }
+
+    void signal(int sig) noexcept override { ::kill(-pid_, sig); }
+
+    Task<ProcessResult> wait(CancellationToken cancel) override {
+        for (;;) {
+            if (const std::optional<ProcessResult> reaped = tryReap(pid_);
+                reaped.has_value()) {
+                reaped_ = true;
+                return Task<ProcessResult>{*reaped};
+            }
+            if (cancel.cancelled()) {
+                ProcessResult result;
+                terminate_group(pid_, std::chrono::milliseconds{2000}, result);
+                reaped_ = true;
+                throw CancellationError{};
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+
+private:
+    void reap() {
+        int status = 0;
+        while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+        }
+        reaped_ = true;
+    }
+
+    pid_t pid_;
+    int   stdin_fd_;
+    int   stdout_fd_;
+    bool  reaped_ = false;
+};
+
 } // namespace
 
 // The sole reaper for tool children (E8, M-F5): always a specific pid, never a
@@ -328,6 +456,92 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
         request.sink->close();
     }
     return Task<ProcessResult>(result);
+}
+
+Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
+    const ProcessRequest& request) {
+    if (request.executable.empty()) {
+        throw ToolError{ToolErrorCode::InvalidArguments, "empty executable"};
+    }
+    if (request.argv.empty()) {
+        throw ToolError{ToolErrorCode::InvalidArguments, "empty argv"};
+    }
+
+    Pipe in = make_pipe();
+    Pipe out = make_pipe();
+    Pipe errsig = make_pipe();
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        close_fd(in.read_fd);
+        close_fd(in.write_fd);
+        close_fd(out.read_fd);
+        close_fd(out.write_fd);
+        close_fd(errsig.read_fd);
+        close_fd(errsig.write_fd);
+        throw ToolError{ToolErrorCode::Io,
+                        std::string{"fork: "} + std::strerror(errno)};
+    }
+
+    if (pid == 0) {
+        ::setpgid(0, 0);
+        if (!request.cwd.empty() && ::chdir(request.cwd.c_str()) != 0) {
+            const int saved = errno;
+            (void)::write(errsig.write_fd, &saved, sizeof(saved));
+            _exit(127);
+        }
+        ::dup2(in.read_fd, STDIN_FILENO);
+        ::dup2(out.write_fd, STDOUT_FILENO);
+        redirect_to_devnull(STDERR_FILENO);
+        ::clearenv();
+        ::setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+        for (const auto& [key, value] : request.environment) {
+            ::setenv(key.c_str(), value.c_str(), 1);
+        }
+        std::vector<char*> argv = to_argv(request.argv);
+        ::execvp(request.executable.c_str(), argv.data());
+        const int saved = errno;
+        (void)::write(errsig.write_fd, &saved, sizeof(saved));
+        _exit(127);
+    }
+
+    ::setpgid(pid, pid);
+    close_fd(in.read_fd);
+    close_fd(out.write_fd);
+    close_fd(errsig.write_fd);
+
+    bool exec_failed = false;
+    int  exec_errno = 0;
+    {
+        pollfd fd{errsig.read_fd, POLLIN, 0};
+        const int ready = ::poll(&fd, 1, 200);
+        if (ready > 0 && (fd.revents & POLLIN) != 0) {
+            const ssize_t count = ::read(errsig.read_fd, &exec_errno, sizeof(exec_errno));
+            exec_failed = count == static_cast<ssize_t>(sizeof(exec_errno));
+        }
+    }
+    close_fd(errsig.read_fd);
+
+    if (exec_failed) {
+        close_fd(in.write_fd);
+        close_fd(out.read_fd);
+        ::kill(-pid, SIGKILL);
+        (void)reap(pid);
+        throw ToolError{ToolErrorCode::Io,
+                        std::string{"exec: "} + std::strerror(exec_errno)};
+    }
+
+    set_nonblocking(in.write_fd);
+    set_nonblocking(out.read_fd);
+    return Task<std::unique_ptr<ChildProcessHandle>>(
+        std::make_unique<SpawnedChild>(pid, in.write_fd, out.read_fd));
+}
+
+int childStdoutFd(ChildProcessHandle& handle) noexcept {
+    if (auto* spawned = dynamic_cast<SpawnedChild*>(&handle)) {
+        return spawned->stdoutFd();
+    }
+    return -1;
 }
 
 } // namespace ymh

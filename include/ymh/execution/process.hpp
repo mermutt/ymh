@@ -7,9 +7,13 @@
 // `OutputSink` when present and bounded by the sink's ring.
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,12 +41,43 @@ struct ProcessResult {
     bool timed_out{false};
 };
 
+class ChildProcessHandle;
+
 class ProcessService {
 public:
     virtual ~ProcessService() = default;
 
     virtual Task<ProcessResult> run(const ProcessRequest&,
                                     CancellationToken) = 0;
+
+    // Additive (15 §5.1, AM-0b). Spawn a long-lived child with piped
+    // stdin/stdout. The child is placed in its own process group and is reaped
+    // by the same specific-pid path as run() (07 §9.2, 11 E8). `sink` is
+    // ignored; the caller reads via the handle. On failure throws
+    // ToolError{SpawnFailed}.
+    virtual Task<std::unique_ptr<ChildProcessHandle>>
+    spawn(const ProcessRequest&) = 0;
+};
+
+// Additive (15 §5.1, AM-0b). A long-lived bidirectional child. One owner; the
+// handle closes its pipe descriptors on destruction and reaps the child so no
+// orphan/zombie outlives the caller (M15).
+class ChildProcessHandle {
+public:
+    virtual ~ChildProcessHandle() = default;
+
+    virtual std::uint64_t pid() const noexcept = 0;
+
+    // Bounded write to the child's stdin. Backpressure is the caller's
+    // (McpTransport) concern; a closed pipe is ToolError{Io}.
+    virtual Task<void> writeStdin(std::string_view bytes, CancellationToken) = 0;
+    virtual void closeStdin() = 0;
+
+    // One read chunk; empty result => EOF.
+    virtual Task<std::size_t> readStdout(std::span<char>, CancellationToken) = 0;
+
+    virtual void signal(int sig) noexcept = 0;   // signals the process group
+    virtual Task<ProcessResult> wait(CancellationToken) = 0;
 };
 
 class LocalProcessService final : public ProcessService {
@@ -52,6 +87,9 @@ public:
 
     Task<ProcessResult> run(const ProcessRequest& request,
                             CancellationToken cancel) override;
+
+    Task<std::unique_ptr<ChildProcessHandle>> spawn(
+        const ProcessRequest& request) override;
 
 private:
     std::chrono::milliseconds terminate_grace_;
@@ -64,5 +102,10 @@ private:
 // A direct `waitpid` in `execution/pty` is a defect (P6).
 [[nodiscard]] std::optional<ProcessResult> tryReap(int pid);
 [[nodiscard]] ProcessResult                reap(int pid);
+
+// Additive (15 §2.3/§6.3): the stdout descriptor of a `spawn()`ed child, so a
+// poll-based MCP transport can bound a read with a deadline. -1 when the handle
+// exposes none.
+[[nodiscard]] int childStdoutFd(ChildProcessHandle& handle) noexcept;
 
 } // namespace ymh

@@ -305,6 +305,7 @@ struct UiModel {
     PermissionDialogModel                 dialog;
     UiMode                                mode = UiMode::Conversation;
     bool                                  shouldExit = false;
+    std::string                           mcp_status;
     DirtySet                              dirty;
 
     [[nodiscard]] WorkspaceModel*  activeWorkspace();
@@ -319,6 +320,10 @@ struct UiModel {
     void            refreshCell(const SessionId& id);
     void            refreshCellIn(const WorkspaceId& workspace, const SessionId& id);
     void            setSessionReadOnly(const SessionId& id, bool read_only);
+
+    // 15 §4.7 (AM-1): the bounded MCP status token projected from a
+    // `HostNoticeKind::McpServerStatus` host notice.
+    void            setMcpStatus(std::string detail);
 
     // Builds (or refreshes) the switcher node tree from the current workspaces
     // and sessions (10 §7.1). Pure model work; no registry/daemon access.

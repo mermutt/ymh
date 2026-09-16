@@ -177,6 +177,11 @@ RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config)
     for (const PolicyRule& rule : config_.rules) {
         validate_rule(rule);
     }
+    for (const ToolDefault& fallback : config_.tool_defaults) {
+        if (fallback.prefix.empty() || fallback.prefix.back() != '.') {
+            throw PolicyConfigError{"tool default prefix must end with '.': " + fallback.id};
+        }
+    }
     reorder();
 }
 
@@ -232,7 +237,16 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request) c
     }
 
     if (winner == nullptr) {
-        return config_.default_verdict;
+        const ToolDefault* fallback = nullptr;
+        for (const ToolDefault& candidate : config_.tool_defaults) {
+            if (!request.tool.starts_with(candidate.prefix)) {
+                continue;
+            }
+            if (fallback == nullptr || candidate.prefix.size() > fallback->prefix.size()) {
+                fallback = &candidate;
+            }
+        }
+        return fallback != nullptr ? fallback->verdict : config_.default_verdict;
     }
     return winner->effect;
 }

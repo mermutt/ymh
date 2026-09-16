@@ -11,6 +11,7 @@
 #include "ymh/agent/compactor.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
+#include "ymh/mcp/mcp_types.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -21,6 +22,9 @@ namespace ymh {
 [[nodiscard]] LLMProviderConfig to_provider_config(const Config& config);
 
 [[nodiscard]] PermissionConfig to_permission_config(const Config& config);
+
+// 15 §4.1/§5.6: map the layered `[mcp]` section onto the adapter config.
+[[nodiscard]] McpConfig to_mcp_config(const Config& config);
 
 // `system_prompt` defaults to `default_system_prompt()` when the config's
 // `agent.system_prompt` is empty.

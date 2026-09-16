@@ -18,6 +18,7 @@
 #include "ymh/execution/pty.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/provider_registry.hpp"
+#include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/tools/builtin_tools.hpp"
@@ -36,7 +37,8 @@ public:
          LLMProviderConfig provider_config,
          std::unique_ptr<LLMProvider> provider,
          bool attach_permission_gate,
-         Executor* executor)
+         Executor* executor,
+         McpClientFactory mcp_client_factory)
         : root_(std::move(root)),
           store_(std::move(store)),
           persistence_(persistence),
@@ -67,6 +69,13 @@ public:
         if (environment_->pty().available()) {
             registrations_.push_back(tools_.add(make_terminal_tool(tool_config_)));
         }
+        mcp_ = std::make_unique<McpManager>(to_mcp_config(config), tool_config_,
+                                            *environment_, governor_, tools_, bus_,
+                                            category_logger(LogCategory::Mcp));
+        if (mcp_client_factory) {
+            mcp_->setClientFactory(std::move(mcp_client_factory));
+        }
+        mcp_->start({}).get();
         tools_.freeze();
 
         services_.sessions        = &sessions_;
@@ -104,6 +113,7 @@ public:
     std::unique_ptr<LocalEnvironment>  environment_;
     ToolRegistry                       tools_;
     std::vector<ToolRegistry::Registration> registrations_;
+    std::unique_ptr<McpManager>        mcp_;
     PermissionConfig                   permission_config_;
     RulePermissionPolicy               policy_;
     PermissionGate                     gate_;
@@ -194,7 +204,8 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
         auto impl = std::make_unique<Impl>(std::move(options.config), std::move(options.root),
                                            std::move(store), persistence, std::move(providers),
                                            std::move(provider_config), std::move(provider),
-                                           options.attach_permission_gate, options.executor);
+                                           options.attach_permission_gate, options.executor,
+                                           std::move(options.mcp_client_factory));
         return std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
     } catch (const std::exception& build_error) {
         return std::unexpected(

@@ -157,6 +157,25 @@ protocol::WorkspaceSummary workspace_summary(const WorkspaceRecord& record) {
     return summary;
 }
 
+std::string mcp_status_detail(const Event& event) {
+    const nlohmann::json& payload = event.payload;
+    std::string detail = "mcp ";
+    detail += payload.value("server", std::string{"?"});
+    detail += " ";
+    detail += payload.value("state", std::string{"unknown"});
+    detail += " tools=";
+    detail += std::to_string(payload.value("tool_count", static_cast<std::size_t>(0)));
+    const std::string reason = payload.value("reason", std::string{});
+    if (!reason.empty()) {
+        detail += " ";
+        detail += reason;
+    }
+    if (detail.size() > 256) {
+        detail.resize(256);
+    }
+    return detail;
+}
+
 } // namespace
 
 HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
@@ -259,6 +278,12 @@ std::size_t HostRuntime::subscriberCount(const SessionId& session) const {
 }
 
 void HostRuntime::handleCommittedEvent(const Event& event) {
+    if (event.type == EventType::McpServerStatusChanged) {
+        if (server_ != nullptr) {
+            server_->onMcpServerStatus(mcp_status_detail(event));
+        }
+        return;
+    }
     const SessionId session = event.session_id;
     EventRecord record;
     {

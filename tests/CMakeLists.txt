@@ -54,19 +54,31 @@ add_executable(ymh_tests
     unit/ui_live_pty_test.cpp
     unit/ui_supervisor_pty_test.cpp
     unit/provider_factory_test.cpp
+    unit/mcp_translation_test.cpp
+    unit/mcp_client_test.cpp
+    unit/mcp_manager_test.cpp
+    unit/mcp_live_status_test.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp
     integration_pty_test.cpp
     integration_two_process_test.cpp
+    integration_mcp_test.cpp
     integration_live_e2e_test.cpp
 )
+
+add_executable(fake_mcp_server support/fake_mcp_server.cpp)
+target_include_directories(fake_mcp_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fake_mcp_server PRIVATE nlohmann_json::nlohmann_json ymh::warnings)
 
 target_include_directories(ymh_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_compile_definitions(ymh_tests PRIVATE YMH_TEST_BINARY="$<TARGET_FILE:ymh>")
+target_compile_definitions(ymh_tests PRIVATE
+    YMH_TEST_BINARY="$<TARGET_FILE:ymh>"
+    YMH_FAKE_MCP_SERVER="$<TARGET_FILE:fake_mcp_server>"
+)
 
 target_link_libraries(ymh_tests
     PRIVATE
@@ -77,6 +89,7 @@ target_link_libraries(ymh_tests
         ymh::policy
         ymh::permission
         ymh::tools
+        ymh::mcp
         ymh::agent
         ymh::runtime
         ymh::registry

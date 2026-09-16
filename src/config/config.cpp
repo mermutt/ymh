@@ -277,8 +277,129 @@ void apply_llm(Config& config, const toml::table& table, const std::filesystem::
     }
 }
 
+void apply_mcp_server(McpServerSettings& server,
+                      const toml::table& table,
+                      const std::filesystem::path& source) {
+    reject_unknown(table, "mcp.server",
+                   {"id", "enabled", "required", "transport", "command", "args", "env",
+                    "cwd", "url", "header_env", "protocol_version", "allowed_tools",
+                    "denied_tools", "default_verdict", "call_timeout_ms",
+                    "max_result_bytes"},
+                   source);
+    server.id =
+        read_value<std::string>(table, "id", "mcp.server", server.id, source);
+    server.enabled =
+        read_value<bool>(table, "enabled", "mcp.server", server.enabled, source);
+    server.required =
+        read_value<bool>(table, "required", "mcp.server", server.required, source);
+    server.transport = read_value<std::string>(table, "transport", "mcp.server",
+                                               server.transport, source);
+    server.command =
+        read_value<std::string>(table, "command", "mcp.server", server.command, source);
+    server.cwd = read_value<std::string>(table, "cwd", "mcp.server", server.cwd, source);
+    server.url = read_value<std::string>(table, "url", "mcp.server", server.url, source);
+    server.protocol_version = read_value<std::string>(
+        table, "protocol_version", "mcp.server", server.protocol_version, source);
+    server.default_verdict = read_value<std::string>(
+        table, "default_verdict", "mcp.server", server.default_verdict, source);
+    server.call_timeout_ms = read_value<std::int64_t>(
+        table, "call_timeout_ms", "mcp.server", server.call_timeout_ms, source);
+    server.max_result_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_result_bytes", "mcp.server",
+        static_cast<std::int64_t>(server.max_result_bytes), source));
+
+    if (auto values = read_string_array(table, "args", "mcp.server", source);
+        !values.empty()) {
+        server.args = std::move(values);
+    }
+    if (auto values = read_string_array(table, "env", "mcp.server", source);
+        !values.empty()) {
+        server.env = std::move(values);
+    }
+    if (auto values = read_string_array(table, "header_env", "mcp.server", source);
+        !values.empty()) {
+        server.header_env = std::move(values);
+    }
+    if (auto values = read_string_array(table, "allowed_tools", "mcp.server", source);
+        !values.empty()) {
+        server.allowed_tools = std::move(values);
+    }
+    if (auto values = read_string_array(table, "denied_tools", "mcp.server", source);
+        !values.empty()) {
+        server.denied_tools = std::move(values);
+    }
+}
+
+void apply_mcp(Config& config, const toml::table& table, const std::filesystem::path& source) {
+    reject_unknown(table, "mcp",
+                   {"enabled", "max_servers", "max_inflight_calls_per_server",
+                    "startup_deadline_ms", "handshake_timeout_ms", "list_timeout_ms",
+                    "list_max_pages", "reconnect_max_attempts",
+                    "reconnect_initial_backoff_ms", "reconnect_max_backoff_ms",
+                    "reconnect_jitter", "reconnect_stable_window_ms", "ping_interval_ms",
+                    "shutdown_grace_ms", "max_frame_bytes", "allow_network_servers",
+                    "server"},
+                   source);
+    McpSettings& mcp = config.mcp;
+    mcp.enabled = read_value<bool>(table, "enabled", "mcp", mcp.enabled, source);
+    mcp.max_servers = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_servers", "mcp", static_cast<std::int64_t>(mcp.max_servers), source));
+    mcp.max_inflight_calls_per_server = static_cast<std::size_t>(
+        read_value<std::int64_t>(table, "max_inflight_calls_per_server", "mcp",
+                                 static_cast<std::int64_t>(mcp.max_inflight_calls_per_server),
+                                 source));
+    mcp.startup_deadline_ms = read_value<std::int64_t>(
+        table, "startup_deadline_ms", "mcp", mcp.startup_deadline_ms, source);
+    mcp.handshake_timeout_ms = read_value<std::int64_t>(
+        table, "handshake_timeout_ms", "mcp", mcp.handshake_timeout_ms, source);
+    mcp.list_timeout_ms = read_value<std::int64_t>(table, "list_timeout_ms", "mcp",
+                                                   mcp.list_timeout_ms, source);
+    mcp.list_max_pages = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "list_max_pages", "mcp", static_cast<std::int64_t>(mcp.list_max_pages),
+        source));
+    mcp.reconnect_max_attempts = static_cast<std::uint32_t>(read_value<std::int64_t>(
+        table, "reconnect_max_attempts", "mcp",
+        static_cast<std::int64_t>(mcp.reconnect_max_attempts), source));
+    mcp.reconnect_initial_backoff_ms = read_value<std::int64_t>(
+        table, "reconnect_initial_backoff_ms", "mcp", mcp.reconnect_initial_backoff_ms,
+        source);
+    mcp.reconnect_max_backoff_ms = read_value<std::int64_t>(
+        table, "reconnect_max_backoff_ms", "mcp", mcp.reconnect_max_backoff_ms, source);
+    mcp.reconnect_jitter = read_value<double>(table, "reconnect_jitter", "mcp",
+                                              mcp.reconnect_jitter, source);
+    mcp.reconnect_stable_window_ms = read_value<std::int64_t>(
+        table, "reconnect_stable_window_ms", "mcp", mcp.reconnect_stable_window_ms, source);
+    mcp.ping_interval_ms = read_value<std::int64_t>(table, "ping_interval_ms", "mcp",
+                                                    mcp.ping_interval_ms, source);
+    mcp.shutdown_grace_ms = read_value<std::int64_t>(table, "shutdown_grace_ms", "mcp",
+                                                     mcp.shutdown_grace_ms, source);
+    mcp.max_frame_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_frame_bytes", "mcp", static_cast<std::int64_t>(mcp.max_frame_bytes),
+        source));
+    mcp.allow_network_servers = read_value<bool>(table, "allow_network_servers", "mcp",
+                                                 mcp.allow_network_servers, source);
+
+    if (const auto node = table["server"]; node) {
+        const toml::array* entries = node.as_array();
+        if (entries == nullptr) {
+            fail(source, "invalid type for 'mcp.server'");
+        }
+        mcp.servers.clear();
+        for (const toml::node& entry : *entries) {
+            const toml::table* server_table = entry.as_table();
+            if (server_table == nullptr) {
+                fail(source, "invalid type for an 'mcp.server' entry");
+            }
+            McpServerSettings server;
+            apply_mcp_server(server, *server_table, source);
+            mcp.servers.push_back(std::move(server));
+        }
+    }
+}
+
 void apply_document(Config& config, const toml::table& table, const std::filesystem::path& source) {
-    reject_unknown(table, "", {"ui", "agent", "workspace", "permissions", "logging", "llm"},
+    reject_unknown(table, "",
+                   {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp"},
                    source);
 
     const auto section = [&](std::string_view name) -> const toml::table* {
@@ -310,6 +431,9 @@ void apply_document(Config& config, const toml::table& table, const std::filesys
     }
     if (const toml::table* llm = section("llm"); llm != nullptr) {
         apply_llm(config, *llm, source);
+    }
+    if (const toml::table* mcp = section("mcp"); mcp != nullptr) {
+        apply_mcp(config, *mcp, source);
     }
 }
 

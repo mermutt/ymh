@@ -89,10 +89,20 @@ struct PolicyRule {
     std::string   id;        // stable, human-readable rule id for `reason`
 };
 
+// Additive (15 §6.1, AM-3). A NO-MATCH fallback for a tool-name prefix: it is
+// consulted only when no PolicyRule matches, so an operator rule always
+// outranks it. `prefix` is a literal prefix (e.g. "mcp.github.").
+struct ToolDefault {
+    std::string   prefix;
+    PolicyVerdict verdict = PolicyVerdict::Ask;
+    std::string   id;        // provenance, e.g. "mcp.github.default"
+};
+
 struct PermissionConfig {
     std::chrono::milliseconds permission_timeout{5 * 60 * 1000};
     std::size_t               arguments_max_bytes{64u * 1024u};
     std::vector<PolicyRule>   rules;
+    std::vector<ToolDefault>  tool_defaults;
     PolicyVerdict             default_verdict{PolicyVerdict::Ask};
 };
 

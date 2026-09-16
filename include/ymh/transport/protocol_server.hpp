@@ -69,6 +69,7 @@ public:
     void onSessionClosed(const SessionId& session, std::string reason);
     void onLeaseLost(const SessionId& session, std::string detail);
     void onDaemonShuttingDown(std::string detail);
+    void onMcpServerStatus(std::string detail);
     void onPermissionRequest(const PermissionRequest& request);
 
     [[nodiscard]] std::size_t attachedClients() const;

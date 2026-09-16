@@ -356,6 +356,10 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
             }
             break;
         }
+        case protocol::HostNoticeKind::McpServerStatus: {
+            model_.setMcpStatus(notice.detail);
+            break;
+        }
     }
 }
 
