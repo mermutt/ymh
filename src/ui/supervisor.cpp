@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <deque>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -26,6 +25,7 @@
 #include "ymh/transport/protocol.hpp"
 #include "ymh/ui/command_registry.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
+#include "ymh/ui/supervisor_presence.hpp"
 #include "ymh/ui/terminal_layer.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
 #include "ymh/ui/ui_model.hpp"
@@ -36,29 +36,6 @@ namespace {
 
 constexpr std::chrono::milliseconds kFrameInterval{50};
 constexpr std::chrono::milliseconds kMaxFrameDelta{250};
-
-protocol::ClientInstanceId load_client_instance() {
-    const std::filesystem::path path = default_state_dir() / "supervisor.json";
-    try {
-        if (std::filesystem::exists(path)) {
-            std::ifstream input(path);
-            const nlohmann::json document = nlohmann::json::parse(input);
-            const std::string value = document.value("client_instance", std::string{});
-            if (!value.empty()) {
-                return protocol::ClientInstanceId{value};
-            }
-        }
-    } catch (const std::exception&) {
-    }
-    const std::string minted = generate_uuid_v4();
-    try {
-        ensure_state_dir(path.parent_path());
-        std::ofstream output(path, std::ios::trunc);
-        output << nlohmann::json{{"client_instance", minted}}.dump();
-    } catch (const std::exception&) {
-    }
-    return protocol::ClientInstanceId{minted};
-}
 
 DaemonStatus daemon_status_for(SupervisorLinkState state) {
     switch (state) {
@@ -107,6 +84,14 @@ bool is_shift_down(const ftxui::Event& event) {
     return event.input() == "\x1b[1;2B";
 }
 
+std::optional<std::string> tty_name() {
+    const char* name = ::ttyname(STDIN_FILENO);
+    if (name == nullptr) {
+        return std::nullopt;
+    }
+    return std::string{name};
+}
+
 class SupervisorApp final : public UiController {
 public:
     explicit SupervisorApp(SupervisorRunOptions options)
@@ -115,6 +100,12 @@ public:
     }
 
     ~SupervisorApp() override {
+        if (scanner_ != nullptr) {
+            scanner_->stop();
+        }
+        if (presence_.has_value()) {
+            presence_->deregister();
+        }
         for (auto& [id, connection] : connections_) {
             (void)id;
             connection->stop();
@@ -123,14 +114,7 @@ public:
 
     int run() {
         for (const SupervisorWorkspace& workspace : options_.workspaces) {
-            specs_.emplace(workspace.id, workspace);
-            WorkspaceModel model;
-            model.id = workspace.id;
-            model.title = workspace.title;
-            model.cwd = workspace.cwd;
-            model.boot_id = workspace.boot_id;
-            model.daemonStatus = DaemonStatus::Connecting;
-            model_.workspaces.emplace(workspace.id, std::move(model));
+            attach_workspace(workspace);
         }
         if (model_.workspaces.empty()) {
             return 1;
@@ -145,43 +129,8 @@ public:
             }
         }
 
-        const protocol::ClientInstanceId instance = load_client_instance();
-        std::vector<SupervisorConnection*> started;
-        for (const SupervisorWorkspace& spec : options_.workspaces) {
-            SupervisorConnectionConfig config;
-            config.socket_path = spec.socket_path;
-            config.workspace = spec.id;
-            config.expected_boot_id = spec.boot_id;
-            config.client_instance = instance;
-            SupervisorSink sink;
-            const WorkspaceId workspace_id = spec.id;
-            sink.on_envelope = [this, workspace_id](const protocol::SessionEnvelope& envelope) {
-                enqueue([this, workspace_id, envelope] {
-                    adapter_.onSessionEnvelope(workspace_id, envelope);
-                });
-            };
-            sink.on_permission = [this, workspace_id](const protocol::PermissionRequest& request) {
-                enqueue([this, workspace_id, request] {
-                    adapter_.onPermissionRequest(workspace_id, request);
-                });
-            };
-            sink.on_notice = [this, workspace_id](const protocol::HostNotice& notice) {
-                enqueue([this, workspace_id, notice] {
-                    adapter_.onHostNotice(workspace_id, notice);
-                });
-            };
-            sink.on_state = [this, workspace_id](SupervisorLinkState state, std::string detail) {
-                on_link_state(workspace_id, state, std::move(detail));
-            };
-            auto connection = std::make_unique<SupervisorConnection>(std::move(config),
-                                                                     std::move(sink));
-            started.push_back(connection.get());
-            connections_.emplace(spec.id, std::move(connection));
-        }
-        for (SupervisorConnection* connection : started) {
-            connection->start();
-        }
-
+        register_presence();
+        start_scanner();
         return run_loop();
     }
 
@@ -250,6 +199,124 @@ private:
         }
         if (screen_ != nullptr) {
             screen_->PostEvent(ftxui::Event::Custom);
+        }
+    }
+
+    void attach_workspace(const SupervisorWorkspace& spec) {
+        if (connections_.count(spec.id) != 0) {
+            return;
+        }
+        specs_.emplace(spec.id, spec);
+        if (model_.workspaces.count(spec.id) == 0) {
+            WorkspaceModel model;
+            model.id = spec.id;
+            model.title = spec.title;
+            model.cwd = spec.cwd;
+            model.boot_id = spec.boot_id;
+            model.daemonStatus = DaemonStatus::Connecting;
+            model_.workspaces.emplace(spec.id, std::move(model));
+            model_.dirty.markAggregate();
+        }
+
+        SupervisorConnectionConfig config;
+        config.socket_path = spec.socket_path;
+        config.workspace = spec.id;
+        config.expected_boot_id = spec.boot_id;
+        config.client_instance = options_.identity.client_instance;
+        config.role = options_.identity.role;
+        config.profile = protocol::profile_for_role(options_.identity.role);
+
+        SupervisorSink sink;
+        const WorkspaceId workspace_id = spec.id;
+        sink.on_envelope = [this, workspace_id](const protocol::SessionEnvelope& envelope) {
+            enqueue([this, workspace_id, envelope] {
+                adapter_.onSessionEnvelope(workspace_id, envelope);
+            });
+        };
+        sink.on_permission = [this, workspace_id](const protocol::PermissionRequest& request) {
+            enqueue([this, workspace_id, request] {
+                adapter_.onPermissionRequest(workspace_id, request);
+            });
+        };
+        sink.on_notice = [this, workspace_id](const protocol::HostNotice& notice) {
+            enqueue([this, workspace_id, notice] {
+                adapter_.onHostNotice(workspace_id, notice);
+            });
+        };
+        sink.on_state = [this, workspace_id](SupervisorLinkState state, std::string detail) {
+            on_link_state(workspace_id, state, std::move(detail));
+        };
+
+        auto connection =
+            std::make_unique<SupervisorConnection>(std::move(config), std::move(sink));
+        connection->start();
+        connections_.emplace(spec.id, std::move(connection));
+    }
+
+    void register_presence() {
+        if (options_.registry == nullptr) {
+            return;
+        }
+        SupervisorPresence::Options presence_options;
+        presence_options.wall_clock = options_.wall_clock;
+        presence_options.tty = tty_name();
+        try {
+            presence_ = SupervisorPresence::registerSelf(
+                *options_.registry, SupervisorId{options_.identity.client_instance.value},
+                std::move(presence_options));
+        } catch (const std::exception&) {
+        }
+    }
+
+    void start_scanner() {
+        if (options_.registry == nullptr ||
+            options_.scan_interval <= std::chrono::milliseconds::zero()) {
+            return;
+        }
+        scanner_ = std::make_unique<DaemonSetScanner>(
+            *options_.registry, options_.scan_interval,
+            [this](std::vector<SupervisorWorkspace> live) { on_scan(std::move(live)); });
+        scanner_->start();
+    }
+
+    void on_scan(std::vector<SupervisorWorkspace> live) {
+        enqueue([this, live = std::move(live)] {
+            for (const SupervisorWorkspace& spec : live) {
+                attach_workspace(spec);
+            }
+        });
+    }
+
+    void tick_presence() {
+        if (!presence_.has_value()) {
+            return;
+        }
+        const auto now = options_.monotonic_clock();
+        if (last_presence_tick_ == std::chrono::steady_clock::time_point{}) {
+            last_presence_tick_ = now;
+            return;
+        }
+        if (now - last_presence_tick_ < presence_->heartbeat_interval()) {
+            return;
+        }
+        last_presence_tick_ = now;
+
+        bool updated = false;
+        try {
+            updated = presence_->heartbeat(epoch_ms(options_.wall_clock()));
+        } catch (const std::exception&) {
+            updated = false;
+        }
+        if (updated) {
+            return;
+        }
+        try {
+            presence_->reRegister();
+        } catch (const std::exception&) {
+        }
+        for (auto& [id, connection] : connections_) {
+            (void)id;
+            connection->forceReconnect();
         }
     }
 
@@ -432,6 +499,7 @@ private:
         }
         last_tick_ = now;
         adapter_.onTick(delta);
+        tick_presence();
     }
 
     SessionUiState* active() {
@@ -865,6 +933,9 @@ private:
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
     std::map<WorkspaceId, std::string> pending_creates_;
+    std::optional<SupervisorPresence> presence_;
+    std::unique_ptr<DaemonSetScanner> scanner_;
+    std::chrono::steady_clock::time_point last_presence_tick_{};
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;

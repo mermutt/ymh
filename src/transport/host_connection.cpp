@@ -135,10 +135,16 @@ bool HostConnection::fill_incoming(std::chrono::milliseconds timeout) {
 
 HelloResult HostConnection::handshake(ServerProfile profile, ClientInstanceId instance,
                                       std::chrono::milliseconds timeout) {
+    return handshake(profile, std::move(instance), ClientRole::Supervisor, timeout);
+}
+
+HelloResult HostConnection::handshake(ServerProfile profile, ClientInstanceId instance,
+                                      ClientRole role, std::chrono::milliseconds timeout) {
     HelloParams params;
     params.protocol_version = kProtocolVersion;
     params.profile = profile;
     params.client_instance = std::move(instance);
+    params.role = role;
     nlohmann::json body;
     to_json(body, params);
     const nlohmann::json result = request(method::kHostHello, std::move(body), timeout);

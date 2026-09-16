@@ -392,6 +392,14 @@ struct SessionDetail {
 [[nodiscard]] std::string_view to_string(ClientRole role) noexcept;
 [[nodiscard]] std::optional<ClientRole> parse_client_role(std::string_view name) noexcept;
 
+// 16 §7.4 C-M6. Role ↔ profile is pinned: `Automation ⇒ Automation`, and
+// `Supervisor`/`Observer ⇒ Interactive`. `profile_for_role` is the derivation
+// the attach path uses; `role_matches_profile` rejects a mismatched pair (the
+// daemon derives the profile from the role at hello; clients derive the profile
+// they send from their role).
+[[nodiscard]] ServerProfile profile_for_role(ClientRole role) noexcept;
+[[nodiscard]] bool role_matches_profile(ClientRole role, ServerProfile profile) noexcept;
+
 // Total parser with a fail-safe fallback (16 §7.4): only `"last_supervisor"`
 // and `"workspace_stop"` are recognized; anything else, including a missing
 // reason, maps to ClientRequest (which admission still checks).

@@ -29,6 +29,7 @@
 #include "ymh/session/events.hpp"
 #include "ymh/transport/host_connection.hpp"
 #include "ymh/ui/supervisor.hpp"
+#include "ymh/ui/supervisor_presence.hpp"
 #include "ymh/ui/ui_application.hpp"
 
 #ifndef YMH_VERSION
@@ -350,45 +351,30 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
 
     ForkExecLauncher launcher;
     HostLifecycle    lifecycle(launcher, *registry);
+
+    const AttachIdentity identity{ui::process_client_instance(),
+                                  protocol::ClientRole::Supervisor};
     try {
-        const AttachResult attach = lifecycle.ensureRunning(row->id);
+        const AttachResult attach = lifecycle.ensureRunning(row->id, identity);
         (void)attach;
     } catch (const std::exception& error) {
         err << "ymh: cannot attach to workspace daemon: " << error.what() << '\n';
         return 1;
     }
 
-    const std::optional<WorkspaceRecord> refreshed = registry->findById(row->id);
-    if (!refreshed.has_value() || !refreshed->host.has_value()) {
-        err << "ymh: daemon did not publish a host claim\n";
-        return 1;
-    }
-
-    std::vector<ui::SupervisorWorkspace> attached;
-    auto add_workspace = [&attached](const WorkspaceRecord& record) {
-        if (!record.host.has_value()) {
-            return;
+    ui::DaemonSetScanner scanner(*registry, std::chrono::milliseconds{2'000}, {});
+    std::vector<ui::SupervisorWorkspace> attached = scanner.scanOnce();
+    if (attached.empty()) {
+        const std::optional<WorkspaceRecord> refreshed = registry->findById(row->id);
+        if (refreshed.has_value() && refreshed->host.has_value()) {
+            ui::SupervisorWorkspace workspace;
+            workspace.id = ui::WorkspaceId{refreshed->id.value};
+            workspace.cwd = refreshed->canonicalPath.string();
+            workspace.title = refreshed->displayTitle;
+            workspace.socket_path = refreshed->host->socketPath.string();
+            workspace.boot_id = refreshed->host->bootId.value;
+            attached.push_back(std::move(workspace));
         }
-        ui::SupervisorWorkspace workspace;
-        workspace.id = ui::WorkspaceId{record.id.value};
-        workspace.cwd = record.canonicalPath.string();
-        workspace.title = record.displayTitle;
-        workspace.socket_path = record.host->socketPath.string();
-        workspace.boot_id = record.host->bootId.value;
-        attached.push_back(std::move(workspace));
-    };
-    add_workspace(*refreshed);
-
-    // Multi-workspace attach: every other registered workspace with a live
-    // daemon is attached without spawning one (read-only discovery).
-    for (const WorkspaceRecord& record : registry->listWorkspaces()) {
-        if (record.id == refreshed->id || !record.host.has_value()) {
-            continue;
-        }
-        if (registry->probeLiveness(record.id) != HostLiveness::Live) {
-            continue;
-        }
-        add_workspace(record);
     }
 
     ui::SupervisorRunOptions options;
@@ -396,6 +382,9 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     options.initial_workspace = *canonical;
     options.config = config;
     options.verbose = verbose;
+    options.lifecycle = &lifecycle;
+    options.registry = registry.get();
+    options.identity = identity;
     return ui::run_supervisor(options);
 }
 
@@ -406,8 +395,10 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
     ForkExecLauncher launcher;
     HostLifecycle    lifecycle(launcher, registry);
     AttachResult     attach;
+    const AttachIdentity identity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                  protocol::ClientRole::Automation};
     try {
-        attach = lifecycle.ensureRunning(row.id);
+        attach = lifecycle.ensureRunning(row.id, identity);
     } catch (const std::exception& error) {
         err << "ymh: cannot attach to workspace daemon: " << error.what() << '\n';
         return 1;

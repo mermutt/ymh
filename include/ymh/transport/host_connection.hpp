@@ -35,6 +35,10 @@ public:
     [[nodiscard]] HelloResult handshake(ServerProfile profile,
                                         ClientInstanceId instance,
                                         std::chrono::milliseconds timeout = std::chrono::seconds{5});
+    [[nodiscard]] HelloResult handshake(ServerProfile profile,
+                                        ClientInstanceId instance,
+                                        ClientRole role,
+                                        std::chrono::milliseconds timeout = std::chrono::seconds{5});
     [[nodiscard]] nlohmann::json request(
         std::string_view method, nlohmann::json params = nlohmann::json::object(),
         std::chrono::milliseconds timeout = std::chrono::seconds{30});

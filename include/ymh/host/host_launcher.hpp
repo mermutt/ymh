@@ -17,12 +17,21 @@
 
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/registry.hpp"
+#include "ymh/transport/protocol.hpp"
 
 namespace ymh::protocol {
 class HostConnection;
 } // namespace ymh::protocol
 
 namespace ymh {
+
+// The caller's pinned identity for an attach (16 §7.3 C-H2, 16-D8). The profile
+// is derived from the role (16 §7.4 C-M6): `Automation ⇒ Automation`, otherwise
+// `Interactive`.
+struct AttachIdentity {
+    protocol::ClientInstanceId client_instance;
+    protocol::ClientRole       role{protocol::ClientRole::Supervisor};
+};
 
 // Spawns and signals daemon processes. Tests inject a fake launcher or run the
 // host in-process (04 §6.1).
@@ -91,7 +100,9 @@ public:
 
     // Attach to a live daemon or spawn one. NEVER kills a process. May clear a
     // stale claim (lazy reap) under the D22 write lock (03 §6.4, H10, H11).
-    AttachResult ensureRunning(WorkspaceId workspace);
+    // The supplied identity is sent verbatim at hello (C-H2); the profile is
+    // derived from `identity.role` (C-M6).
+    AttachResult ensureRunning(WorkspaceId workspace, AttachIdentity identity);
 
     // Detach this supervisor. Does NOT terminate the daemon (H8, H9).
     void detach(WorkspaceId workspace, protocol::ClientId client);
@@ -103,7 +114,7 @@ private:
     // Clears a claim only when lock-absence holds, under the D22 write lock.
     ReapResult reapIfStale(const WorkspaceRecord& record);
 
-    AttachResult spawnAndAttach(const WorkspaceRecord& record);
+    AttachResult spawnAndAttach(const WorkspaceRecord& record, const AttachIdentity& identity);
     [[nodiscard]] HostConfig configFor(const WorkspaceRecord& record) const;
 
     HostLauncher&      launcher_;

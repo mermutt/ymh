@@ -65,8 +65,9 @@ struct SupervisorConnectionConfig {
     std::string                   socket_path;
     WorkspaceId                   workspace;              // expected registry id
     std::string                   expected_boot_id;       // registry row host->bootId (may be empty)
-    protocol::ClientInstanceId    client_instance;        // persisted supervisor-local (D20.3)
+    protocol::ClientInstanceId    client_instance;        // pinned in-memory mint (16-D8)
     protocol::ServerProfile       profile = protocol::ServerProfile::Interactive;
+    protocol::ClientRole          role = protocol::ClientRole::Supervisor;  // 16 §7.4 C-M6
 
     // Bounded intervals so a test can drive reconnect deterministically.
     std::chrono::milliseconds poll_interval{20};

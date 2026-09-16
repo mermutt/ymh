@@ -103,6 +103,11 @@ public:
         return subscribes_;
     }
 
+    [[nodiscard]] std::optional<protocol::HelloParams> last_hello() const {
+        const std::lock_guard lock(state_mutex_);
+        return last_hello_;
+    }
+
     void set_invalid_cursor_once() { invalid_cursor_once_.store(true); }
     void set_reject_second_decide(bool value) { reject_second_decide_.store(value); }
 
@@ -182,6 +187,10 @@ private:
         }
         if (request->method == protocol::method::kHostHello) {
             hello_count_.fetch_add(1);
+            {
+                const std::lock_guard lock(state_mutex_);
+                last_hello_ = request->params.get<protocol::HelloParams>();
+            }
             protocol::HelloResult hello;
             hello.workspace.value = std::string{kWorkspace};
             hello.boot_id.value = std::string{kBoot};
@@ -276,6 +285,7 @@ private:
     std::atomic<bool> reject_second_decide_{false};
     mutable std::mutex state_mutex_;
     std::vector<protocol::SubscribeParams> subscribes_;
+    std::optional<protocol::HelloParams> last_hello_;
     mutable std::mutex clients_mutex_;
     std::vector<int> clients_;
     std::mutex write_mutex_;
@@ -519,6 +529,48 @@ TEST(SupervisorConnection, PermissionRoundTripFirstWins) {
 
     first.stop();
     second.stop();
+}
+
+TEST(SupervisorConnection, SendsPinnedIdentityAndRoleAtHello) {
+    test::ShortTempRoot root("ymh_sup_identity");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected collected;
+
+    SupervisorConnectionConfig config = config_for(socket_path);
+    config.client_instance = protocol::ClientInstanceId{"cccccccc-cccc-4ccc-8ccc-cccccccccccc"};
+    config.role = protocol::ClientRole::Supervisor;
+    config.profile = protocol::profile_for_role(config.role);
+
+    SupervisorConnection connection(std::move(config), sink_for(collected));
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Attached, 3s));
+
+    const std::optional<protocol::HelloParams> hello = server.last_hello();
+    ASSERT_TRUE(hello.has_value());
+    EXPECT_EQ(hello->client_instance.value, "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    EXPECT_EQ(hello->role, protocol::ClientRole::Supervisor);
+    EXPECT_EQ(hello->profile, protocol::ServerProfile::Interactive);
+    connection.stop();
+}
+
+TEST(SupervisorConnection, RejectsRoleProfileMismatchBeforeHello) {
+    test::ShortTempRoot root("ymh_sup_mismatch");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected collected;
+
+    SupervisorConnectionConfig config = config_for(socket_path);
+    config.role = protocol::ClientRole::Supervisor;
+    config.profile = protocol::ServerProfile::Automation;
+
+    SupervisorConnection connection(std::move(config), sink_for(collected));
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Dead, 3s));
+    EXPECT_EQ(server.hello_count(), 0);
+    connection.stop();
 }
 
 } // namespace
