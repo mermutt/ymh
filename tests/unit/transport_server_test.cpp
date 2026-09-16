@@ -120,6 +120,15 @@ int error_code(const nlohmann::json& frame) {
     return frame.at("error").at("code").get<int>();
 }
 
+std::shared_ptr<const std::vector<protocol::ClientInstanceId>> snapshot_of(
+    std::initializer_list<std::string_view> instances) {
+    auto snapshot = std::make_shared<std::vector<protocol::ClientInstanceId>>();
+    for (const std::string_view instance : instances) {
+        snapshot->push_back(protocol::ClientInstanceId{std::string{instance}});
+    }
+    return snapshot;
+}
+
 TEST(TransportServer, HandshakeAssignsClientId) {
     Harness harness;
     Peer* peer = harness.open();
@@ -328,9 +337,12 @@ TEST(TransportServer, SessionCreateAndAgentPrompt) {
     harness.send(*peer, Harness::request(2, protocol::method::kSessionCreate,
                                          nlohmann::json{{"title", "demo"}}));
     auto frames = harness.drain(*peer);
-    ASSERT_EQ(frames.size(), 1u);
+    ASSERT_EQ(frames.size(), 2u);
     const std::string session = frames[0].at("result").at("session").get<std::string>();
     EXPECT_TRUE(frames[0].at("result").contains("header"));
+    EXPECT_EQ(frames[1].at("method").get<std::string>(), "host.event");
+    EXPECT_EQ(frames[1].at("params").at("kind").get<std::string>(), "session_created");
+    EXPECT_EQ(frames[1].at("params").at("session").get<std::string>(), session);
 
     harness.send(*peer, Harness::request(3, protocol::method::kAgentPrompt,
                                          nlohmann::json{{"session", session},
@@ -827,6 +839,248 @@ TEST(TransportServer, MalformedParamsMapToInvalidParams) {
     const auto frames = harness.drain(*peer);
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InvalidParams));
+}
+
+TEST(TransportServer, HostShutdownRefusedWhenAnotherSupervisorIsLive) {
+    Harness harness;
+    Peer* first = harness.open();
+    harness.hello(*first, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*first);
+    Peer* second = harness.open();
+    harness.hello(*second, protocol::ServerProfile::Interactive, kInstanceB, 2);
+    harness.drain(*second);
+
+    harness.send(*first, Harness::request(3, protocol::method::kHostShutdown,
+                                          nlohmann::json{{"reason", "last_supervisor"}}));
+    const auto frames = harness.drain(*first);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::AppCode::NotLastOwner));
+    EXPECT_EQ(harness.host.state, protocol::HostState::Serving);
+    EXPECT_TRUE(harness.host.calls.empty());
+    EXPECT_FALSE(harness.host.last_shutdown_reason.has_value());
+    EXPECT_FALSE(harness.server->isDropped(first->id));
+}
+
+TEST(TransportServer, HostShutdownRefusedWhenAutomationIsLive) {
+    Harness harness;
+    Peer* supervisor = harness.open();
+    harness.hello(*supervisor, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*supervisor);
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB, 2,
+                  protocol::ClientRole::Automation);
+    harness.drain(*automation);
+
+    harness.send(*supervisor, Harness::request(3, protocol::method::kHostShutdown,
+                                               nlohmann::json{{"reason", "last_supervisor"}}));
+    const auto frames = harness.drain(*supervisor);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::AppCode::NotLastOwner));
+    EXPECT_EQ(harness.host.state, protocol::HostState::Serving);
+}
+
+TEST(TransportServer, HostShutdownRefusedByFreshSnapshotOwnerExcludingCaller) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+
+    harness.host.owner_snapshot = snapshot_of({kInstanceA, kInstanceB});
+    harness.send(*peer, Harness::request(2, protocol::method::kHostShutdown,
+                                         nlohmann::json{{"reason", "last_supervisor"}}));
+    auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::AppCode::NotLastOwner));
+    EXPECT_EQ(harness.host.state, protocol::HostState::Serving);
+
+    harness.host.owner_snapshot = snapshot_of({kInstanceA});
+    harness.send(*peer, Harness::request(3, protocol::method::kHostShutdown,
+                                         nlohmann::json{{"reason", "last_supervisor"}}));
+    frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_TRUE(frames[0].contains("result"));
+    EXPECT_EQ(frames[1].at("params").at("kind").get<std::string>(), "daemon_shutting_down");
+    EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::LastSupervisor);
+}
+
+TEST(TransportServer, HostShutdownWorkspaceStopOverridesOwners) {
+    Harness harness;
+    Peer* supervisor = harness.open();
+    harness.hello(*supervisor, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*supervisor);
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB, 2,
+                  protocol::ClientRole::Automation);
+    harness.drain(*automation);
+    harness.host.owner_snapshot = snapshot_of({kInstanceA, kInstanceB});
+
+    harness.send(*supervisor, Harness::request(3, protocol::method::kHostShutdown,
+                                               nlohmann::json{{"reason", "workspace_stop"}}));
+    const auto frames = harness.drain(*supervisor);
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_TRUE(frames[0].contains("result"));
+    EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::WorkspaceStop);
+}
+
+TEST(TransportServer, HostShutdownReasonMappingDoesNotDegrade) {
+    {
+        Harness harness;
+        Peer* peer = harness.open();
+        harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+        harness.drain(*peer);
+        harness.send(*peer, Harness::request(2, protocol::method::kHostShutdown,
+                                             nlohmann::json{{"reason", "last_supervisor"}}));
+        harness.drain(*peer);
+        EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::LastSupervisor);
+    }
+    {
+        Harness harness;
+        Peer* peer = harness.open();
+        harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+        harness.drain(*peer);
+        harness.send(*peer, Harness::request(2, protocol::method::kHostShutdown,
+                                             nlohmann::json{{"reason", "workspace_stop"}}));
+        harness.drain(*peer);
+        EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::WorkspaceStop);
+    }
+    {
+        Harness harness;
+        Peer* peer = harness.open();
+        harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+        harness.drain(*peer);
+        harness.send(*peer, Harness::request(2, protocol::method::kHostShutdown,
+                                             nlohmann::json{{"reason", "not_a_reason"}}));
+        harness.drain(*peer);
+        EXPECT_EQ(harness.host.last_shutdown_reason, protocol::ShutdownReason::ClientRequest);
+    }
+}
+
+TEST(TransportServer, HostOwnershipRawCountsIncludeCallerOnlyFreshExcludes) {
+    Harness harness;
+    Peer* first = harness.open();
+    harness.hello(*first, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*first);
+    Peer* second = harness.open();
+    harness.hello(*second, protocol::ServerProfile::Interactive, kInstanceB, 2);
+    harness.drain(*second);
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation,
+                  "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 3, protocol::ClientRole::Automation);
+    harness.drain(*automation);
+    Peer* observer = harness.open();
+    harness.hello(*observer, protocol::ServerProfile::Interactive,
+                  "dddddddd-dddd-4ddd-8ddd-dddddddddddd", 4, protocol::ClientRole::Observer);
+    harness.drain(*observer);
+
+    harness.host.owner_snapshot =
+        snapshot_of({kInstanceA, kInstanceB, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"});
+
+    harness.send(*first,
+                 Harness::request(5, protocol::method::kHostOwnership, nlohmann::json::object()));
+    const auto frames = harness.drain(*first);
+    ASSERT_EQ(frames.size(), 1u);
+    const auto view = frames[0].at("result").get<protocol::OwnershipView>();
+    EXPECT_EQ(view.live_supervisors, 2u);
+    EXPECT_EQ(view.live_automation, 1u);
+    EXPECT_EQ(view.other_fresh_owners, 2u);
+    EXPECT_EQ(view.clients.size(), 3u);
+    EXPECT_FALSE(view.shutting_down);
+}
+
+TEST(TransportServer, HostOwnershipSoleCallerIsJustMe) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    harness.host.owner_snapshot = snapshot_of({kInstanceA});
+
+    harness.send(*peer,
+                 Harness::request(2, protocol::method::kHostOwnership, nlohmann::json::object()));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    const auto view = frames[0].at("result").get<protocol::OwnershipView>();
+    EXPECT_EQ(view.live_supervisors, 1u);
+    EXPECT_EQ(view.live_automation, 0u);
+    EXPECT_EQ(view.other_fresh_owners, 0u);
+    ASSERT_EQ(view.clients.size(), 1u);
+    EXPECT_EQ(view.clients[0].client_instance, kInstanceA);
+    EXPECT_EQ(view.clients[0].role, protocol::ClientRole::Supervisor);
+}
+
+TEST(TransportServer, RoleOfIsNulloptUntilHandshaken) {
+    Harness harness;
+    Peer* peer = harness.open();
+    EXPECT_FALSE(harness.server->roleOf(peer->id).has_value());
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA, 1,
+                  protocol::ClientRole::Observer);
+    harness.drain(*peer);
+    ASSERT_TRUE(harness.server->roleOf(peer->id).has_value());
+    EXPECT_EQ(*harness.server->roleOf(peer->id), protocol::ClientRole::Observer);
+}
+
+TEST(TransportServer, SessionCreatedBroadcastsToAllInteractiveNotSubscriptionGated) {
+    Harness harness;
+    Peer* creator = harness.open();
+    harness.hello(*creator, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*creator);
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceB, 2);
+    harness.drain(*peer);
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation,
+                  "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 3, protocol::ClientRole::Automation);
+    harness.drain(*automation);
+
+    harness.send(*creator, Harness::request(4, protocol::method::kSessionCreate,
+                                            nlohmann::json{{"title", "demo"}}));
+    const auto creator_frames = harness.drain(*creator);
+    ASSERT_EQ(creator_frames.size(), 2u);
+    const std::string session = creator_frames[0].at("result").at("session").get<std::string>();
+    EXPECT_EQ(creator_frames[1].at("method").get<std::string>(), "host.event");
+    EXPECT_EQ(creator_frames[1].at("params").at("kind").get<std::string>(), "session_created");
+    EXPECT_EQ(creator_frames[1].at("params").at("session").get<std::string>(), session);
+
+    const auto peer_frames = harness.drain(*peer);
+    ASSERT_EQ(peer_frames.size(), 1u);
+    EXPECT_EQ(peer_frames[0].at("method").get<std::string>(), "host.event");
+    EXPECT_EQ(peer_frames[0].at("params").at("kind").get<std::string>(), "session_created");
+    EXPECT_EQ(peer_frames[0].at("params").at("session").get<std::string>(), session);
+
+    EXPECT_TRUE(harness.drain(*automation).empty());
+}
+
+TEST(TransportServer, SessionCreatedBroadcastOnResumeAndFork) {
+    Harness harness;
+    const SessionId seeded = harness.host.seed("s1");
+    Peer* creator = harness.open();
+    harness.hello(*creator, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*creator);
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceB, 2);
+    harness.drain(*peer);
+
+    harness.send(*creator, Harness::request(3, protocol::method::kSessionResume,
+                                            nlohmann::json{{"session", seeded.value}}));
+    auto frames = harness.drain(*creator);
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_TRUE(frames[0].contains("result"));
+    EXPECT_EQ(frames[1].at("params").at("kind").get<std::string>(), "session_created");
+    EXPECT_EQ(frames[1].at("params").at("session").get<std::string>(), seeded.value);
+    auto peer_frames = harness.drain(*peer);
+    ASSERT_EQ(peer_frames.size(), 1u);
+    EXPECT_EQ(peer_frames[0].at("params").at("kind").get<std::string>(), "session_created");
+
+    harness.send(*creator, Harness::request(4, protocol::method::kSessionFork,
+                                            nlohmann::json{{"session", seeded.value},
+                                                           {"seed_length", 1}}));
+    frames = harness.drain(*creator);
+    ASSERT_EQ(frames.size(), 2u);
+    const std::string forked = frames[0].at("result").at("session").get<std::string>();
+    EXPECT_EQ(frames[1].at("params").at("kind").get<std::string>(), "session_created");
+    EXPECT_EQ(frames[1].at("params").at("session").get<std::string>(), forked);
+    peer_frames = harness.drain(*peer);
+    ASSERT_EQ(peer_frames.size(), 1u);
+    EXPECT_EQ(peer_frames[0].at("params").at("session").get<std::string>(), forked);
 }
 
 } // namespace

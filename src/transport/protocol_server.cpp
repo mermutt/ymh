@@ -363,11 +363,18 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             const std::string reason = request.params.is_object()
                                            ? request.params.value("reason", std::string{})
                                            : std::string{};
-            host_.requestShutdown(parse_shutdown_reason(reason));
+            const ShutdownReason parsed = parse_shutdown_reason(reason);
+            if (!admit_shutdown(conn, parsed)) {
+                throw RpcException(code_value(AppCode::NotLastOwner),
+                                   "daemon still has another owner; shutdown refused");
+            }
+            host_.requestShutdown(parsed);
             respond(conn, request.id, nlohmann::json::object());
             onDaemonShuttingDown("host.shutdown accepted");
             conn.close_when_drained = true;
             maybe_close_after_drain(conn);
+        } else if (method_name == method::kHostOwnership) {
+            respond(conn, request.id, to_json_value(ownershipView(conn.id)));
         } else if (method_name == method::kWorkspaceList) {
             nlohmann::json array = nlohmann::json::array();
             for (const WorkspaceSummary& summary : host_.listWorkspaces()) {
@@ -389,10 +396,12 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             const SessionCreated created = host_.createSession(object_params(request.params));
             respond(conn, request.id,
                     nlohmann::json{{"session", created.session.value}, {"header", created.header}});
+            onSessionCreated(created.session);
         } else if (method_name == method::kSessionResume) {
             const SessionResumed resumed = host_.resumeSession(session_param(request.params));
             respond(conn, request.id,
                     nlohmann::json{{"session", resumed.session.value}, {"status", resumed.status}});
+            onSessionCreated(resumed.session);
         } else if (method_name == method::kSessionFork) {
             const SessionId session = session_param(request.params);
             const auto seed = object_params(request.params).find("seed_length");
@@ -403,6 +412,7 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             const SessionCreated created = host_.forkSession(session, seed->get<std::int64_t>());
             respond(conn, request.id,
                     nlohmann::json{{"session", created.session.value}, {"header", created.header}});
+            onSessionCreated(created.session);
         } else if (method_name == method::kSessionReplay) {
             handle_subscribe(conn, request, true);
         } else if (method_name == method::kSessionActivate) {
@@ -749,6 +759,19 @@ void ProtocolServer::onEventCommitted(const EventRecord& record) {
     }
 }
 
+void ProtocolServer::onSessionCreated(const SessionId& session) {
+    for (auto& entry : connections_) {
+        Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
+            continue;
+        }
+        enqueue(conn, notification_json(
+                         notify::kHostEvent,
+                         to_json_value(HostNotice{HostNoticeKind::SessionCreated,
+                                                  config_.workspace, session, std::string{}})));
+    }
+}
+
 void ProtocolServer::onSessionClosed(const SessionId& session, std::string reason) {
     for (auto& entry : connections_) {
         Connection& conn = entry.second;
@@ -882,6 +905,51 @@ std::optional<ClientInstanceId> ProtocolServer::instanceOf(ClientId id) const {
     return it->second.instance;
 }
 
+std::optional<ClientRole> ProtocolServer::roleOf(ClientId id) const {
+    const auto it = connections_.find(id.value);
+    if (it == connections_.end() || it->second.dropped || !it->second.hello_done) {
+        return std::nullopt;
+    }
+    return it->second.role;
+}
+
+OwnershipView ProtocolServer::ownershipView(ClientId caller) const {
+    OwnershipView view;
+    std::string caller_instance;
+    const auto caller_it = connections_.find(caller.value);
+    if (caller_it != connections_.end()) {
+        caller_instance = caller_it->second.instance.value;
+    }
+
+    for (const auto& entry : connections_) {
+        const Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done) {
+            continue;
+        }
+        if (conn.role == ClientRole::Supervisor) {
+            ++view.live_supervisors;
+        } else if (conn.role == ClientRole::Automation) {
+            ++view.live_automation;
+        } else {
+            continue;
+        }
+        view.clients.push_back(OwnershipView::ClientInfo{conn.instance.value, conn.role,
+                                                         conn.peer_pid});
+    }
+
+    const std::shared_ptr<const std::vector<ClientInstanceId>> snapshot =
+        host_.freshOwnerSnapshot();
+    if (snapshot != nullptr) {
+        for (const ClientInstanceId& id : *snapshot) {
+            if (id.value != caller_instance) {
+                ++view.other_fresh_owners;
+            }
+        }
+    }
+    view.shutting_down = host_.hostState() == HostState::Draining;
+    return view;
+}
+
 std::size_t ProtocolServer::subscriptionCount(ClientId id) const {
     const auto it = connections_.find(id.value);
     if (it == connections_.end()) {
@@ -933,6 +1001,46 @@ void ProtocolServer::set_subscribe_observer(SubscribeObserver observer) {
 
 void ProtocolServer::set_owner_liveness_sink(OwnerLivenessSink sink) {
     owner_liveness_sink_ = std::move(sink);
+}
+
+bool ProtocolServer::admit_shutdown(const Connection& caller, ShutdownReason reason) const {
+    if (reason == ShutdownReason::WorkspaceStop) {
+        return true;
+    }
+
+    std::size_t live_supervisors = 0;
+    std::size_t live_automation = 0;
+    for (const auto& entry : connections_) {
+        const Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done) {
+            continue;
+        }
+        if (conn.role == ClientRole::Supervisor) {
+            ++live_supervisors;
+        } else if (conn.role == ClientRole::Automation) {
+            ++live_automation;
+        }
+    }
+    const bool caller_is_supervisor = caller.role == ClientRole::Supervisor;
+    const std::size_t supervisors_excluding =
+        (caller_is_supervisor && live_supervisors > 0) ? live_supervisors - 1 : live_supervisors;
+    if (supervisors_excluding > 0) {
+        return false;
+    }
+    if (live_automation > 0) {
+        return false;
+    }
+
+    const std::shared_ptr<const std::vector<ClientInstanceId>> snapshot =
+        host_.freshOwnerSnapshot();
+    if (snapshot != nullptr) {
+        for (const ClientInstanceId& id : *snapshot) {
+            if (id.value != caller.instance.value) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 void ProtocolServer::publish_owner_liveness() {

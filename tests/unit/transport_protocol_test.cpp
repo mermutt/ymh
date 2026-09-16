@@ -246,4 +246,51 @@ TEST(TransportProtocol, HostStatusRoundTrips) {
     EXPECT_EQ(parsed.active_session->value, "s");
 }
 
+TEST(TransportProtocol, ClientRoleParseSerializeAndDefault) {
+    EXPECT_EQ(protocol::to_string(protocol::ClientRole::Supervisor), "supervisor");
+    EXPECT_EQ(protocol::to_string(protocol::ClientRole::Automation), "automation");
+    EXPECT_EQ(protocol::to_string(protocol::ClientRole::Observer), "observer");
+    EXPECT_EQ(protocol::parse_client_role("observer"), protocol::ClientRole::Observer);
+    EXPECT_FALSE(protocol::parse_client_role("owner").has_value());
+
+    const nlohmann::json without_role = nlohmann::json{
+        {"protocol_version", protocol::kProtocolVersion},
+        {"profile", "interactive"},
+        {"client_instance", "33333333-3333-4333-8333-333333333333"}};
+    protocol::HelloParams parsed;
+    protocol::from_json(without_role, parsed);
+    EXPECT_EQ(parsed.role, protocol::ClientRole::Supervisor);
+
+    parsed.role = protocol::ClientRole::Automation;
+    nlohmann::json json;
+    protocol::to_json(json, parsed);
+    EXPECT_EQ(json.at("role").get<std::string>(), "automation");
+}
+
+TEST(TransportProtocol, OwnershipViewRoundTrips) {
+    protocol::OwnershipView view;
+    view.clients = {{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", protocol::ClientRole::Supervisor, 7},
+                    {"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", protocol::ClientRole::Automation, 9}};
+    view.live_supervisors = 1;
+    view.live_automation = 1;
+    view.other_fresh_owners = 2;
+    view.shutting_down = true;
+
+    nlohmann::json json;
+    protocol::to_json(json, view);
+    EXPECT_EQ(json.at("live_supervisors").get<std::size_t>(), 1u);
+    EXPECT_EQ(json.at("other_fresh_owners").get<std::size_t>(), 2u);
+    EXPECT_TRUE(json.at("shutting_down").get<bool>());
+
+    protocol::OwnershipView parsed;
+    protocol::from_json(json, parsed);
+    ASSERT_EQ(parsed.clients.size(), 2u);
+    EXPECT_EQ(parsed.clients[0].role, protocol::ClientRole::Supervisor);
+    EXPECT_EQ(parsed.clients[1].role, protocol::ClientRole::Automation);
+    EXPECT_EQ(parsed.clients[1].pid, 9);
+    EXPECT_EQ(parsed.live_automation, 1u);
+    EXPECT_EQ(parsed.other_fresh_owners, 2u);
+    EXPECT_TRUE(parsed.shutting_down);
+}
+
 } // namespace
