@@ -459,6 +459,37 @@ void from_json(const nlohmann::json& json, HostStatus& status) {
     status.profile = *profile;
 }
 
+void to_json(nlohmann::json& json, const OwnershipView& view) {
+    nlohmann::json clients = nlohmann::json::array();
+    for (const OwnershipView::ClientInfo& client : view.clients) {
+        clients.push_back(nlohmann::json{{"client_instance", client.client_instance},
+                                         {"role", std::string{to_string(client.role)}},
+                                         {"pid", client.pid}});
+    }
+    json = nlohmann::json{{"clients", std::move(clients)},
+                          {"live_supervisors", view.live_supervisors},
+                          {"live_automation", view.live_automation},
+                          {"other_fresh_owners", view.other_fresh_owners},
+                          {"shutting_down", view.shutting_down}};
+}
+
+void from_json(const nlohmann::json& json, OwnershipView& view) {
+    view.clients.clear();
+    for (const auto& entry : json.at("clients")) {
+        const auto role = parse_client_role(entry.at("role").get<std::string>());
+        if (!role.has_value()) {
+            throw std::invalid_argument("unknown client role");
+        }
+        const std::string client_instance = entry.at("client_instance").get<std::string>();
+        view.clients.push_back(OwnershipView::ClientInfo{
+            client_instance, *role, entry.at("pid").get<std::int32_t>()});
+    }
+    view.live_supervisors = json.at("live_supervisors").get<std::size_t>();
+    view.live_automation = json.at("live_automation").get<std::size_t>();
+    view.other_fresh_owners = json.at("other_fresh_owners").get<std::size_t>();
+    view.shutting_down = json.at("shutting_down").get<bool>();
+}
+
 void to_json(nlohmann::json& json, const PermissionRequest& request) {
     json = nlohmann::json{
         {"request_id", request.request_id},

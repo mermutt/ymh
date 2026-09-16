@@ -66,6 +66,7 @@ public:
     void onFrameWritten(ClientId id, std::size_t bytes);
 
     void onEventCommitted(const EventRecord& record);
+    void onSessionCreated(const SessionId& session);
     void onSessionClosed(const SessionId& session, std::string reason);
     void onLeaseLost(const SessionId& session, std::string detail);
     void onDaemonShuttingDown(std::string detail);
@@ -76,6 +77,14 @@ public:
     [[nodiscard]] bool hasClient(ClientId id) const;
     [[nodiscard]] std::optional<ServerProfile> profileOf(ClientId id) const;
     [[nodiscard]] std::optional<ClientInstanceId> instanceOf(ClientId id) const;
+    [[nodiscard]] std::optional<ClientRole> roleOf(ClientId id) const;
+
+    // 16 §7.4: the `host.ownership` view for the CALLING connection (io thread).
+    // `caller` is the dispatching connection's ClientId, never a wire param; the
+    // requester's ClientInstanceId is read from its connection (O-L1). No
+    // clock/ttl parameters: the fresh set is the watchdog's precomputed
+    // immutable snapshot (§5.1), so no freshness math happens here.
+    [[nodiscard]] OwnershipView ownershipView(ClientId caller) const;
     [[nodiscard]] std::size_t subscriptionCount(ClientId id) const;
     [[nodiscard]] std::size_t outstandingBytes(ClientId id) const;
     [[nodiscard]] bool isDropped(ClientId id) const;
@@ -153,6 +162,11 @@ private:
     void drop_client(Connection& conn, std::string reason);
     void end_subscriptions(Connection& conn, const SessionId& session, std::string reason);
     void publish_owner_liveness();
+
+    // 16 §4.4 (O-H2): io-thread admission pre-check run BEFORE requestShutdown
+    // latches Draining. `caller` is the dispatching connection; `reason` is the
+    // parsed wire reason. Only `workspace_stop` bypasses the owner checks.
+    [[nodiscard]] bool admit_shutdown(const Connection& caller, ShutdownReason reason) const;
 
     [[nodiscard]] HostStatus compose_status(const Connection& conn) const;
     [[nodiscard]] nlohmann::json stream_notification(SubscriptionId subscription, bool replay,

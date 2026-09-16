@@ -438,6 +438,11 @@ void from_json(const nlohmann::json& json, HostNotice& notice);
 void to_json(nlohmann::json& json, const HostStatus& status);
 void from_json(const nlohmann::json& json, HostStatus& status);
 
+// 16 §7.4: `host.ownership` result. Raw live counts include the caller; only
+// `other_fresh_owners` excludes it.
+void to_json(nlohmann::json& json, const OwnershipView& view);
+void from_json(const nlohmann::json& json, OwnershipView& view);
+
 void to_json(nlohmann::json& json, const PermissionRequest& request);
 void from_json(const nlohmann::json& json, PermissionRequest& request);
 
