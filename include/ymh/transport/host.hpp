@@ -75,6 +75,7 @@ public:
     virtual void deleteSession(const SessionId& id) = 0;
     virtual void activateSession(const SessionId& id) = 0;
     virtual void suspendSession(const SessionId& id) = 0;
+    virtual void compactSession(const SessionId& id) = 0;
 
     virtual void agentPrompt(const SessionId& id, const nlohmann::json& message) = 0;
     virtual void agentFollowup(const SessionId& id, const nlohmann::json& message) = 0;

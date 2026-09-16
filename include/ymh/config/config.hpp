@@ -41,11 +41,27 @@ struct UiConfig {
 };
 
 // [agent]
+struct CompactionSettings {
+    bool        enabled = false;
+    std::size_t threshold_tokens = 0;
+    double      threshold_ratio = 0.80;
+    std::size_t context_window_tokens = 0;
+    std::size_t reserve_output_tokens = 4'096;
+    std::size_t keep_recent_turns = 2;
+    std::size_t min_prefix_messages = 4;
+    std::size_t max_summary_tokens = 1'024;
+    std::size_t max_summary_bytes = 256u * 1024u;
+    std::string summarizer_model;
+    std::size_t max_compactions_per_turn = 1;
+    bool        retry_on_context_length = true;
+};
+
 struct AgentDefaults {
     std::string                model;   // may be empty; resolved with llm.model
     std::size_t                max_steps = 100;
     std::optional<std::string> reasoning_effort;  // "low" | "medium" | "high"
     std::string                system_prompt;     // empty => built-in default
+    CompactionSettings         compaction;
 };
 
 // [workspace]

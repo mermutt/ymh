@@ -428,6 +428,7 @@ inline constexpr std::string_view kSessionFork      = "session.fork";
 inline constexpr std::string_view kSessionReplay    = "session.replay";
 inline constexpr std::string_view kSessionActivate  = "session.activate";
 inline constexpr std::string_view kSessionSuspend   = "session.suspend";
+inline constexpr std::string_view kSessionCompact   = "session.compact";
 inline constexpr std::string_view kSessionClose     = "session.close";
 inline constexpr std::string_view kSessionDelete    = "session.delete";
 inline constexpr std::string_view kAgentPrompt      = "agent.prompt";
@@ -447,8 +448,9 @@ inline constexpr std::string_view kEventUnsubscribe = "event.unsubscribe";
 [[nodiscard]] bool is_known_method(std::string_view name) noexcept;
 
 // Profile gating (05 §6.3, T10). Automation denies the operator controls
-// (`session.activate`, `session.suspend`, `host.shutdown`); every other catalog
-// method is permitted (see the ambiguity note in the implementation report).
+// (`session.activate`, `session.suspend`, `session.compact`, `host.shutdown`);
+// every other catalog method is permitted (see the ambiguity note in the
+// implementation report).
 [[nodiscard]] bool is_method_allowed(ServerProfile profile, std::string_view method) noexcept;
 
 // ---------------------------------------------------------------------------

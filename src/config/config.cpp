@@ -107,9 +107,57 @@ void apply_ui(Config& config, const toml::table& table, const std::filesystem::p
         read_value<std::string>(table, "side_panel", "ui", config.ui.side_panel, source);
 }
 
+void apply_compaction(Config& config,
+                      const toml::table& table,
+                      const std::filesystem::path& source) {
+    reject_unknown(table, "agent.compaction",
+                   {"enabled", "threshold_tokens", "threshold_ratio", "context_window_tokens",
+                    "reserve_output_tokens", "keep_recent_turns", "min_prefix_messages",
+                    "max_summary_tokens", "max_summary_bytes", "summarizer_model",
+                    "max_compactions_per_turn", "retry_on_context_length"},
+                   source);
+    CompactionSettings& compaction = config.agent.compaction;
+    compaction.enabled = read_value<bool>(table, "enabled", "agent.compaction",
+                                          compaction.enabled, source);
+    compaction.threshold_tokens = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "threshold_tokens", "agent.compaction",
+        static_cast<std::int64_t>(compaction.threshold_tokens), source));
+    compaction.threshold_ratio = read_value<double>(table, "threshold_ratio",
+                                                    "agent.compaction",
+                                                    compaction.threshold_ratio, source);
+    compaction.context_window_tokens = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "context_window_tokens", "agent.compaction",
+        static_cast<std::int64_t>(compaction.context_window_tokens), source));
+    compaction.reserve_output_tokens = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "reserve_output_tokens", "agent.compaction",
+        static_cast<std::int64_t>(compaction.reserve_output_tokens), source));
+    compaction.keep_recent_turns = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "keep_recent_turns", "agent.compaction",
+        static_cast<std::int64_t>(compaction.keep_recent_turns), source));
+    compaction.min_prefix_messages = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "min_prefix_messages", "agent.compaction",
+        static_cast<std::int64_t>(compaction.min_prefix_messages), source));
+    compaction.max_summary_tokens = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_summary_tokens", "agent.compaction",
+        static_cast<std::int64_t>(compaction.max_summary_tokens), source));
+    compaction.max_summary_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_summary_bytes", "agent.compaction",
+        static_cast<std::int64_t>(compaction.max_summary_bytes), source));
+    compaction.summarizer_model = read_value<std::string>(
+        table, "summarizer_model", "agent.compaction", compaction.summarizer_model, source);
+    compaction.max_compactions_per_turn = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_compactions_per_turn", "agent.compaction",
+        static_cast<std::int64_t>(compaction.max_compactions_per_turn), source));
+    compaction.retry_on_context_length = read_value<bool>(
+        table, "retry_on_context_length", "agent.compaction",
+        compaction.retry_on_context_length, source);
+}
+
 void apply_agent(Config& config, const toml::table& table, const std::filesystem::path& source) {
     reject_unknown(table, "agent",
-                   {"model", "max_steps", "reasoning_effort", "system_prompt"}, source);
+                   {"model", "max_steps", "reasoning_effort", "system_prompt", "compaction",
+                    "compaction_threshold_tokens"},
+                   source);
     config.agent.model =
         read_value<std::string>(table, "model", "agent", config.agent.model, source);
     config.agent.max_steps =
@@ -119,6 +167,16 @@ void apply_agent(Config& config, const toml::table& table, const std::filesystem
         read_optional_string(table, "reasoning_effort", "agent", source);
     config.agent.system_prompt =
         read_value<std::string>(table, "system_prompt", "agent", config.agent.system_prompt, source);
+    config.agent.compaction.threshold_tokens = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "compaction_threshold_tokens", "agent",
+        static_cast<std::int64_t>(config.agent.compaction.threshold_tokens), source));
+    if (const auto node = table["compaction"]; node) {
+        const toml::table* nested = node.as_table();
+        if (nested == nullptr) {
+            fail(source, "invalid type for 'agent.compaction'");
+        }
+        apply_compaction(config, *nested, source);
+    }
 }
 
 void apply_workspace(Config& config, const toml::table& table, const std::filesystem::path& source) {

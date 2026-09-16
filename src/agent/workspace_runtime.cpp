@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ymh/agent/agent_registry.hpp"
+#include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/cli/wiring.hpp"
@@ -70,6 +71,12 @@ public:
         services_.provider        = provider_.get();
         services_.pool            = &pool_;
 
+        if (provider_ != nullptr) {
+            compactor_ = std::make_unique<ContextCompactor>(
+                *provider_, pool_, estimator_, to_compaction_policy(config));
+            services_.context_compactor = compactor_.get();
+        }
+
         agents_ = std::make_unique<AgentRegistry>(services_, agent_config_);
     }
 
@@ -92,6 +99,7 @@ public:
     LLMProviderConfig                  provider_config_;
     std::unique_ptr<LLMProvider>       provider_;
     LLMPool                            pool_;
+    std::unique_ptr<ContextCompactor>  compactor_;
     OutputRing                         ring_;
     RingOutputSink                     sink_;
     SessionManager                     sessions_;

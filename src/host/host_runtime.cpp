@@ -535,6 +535,22 @@ void HostRuntime::suspendSession(const SessionId& id) {
     });
 }
 
+void HostRuntime::compactSession(const SessionId& id) {
+    translate([&]() {
+        if (!sessionExists(id)) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
+                                   "UnknownSession"});
+        }
+        ensureAgent(id);
+        if (!turns_.submit([this, id]() {
+                (void)runtime_.agents().requestCompaction(id);
+            })) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InternalError),
+                                   "InboxFull"});
+        }
+    });
+}
+
 void HostRuntime::agentPrompt(const SessionId& id, const nlohmann::json& message) {
     translate([&]() {
         if (!sessionExists(id)) {

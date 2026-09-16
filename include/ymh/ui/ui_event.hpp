@@ -6,12 +6,14 @@
 // never serialized on the wire (U4, §20.6, 05 §5.2, §54 D15). The wire carries
 // the core, durable `Event`; the model sees only `UiEvent`/`WorkspaceEvent`.
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <variant>
 
 #include "ymh/agent/agent.hpp"
+#include "ymh/agent/compactor.hpp"
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -162,6 +164,23 @@ struct StatusChanged {
     std::string text;
 };
 
+struct CompactionMarker {
+    SessionId   session;
+    std::uint64_t boundary = 0;
+    std::size_t   tokenEstimate = 0;
+    std::string   model;
+    std::string   summary;
+};
+
+struct CompactionOutcomeNotice {
+    SessionId         session;
+    CompactionOutcome outcome = CompactionOutcome::NotNeeded;
+    std::uint64_t     boundary = 0;
+    std::size_t       tokenEstimate = 0;
+    std::string       model;
+    std::string       reason;
+};
+
 struct UiEvent {
     std::variant<
         UserMessage,
@@ -179,7 +198,9 @@ struct UiEvent {
         SubagentUpdated,
         ErrorOccurred,
         TokenUsageUpdated,
-        StatusChanged>
+        StatusChanged,
+        CompactionMarker,
+        CompactionOutcomeNotice>
         value;
 };
 

@@ -7,6 +7,8 @@
 // from `adapt()`; `onEvent()` updates it after applying (10 §5.2).
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -73,9 +75,19 @@ private:
     [[nodiscard]] AgentState project_state(const SessionId& session,
                                            const Event& event) const;
 
+    struct MaintenanceState {
+        bool          active = false;
+        bool          sawCompaction = false;
+        std::uint64_t boundary = 0;
+        std::size_t   tokenEstimate = 0;
+        std::string   model;
+    };
+    [[nodiscard]] std::vector<UiEvent> adapt_maintenance(const Event& event);
+
     UiModel&      model_;
     std::map<SessionId, AgentState>      lastState_;
     std::map<SessionId, std::string>     startedMessages_;
+    std::map<SessionId, MaintenanceState> maintenance_;
     std::function<AgentState(const SessionId&)> state_provider_;
     std::set<std::string>                applied_event_ids_;
     std::deque<std::string>              applied_event_order_;

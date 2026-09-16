@@ -51,6 +51,9 @@ TurnOrigin parse_turn_origin(std::string_view value) {
     if (value == "injection") {
         return TurnOrigin::Injection;
     }
+    if (value == "maintenance") {
+        return TurnOrigin::Maintenance;
+    }
     reject_enum("turn origin", value);
 }
 
@@ -128,6 +131,8 @@ std::string_view turn_origin_name(payload::TurnOrigin origin) noexcept {
             return "follow_up";
         case payload::TurnOrigin::Injection:
             return "injection";
+        case payload::TurnOrigin::Maintenance:
+            return "maintenance";
     }
     return {};
 }

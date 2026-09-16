@@ -452,6 +452,15 @@ private:
         context.request_exit = [this] { requestExit(); };
         context.create_session = [this] { new_session(); };
         context.set_model = [this](const std::string& name) { preferred_model_ = name; };
+        context.compact = [this] {
+            WorkspaceModel* workspace = model_.activeWorkspace();
+            if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+                return;
+            }
+            nlohmann::json params{{"session", workspace->activeSessionId.value}};
+            submit_to(workspace->id, std::string(protocol::method::kSessionCompact),
+                      std::move(params), nullptr);
+        };
         return registry_.dispatch(line, context);
     }
 
