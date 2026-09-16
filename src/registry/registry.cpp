@@ -85,6 +85,23 @@ CREATE TABLE registry_meta (
 );
 )sql";
 
+// 16 §2.3/§7.2 (A10/A11): the additive ownership set. Kept as its own DDL
+// fragment so a fresh schema (migrate_fresh) and a 1 → 2 migration create the
+// exact same table and index. The four pre-16 tables above are byte-identical.
+constexpr char kSupervisorsDdl[] = R"sql(
+CREATE TABLE supervisors (
+    id          TEXT PRIMARY KEY,
+    pid         INTEGER NOT NULL,
+    boot_id     TEXT NOT NULL,
+    started_at  INTEGER NOT NULL,
+    heartbeat   INTEGER NOT NULL,
+    tty         TEXT,
+    CHECK (pid > 0)
+);
+
+CREATE INDEX idx_supervisors_heartbeat ON supervisors(heartbeat);
+)sql";
+
 [[noreturn]] void throw_registry(RegistryErrorCode code, const std::string& message) {
     throw RegistryError(code, message);
 }
@@ -219,8 +236,16 @@ void apply_pragmas(sqlite3* db, const RegistryConfig& config, bool writable) {
 void migrate_fresh(sqlite3* db) {
     Transaction transaction{db};
     exec_sql(db, kRegistryDdl);
-    exec_sql(db, "PRAGMA user_version = 1");
+    exec_sql(db, kSupervisorsDdl);
+    exec_sql(db, "PRAGMA user_version = 2");
     exec_sql(db, "PRAGMA application_id = 0x594D4802");
+    transaction.commit();
+}
+
+void migrate_v1_to_v2(sqlite3* db) {
+    Transaction transaction{db};
+    exec_sql(db, kSupervisorsDdl);
+    exec_sql(db, "PRAGMA user_version = 2");
     transaction.commit();
 }
 
@@ -306,6 +331,28 @@ WorkspaceRecord read_workspace(Statement& statement) {
 constexpr char kSelectWorkspaceColumns[] =
     "SELECT id, canonical_path, display_title, created_at, updated_at, host_pid, "
     "host_boot_id, host_socket, host_heartbeat, metadata FROM workspaces";
+
+bool supervisors_table_present(sqlite3* db) {
+    Statement statement{
+        db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervisors'"};
+    return statement.step() == SQLITE_ROW;
+}
+
+SupervisorRow read_supervisor(Statement& statement) {
+    SupervisorRow row;
+    row.id = SupervisorId{statement.columnText(0)};
+    row.pid = static_cast<std::int32_t>(statement.columnInt64(1));
+    row.bootId = statement.columnText(2);
+    row.startedAtMs = statement.columnInt64(3);
+    row.heartbeatMs = statement.columnInt64(4);
+    if (!statement.isNull(5)) {
+        row.tty = statement.columnText(5);
+    }
+    return row;
+}
+
+constexpr char kSelectSupervisorColumns[] =
+    "SELECT id, pid, boot_id, started_at, heartbeat, tty FROM supervisors";
 
 WorkspaceSessionRecord read_session(Statement& statement) {
     WorkspaceSessionRecord record;
@@ -701,8 +748,7 @@ std::unique_ptr<WorkspaceRegistry> WorkspaceRegistry::open(const RegistryConfig&
         throw_registry(RegistryErrorCode::SchemaVersion,
                        "registry.db was written by a newer binary");
     } else if (version < kRegistrySchemaVersion) {
-        throw_registry(RegistryErrorCode::SchemaVersion,
-                       "registry.db schema has no migration path to this binary");
+        migrate_v1_to_v2(impl->db);
     }
     verify_foreign_keys(impl->db);
 
@@ -733,7 +779,10 @@ std::unique_ptr<WorkspaceRegistry> WorkspaceRegistry::openReadOnly(const Registr
 
     const int application_id = read_pragma_int(impl->db, "PRAGMA application_id");
     const int version = read_pragma_int(impl->db, "PRAGMA user_version");
-    if (application_id != kRegistryApplicationId || version != kRegistrySchemaVersion) {
+    // 16 §7.2 (C-M9/O-M7, amending 03 §3.4): a read-only open tolerates an
+    // un-migrated older schema and serves the old view without writing. Only a
+    // newer DB (version > kRegistrySchemaVersion) is refused, unchanged.
+    if (application_id != kRegistryApplicationId || version > kRegistrySchemaVersion) {
         throw_registry(RegistryErrorCode::SchemaVersion,
                        "registry.db is foreign or has an unexpected schema version");
     }
@@ -874,6 +923,41 @@ HostLiveness WorkspaceRegistry::probeLiveness(WorkspaceId workspace) const {
     }
     const WorkspaceLockProbe probe = probeWorkspaceLock(record->canonicalPath);
     return probe.held ? HostLiveness::Live : HostLiveness::Stale;
+}
+
+std::vector<SupervisorRow> WorkspaceRegistry::listSupervisors() const {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+    std::vector<SupervisorRow> result;
+    if (!supervisors_table_present(impl_->db)) {
+        return result;
+    }
+    Statement statement{impl_->db, (std::string{kSelectSupervisorColumns} +
+                                   " ORDER BY started_at ASC, id ASC")
+                                      .c_str()};
+    while (statement.step() == SQLITE_ROW) {
+        result.push_back(read_supervisor(statement));
+    }
+    return result;
+}
+
+std::size_t WorkspaceRegistry::freshSupervisorCount(
+    std::int64_t now_wall_ms, std::chrono::milliseconds ttl,
+    const std::optional<SupervisorId>& exclude) const {
+    std::size_t count = 0;
+    for (const SupervisorRow& row : listSupervisors()) {
+        if (exclude.has_value() && row.id == *exclude) {
+            continue;
+        }
+        if (isFresh(row, now_wall_ms, ttl)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool WorkspaceRegistry::hasFreshSupervisor(std::int64_t now_wall_ms,
+                                           std::chrono::milliseconds ttl) const {
+    return freshSupervisorCount(now_wall_ms, ttl, std::nullopt) > 0;
 }
 
 WorkspaceRecord WorkspaceRegistry::registerWorkspace(const std::filesystem::path& canonicalPath,
@@ -1031,6 +1115,73 @@ void WorkspaceRegistry::releaseHost(WorkspaceId workspace, HostBootId bootId) {
     statement.bindText(2, bootId.value);
     statement.step();
     transaction.commit();
+}
+
+void WorkspaceRegistry::registerSupervisor(const SupervisorRow& row) {
+    if (row.id.value.empty()) {
+        throw_registry(RegistryErrorCode::OpenFailed, "supervisor id must not be empty");
+    }
+    if (row.pid <= 0) {
+        throw_registry(RegistryErrorCode::OpenFailed, "supervisor pid must be > 0");
+    }
+    if (row.bootId.empty()) {
+        throw_registry(RegistryErrorCode::OpenFailed, "supervisor boot id must not be empty");
+    }
+    Impl::LockGuard guard(*impl_);
+    Transaction transaction{impl_->db};
+    Statement statement{
+        impl_->db,
+        "INSERT INTO supervisors(id, pid, boot_id, started_at, heartbeat, tty) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET pid = excluded.pid, boot_id = excluded.boot_id, "
+        "started_at = excluded.started_at, heartbeat = excluded.heartbeat, tty = excluded.tty"};
+    statement.bindText(1, row.id.value);
+    statement.bindInt64(2, row.pid);
+    statement.bindText(3, row.bootId);
+    statement.bindInt64(4, row.startedAtMs);
+    statement.bindInt64(5, row.heartbeatMs);
+    statement.bindOptionalText(6, row.tty);
+    statement.step();
+    transaction.commit();
+}
+
+bool WorkspaceRegistry::heartbeatSupervisor(const SupervisorId& id, std::int64_t now_wall_ms) {
+    Impl::LockGuard guard(*impl_);
+    Transaction transaction{impl_->db};
+    Statement statement{impl_->db, "UPDATE supervisors SET heartbeat = ? WHERE id = ?"};
+    statement.bindInt64(1, now_wall_ms);
+    statement.bindText(2, id.value);
+    statement.step();
+    const bool updated = sqlite3_changes(impl_->db) > 0;
+    transaction.commit();
+    return updated;
+}
+
+bool WorkspaceRegistry::deregisterSupervisor(const SupervisorId& id) {
+    Impl::LockGuard guard(*impl_);
+    Transaction transaction{impl_->db};
+    Statement statement{impl_->db, "DELETE FROM supervisors WHERE id = ?"};
+    statement.bindText(1, id.value);
+    statement.step();
+    const bool deleted = sqlite3_changes(impl_->db) > 0;
+    transaction.commit();
+    return deleted;
+}
+
+std::size_t WorkspaceRegistry::pruneStaleSupervisors(std::int64_t now_wall_ms,
+                                                     std::chrono::milliseconds ttl) {
+    Impl::LockGuard guard(*impl_);
+    Transaction transaction{impl_->db};
+    Statement statement{
+        impl_->db,
+        "DELETE FROM supervisors WHERE (? - heartbeat) < 0 OR (? - heartbeat) > ?"};
+    statement.bindInt64(1, now_wall_ms);
+    statement.bindInt64(2, now_wall_ms);
+    statement.bindInt64(3, ttl.count());
+    statement.step();
+    const auto removed = static_cast<std::size_t>(sqlite3_changes(impl_->db));
+    transaction.commit();
+    return removed;
 }
 
 bool WorkspaceRegistry::reapHost(WorkspaceId workspace) {

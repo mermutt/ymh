@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "ymh/core/event.hpp"
+#include "ymh/registry/supervisor.hpp"
 
 namespace ymh {
 
@@ -170,7 +171,7 @@ struct RegistryConfig {
     bool                               allow_process_scan_fallback{true};
 };
 
-inline constexpr int          kRegistrySchemaVersion = 1;
+inline constexpr int          kRegistrySchemaVersion = 2;
 inline constexpr std::int32_t kRegistryApplicationId = 0x594D4802;  // 'Y','M','H', family 2
 inline constexpr std::string_view kInitializedMarker  = "initialized";
 inline constexpr std::string_view kLegacyMigratedMarker = "legacy_migrated";
@@ -232,6 +233,21 @@ public:
     // Sidecar-flock liveness observation (§6.3, §6.4). Read-only; never clears.
     [[nodiscard]] HostLiveness probeLiveness(WorkspaceId) const;
 
+    // ---- supervisor ownership set (16 §7.1) --------------------------------
+    // All rows, `started_at` then `id` ascending. Returns `{}` when the
+    // `supervisors` table is absent (read-only open of an un-migrated v1 DB).
+    [[nodiscard]] std::vector<SupervisorRow> listSupervisors() const;
+
+    // Fresh rows by `isFresh` (negative delta is stale), optionally excluding
+    // one id. Returns 0 when the `supervisors` table is absent.
+    [[nodiscard]] std::size_t freshSupervisorCount(
+        std::int64_t now_wall_ms, std::chrono::milliseconds ttl,
+        const std::optional<SupervisorId>& exclude = std::nullopt) const;
+
+    // Convenience wrapper for non-daemon callers. False when the table is absent.
+    [[nodiscard]] bool hasFreshSupervisor(std::int64_t now_wall_ms,
+                                          std::chrono::milliseconds ttl) const;
+
     // ---- mutations (require the D22 write lock; §5) ------------------------
     WorkspaceRecord registerWorkspace(const std::filesystem::path& canonicalPath,
                                       std::string displayTitle,
@@ -243,6 +259,19 @@ public:
     void            claimHost(HostClaim);
     void            heartbeat(HostClaim);  // no-op if the claim no longer matches
     void            releaseHost(WorkspaceId, HostBootId);
+
+    // Supervisor ownership set (16 §7.1). Upsert by `id`; a new `bootId`
+    // supersedes a recycled-pid predecessor. Heartbeat returns false when the
+    // row is absent (pruned by a peer), so the caller re-registers (§2.6/C-M8).
+    void registerSupervisor(const SupervisorRow& row);
+    [[nodiscard]] bool heartbeatSupervisor(const SupervisorId& id,
+                                           std::int64_t now_wall_ms);
+    [[nodiscard]] bool deregisterSupervisor(const SupervisorId& id);  // false if absent
+
+    // Deletes rows with `delta > ttl || delta < 0` (delta as in isFresh).
+    // Returns the number deleted. Supervisor-only (16 §5.4/A9).
+    std::size_t pruneStaleSupervisors(std::int64_t now_wall_ms,
+                                      std::chrono::milliseconds ttl);
 
     // Clears a stale claim under the write lock, gated on lock-absence (R5).
     // Returns true iff a claim row was cleared. Never kills a process (R11).
