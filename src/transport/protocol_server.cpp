@@ -813,6 +813,20 @@ void ProtocolServer::onDaemonShuttingDown(std::string detail) {
     }
 }
 
+void ProtocolServer::onMcpServerStatus(std::string detail) {
+    for (auto& entry : connections_) {
+        Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
+            continue;
+        }
+        enqueue(conn, notification_json(
+                         notify::kHostEvent,
+                         to_json_value(HostNotice{HostNoticeKind::McpServerStatus,
+                                                  config_.workspace, std::nullopt,
+                                                  std::move(detail)})));
+    }
+}
+
 void ProtocolServer::onPermissionRequest(const PermissionRequest& request) {
     for (auto& entry : connections_) {
         Connection& conn = entry.second;

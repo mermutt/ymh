@@ -68,6 +68,9 @@ enum class EventType : std::uint16_t {
     TokenUsage,          // wire: usage
     SubagentSpawned,     // wire: subagent/spawned
     SubagentFanIn,       // wire: subagent/fan_in
+    // Live-only (15 §4.7, AM-1): never in the durable SessionEventMap, never
+    // appended to the session log. Delivered to global EventBus subscribers.
+    McpServerStatusChanged,  // wire: mcp/server_status_changed
 };
 
 // CamelCase -> slash form. Total over the enum; returns an empty view for a

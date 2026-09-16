@@ -211,6 +211,7 @@ enum class HostNoticeKind : std::uint8_t {
     SessionCreated,      // the open set changed (daemon-driven)
     LeaseLost,           // 02 §5.7: a session degraded to read-only
     DaemonShuttingDown,  // host.shutdown accepted; drain begins
+    McpServerStatus,     // 15 §4.7 (AM-1): bounded MCP status token in `detail`
 };
 
 struct HostNotice {

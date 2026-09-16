@@ -106,6 +106,48 @@ struct LlmSettings {
     RetrySettings              retry;
 };
 
+// [[mcp.server]] — one configured MCP server (15 §4.1/§5.6). Mapped onto
+// `McpServerConfig` by the CLI wiring; secrets are env references only.
+struct McpServerSettings {
+    std::string              id;
+    bool                     enabled = true;
+    bool                     required = false;
+    std::string              transport = "stdio";
+    std::string              command;
+    std::vector<std::string> args;
+    std::vector<std::string> env;
+    std::string              cwd;
+    std::string              url;
+    std::vector<std::string> header_env;
+    std::string              protocol_version;
+    std::vector<std::string> allowed_tools;
+    std::vector<std::string> denied_tools;
+    std::string              default_verdict = "ask";
+    std::int64_t             call_timeout_ms = 60'000;
+    std::size_t              max_result_bytes = 1u * 1024u * 1024u;
+};
+
+// [mcp] — the layered section (15 §5.6). Arrays replace wholesale per layer.
+struct McpSettings {
+    bool                         enabled = true;
+    std::vector<McpServerSettings> servers;
+    std::size_t                  max_servers = 8;
+    std::size_t                  max_inflight_calls_per_server = 4;
+    std::int64_t                 startup_deadline_ms = 5'000;
+    std::int64_t                 handshake_timeout_ms = 10'000;
+    std::int64_t                 list_timeout_ms = 5'000;
+    std::size_t                  list_max_pages = 64;
+    std::uint32_t                reconnect_max_attempts = 5;
+    std::int64_t                 reconnect_initial_backoff_ms = 500;
+    std::int64_t                 reconnect_max_backoff_ms = 30'000;
+    double                       reconnect_jitter = 0.25;
+    std::int64_t                 reconnect_stable_window_ms = 30'000;
+    std::int64_t                 ping_interval_ms = 15'000;
+    std::int64_t                 shutdown_grace_ms = 2'000;
+    std::size_t                  max_frame_bytes = 8u * 1024u * 1024u;
+    bool                         allow_network_servers = false;
+};
+
 struct Config {
     UiConfig           ui;
     AgentDefaults      agent;
@@ -113,6 +155,7 @@ struct Config {
     PermissionDefaults permissions;
     LoggingSettings    logging;
     LlmSettings        llm;
+    McpSettings        mcp;
 };
 
 // Explicit layer sources. `global`/`workspace` may be empty to skip a layer.

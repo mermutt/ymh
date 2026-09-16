@@ -325,6 +325,37 @@ target_link_libraries(ymh_tools
 )
 
 # ---------------------------------------------------------------------------
+# MCP adapter library (component 15)
+# ---------------------------------------------------------------------------
+
+add_library(ymh_mcp STATIC
+    src/mcp/mcp_types.cpp
+    src/mcp/schema_translation.cpp
+    src/mcp/mcp_transport.cpp
+    src/mcp/mcp_client.cpp
+    src/mcp/mcp_tool.cpp
+    src/mcp/mcp_manager.cpp
+)
+add_library(ymh::mcp ALIAS ymh_mcp)
+
+target_include_directories(ymh_mcp
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_mcp
+    PUBLIC
+        ymh::core
+        ymh::session
+        ymh::execution
+        ymh::policy
+        ymh::tools
+        nlohmann_json::nlohmann_json
+    PRIVATE
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
 # Agent & loop library (component 06)
 # ---------------------------------------------------------------------------
 
@@ -420,6 +451,7 @@ target_link_libraries(ymh_wiring
         ymh::agent
         ymh::config
         ymh::llm
+        ymh::mcp
         ymh::policy
     PRIVATE
         ymh::registry
@@ -445,6 +477,7 @@ target_link_libraries(ymh_runtime
         ymh::agent
         ymh::config
         ymh::logging
+        ymh::mcp
         ymh::wiring
     PRIVATE
         ymh::warnings

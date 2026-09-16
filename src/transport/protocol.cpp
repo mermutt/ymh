@@ -50,11 +50,12 @@ constexpr std::array<WireEnumEntry<StreamFrom::Kind>, 3> kStreamKinds{{
     {StreamFrom::Kind::Cursor, "cursor"},
 }};
 
-constexpr std::array<WireEnumEntry<HostNoticeKind>, 4> kHostNoticeKinds{{
+constexpr std::array<WireEnumEntry<HostNoticeKind>, 5> kHostNoticeKinds{{
     {HostNoticeKind::SessionClosed, "session_closed"},
     {HostNoticeKind::SessionCreated, "session_created"},
     {HostNoticeKind::LeaseLost, "lease_lost"},
     {HostNoticeKind::DaemonShuttingDown, "daemon_shutting_down"},
+    {HostNoticeKind::McpServerStatus, "mcp_server_status"},
 }};
 
 constexpr std::array<WireEnumEntry<PermissionAnswer>, 2> kPermissionAnswers{{

@@ -82,7 +82,74 @@ PermissionConfig to_permission_config(const Config& config) {
     add_rule(permissions, "write_file", write, "default.write_file");
     add_rule(permissions, "edit_file", write, "default.edit_file");
     add_rule(permissions, "shell", shell, "default.shell");
+
+    for (const McpServerSettings& server : config.mcp.servers) {
+        if (!server.enabled || server.id.empty()) {
+            continue;
+        }
+        ToolDefault fallback;
+        fallback.prefix = "mcp." + server.id + ".";
+        fallback.verdict = parse_verdict(server.default_verdict, "mcp.default_verdict");
+        fallback.id = "mcp." + server.id + ".default";
+        permissions.tool_defaults.push_back(std::move(fallback));
+    }
     return permissions;
+}
+
+McpConfig to_mcp_config(const Config& config) {
+    McpConfig mcp;
+    mcp.enabled = config.mcp.enabled;
+    mcp.max_servers = config.mcp.max_servers;
+    mcp.max_inflight_calls_per_server = config.mcp.max_inflight_calls_per_server;
+    mcp.startup_deadline = std::chrono::milliseconds{config.mcp.startup_deadline_ms};
+    mcp.handshake_timeout = std::chrono::milliseconds{config.mcp.handshake_timeout_ms};
+    mcp.list_timeout = std::chrono::milliseconds{config.mcp.list_timeout_ms};
+    mcp.list_max_pages = config.mcp.list_max_pages;
+    mcp.reconnect_max_attempts = config.mcp.reconnect_max_attempts;
+    mcp.reconnect_initial_backoff =
+        std::chrono::milliseconds{config.mcp.reconnect_initial_backoff_ms};
+    mcp.reconnect_max_backoff =
+        std::chrono::milliseconds{config.mcp.reconnect_max_backoff_ms};
+    mcp.reconnect_jitter = config.mcp.reconnect_jitter;
+    mcp.reconnect_stable_window =
+        std::chrono::milliseconds{config.mcp.reconnect_stable_window_ms};
+    mcp.ping_interval = std::chrono::milliseconds{config.mcp.ping_interval_ms};
+    mcp.shutdown_grace = std::chrono::milliseconds{config.mcp.shutdown_grace_ms};
+    mcp.max_frame_bytes = config.mcp.max_frame_bytes;
+    mcp.allow_network_servers = config.mcp.allow_network_servers;
+    if (mcp.max_frame_bytes > protocol::TransportLimits{}.max_frame_bytes) {
+        throw ConfigError(
+            "[mcp].max_frame_bytes must be <= protocol::TransportLimits::max_frame_bytes");
+    }
+
+    for (const McpServerSettings& settings : config.mcp.servers) {
+        McpServerConfig server;
+        server.id.value = settings.id;
+        server.enabled = settings.enabled;
+        server.required = settings.required;
+        const std::optional<McpTransportKind> transport =
+            parse_mcp_transport(settings.transport);
+        if (!transport.has_value()) {
+            throw ConfigError("[mcp.server].transport must be one of: stdio, http_sse (got '" +
+                              settings.transport + "')");
+        }
+        server.transport = *transport;
+        server.command = settings.command;
+        server.args = settings.args;
+        server.env = settings.env;
+        server.cwd = settings.cwd;
+        server.url = settings.url;
+        server.header_env = settings.header_env;
+        server.protocol_version = settings.protocol_version;
+        server.allowed_tools = settings.allowed_tools;
+        server.denied_tools = settings.denied_tools;
+        server.default_verdict =
+            parse_verdict(settings.default_verdict, "mcp.default_verdict");
+        server.call_timeout = std::chrono::milliseconds{settings.call_timeout_ms};
+        server.max_result_bytes = settings.max_result_bytes;
+        mcp.servers.push_back(std::move(server));
+    }
+    return mcp;
 }
 
 AgentConfig to_agent_config(const Config& config) {

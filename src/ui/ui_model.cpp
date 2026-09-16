@@ -364,6 +364,11 @@ void UiModel::setSessionReadOnly(const SessionId& id, bool read_only) {
     }
 }
 
+void UiModel::setMcpStatus(std::string detail) {
+    mcp_status = std::move(detail);
+    dirty.markAggregate();
+}
+
 void UiModel::apply(const UiEvent& event) {
     const bool conversation_event = std::visit(
         [](const auto& e) {

@@ -27,6 +27,7 @@
 #include <string>
 
 #include "ymh/config/config.hpp"
+#include "ymh/mcp/mcp_client.hpp"
 #include "ymh/session/session_persistence.hpp"
 
 namespace ymh {
@@ -90,6 +91,11 @@ struct WorkspaceRuntimeOptions {
     // null, `pty()` is the internal `UnavailablePtyService`. The caller owns
     // the executor and must outlive the runtime.
     Executor* executor = nullptr;
+
+    // 15 §11.2 test seam: when set, the owned `McpManager` uses this factory
+    // instead of the production stdio factory, so tests can inject a scripted
+    // client. Never set in production.
+    McpClientFactory mcp_client_factory;
 };
 
 class WorkspaceRuntime {

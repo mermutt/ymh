@@ -235,6 +235,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
         switch (event.type) {
             case EventType::SessionStarted:
             case EventType::SessionEnded:
+            case EventType::McpServerStatusChanged:
                 break;
             case EventType::TurnStarted: {
                 const auto& value = event.payload.get<payload::TurnStarted>();
