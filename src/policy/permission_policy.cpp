@@ -125,12 +125,34 @@ std::string path_pattern(const PermissionRequest& request) {
 }
 
 std::string command_pattern(const PermissionRequest& request) {
-    if (request.tool != "shell" || !request.arguments.is_object() ||
-        !request.arguments.contains("command") ||
-        !request.arguments["command"].is_string()) {
+    if (!request.arguments.is_object()) {
         return {};
     }
-    return request.arguments["command"].get<std::string>();
+    if (request.tool == "shell" && request.arguments.contains("command") &&
+        request.arguments["command"].is_string()) {
+        return request.arguments["command"].get<std::string>();
+    }
+    if (request.tool == "terminal") {
+        if (request.arguments.contains("command") &&
+            request.arguments["command"].is_string()) {
+            return request.arguments["command"].get<std::string>();
+        }
+        if (request.arguments.contains("argv") &&
+            request.arguments["argv"].is_array()) {
+            std::string joined;
+            for (const auto& element : request.arguments["argv"]) {
+                if (!element.is_string()) {
+                    continue;
+                }
+                if (!joined.empty()) {
+                    joined.push_back(' ');
+                }
+                joined += element.get<std::string>();
+            }
+            return joined;
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -140,7 +162,7 @@ bool tool_is_mutating(const PermissionRequest& request) noexcept {
         return true;
     }
     static constexpr std::string_view kMutating[] = {
-        "write_file", "edit_file", "shell", "pty", "checkout", "git_checkout",
+        "write_file", "edit_file", "shell", "pty", "terminal", "checkout", "git_checkout",
     };
     for (std::string_view name : kMutating) {
         if (request.tool == name) {

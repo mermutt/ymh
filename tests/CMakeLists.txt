@@ -14,6 +14,7 @@ add_executable(ymh_tests
     unit/path_safety_test.cpp
     unit/output_test.cpp
     unit/process_test.cpp
+    unit/pty_test.cpp
     unit/registry_test.cpp
     unit/tools_test.cpp
     unit/git_tools_test.cpp
@@ -55,6 +56,7 @@ add_executable(ymh_tests
     unit/provider_factory_test.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp
+    integration_pty_test.cpp
     integration_two_process_test.cpp
     integration_live_e2e_test.cpp
 )

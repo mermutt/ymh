@@ -111,22 +111,6 @@ void fill_from_status(int status, ProcessResult& result) {
     }
 }
 
-// The sole reaper for tool children (E8, M-F5): always a specific pid, never a
-// global `waitpid(-1)` sweep, which would race this path and destroy the exit
-// status it needs. The daemon installs no SIGCHLD reaper; see
-// `ymh/execution/signal_policy.hpp`.
-ProcessResult reap(int pid) {
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR) {
-            break;
-        }
-    }
-    ProcessResult result;
-    fill_from_status(status, result);
-    return result;
-}
-
 void terminate_group(int pid, std::chrono::milliseconds grace, ProcessResult& result) {
     ::kill(-pid, SIGTERM);
     int status = 0;
@@ -149,6 +133,33 @@ void terminate_group(int pid, std::chrono::milliseconds grace, ProcessResult& re
 }
 
 } // namespace
+
+// The sole reaper for tool children (E8, M-F5): always a specific pid, never a
+// global `waitpid(-1)` sweep, which would race this path and destroy the exit
+// status it needs. The daemon installs no SIGCHLD reaper; see
+// `ymh/execution/signal_policy.hpp`.
+std::optional<ProcessResult> tryReap(int pid) {
+    int status = 0;
+    const pid_t child = ::waitpid(pid, &status, WNOHANG);
+    if (child != pid) {
+        return std::nullopt;
+    }
+    ProcessResult result;
+    fill_from_status(status, result);
+    return result;
+}
+
+ProcessResult reap(int pid) {
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            break;
+        }
+    }
+    ProcessResult result;
+    fill_from_status(status, result);
+    return result;
+}
 
 LocalProcessService::LocalProcessService(std::chrono::milliseconds terminate_grace)
     : terminate_grace_(terminate_grace) {}

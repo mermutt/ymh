@@ -32,6 +32,14 @@ include(CompilerWarnings)
 
 option(YMH_BUILD_TESTS "Build the ymh test suite" ON)
 
+# 14 §13.4: build the whole suite with ThreadSanitizer to exercise the PTY I/O
+# path (`cmake -DYMH_TSAN=ON`). Off by default so the normal build is unchanged.
+option(YMH_TSAN "Build with ThreadSanitizer" OFF)
+if(YMH_TSAN)
+    add_compile_options(-fsanitize=thread -g -O1)
+    add_link_options(-fsanitize=thread)
+endif()
+
 # ---------------------------------------------------------------------------
 # Third-party dependencies (FetchContent)
 #
@@ -221,6 +229,7 @@ add_library(ymh_execution STATIC
     src/execution/environment.cpp
     src/execution/git_service.cpp
     src/execution/resource_governor.cpp
+    src/execution/pty.cpp
 )
 add_library(ymh::execution ALIAS ymh_execution)
 
@@ -234,6 +243,7 @@ target_link_libraries(ymh_execution
         ymh::core
         nlohmann_json::nlohmann_json
     PRIVATE
+        asio::asio
         PkgConfig::LIBGIT2
         ymh::warnings
 )
@@ -294,6 +304,7 @@ add_library(ymh_tools STATIC
     src/tools/tool_registry.cpp
     src/tools/builtin_tools.cpp
     src/tools/git_tools.cpp
+    src/tools/terminal_tool.cpp
 )
 add_library(ymh::tools ALIAS ymh_tools)
 

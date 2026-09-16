@@ -1,10 +1,11 @@
 #pragma once
 
-// PTY, git, and LSP service seams (07 §6.5-§6.7). All three are Phase 2
-// capabilities: the canonical `ExecutionEnvironment` (§18) exposes them so no
-// tool changes when they land, but v1 registers no PTY/git/LSP-backed tool and
-// `lsp()` returns nullptr. `Unavailable*` are the v1 local implementations;
-// they fail loud rather than pretend.
+// Git and LSP service seams (07 §6.5-§6.7). Both are Phase 2 capabilities: the
+// canonical `ExecutionEnvironment` (§18) exposes them so no tool changes when
+// they land, but v1 registers no git/LSP-backed tool and `lsp()` returns
+// nullptr. `Unavailable*` are the v1 local implementations; they fail loud
+// rather than pretend. The PTY seam moved to `ymh/execution/pty.hpp` (14 §3/§4)
+// and is re-exported here so existing includers keep compiling.
 
 #include <filesystem>
 #include <memory>
@@ -15,44 +16,9 @@
 #include "ymh/core/cancellation.hpp"
 #include "ymh/core/task.hpp"
 #include "ymh/execution/errors.hpp"
+#include "ymh/execution/pty.hpp"
 
 namespace ymh {
-
-template <class T>
-class Stream;
-
-struct PtyRequest {
-    std::string           executable;
-    std::vector<std::string> argv;
-    std::filesystem::path cwd;
-    int                   rows = 24;
-    int                   cols = 80;
-};
-
-class PtySession {
-public:
-    virtual ~PtySession() = default;
-
-    virtual void                     write(std::string_view) = 0;
-    virtual Stream<std::string>      output() = 0;
-    virtual void                     resize(int rows, int cols) = 0;
-    virtual void                     terminate() = 0;   // SIGHUP -> grace -> SIGKILL
-};
-
-class PtyService {
-public:
-    virtual ~PtyService() = default;
-
-    virtual Task<std::unique_ptr<PtySession>> open(const PtyRequest&,
-                                                   CancellationToken) = 0;
-};
-
-class UnavailablePtyService final : public PtyService {
-public:
-    Task<std::unique_ptr<PtySession>> open(const PtyRequest&, CancellationToken) override {
-        throw ToolError{ToolErrorCode::Internal, "PTY is not available in v1"};
-    }
-};
 
 struct GitQuery {
     std::string           ref;

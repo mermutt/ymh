@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -55,5 +56,13 @@ public:
 private:
     std::chrono::milliseconds terminate_grace_;
 };
+
+// The process layer's single specific-pid reaper, exposed so the PTY pump can
+// collect one child without a second `waitpid` (14 §7.2, E-P5):
+//   * tryReap — `waitpid(pid, &st, WNOHANG)`; nullopt while running. Loop-safe.
+//   * reap    — blocking `waitpid(pid, &st, 0)`; OFF-LOOP callers only.
+// A direct `waitpid` in `execution/pty` is a defect (P6).
+[[nodiscard]] std::optional<ProcessResult> tryReap(int pid);
+[[nodiscard]] ProcessResult                reap(int pid);
 
 } // namespace ymh

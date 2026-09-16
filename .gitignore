@@ -16,3 +16,4 @@ compile_commands.json
 
 # ymh per-workspace state (sessions.db, sessions.lock, host.sock, host.log)
 .ymh/
+build-tsan/

@@ -47,6 +47,12 @@ class TransportServer {
 public:
     TransportServer(ProtocolServer& server, std::string socket_path,
                     TransportLimits limits = {});
+
+    // Additive (04 daemon loop ownership, 14 E-P3): run on a caller-owned
+    // io_context so the daemon can share one loop with the PTY pump.
+    TransportServer(ProtocolServer& server, std::string socket_path,
+                    asio::io_context& io, TransportLimits limits = {});
+
     ~TransportServer();
 
     TransportServer(const TransportServer&) = delete;
@@ -55,6 +61,12 @@ public:
     void start();
     void stop();
 
+    // Invoked on the io runner thread immediately before `run()`. Lets the
+    // daemon bind an `AsioExecutor`'s thread affinity (14 §5.1, E-P3).
+    void setRunnerStartHook(std::function<void()> hook) {
+        on_runner_start_ = std::move(hook);
+    }
+
     // D1: marshal `fn` onto the transport's io thread. Safe from any thread.
     // Returns false (and drops `fn`) before start() or after stop() has begun.
     bool post(std::function<void()> fn);
@@ -62,7 +74,7 @@ public:
     // D1: the transport's io_context, for constructing dependent steady_timers
     // and scheduling on the same thread. Never run() it from the caller; the
     // transport owns the single runner thread.
-    [[nodiscard]] asio::io_context& io() noexcept { return io_; }
+    [[nodiscard]] asio::io_context& io() noexcept { return *io_; }
 
     [[nodiscard]] bool running() const noexcept {
         return started_.load() && !stopping_.load();
@@ -76,7 +88,8 @@ private:
     ProtocolServer&                          server_;
     std::string                              socket_path_;
     TransportLimits                          limits_;
-    asio::io_context                         io_;
+    std::unique_ptr<asio::io_context>        owned_io_;
+    asio::io_context*                        io_ = nullptr;
     asio::local::stream_protocol::acceptor   acceptor_;
     std::thread                              thread_;
     std::atomic<bool>                        stopping_{false};
@@ -84,6 +97,7 @@ private:
     std::mutex                               post_mutex_;
     std::optional<ino_t>                     own_inode_;
     std::set<std::shared_ptr<SocketSession>> sessions_;
+    std::function<void()>                    on_runner_start_;
 };
 
 } // namespace ymh::protocol

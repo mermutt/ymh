@@ -25,6 +25,7 @@ struct ResourceCaps {
     std::size_t max_session_ptys{2};             // F8
     std::size_t session_output_ring_bytes{1u << 20};   // F5, §20.10
     std::size_t active_output_ring_bytes{4u << 20};    // F5
+    std::size_t pty_output_ring_bytes{256u * 1024u};   // E-P4: per-PTY ring
 };
 
 // Forward-declared: owned by spec 06 (§5.9) and not used by tools. Declared so

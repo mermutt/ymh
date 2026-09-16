@@ -7,12 +7,15 @@
 #include <string>
 #include <utility>
 
+#include <asio.hpp>
+
 #include "support/test_env.hpp"
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
+#include "ymh/execution/asio_executor.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/session/events.hpp"
@@ -210,6 +213,35 @@ TEST_F(WorkspaceRuntimeTest, HeldFlockMapsToWorkspaceBusy) {
         make_workspace_runtime(options_for(workspace));
     ASSERT_FALSE(runtime_result.has_value());
     EXPECT_EQ(runtime_result.error().code, WorkspaceRuntimeErrorCode::WorkspaceBusy);
+}
+
+TEST_F(WorkspaceRuntimeTest, ExecutorInjectionEnablesPtyAndTerminalTool) {
+    TempWorkspace workspace("runtime_pty");
+    asio::io_context io;
+    AsioExecutor     executor(io);
+
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.executor                = &executor;
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    EXPECT_TRUE(runtime.environment().pty().available());
+    EXPECT_TRUE(runtime.tools().contains(ToolName{"terminal"}));
+    EXPECT_TRUE(runtime.tools().contains(ToolName{"shell"}));
+}
+
+TEST_F(WorkspaceRuntimeTest, WithoutExecutorPtyIsUnavailableAndToolAbsent) {
+    TempWorkspace workspace("runtime_no_pty");
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(options_for(workspace));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    EXPECT_FALSE(runtime.environment().pty().available());
+    EXPECT_FALSE(runtime.tools().contains(ToolName{"terminal"}));
 }
 
 } // namespace

@@ -31,6 +31,10 @@ struct ToolConfig {
 
     // Subprocess/PTY teardown grace (§5.3, §6.5, §9.3).
     std::chrono::milliseconds terminate_grace{2'000};
+
+    // Outbound PTY write queue bound (14 §3.2, E-P8). A `write` is admitted
+    // only if the whole payload fits; the pump drains in <= 64 KiB chunks.
+    std::size_t pty_write_queue_cap{256u * 1024u};
 };
 
 } // namespace ymh

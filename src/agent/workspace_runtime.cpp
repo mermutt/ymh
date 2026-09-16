@@ -15,11 +15,13 @@
 #include "ymh/execution/config.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/output.hpp"
+#include "ymh/execution/pty.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/tools/builtin_tools.hpp"
+#include "ymh/tools/terminal_tool.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
 namespace ymh {
@@ -33,12 +35,20 @@ public:
          ProviderRegistry providers,
          LLMProviderConfig provider_config,
          std::unique_ptr<LLMProvider> provider,
-         bool attach_permission_gate)
+         bool attach_permission_gate,
+         Executor* executor)
         : root_(std::move(root)),
           store_(std::move(store)),
           persistence_(persistence),
-          environment_(std::make_unique<LocalEnvironment>(root_, SandboxMode::Workspace,
-                                                          tool_config_)),
+          tool_config_(),
+          governor_(),
+          pty_events_(),
+          pty_(executor != nullptr
+                   ? std::make_unique<LocalPtyService>(*executor, governor_,
+                                                       pty_events_, tool_config_)
+                   : nullptr),
+          environment_(std::make_unique<LocalEnvironment>(
+              root_, SandboxMode::Workspace, tool_config_, pty_.get())),
           permission_config_(to_permission_config(config)),
           policy_(permission_config_),
           gate_(policy_, permission_config_),
@@ -53,6 +63,9 @@ public:
           sessions_(*store_, bus_) {
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
             registrations_.push_back(tools_.add(std::move(tool)));
+        }
+        if (environment_->pty().available()) {
+            registrations_.push_back(tools_.add(make_terminal_tool(tool_config_)));
         }
         tools_.freeze();
 
@@ -85,8 +98,10 @@ public:
     SessionPersistence*                persistence_ = nullptr;
     EventBus                           bus_;
     ToolConfig                         tool_config_;
-    std::unique_ptr<LocalEnvironment>  environment_;
     ResourceGovernor                   governor_;
+    NoopPtyEventSink                   pty_events_;
+    std::unique_ptr<LocalPtyService>   pty_;
+    std::unique_ptr<LocalEnvironment>  environment_;
     ToolRegistry                       tools_;
     std::vector<ToolRegistry::Registration> registrations_;
     PermissionConfig                   permission_config_;
@@ -179,7 +194,7 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
         auto impl = std::make_unique<Impl>(std::move(options.config), std::move(options.root),
                                            std::move(store), persistence, std::move(providers),
                                            std::move(provider_config), std::move(provider),
-                                           options.attach_permission_gate);
+                                           options.attach_permission_gate, options.executor);
         return std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
     } catch (const std::exception& build_error) {
         return std::unexpected(

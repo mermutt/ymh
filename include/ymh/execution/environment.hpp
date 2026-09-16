@@ -46,10 +46,12 @@ public:
 class LocalEnvironment final : public ExecutionEnvironment {
 public:
     // Throws std::invalid_argument when `root` is absent or not a directory.
-    // The stored root is realpath-canonical.
+    // The stored root is realpath-canonical. `pty` is borrowed (14 §4.5, E-P7);
+    // nullptr keeps the internal `UnavailablePtyService` (the v1 default).
     explicit LocalEnvironment(std::filesystem::path root,
                               SandboxMode mode = SandboxMode::Workspace,
-                              ToolConfig config = {});
+                              ToolConfig config = {},
+                              PtyService* pty = nullptr);
 
     const std::filesystem::path& root() const override { return root_; }
     std::filesystem::path        resolve(std::string_view path) const override;
@@ -57,7 +59,7 @@ public:
 
     Filesystem&     fs() override { return fs_; }
     ProcessService& process() override { return process_; }
-    PtyService&     pty() override { return pty_; }
+    PtyService&     pty() override { return *pty_; }
     GitService&     git() override { return git_; }
     LspService*     lsp() override { return nullptr; }
 
@@ -66,7 +68,8 @@ private:
     SandboxMode           mode_;
     LocalFilesystem       fs_;
     LocalProcessService   process_;
-    UnavailablePtyService pty_;
+    UnavailablePtyService pty_fallback_;
+    PtyService*           pty_ = nullptr;
     LibGit2GitService     git_;
 };
 
