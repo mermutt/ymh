@@ -529,7 +529,10 @@ TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {
     ForkExecLauncher                   launcher(binary_);
     std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
     HostLifecycle                      lifecycle(launcher, *registry);
-    AttachResult                       attach = lifecycle.ensureRunning(WorkspaceId{workspace_id});
+    AttachResult                       attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                       protocol::ClientRole::Supervisor});
     ASSERT_NE(attach.connection, nullptr);
     attach.connection->close();
 
@@ -670,7 +673,10 @@ TEST_F(TwoProcess, TwoSpawnsExactlyOneDaemon) {
         std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
         ForkExecLauncher                   launcher(binary_);
         HostLifecycle                      lifecycle(launcher, *registry);
-        AttachResult attach = lifecycle.ensureRunning(WorkspaceId{workspace_id});
+        AttachResult attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                       protocol::ClientRole::Supervisor});
         if (attach.connection == nullptr) {
             return false;
         }
@@ -740,7 +746,10 @@ TEST_F(TwoProcess, SigstopNeverStolen) {
     HostLifecycle    lifecycle(launcher, *registry);
     bool             refused = false;
     try {
-        AttachResult attach = lifecycle.ensureRunning(WorkspaceId{workspace_id});
+        AttachResult attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                       protocol::ClientRole::Supervisor});
         static_cast<void>(attach);
     } catch (const std::exception&) {
         refused = true;
@@ -864,7 +873,10 @@ TEST_F(TwoProcess, StaleSocketReplace) {
     ForkExecLauncher                   launcher(binary_);
     std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
     HostLifecycle                      lifecycle(launcher, *registry);
-    AttachResult                       attach = lifecycle.ensureRunning(WorkspaceId{workspace_id});
+    AttachResult                       attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                       protocol::ClientRole::Supervisor});
     ASSERT_NE(attach.connection, nullptr);
     const protocol::HelloResult hello = attach.connection->hello();
     attach.connection->close();
@@ -1202,7 +1214,10 @@ TEST_F(TwoProcess, PingKeepsIdleLinkAliveAndDetectsCrash) {
     ForkExecLauncher                   launcher(binary_);
     std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
     HostLifecycle                      lifecycle(launcher, *registry);
-    AttachResult                       attach = lifecycle.ensureRunning(WorkspaceId{workspace_id});
+    AttachResult                       attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                       protocol::ClientRole::Supervisor});
     ASSERT_NE(attach.connection, nullptr);
     attach.connection->close();
 
@@ -1211,6 +1226,65 @@ TEST_F(TwoProcess, PingKeepsIdleLinkAliveAndDetectsCrash) {
         << "the supervisor never reattached to the respawned daemon";
     EXPECT_TRUE(connection.attached());
     connection.stop();
+}
+
+TEST_F(TwoProcess, EnsureRunningCarriesAttachIdentity) {
+    ShortTempRoot root("ymh-2p-identity");
+    configure_workspace(root);
+    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write("fake.json", kFakeTextScript);
+    const std::filesystem::path script = root.path() / "fake.json";
+
+    const RegistryConfig registry_config = registry_config_for(root.state_dir());
+    const std::string    workspace_id =
+        register_workspace(registry_config, root.path(), "identity").value;
+
+    HostHarness harness(options_for(root, workspace_id, script));
+    harness.start();
+    ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
+    DaemonGuard guard(workspace_id);
+
+    ForkExecLauncher                   launcher(binary_);
+    std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+    HostLifecycle                      lifecycle(launcher, *registry);
+
+    const protocol::ClientInstanceId supervisor_id{"99999999-9999-4999-8999-999999999999"};
+    AttachResult supervisor_attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{supervisor_id, protocol::ClientRole::Supervisor});
+    ASSERT_NE(supervisor_attach.connection, nullptr);
+    const protocol::OwnershipView supervisor_view =
+        supervisor_attach.connection
+            ->request(std::string(protocol::method::kHostOwnership))
+            .get<protocol::OwnershipView>();
+    bool supervisor_seen = false;
+    for (const protocol::OwnershipView::ClientInfo& client : supervisor_view.clients) {
+        if (client.client_instance == supervisor_id.value) {
+            supervisor_seen = true;
+            EXPECT_EQ(client.role, protocol::ClientRole::Supervisor);
+        }
+    }
+    EXPECT_TRUE(supervisor_seen) << "the registered row id must match the connection instance";
+    supervisor_attach.connection->close();
+
+    const protocol::ClientInstanceId automation_id{"88888888-8888-4888-8888-888888888888"};
+    AttachResult automation_attach = lifecycle.ensureRunning(
+        WorkspaceId{workspace_id},
+        AttachIdentity{automation_id, protocol::ClientRole::Automation});
+    ASSERT_NE(automation_attach.connection, nullptr);
+    const protocol::OwnershipView automation_view =
+        automation_attach.connection
+            ->request(std::string(protocol::method::kHostOwnership))
+            .get<protocol::OwnershipView>();
+    bool automation_seen = false;
+    for (const protocol::OwnershipView::ClientInfo& client : automation_view.clients) {
+        if (client.client_instance == automation_id.value) {
+            automation_seen = true;
+            EXPECT_EQ(client.role, protocol::ClientRole::Automation);
+        }
+    }
+    EXPECT_TRUE(automation_seen) << "ymh run must attach with ClientRole::Automation";
+    automation_attach.connection->close();
 }
 
 } // namespace

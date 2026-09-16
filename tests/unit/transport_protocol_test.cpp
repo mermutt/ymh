@@ -267,6 +267,24 @@ TEST(TransportProtocol, ClientRoleParseSerializeAndDefault) {
     EXPECT_EQ(json.at("role").get<std::string>(), "automation");
 }
 
+TEST(TransportProtocol, RoleProfileDerivationAndMismatchReject) {
+    EXPECT_EQ(protocol::profile_for_role(protocol::ClientRole::Automation),
+              protocol::ServerProfile::Automation);
+    EXPECT_EQ(protocol::profile_for_role(protocol::ClientRole::Supervisor),
+              protocol::ServerProfile::Interactive);
+    EXPECT_EQ(protocol::profile_for_role(protocol::ClientRole::Observer),
+              protocol::ServerProfile::Interactive);
+
+    EXPECT_TRUE(protocol::role_matches_profile(protocol::ClientRole::Automation,
+                                               protocol::ServerProfile::Automation));
+    EXPECT_TRUE(protocol::role_matches_profile(protocol::ClientRole::Supervisor,
+                                               protocol::ServerProfile::Interactive));
+    EXPECT_FALSE(protocol::role_matches_profile(protocol::ClientRole::Automation,
+                                                protocol::ServerProfile::Interactive));
+    EXPECT_FALSE(protocol::role_matches_profile(protocol::ClientRole::Supervisor,
+                                                protocol::ServerProfile::Automation));
+}
+
 TEST(TransportProtocol, OwnershipViewRoundTrips) {
     protocol::OwnershipView view;
     view.clients = {{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", protocol::ClientRole::Supervisor, 7},

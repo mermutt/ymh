@@ -479,7 +479,11 @@ TEST(HostLifecycleTest, EnsureRunningSpawnsWhenNoClaim) {
 
     FakeLauncher  launcher;
     HostLifecycle lifecycle(launcher, *registry);
-    EXPECT_THROW(lifecycle.ensureRunning(record.id), HostError);
+    EXPECT_THROW(lifecycle.ensureRunning(
+                     record.id,
+                     AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                    protocol::ClientRole::Supervisor}),
+                 HostError);
     EXPECT_EQ(launcher.spawn_count, 1);
     EXPECT_EQ(launcher.stopped_pid, 4242);
 }
@@ -495,7 +499,11 @@ TEST(HostLifecycleTest, ReapIfStaleClearsStaleClaim) {
 
     FakeLauncher  launcher;
     HostLifecycle lifecycle(launcher, *registry);
-    EXPECT_THROW(lifecycle.ensureRunning(record.id), HostError);
+    EXPECT_THROW(lifecycle.ensureRunning(
+                     record.id,
+                     AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                    protocol::ClientRole::Supervisor}),
+                 HostError);
     const std::optional<WorkspaceRecord> refreshed = registry->findById(record.id);
     ASSERT_TRUE(refreshed.has_value());
     EXPECT_FALSE(refreshed->host.has_value());
@@ -600,7 +608,11 @@ TEST(WorkspaceHostOwnership, ProductionConstructorsArmTheWatchdog) {
 
     FakeLauncher  launcher;
     HostLifecycle lifecycle(launcher, *registry);
-    EXPECT_THROW(lifecycle.ensureRunning(record.id), HostError);
+    EXPECT_THROW(lifecycle.ensureRunning(
+                     record.id,
+                     AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                    protocol::ClientRole::Supervisor}),
+                 HostError);
     ASSERT_EQ(launcher.spawn_count, 1);
     EXPECT_TRUE(launcher.last_config.require_owner);
     EXPECT_FALSE(launcher.last_config.watchdog_disabled);

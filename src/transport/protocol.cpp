@@ -192,6 +192,15 @@ std::optional<ClientRole> parse_client_role(std::string_view name) noexcept {
     return parse_wire_enum(kClientRoles, name);
 }
 
+ServerProfile profile_for_role(ClientRole role) noexcept {
+    return role == ClientRole::Automation ? ServerProfile::Automation
+                                          : ServerProfile::Interactive;
+}
+
+bool role_matches_profile(ClientRole role, ServerProfile profile) noexcept {
+    return profile_for_role(role) == profile;
+}
+
 std::string_view to_string(ShutdownReason reason) noexcept {
     return wire_name_of(kShutdownReasons, reason);
 }

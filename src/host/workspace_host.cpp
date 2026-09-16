@@ -142,12 +142,13 @@ std::unique_ptr<HostConnection> connect_to(const std::filesystem::path& socket_p
 // to the wrong daemon.
 std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& socket_path,
                                                 const WorkspaceId&           workspace,
-                                                const HostBootId&            boot_id) {
+                                                const HostBootId&            boot_id,
+                                                const AttachIdentity&        identity) {
     auto connection = std::make_unique<HostConnection>();
     connection->connect(socket_path.string());
     const protocol::HelloResult hello =
-        connection->handshake(protocol::ServerProfile::Interactive,
-                              protocol::ClientInstanceId{generate_uuid_v4()});
+        connection->handshake(protocol::profile_for_role(identity.role),
+                              identity.client_instance, identity.role);
     if (hello.workspace.value != workspace.value || hello.boot_id.value != boot_id.value) {
         connection->close();
         throw HostError(protocol::HostErrorCode::AttachRejected,
@@ -1049,7 +1050,8 @@ ReapResult HostLifecycle::reapIfStale(const WorkspaceRecord& record) {
     return registry_.reapHost(record.id) ? ReapResult::Reaped : ReapResult::Absent;
 }
 
-AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record) {
+AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
+                                           const AttachIdentity&  identity) {
     const HostConfig                    config  = configFor(record);
     const HostLauncher::SpawnResult     spawned = launcher_.spawn(config);
     const std::chrono::steady_clock::time_point deadline =
@@ -1063,8 +1065,9 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record) {
         const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
         if (current.has_value() && current->host.has_value()) {
             try {
-                return AttachResult{
-                    connect_checked(spawned.socketPath, record.id, spawned.bootId), true};
+                return AttachResult{connect_checked(spawned.socketPath, record.id,
+                                                    spawned.bootId, identity),
+                                    true};
             } catch (const std::exception& error) {
                 last_error = error.what();
             }
@@ -1087,10 +1090,9 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record) {
         const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
         if (current.has_value() && current->host.has_value()) {
             try {
-                return AttachResult{
-                    connect_checked(current->host->socketPath, current->id,
-                                    current->host->bootId),
-                    false};
+                return AttachResult{connect_checked(current->host->socketPath, current->id,
+                                                    current->host->bootId, identity),
+                                    false};
             } catch (const std::exception& error) {
                 last_error = error.what();
             }
@@ -1101,24 +1103,25 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record) {
                     "daemon did not become ready: " + last_error);
 }
 
-AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace) {
+AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace, AttachIdentity identity) {
     const std::optional<WorkspaceRecord> record = registry_.findById(workspace);
     if (!record.has_value()) {
         throw HostError(protocol::HostErrorCode::WorkspaceMissing,
                         "no workspace row for id " + workspace.value);
     }
     if (!record->host.has_value()) {
-        return spawnAndAttach(*record);
+        return spawnAndAttach(*record, identity);
     }
     if (registry_.probeLiveness(workspace) == HostLiveness::Live) {
         // H10/H11: a held sidecar flock always means live. Attach only if the
         // hello identity matches; a mismatch is refused, never reaped, and a
         // connection failure (e.g. SIGSTOP) never spawns a second daemon.
-        return AttachResult{
-            connect_checked(record->host->socketPath, record->id, record->host->bootId), false};
+        return AttachResult{connect_checked(record->host->socketPath, record->id,
+                                            record->host->bootId, identity),
+                            false};
     }
     reapIfStale(*record);
-    return spawnAndAttach(*record);
+    return spawnAndAttach(*record, identity);
 }
 
 void HostLifecycle::detach(WorkspaceId, protocol::ClientId) {}

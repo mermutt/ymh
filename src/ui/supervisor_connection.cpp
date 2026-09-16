@@ -181,11 +181,15 @@ void SupervisorConnection::set_state(SupervisorLinkState state, std::string deta
 
 bool SupervisorConnection::attempt_attach() {
     set_state(SupervisorLinkState::Connecting, "handshake in flight");
+    if (!protocol::role_matches_profile(config_.role, config_.profile)) {
+        set_state(SupervisorLinkState::Dead, "role/profile mismatch");
+        return false;
+    }
     auto connection = std::make_unique<protocol::HostConnection>();
     try {
         connection->connect(config_.socket_path);
         const protocol::HelloResult hello = connection->handshake(
-            config_.profile, config_.client_instance, config_.handshake_timeout);
+            config_.profile, config_.client_instance, config_.role, config_.handshake_timeout);
         if (hello.workspace.value != config_.workspace.value) {
             connection->close();
             set_state(SupervisorLinkState::Dead, "attach identity mismatch (workspace)");

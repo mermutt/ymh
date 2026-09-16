@@ -45,6 +45,7 @@ add_executable(ymh_tests
     unit/ui_model_test.cpp
     unit/ui_event_adapter_test.cpp
     unit/supervisor_connection_test.cpp
+    unit/supervisor_presence_test.cpp
     unit/ui_render_golden_test.cpp
     unit/syntax_renderer_test.cpp
     unit/markdown_renderer_test.cpp
