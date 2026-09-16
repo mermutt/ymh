@@ -469,6 +469,23 @@ TEST(UiModel, CommandRegistryDispatchesBuiltins) {
     EXPECT_EQ(matches.front()->name, "help");
 }
 
+TEST(UiModel, CommandRegistryDispatchesCompact) {
+    UiModel model = make_model();
+    const CommandRegistry registry = CommandRegistry::builtin();
+    bool compacted = false;
+    CommandContext context{model};
+    context.session = model.session(kSession);
+    context.compact = [&compacted] { compacted = true; };
+
+    EXPECT_TRUE(registry.dispatch("/compact", context));
+    EXPECT_TRUE(compacted);
+
+    const std::vector<const Command*> matches = registry.complete("co");
+    ASSERT_EQ(matches.size(), 1u);
+    EXPECT_EQ(matches.front()->name, "compact");
+    EXPECT_EQ(matches.front()->description, "Summarize history to reclaim context");
+}
+
 TEST(UiModel, CommandOutputWhileScrolledRaisesUnseen) {
     UiModel model = make_model();
     const CommandRegistry registry = CommandRegistry::builtin();

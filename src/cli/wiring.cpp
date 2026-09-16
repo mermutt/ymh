@@ -100,4 +100,27 @@ AgentConfig to_agent_config(const Config& config) {
     return agent;
 }
 
+CompactionPolicy to_compaction_policy(const Config& config) {
+    const CompactionSettings& settings = config.agent.compaction;
+    CompactionPolicy          policy;
+    policy.threshold_tokens        = settings.threshold_tokens;
+    policy.threshold_ratio         = settings.threshold_ratio;
+    policy.context_window_tokens   = settings.context_window_tokens;
+    policy.reserve_output_tokens   = settings.reserve_output_tokens;
+    policy.keep_recent_turns       = settings.keep_recent_turns;
+    policy.min_prefix_messages     = settings.min_prefix_messages;
+    policy.max_summary_tokens      = settings.max_summary_tokens;
+    policy.max_summary_bytes       = settings.max_summary_bytes;
+    policy.summarizer_model        = settings.summarizer_model;
+    policy.max_compactions_per_turn = settings.max_compactions_per_turn;
+    policy.retry_on_context_length = settings.retry_on_context_length;
+    policy.enabled = settings.enabled || policy.threshold_tokens > 0 ||
+                     policy.context_window_tokens > 0;
+    if (policy.max_summary_bytes > PersistenceConfig{}.max_payload_bytes) {
+        throw ConfigError(
+            "[agent.compaction].max_summary_bytes must be <= PersistenceConfig::max_payload_bytes");
+    }
+    return policy;
+}
+
 } // namespace ymh

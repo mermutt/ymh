@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -174,6 +177,98 @@ TEST(UiEventAdapter, AggregateCountsAcrossWorkspaces) {
 
     EXPECT_EQ(model.aggregate.current.activeCount, 2u);
     EXPECT_EQ(model.aggregate.current.waitingCount, 0u);
+}
+
+Event turn_started_event(const SessionId& session, std::uint64_t turn,
+                         payload::TurnOrigin origin) {
+    Event event;
+    event.id.value = "ts-" + std::to_string(turn);
+    event.session_id = session;
+    event.type = EventType::TurnStarted;
+    event.payload = payload::TurnStarted{turn, origin};
+    return event;
+}
+
+Event turn_ended_event(const SessionId& session, std::uint64_t turn) {
+    Event event;
+    event.id.value = "te-" + std::to_string(turn);
+    event.session_id = session;
+    event.type = EventType::TurnEnded;
+    event.payload = payload::TurnEnded{turn};
+    return event;
+}
+
+Event compaction_event(const SessionId& session, Sequence boundary, std::size_t estimate,
+                       std::string model, std::string summary) {
+    Event event;
+    event.id.value = "cc-" + std::to_string(boundary);
+    event.session_id = session;
+    event.type = EventType::ContextCompaction;
+    payload::ContextCompaction payload;
+    payload.boundary      = boundary;
+    payload.tokenEstimate = estimate;
+    payload.model         = std::move(model);
+    payload.summary       = std::move(summary);
+    event.payload         = payload;
+    return event;
+}
+
+TEST(UiEventAdapter, CompactionMarkerProjectsFromEvent) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    const std::vector<UiEvent> events =
+        adapter.adapt(compaction_event(kSessionA, 8, 42, "fake-model", "the summary"));
+    ASSERT_EQ(events.size(), 1u);
+    const auto* marker = std::get_if<CompactionMarker>(&events[0].value);
+    ASSERT_NE(marker, nullptr);
+    EXPECT_EQ(marker->session, kSessionA);
+    EXPECT_EQ(marker->boundary, 8u);
+    EXPECT_EQ(marker->tokenEstimate, 42u);
+    EXPECT_EQ(marker->model, "fake-model");
+    EXPECT_EQ(marker->summary, "the summary");
+}
+
+TEST(UiEventAdapter, MaintenanceTurnEmitsCompactedNotice) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    adapter.onEvent(turn_started_event(kSessionA, 1, payload::TurnOrigin::Maintenance));
+    adapter.onEvent(compaction_event(kSessionA, 8, 42, "fake-model", "the summary"));
+    adapter.onEvent(turn_ended_event(kSessionA, 1));
+
+    const SessionUiState* state = model.session(kSessionA);
+    ASSERT_NE(state, nullptr);
+    bool marker = false;
+    bool notice = false;
+    for (const ConversationEntry& entry : state->conversation.entries) {
+        if (entry.text.find("compacted history") != std::string::npos) {
+            marker = true;
+        }
+        if (entry.text.find("compaction complete") != std::string::npos) {
+            notice = true;
+        }
+    }
+    EXPECT_TRUE(marker);
+    EXPECT_TRUE(notice);
+}
+
+TEST(UiEventAdapter, MaintenanceTurnEmitsNotNeededNotice) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    adapter.onEvent(turn_started_event(kSessionA, 1, payload::TurnOrigin::Maintenance));
+    adapter.onEvent(turn_ended_event(kSessionA, 1));
+
+    const SessionUiState* state = model.session(kSessionA);
+    ASSERT_NE(state, nullptr);
+    bool notice = false;
+    for (const ConversationEntry& entry : state->conversation.entries) {
+        if (entry.text.find("compaction skipped") != std::string::npos) {
+            notice = true;
+        }
+    }
+    EXPECT_TRUE(notice);
 }
 
 } // namespace

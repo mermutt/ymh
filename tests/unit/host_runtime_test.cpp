@@ -647,6 +647,32 @@ TEST_F(HostRuntimeTest, ActivateSuspendTracksActiveSession) {
     EXPECT_FALSE(bridge.host().hostStatus().active_session.has_value());
 }
 
+TEST_F(HostRuntimeTest, CompactSessionSubmitsMaintenanceTurn) {
+    Bridge bridge("hr_compact");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+
+    const RpcFailure missing =
+        expect_rpc([&] { bridge.host().compactSession(SessionId{"missing"}); });
+    EXPECT_EQ(missing.code, protocol::code_value(protocol::AppCode::UnknownSession));
+    EXPECT_EQ(missing.kind, "UnknownSession");
+
+    EXPECT_NO_THROW(bridge.host().compactSession(created.session));
+
+    bool saw_terminal = false;
+    for (int attempt = 0; attempt < 200 && !saw_terminal; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        for (const EventRecord& record :
+             bridge.runtime().sessions().session(created.session).events()) {
+            if (record.event.type == EventType::TurnEnded ||
+                record.event.type == EventType::TurnCancelled ||
+                record.event.type == EventType::TurnFailed) {
+                saw_terminal = true;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_terminal);
+}
+
 TEST_F(HostRuntimeTest, CommittedEventsStreamToSubscribedClientInOrder) {
     Bridge bridge("hr_stream");
     const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());

@@ -45,6 +45,10 @@ enum class TurnOrigin : std::uint8_t {
     Steer,
     FollowUp,
     Injection,
+    // The dedicated maintenance turn that services a manual `/compact`
+    // (13-context-compaction.md §6.7, errata A1). Distinct from `Injection`,
+    // which is reserved for a `ContextInjected` that materializes as a turn.
+    Maintenance,
 };
 
 struct TurnStarted {

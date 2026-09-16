@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <functional>
 #include <optional>
 #include <string>
@@ -18,6 +19,7 @@
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/chunk_coalescer.hpp"
+#include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/core/cancellation.hpp"
@@ -50,6 +52,10 @@ struct AgentServices {
     Logger*               logger = nullptr;
     OutputSink*           output = nullptr;
     Compactor*            compactor = nullptr;
+    // The rich compactor the loop calls for `compact()`/`CompactionResult`
+    // (13-context-compaction.md §5.2, errata A3); the frozen `compactor` seam
+    // above remains for the legacy path.
+    ContextCompactor*     context_compactor = nullptr;
     TokenEstimator*       estimator = nullptr;
     LLMProvider*          provider = nullptr;
     LLMProviderConfig     provider_config;
@@ -81,6 +87,12 @@ public:
     void dispose() override;
     void whenIdle(std::function<void()> callback) override;
 
+    // Additive enqueue target for the manual `/compact` path
+    // (13-context-compaction.md §6.8, errata A5). Enqueue-only, executor-thread
+    // confined: returns `Queued` once the `Compact` item is accepted, or the
+    // typed rejection. Never appends inline.
+    std::expected<CompactionOutcome, AgentError> requestCompaction();
+
     Task<void> run(CancellationToken sessionCancel);
     void       activate();
     void       suspend();
@@ -93,6 +105,7 @@ private:
         FollowUp,
         Steer,
         Inject,
+        Compact,
     };
 
     struct InboxItem {
@@ -106,11 +119,12 @@ private:
     [[nodiscard]] bool        hasTurnTrigger() const noexcept;
     InboxResult               enqueue(InboxItem item);
     void                      runTurn();
+    void                      runMaintenanceTurn(TurnId turn);
     void                      drainFoldedItems();
     void                      appendUserMessage(const Message& message);
     void                      appendContextInjected(const ContextMessage& context);
     void                      appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message);
-    void                      runCompaction(const std::vector<Message>& messages);
+    CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn);
     [[nodiscard]] LLMRequest  buildRequest(const std::vector<Message>& messages) const;
     bool                      executeToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
     void                      flushIdleCallbacks();
@@ -124,6 +138,8 @@ private:
     AgentState                           state_ = AgentState::Idle;
     bool                                 disposed_ = false;
     bool                                 running_ = false;
+    bool                                 pending_maintenance_failure_ = false;
+    std::size_t                          compactions_this_turn_ = 0;
     CancellationSource                   turn_cancel_;
     std::string                          cancel_reason_;
     std::vector<std::function<void()>>   idle_callbacks_;

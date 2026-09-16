@@ -1,12 +1,15 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 #include "ymh/agent/agent_registry.hpp"
+#include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/output.hpp"
@@ -37,8 +40,10 @@ inline AgentServices make_agent_services(SessionManager& sessions,
                                          OutputSink& output,
                                          LLMProvider& provider,
                                          LLMPool& pool,
+                                         TokenEstimator& estimator,
                                          AgentServices::PermissionResolver resolver,
-                                         Compactor* compactor) {
+                                         Compactor* compactor,
+                                         ContextCompactor* context_compactor = nullptr) {
     AgentServices services;
     services.sessions            = &sessions;
     services.governor            = &governor;
@@ -51,7 +56,9 @@ inline AgentServices make_agent_services(SessionManager& sessions,
     services.output              = &output;
     services.provider            = &provider;
     services.pool                = &pool;
+    services.estimator           = &estimator;
     services.compactor           = compactor;
+    services.context_compactor   = context_compactor;
     services.permission_resolver = std::move(resolver);
     return services;
 }
@@ -65,7 +72,9 @@ struct AgentEnv {
              bool register_builtins = false,
              std::size_t pool_capacity = 4,
              Compactor* compactor = nullptr,
-             bool use_permission_gate = false)
+             bool use_permission_gate = false,
+             std::optional<CompactionPolicy> compaction = std::nullopt,
+             WallClock wall_clock = std::chrono::system_clock::now)
         : workspace(prefix),
           sessions(store, bus),
           env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
@@ -75,9 +84,14 @@ struct AgentEnv {
                                    : nullptr),
           assembler(tools, config.system_prompt),
           pool(pool_capacity),
+          context_compactor(compaction.has_value()
+                                ? std::make_unique<ContextCompactor>(*this->provider, pool, estimator,
+                                                                     *compaction,
+                                                                     std::move(wall_clock))
+                                : nullptr),
           registry(make_agent_services(sessions, governor, tools, policy, gate.get(), assembler, env,
-                                        logger, sink, *this->provider, pool, std::move(resolver),
-                                        compactor),
+                                        logger, sink, *this->provider, pool, estimator,
+                                        std::move(resolver), compactor, context_compactor.get()),
                    std::move(config)) {
         if (register_builtins) {
             for (std::unique_ptr<Tool>& tool : make_builtin_tools()) {
@@ -119,6 +133,7 @@ struct AgentEnv {
     SessionContextAssembler assembler;
     DefaultTokenEstimator estimator;
     LLMPool pool;
+    std::unique_ptr<ContextCompactor> context_compactor;
     AgentRegistry registry;
 };
 

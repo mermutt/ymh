@@ -227,6 +227,36 @@ TEST(TransportServer, AutomationCannotCallOperatorControls) {
               protocol::code_value(protocol::AppCode::MethodNotAllowedForProfile));
 }
 
+TEST(TransportServer, SessionCompactAcksQueuedAndIsInteractiveOnly) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+    nlohmann::json  params{{"session", session.value}};
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionCompact, params));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].at("result").at("outcome").get<std::string>(), "Queued");
+    ASSERT_EQ(harness.host.calls.size(), 1u);
+    EXPECT_EQ(harness.host.calls[0], "session.compact");
+}
+
+TEST(TransportServer, AutomationCannotCallSessionCompact) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Automation, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+    nlohmann::json  params{{"session", session.value}};
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionCompact, params));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]),
+              protocol::code_value(protocol::AppCode::MethodNotAllowedForProfile));
+    EXPECT_TRUE(harness.host.calls.empty());
+}
+
 TEST(TransportServer, PingAndStatus) {
     Harness harness;
     Peer* peer = harness.open();

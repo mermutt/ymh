@@ -149,6 +149,7 @@ public:
     void                     deleteSession(const SessionId& id) override;
     void                     activateSession(const SessionId& id) override;
     void                     suspendSession(const SessionId& id) override;
+    void                     compactSession(const SessionId& id) override;
 
     void        agentPrompt(const SessionId& id, const nlohmann::json& message) override;
     void        agentFollowup(const SessionId& id, const nlohmann::json& message) override;

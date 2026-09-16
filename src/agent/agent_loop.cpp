@@ -83,14 +83,14 @@ bool AgentLoop::disposed() const noexcept {
 bool AgentLoop::hasTurnTrigger() const noexcept {
     for (const InboxItem& item : inbox_) {
         if (item.kind == InboxKind::Send || item.kind == InboxKind::FollowUp ||
-            item.kind == InboxKind::Steer) {
+            item.kind == InboxKind::Steer || item.kind == InboxKind::Compact) {
             return true;
         }
         if (item.kind == InboxKind::Inject && item.context.startsTurn) {
             return true;
         }
     }
-    return false;
+    return pending_maintenance_failure_;
 }
 
 bool AgentLoop::hasPendingWork() const noexcept {
@@ -147,11 +147,22 @@ InboxResult AgentLoop::enqueue(InboxItem item) {
 }
 
 void AgentLoop::activate() {
-    if (disposed_ || running_ || state_ == AgentState::Error) {
+    if (disposed_ || running_) {
         return;
     }
     running_ = true;
-    while (!disposed_ && state_ != AgentState::Error && hasTurnTrigger()) {
+    while (!disposed_ && hasTurnTrigger()) {
+        if (pending_maintenance_failure_) {
+            pending_maintenance_failure_ = false;
+            const TurnId turn = session_.nextTurnId();
+            session_.append(payload::TurnStarted{turn, payload::TurnOrigin::Maintenance});
+            appendTurnFailed(turn, AgentErrorCode::InboxFull,
+                             "compaction request rejected: inbox full");
+            continue;
+        }
+        if (state_ == AgentState::Error) {
+            break;
+        }
         runTurn();
     }
     running_ = false;
@@ -179,6 +190,40 @@ void AgentLoop::suspend() {
     turn_cancel_.cancel();
 }
 
+std::expected<CompactionOutcome, AgentError> AgentLoop::requestCompaction() {
+    if (disposed_) {
+        return std::unexpected(AgentError{AgentErrorCode::AgentDisposed, "agent disposed"});
+    }
+    if (inbox_.size() >= config_.max_inbox) {
+        pending_maintenance_failure_ = true;
+        if (!running_) {
+            if (state_ == AgentState::Error) {
+                state_ = AgentState::Idle;
+            }
+            activate();
+        }
+        return std::unexpected(AgentError{AgentErrorCode::InboxFull, "inbox full"});
+    }
+    InboxItem item;
+    item.kind   = InboxKind::Compact;
+    item.origin = payload::TurnOrigin::Maintenance;
+    const InboxResult queued = enqueue(std::move(item));
+    if (queued == InboxResult::Accepted) {
+        return CompactionOutcome::Queued;
+    }
+    if (queued == InboxResult::AgentDisposed) {
+        return std::unexpected(AgentError{AgentErrorCode::AgentDisposed, "agent disposed"});
+    }
+    pending_maintenance_failure_ = true;
+    if (!running_) {
+        if (state_ == AgentState::Error) {
+            state_ = AgentState::Idle;
+        }
+        activate();
+    }
+    return std::unexpected(AgentError{AgentErrorCode::InboxFull, "inbox full"});
+}
+
 void AgentLoop::dispose() {
     if (disposed_) {
         return;
@@ -190,6 +235,7 @@ void AgentLoop::dispose() {
         turn_cancel_.cancel();
     }
     inbox_.clear();
+    pending_maintenance_failure_ = false;
     state_   = AgentState::Idle;
     running_ = false;
     flushIdleCallbacks();
@@ -250,15 +296,29 @@ void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string m
     state_ = AgentState::Error;
 }
 
-void AgentLoop::runCompaction(const std::vector<Message>& messages) {
-    if (services_.compactor == nullptr) {
-        return;
+CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages, TurnId turn) {
+    if (services_.context_compactor != nullptr) {
+        CompactionResult result =
+            services_.context_compactor->compact(session_, messages, turn_cancel_.token());
+        if (result.outcome == CompactionOutcome::Compacted && result.compaction.has_value()) {
+            session_.append(*result.compaction);
+            ++compactions_this_turn_;
+            if (result.usage.has_value()) {
+                session_.append(payload::TokenUsage{*result.usage, turn});
+            }
+        }
+        return result.outcome;
     }
-    std::optional<payload::ContextCompaction> compaction =
-        services_.compactor->run(session_, messages, turn_cancel_.token());
-    if (compaction.has_value()) {
-        session_.append(*compaction);
+    if (services_.compactor != nullptr) {
+        std::optional<payload::ContextCompaction> compaction =
+            services_.compactor->run(session_, messages, turn_cancel_.token());
+        if (compaction.has_value()) {
+            session_.append(*compaction);
+            ++compactions_this_turn_;
+            return CompactionOutcome::Compacted;
+        }
     }
+    return CompactionOutcome::NotNeeded;
 }
 
 LLMRequest AgentLoop::buildRequest(const std::vector<Message>& messages) const {
@@ -401,6 +461,44 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
     return true;
 }
 
+void AgentLoop::runMaintenanceTurn(TurnId turn) {
+    session_.append(payload::TurnStarted{turn, payload::TurnOrigin::Maintenance});
+    turn_cancel_ = CancellationSource{};
+    cancel_reason_ = "user";
+    compactions_this_turn_ = 0;
+
+    const StepId step = session_.nextStepId();
+    session_.append(payload::StepStarted{turn, step});
+    state_ = AgentState::Thinking;
+
+    if (services_.context == nullptr) {
+        appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, "no context assembler");
+        return;
+    }
+    std::vector<Message> messages;
+    try {
+        messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+    } catch (const std::exception& error) {
+        appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
+        return;
+    }
+
+    const CompactionOutcome outcome = runCompaction(messages, turn);
+    if (outcome == CompactionOutcome::Cancelled) {
+        const std::string reason = cancel_reason_.empty() ? std::string{"user"} : cancel_reason_;
+        session_.append(payload::TurnCancelled{turn, reason});
+        state_ = AgentState::Idle;
+        return;
+    }
+    if (outcome == CompactionOutcome::Failed) {
+        appendTurnFailed(turn, AgentErrorCode::CompactionFailed, "compaction failed");
+        return;
+    }
+    session_.append(payload::StepEnded{turn, step});
+    session_.append(payload::TurnEnded{turn});
+    state_ = AgentState::Idle;
+}
+
 void AgentLoop::runTurn() {
     while (!inbox_.empty() && inbox_.front().kind == InboxKind::Inject &&
            !inbox_.front().context.startsTurn) {
@@ -415,6 +513,10 @@ void AgentLoop::runTurn() {
     inbox_.pop_front();
 
     const TurnId turn = session_.nextTurnId();
+    if (trigger.kind == InboxKind::Compact) {
+        runMaintenanceTurn(turn);
+        return;
+    }
     if (trigger.kind == InboxKind::Inject) {
         appendContextInjected(trigger.context);
     } else {
@@ -424,6 +526,19 @@ void AgentLoop::runTurn() {
 
     turn_cancel_ = CancellationSource{};
     cancel_reason_ = "user";
+    compactions_this_turn_ = 0;
+
+    const auto compaction_available = [&]() -> bool {
+        if (services_.context_compactor != nullptr) {
+            return compactions_this_turn_ <
+                   services_.context_compactor->policy().max_compactions_per_turn;
+        }
+        return services_.compactor != nullptr && compactions_this_turn_ < 1;
+    };
+    const bool threshold_enabled =
+        services_.context_compactor != nullptr
+            ? services_.context_compactor->policy().is_enabled()
+            : config_.compaction_threshold_tokens > 0;
 
     for (std::size_t stepNumber = 1;; ++stepNumber) {
         const StepId step = session_.nextStepId();
@@ -445,14 +560,21 @@ void AgentLoop::runTurn() {
             return;
         }
 
-        if (config_.compaction_threshold_tokens > 0 && services_.estimator != nullptr &&
-            services_.estimator->estimate(messages) > config_.compaction_threshold_tokens) {
-            runCompaction(messages);
-            try {
-                messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
-            } catch (const std::exception& error) {
-                appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
-                return;
+        if (services_.estimator != nullptr && compaction_available() && threshold_enabled) {
+            const std::size_t estimate = services_.estimator->estimate(messages);
+            const std::size_t threshold = services_.context_compactor != nullptr
+                                              ? services_.context_compactor->policy()
+                                                    .effective_threshold_tokens()
+                                              : config_.compaction_threshold_tokens;
+            if (estimate > threshold) {
+                runCompaction(messages, turn);
+                try {
+                    messages =
+                        services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+                } catch (const std::exception& error) {
+                    appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
+                    return;
+                }
             }
         }
 
@@ -509,7 +631,14 @@ void AgentLoop::runTurn() {
             if (attempt == 1) {
                 break;
             }
-            runCompaction(messages);
+            if (!compaction_available()) {
+                break;
+            }
+            if (services_.context_compactor != nullptr &&
+                !services_.context_compactor->policy().retry_on_context_length) {
+                break;
+            }
+            runCompaction(messages, turn);
             try {
                 messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
             } catch (const std::exception& error) {

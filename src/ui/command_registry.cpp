@@ -133,6 +133,14 @@ CommandRegistry CommandRegistry::builtin() {
                               "live model switch)");
         }});
     registry.add(Command{
+        "compact", "Summarize history to reclaim context",
+        [](CommandContext& context, const std::string&) {
+            if (context.compact) {
+                context.compact();
+            }
+            append_system(context, "compaction requested");
+        }});
+    registry.add(Command{
         "exit", "quit the supervisor",
         [](CommandContext& context, const std::string&) {
             if (context.request_exit) {

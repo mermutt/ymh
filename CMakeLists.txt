@@ -322,6 +322,7 @@ add_library(ymh_agent STATIC
     src/agent/agent_loop.cpp
     src/agent/agent_registry.cpp
     src/agent/chunk_coalescer.cpp
+    src/agent/compactor.cpp
     src/agent/context_assembler.cpp
     src/agent/llm_pool.cpp
     src/agent/subagent.cpp

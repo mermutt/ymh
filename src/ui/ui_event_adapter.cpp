@@ -141,6 +141,13 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             events.push_back(UiEvent{SubagentUpdated{session, payload.subagent, payload.summary, state}});
             break;
         }
+        case EventType::ContextCompaction: {
+            const auto payload = event.payload.get<payload::ContextCompaction>();
+            events.push_back(UiEvent{CompactionMarker{
+                session, static_cast<std::uint64_t>(payload.boundary), payload.tokenEstimate,
+                payload.model, payload.summary}});
+            break;
+        }
         default:
             break;
     }
@@ -175,6 +182,66 @@ void UiEventAdapter::onEvent(const Event& event) {
     for (const UiEvent& adapted : adapt(event)) {
         applyAndMark(adapted);
     }
+    for (const UiEvent& notice : adapt_maintenance(event)) {
+        applyAndMark(notice);
+    }
+}
+
+std::vector<UiEvent> UiEventAdapter::adapt_maintenance(const Event& event) {
+    const SessionId session = event.session_id;
+    std::vector<UiEvent> events;
+    switch (event.type) {
+        case EventType::TurnStarted: {
+            const auto payload = event.payload.get<payload::TurnStarted>();
+            if (payload.origin == payload::TurnOrigin::Maintenance) {
+                MaintenanceState state;
+                state.active = true;
+                maintenance_[session] = state;
+            }
+            break;
+        }
+        case EventType::ContextCompaction: {
+            const auto state = maintenance_.find(session);
+            if (state == maintenance_.end() || !state->second.active) {
+                break;
+            }
+            const auto payload = event.payload.get<payload::ContextCompaction>();
+            state->second.sawCompaction = true;
+            state->second.boundary      = static_cast<std::uint64_t>(payload.boundary);
+            state->second.tokenEstimate = payload.tokenEstimate;
+            state->second.model         = payload.model;
+            break;
+        }
+        case EventType::TurnEnded:
+        case EventType::TurnCancelled:
+        case EventType::TurnFailed: {
+            const auto state = maintenance_.find(session);
+            if (state == maintenance_.end() || !state->second.active) {
+                break;
+            }
+            CompactionOutcomeNotice notice;
+            notice.session       = session;
+            notice.boundary      = state->second.boundary;
+            notice.tokenEstimate = state->second.tokenEstimate;
+            notice.model         = state->second.model;
+            if (event.type == EventType::TurnEnded) {
+                notice.outcome = state->second.sawCompaction ? CompactionOutcome::Compacted
+                                                             : CompactionOutcome::NotNeeded;
+            } else if (event.type == EventType::TurnCancelled) {
+                notice.outcome = CompactionOutcome::Cancelled;
+                notice.reason  = event.payload.get<payload::TurnCancelled>().reason;
+            } else {
+                notice.outcome = CompactionOutcome::Failed;
+                notice.reason  = event.payload.get<payload::TurnFailed>().message;
+            }
+            maintenance_.erase(state);
+            events.push_back(UiEvent{notice});
+            break;
+        }
+        default:
+            break;
+    }
+    return events;
 }
 
 void UiEventAdapter::onSessionEnvelope(const protocol::SessionEnvelope& envelope) {

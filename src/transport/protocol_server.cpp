@@ -405,6 +405,9 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
         } else if (method_name == method::kSessionSuspend) {
             host_.suspendSession(session_param(request.params));
             respond(conn, request.id, nlohmann::json::object());
+        } else if (method_name == method::kSessionCompact) {
+            host_.compactSession(session_param(request.params));
+            respond(conn, request.id, nlohmann::json{{"outcome", "Queued"}});
         } else if (method_name == method::kSessionClose) {
             const SessionId session = session_param(request.params);
             host_.closeSession(session);

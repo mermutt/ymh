@@ -38,7 +38,7 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 }
 
 TEST(TransportProtocol, MethodCatalogIsComplete) {
-    EXPECT_EQ(protocol::all_methods().size(), 27u);
+    EXPECT_EQ(protocol::all_methods().size(), 28u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
@@ -53,6 +53,8 @@ TEST(TransportProtocol, ProfileGating) {
                                              protocol::method::kSessionActivate));
     EXPECT_FALSE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
                                              protocol::method::kSessionSuspend));
+    EXPECT_FALSE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                             protocol::method::kSessionCompact));
     EXPECT_FALSE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
                                              protocol::method::kHostShutdown));
     EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "ymh/agent/agent.hpp"
+#include "ymh/agent/compactor.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -24,6 +25,11 @@ namespace ymh {
 // `system_prompt` defaults to `default_system_prompt()` when the config's
 // `agent.system_prompt` is empty.
 [[nodiscard]] AgentConfig to_agent_config(const Config& config);
+
+// 13-context-compaction.md §3.2/§6.6: the compaction policy from the layered
+// config. Validates `max_summary_bytes` against `PersistenceConfig::
+// max_payload_bytes` (throws `ConfigError`, C18).
+[[nodiscard]] CompactionPolicy to_compaction_policy(const Config& config);
 
 [[nodiscard]] std::string default_system_prompt();
 

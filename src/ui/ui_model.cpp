@@ -375,7 +375,9 @@ void UiModel::apply(const UiEvent& event) {
                    std::is_same_v<T, ToolStarted> ||
                    std::is_same_v<T, ToolOutput> ||
                    std::is_same_v<T, ToolFinished> ||
-                   std::is_same_v<T, ErrorOccurred>;
+                   std::is_same_v<T, ErrorOccurred> ||
+                   std::is_same_v<T, CompactionMarker> ||
+                   std::is_same_v<T, CompactionOutcomeNotice>;
         },
         event.value);
     std::visit(
@@ -542,6 +544,38 @@ void UiModel::apply(const UiEvent& event) {
             } else if constexpr (std::is_same_v<T, StatusChanged>) {
                 state.status.note = e.text;
                 dirty.mark(e.session, UiDirtyFlag::Status);
+            } else if constexpr (std::is_same_v<T, CompactionMarker>) {
+                ConversationEntry entry;
+                entry.role = ConversationRole::System;
+                entry.text = "\u22ef compacted history up to #" + std::to_string(e.boundary) +
+                             " \u00b7 summary ~" + std::to_string(e.tokenEstimate) +
+                             " tokens \u00b7 model " + e.model;
+                state.conversation.entries.push_back(std::move(entry));
+                dirty.mark(e.session, UiDirtyFlag::Conversation);
+            } else if constexpr (std::is_same_v<T, CompactionOutcomeNotice>) {
+                ConversationEntry entry;
+                entry.role = ConversationRole::System;
+                switch (e.outcome) {
+                    case CompactionOutcome::Compacted:
+                        entry.text = "compaction complete: ~" +
+                                     std::to_string(e.tokenEstimate) + " tokens, model " + e.model;
+                        break;
+                    case CompactionOutcome::NotNeeded:
+                        entry.text = "compaction skipped: nothing to compact";
+                        break;
+                    case CompactionOutcome::Cancelled:
+                        entry.text = "compaction cancelled";
+                        break;
+                    case CompactionOutcome::Failed:
+                        entry.text = "compaction failed" +
+                                     (e.reason.empty() ? std::string{} : ": " + e.reason);
+                        break;
+                    case CompactionOutcome::Queued:
+                        entry.text = "compaction queued";
+                        break;
+                }
+                state.conversation.entries.push_back(std::move(entry));
+                dirty.mark(e.session, UiDirtyFlag::Conversation);
             }
             refreshCell(e.session);
         },

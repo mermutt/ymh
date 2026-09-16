@@ -205,6 +205,18 @@ bool AgentRegistry::hasPendingWork(const SessionId& id) const noexcept {
     return agent->second->hasPendingWork();
 }
 
+std::expected<CompactionOutcome, AgentError> AgentRegistry::requestCompaction(const SessionId& id) {
+    const auto session = bySession_.find(id.value);
+    if (session == bySession_.end()) {
+        return std::unexpected(AgentError{AgentErrorCode::UnknownSession, "unknown session"});
+    }
+    const auto agent = agents_.find(session->second.value);
+    if (agent == agents_.end()) {
+        return std::unexpected(AgentError{AgentErrorCode::UnknownSession, "unknown session"});
+    }
+    return agent->second->requestCompaction();
+}
+
 void AgentRegistry::suspendSession(const SessionId& id) {
     const auto session = bySession_.find(id.value);
     if (session == bySession_.end()) {

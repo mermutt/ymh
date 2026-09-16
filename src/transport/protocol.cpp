@@ -521,13 +521,14 @@ void from_json(const nlohmann::json& json, SessionDetail& detail) {
 
 namespace {
 
-constexpr std::array<std::string_view, 27> kMethodCatalog{{
+constexpr std::array<std::string_view, 28> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kWorkspaceList,    method::kWorkspaceShow,    method::kSessionList,
     method::kSessionShow,      method::kSessionCreate,    method::kSessionResume,
     method::kSessionFork,      method::kSessionReplay,    method::kSessionActivate,
-    method::kSessionSuspend,   method::kSessionClose,     method::kSessionDelete,
+    method::kSessionSuspend,   method::kSessionCompact,   method::kSessionClose,
+    method::kSessionDelete,
     method::kAgentPrompt,      method::kAgentFollowup,    method::kAgentSteer,
     method::kAgentInject,      method::kAgentCancel,      method::kAgentStatus,
     method::kPermissionDecide, method::kEventSubscribe,   method::kEventUnsubscribe,
@@ -553,7 +554,7 @@ bool is_method_allowed(ServerProfile profile, std::string_view method_name) noex
         return true;
     }
     return method_name != method::kSessionActivate && method_name != method::kSessionSuspend &&
-           method_name != method::kHostShutdown;
+           method_name != method::kSessionCompact && method_name != method::kHostShutdown;
 }
 
 } // namespace ymh::protocol

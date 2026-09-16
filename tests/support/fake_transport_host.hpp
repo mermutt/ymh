@@ -158,6 +158,11 @@ public:
         active_session.reset();
     }
 
+    void compactSession(const SessionId& id) override {
+        calls.push_back("session.compact");
+        require_session(id);
+    }
+
     void agentPrompt(const SessionId& id, const nlohmann::json& message) override {
         calls.push_back("agent.prompt");
         require_session(id);

@@ -58,6 +58,11 @@ public:
     // in-flight turn. False for an unknown session.
     [[nodiscard]] bool hasPendingWork(const SessionId& id) const noexcept;
 
+    // Additive enqueue target for the manual `/compact` path
+    // (13-context-compaction.md §6.8, errata A5). Looks up the registered
+    // `AgentLoop` and delegates to its public `requestCompaction()`.
+    std::expected<CompactionOutcome, AgentError> requestCompaction(const SessionId& id);
+
     // 11-m2-errata §7 (D18/D19): the daemon installs the async
     // `PermissionBroker` resolver once the runtime is built. Must be called
     // before any agent is created; the resolver runs on the turn thread and

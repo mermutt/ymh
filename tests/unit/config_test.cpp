@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "support/test_env.hpp"
+#include "ymh/cli/wiring.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/logger.hpp"
 #include "ymh/llm/provider_registry.hpp"
@@ -253,6 +254,35 @@ TEST(Config, ScaffoldFailureLogsWarningAndDoesNotThrow) {
     EXPECT_FALSE(result.ok);
     EXPECT_FALSE(result.global_config_created);
     EXPECT_FALSE(logger.warnings.empty());
+}
+
+TEST(Config, CompactionPolicyParsesAndMaps) {
+    test::TempWorkspace workspace("config_compaction");
+    workspace.write(".ymh/config.toml",
+                    "[agent]\ncompaction_threshold_tokens = 5000\n"
+                    "[agent.compaction]\nkeep_recent_turns = 3\n"
+                    "summarizer_model = \"cheap\"\nmax_summary_bytes = 1024\n"
+                    "retry_on_context_length = false\n");
+
+    ConfigPaths paths;
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    EXPECT_EQ(config.agent.compaction.threshold_tokens, 5000u);
+    EXPECT_EQ(config.agent.compaction.keep_recent_turns, 3u);
+    EXPECT_EQ(config.agent.compaction.summarizer_model, "cheap");
+    EXPECT_EQ(config.agent.compaction.max_summary_bytes, 1024u);
+    EXPECT_FALSE(config.agent.compaction.retry_on_context_length);
+
+    const CompactionPolicy policy = to_compaction_policy(config);
+    EXPECT_TRUE(policy.is_enabled());
+    EXPECT_EQ(policy.effective_threshold_tokens(), 5000u);
+    EXPECT_EQ(policy.keep_recent_turns, 3u);
+}
+
+TEST(Config, CompactionOversizedSummaryBytesRejected) {
+    Config config;
+    config.agent.compaction.max_summary_bytes = PersistenceConfig{}.max_payload_bytes + 1;
+    EXPECT_THROW((void)to_compaction_policy(config), ConfigError);
 }
 
 } // namespace

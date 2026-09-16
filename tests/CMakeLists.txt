@@ -24,6 +24,7 @@ add_executable(ymh_tests
     unit/agent_registry_test.cpp
     unit/agent_turn_executor_test.cpp
     unit/agent_coalescer_test.cpp
+    unit/compaction_test.cpp
     unit/llm_pool_test.cpp
     unit/workspace_runtime_test.cpp
     unit/host_runtime_test.cpp

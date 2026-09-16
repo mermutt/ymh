@@ -20,6 +20,7 @@ struct CommandContext {
     std::function<void()>                   request_exit;
     std::function<void()>                   create_session;
     std::function<void(const std::string&)> set_model;
+    std::function<void()>                   compact;
 };
 
 struct Command {
