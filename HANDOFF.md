@@ -195,3 +195,20 @@ and marked `verified` in `DESIGN_STATUS.md`): context compaction (`13`), the PTY
 capability behind the execution-environment seam (`14`), and the MCP adapter into
 the shared tool registry (`15`). Remaining candidates: LSP tools (§28), remote
 SSH/TCP transport (§47 Mode B), worktrees, and multi-workspace UI polish.
+
+**Spec `16-daemon-ownership.md` is verified but NOT yet implemented.** It changes
+daemon lifetime from "supervisor-independent" to **supervisor-owned**: the last
+supervisor's clean exit prompts and tears the daemons down, and every crash path
+is backstopped by a daemon-side owner watchdog. It **supersedes** `04` H8/H9,
+`04` §3.2/§6.5/§14.1(f), `00` §54 D23 and §9.8/§9.9, `10` §2.1, and `11` §8.2
+D20.3; it amends `03`/`04`/`05` (A15/A16) and adds a `supervisors` registry table
+(schema 1→2). Invariants `O1–O22`, failure modes `O-F1–O-F16`. Gated over 5
+rounds by an adversarial critic plus Oracle — **both PASS, zero open HIGH/MEDIUM**
+(2737 lines). Implementation is the next large wave.
+
+Two supporting registers were produced alongside it:
+`REQUIREMENTS_BACKLOG.md` (RB-01–RB-11, triaged from `requirements_draft.txt` and
+deduplicated against shipped code; six items need a spec/errata before code) and
+`UI_SURFACE_INVENTORY.md` (the spec-16 ↔ RB-10/RB-11 UI seam; most
+cross-supervisor visibility already ships, so spec 16's new UI is mainly the
+last-supervisor exit prompt).

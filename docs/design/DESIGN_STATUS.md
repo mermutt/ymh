@@ -21,6 +21,9 @@ coded after it is marked **verified** here.
 | 13 | `13-context-compaction.md` | yes | **verified** | Oracle component gate: GATE PASS (8 review rounds; no open HIGH/MEDIUM) | 1567+ lines; context compaction (projection, never deletion); `ContextCompaction` event |
 | 14 | `14-pty-capability.md` | yes | **verified** | Oracle component gate: GATE PASS (4 review rounds; no open HIGH/MEDIUM) | 1865+ lines; `PtySession`/`PtyService` behind the execution-environment seam |
 | 15 | `15-mcp-adapter.md` | yes | **verified** | Oracle component gate: GATE PASS (3 review rounds; no open HIGH/MEDIUM) | 2051 lines; MCP client adapter into the shared tool registry; namespaced `mcp.<server>.<tool>` |
+| 16 | `16-daemon-ownership.md` | yes | **verified** | Dual gate, 5 rounds: adversarial critic + Oracle, **both PASS** (0 open HIGH/MEDIUM) | 2737 lines; supervisor-owned daemons; supersedes 04 H8/H9 §3.2/§6.5/§14.1(f), 00 §54 D23/§9.8/§9.9, 10 §2.1, 11 §8.2 D20.3; amends 03/04/05 (A15/A16); invariants O1–O22, failure modes O-F1–O-F16 |
+| — | `REQUIREMENTS_BACKLOG.md` | yes | — (register; not a component spec) | track: triage, self-verified | 364 lines; RB-01–RB-11 from `requirements_draft.txt`, dedup'd against shipped code; 6 items need a spec/errata before code |
+| — | `UI_SURFACE_INVENTORY.md` | yes | — (register; not a component spec) | track: triage, self-verified | 134 lines; spec-16 ↔ RB-10/RB-11 UI seam (C1–C5); most cross-supervisor visibility already ships |
 
 ## Open top-level items (`HANDOFF.md` §5)
 
@@ -75,4 +78,10 @@ coded after it is marked **verified** here.
 | 2026-09-15 | `11-m2-errata.md` | Oracle G0 pass 2 | GATE PASS — 21 resolved + R1–R3; interfaces frozen |
 | 2026-09-15 | `11-m2-errata.md` §7.2 | track E finding (post-gate, additive) | `Clock&` inert → injectable `ClockReader` (default `Clock::now`); D19.1 + E21 + §16 updated; no other interface semantics changed |
 | 2026-09-15 | `12-m1-drift-errata.md` | track F (self) | written — M1 spec/code reconciliation register DR1–DR6; no new semantics; defers to 11; pending review |
+| 2026-09-16 | `16-daemon-ownership.md` | round 1 (rev 0) | GATE FAIL — critic 4 HIGH/10 MEDIUM/5 LOW; Oracle 2 HIGH/11 MEDIUM/8 LOW (incl. safety-property breach: `FRESH_OWNER` clock mismatch) |
+| 2026-09-16 | `16-daemon-ownership.md` | round 2 (rev 1a) | GATE FAIL — closure 40/41 + 21/21; **NEW** 1 HIGH (cached-count cannot exclude the requester), 5 MEDIUM, 13 LOW |
+| 2026-09-16 | `16-daemon-ownership.md` | round 3 (rev 2) | GATE FAIL — closure 7/7 + 14/15; **NEW** 1 HIGH (fail-open `require_owner` default), 2 MEDIUM, 7 LOW |
+| 2026-09-16 | `16-daemon-ownership.md` | round 4 (rev 3) | GATE FAIL — closure 8/9; **NEW** 1 HIGH (guard omitted `watchdog_disabled`), 2 MEDIUM, 6 LOW; adjudicated Oracle `G3` over the critic (seam retyping was overstated) |
+| 2026-09-16 | `16-daemon-ownership.md` | round 5 (rev 4) | **GATE PASS** — critic 0 HIGH/0 MEDIUM (closure 3/3); Oracle 0 HIGH/0 MEDIUM (closure 9/9); 5 LOW remained |
+| 2026-09-16 | `16-daemon-ownership.md` | final polish (rev 5) + targeted Oracle confirmation | **PASS** — 5/5 LOW fixed, 0 regressions; O15 bounds unchanged (23 s/38 s); escalation budget 12 s → 34 s confirmed exit-bound, not request-bound |
 
