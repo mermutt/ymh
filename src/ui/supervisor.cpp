@@ -1,7 +1,9 @@
 #include "ymh/ui/supervisor.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <filesystem>
@@ -9,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -36,6 +39,7 @@ namespace {
 
 constexpr std::chrono::milliseconds kFrameInterval{50};
 constexpr std::chrono::milliseconds kMaxFrameDelta{250};
+constexpr std::chrono::milliseconds kExitQueryMargin{500};
 
 DaemonStatus daemon_status_for(SupervisorLinkState state) {
     switch (state) {
@@ -184,14 +188,224 @@ public:
         adapter_.onPermissionResolved(session, request, decision);
     }
 
-    void requestExit() override {
+    void requestExit() override { begin_exit(); }
+
+private:
+    // 16 §4.2 (16-D9). The supervisor stays registered until the user confirms:
+    // query the orphaning set read-only, then either exit (empty set), auto-
+    // confirm (--yes), or open the prompt. Ctrl+D and `/exit` stay thin callers.
+    void begin_exit() {
+        if (quit_.load() || model_.exitConfirm.open) {
+            return;
+        }
+        const std::vector<WorkspaceId> orphaning = compute_orphaning_set();
+        if (orphaning.empty()) {
+            confirm_exit({});
+            return;
+        }
+        if (options_.no_prompt) {
+            confirm_exit(orphaning);
+            return;
+        }
+        open_exit_prompt(orphaning);
+    }
+
+    // 16 §4.1: a candidate is orphaned iff the daemon reports the caller as its
+    // sole live supervisor, no `ymh run` holds it, and no other fresh owner row
+    // exists. A daemon that does not answer within `ownership_query_timeout` is
+    // skipped; its own watchdog is the backstop.
+    std::vector<WorkspaceId> compute_orphaning_set() {
+        std::vector<WorkspaceId> orphaning;
+        for (auto& [id, connection] : connections_) {
+            if (connection->state() != SupervisorLinkState::Attached) {
+                continue;
+            }
+            const std::optional<protocol::OwnershipView> view = query_ownership(*connection);
+            if (view.has_value() && is_orphaning_view(*view)) {
+                orphaning.push_back(id);
+            }
+        }
+        return orphaning;
+    }
+
+    std::optional<protocol::OwnershipView> query_ownership(SupervisorConnection& connection) {
+        struct State {
+            std::mutex                              mutex;
+            std::condition_variable                 cv;
+            bool                                    done = false;
+            std::optional<protocol::OwnershipView>  view;
+        };
+        auto state = std::make_shared<State>();
+        connection.submit(
+            std::string(protocol::method::kHostOwnership), nlohmann::json::object(),
+            [state](SupervisorReply reply) {
+                std::lock_guard lock(state->mutex);
+                if (reply.ok) {
+                    try {
+                        protocol::OwnershipView parsed;
+                        protocol::from_json(reply.result, parsed);
+                        state->view = std::move(parsed);
+                    } catch (const std::exception&) {
+                    }
+                }
+                state->done = true;
+                state->cv.notify_all();
+            },
+            options_.ownership_query_timeout);
+        std::unique_lock lock(state->mutex);
+        state->cv.wait_for(lock, options_.ownership_query_timeout + kExitQueryMargin,
+                           [&state] { return state->done; });
+        return state->view;
+    }
+
+    void open_exit_prompt(const std::vector<WorkspaceId>& orphaning) {
+        model_.exitConfirm.open = true;
+        model_.exitConfirm.orphaning = orphaning;
+        model_.exitConfirm.sessions = count_sessions(orphaning);
+        model_.exitConfirm.running = count_running(orphaning);
+        model_.exitConfirm.selected = 1;
+        model_.mode = UiMode::ExitConfirm;
+        model_.dirty.markAggregate();
+    }
+
+    int count_sessions(const std::vector<WorkspaceId>& orphaning) const {
+        int total = 0;
+        for (const WorkspaceId& workspace : orphaning) {
+            const auto it = model_.workspaces.find(workspace);
+            if (it != model_.workspaces.end()) {
+                total += static_cast<int>(it->second.sessions.size());
+            }
+        }
+        return total;
+    }
+
+    int count_running(const std::vector<WorkspaceId>& orphaning) const {
+        int total = 0;
+        for (const auto& [id, session] : model_.sessions) {
+            (void)id;
+            if (std::find(orphaning.begin(), orphaning.end(), session.workspace) ==
+                orphaning.end()) {
+                continue;
+            }
+            if (is_active_state(session.agent_state)) {
+                ++total;
+            }
+        }
+        return total;
+    }
+
+    // Cancel (n/N/Esc/Ctrl+C): no registry write, still registered, stay in the
+    // TUI (16 §4.2). No path may leave a live supervisor deregistered.
+    void cancel_exit() {
+        model_.exitConfirm = ExitConfirmState{};
+        model_.mode = UiMode::Conversation;
+        model_.dirty.markAggregate();
+    }
+
+    // Confirm (y/Y/Enter on Terminate, or --yes). Pinned order: deregister, then
+    // `host.shutdown{last_supervisor}` per orphaned daemon, then close (§4.3).
+    void confirm_exit(std::vector<WorkspaceId> orphaning) {
+        if (quit_.load()) {
+            return;
+        }
+        model_.exitConfirm = ExitConfirmState{};
+        if (presence_.has_value()) {
+            presence_->deregister();
+            presence_.reset();
+        }
+        teardown_daemons(orphaning);
         quit_.store(true);
         if (screen_ != nullptr) {
             screen_->Exit();
         }
     }
 
-private:
+    // 16 §4.3 steps 2-3: send the typed `last_supervisor` shutdown to each
+    // orphaned daemon, then wait for each to close, all bounded by one
+    // `teardown_grace`. On expiry the socket is closed anyway (never SIGKILL).
+    void teardown_daemons(const std::vector<WorkspaceId>& orphaning) {
+        const auto deadline = std::chrono::steady_clock::now() + options_.teardown_grace;
+        struct State {
+            std::mutex              mutex;
+            std::condition_variable cv;
+            std::size_t             pending = 0;
+        };
+        auto state = std::make_shared<State>();
+        for (const WorkspaceId& workspace : orphaning) {
+            const auto it = connections_.find(workspace);
+            if (it == connections_.end()) {
+                continue;
+            }
+            {
+                std::lock_guard lock(state->mutex);
+                ++state->pending;
+            }
+            it->second->submit(
+                std::string(protocol::method::kHostShutdown),
+                nlohmann::json{{"reason", "last_supervisor"}},
+                [state](SupervisorReply) {
+                    std::lock_guard lock(state->mutex);
+                    if (state->pending > 0) {
+                        --state->pending;
+                    }
+                    state->cv.notify_all();
+                },
+                options_.teardown_grace);
+        }
+        {
+            std::unique_lock lock(state->mutex);
+            state->cv.wait_for(lock, options_.teardown_grace + kExitQueryMargin,
+                               [&state] { return state->pending == 0; });
+        }
+        for (const WorkspaceId& workspace : orphaning) {
+            const auto it = connections_.find(workspace);
+            if (it == connections_.end()) {
+                continue;
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining <= std::chrono::milliseconds::zero()) {
+                break;
+            }
+            static_cast<void>(it->second->waitUntil(
+                [&it] {
+                    const SupervisorLinkState link = it->second->state();
+                    return link == SupervisorLinkState::Dead ||
+                           link == SupervisorLinkState::Detached;
+                },
+                remaining));
+        }
+    }
+
+    bool handle_exit_confirm(const ftxui::Event& event) {
+        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
+            cancel_exit();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowLeft || event == ftxui::Event::ArrowRight ||
+            event == ftxui::Event::Tab) {
+            model_.exitConfirm.selected = model_.exitConfirm.selected == 0 ? 1 : 0;
+            return true;
+        }
+        if (event == ftxui::Event::Return) {
+            if (model_.exitConfirm.selected == 0) {
+                confirm_exit(model_.exitConfirm.orphaning);
+            } else {
+                cancel_exit();
+            }
+            return true;
+        }
+        if (event.is_character()) {
+            const std::string character = event.character();
+            if (character == "y" || character == "Y") {
+                confirm_exit(model_.exitConfirm.orphaning);
+            } else if (character == "n" || character == "N") {
+                cancel_exit();
+            }
+        }
+        return true;
+    }
+
     void enqueue(std::function<void()> action) {
         {
             const std::lock_guard lock(action_mutex_);
@@ -240,7 +454,19 @@ private:
         };
         sink.on_notice = [this, workspace_id](const protocol::HostNotice& notice) {
             enqueue([this, workspace_id, notice] {
+                if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
+                    notice.session.has_value()) {
+                    const auto connection = connections_.find(workspace_id);
+                    if (connection != connections_.end()) {
+                        connection->second->untrack(*notice.session);
+                    }
+                }
                 adapter_.onHostNotice(workspace_id, notice);
+                if (notice.kind == protocol::HostNoticeKind::SessionCreated) {
+                    // 16 §7.6: one refresh fills the new cell's title; the
+                    // broadcast notice itself carries only the SessionId.
+                    refresh_sessions(workspace_id);
+                }
             });
         };
         sink.on_state = [this, workspace_id](SupervisorLinkState state, std::string detail) {
@@ -838,6 +1064,9 @@ private:
         if (event == ftxui::Event::Custom) {
             drain();
             return true;
+        }
+        if (model_.exitConfirm.open) {
+            return handle_exit_confirm(event);
         }
         if (model_.dialog.open) {
             return handle_dialog(event);

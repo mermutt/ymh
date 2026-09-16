@@ -125,6 +125,11 @@ public:
     // on the pump thread (or synchronously if the connection is stopping).
     void submit(std::string method, nlohmann::json params, ReplyFn reply);
 
+    // As above with an explicit per-request timeout (16 §4.1 C-L5): the exit
+    // path's `host.ownership` probe must not wait the default request timeout.
+    void submit(std::string method, nlohmann::json params, ReplyFn reply,
+                std::chrono::milliseconds timeout);
+
     // ---- observation (thread-safe) ----------------------------------------
     [[nodiscard]] SupervisorLinkState state() const;
     [[nodiscard]] bool attached() const;
@@ -147,9 +152,10 @@ public:
 
 private:
     struct PendingRequest {
-        std::string    method;
-        nlohmann::json params;
-        ReplyFn        reply;
+        std::string               method;
+        nlohmann::json            params;
+        ReplyFn                   reply;
+        std::chrono::milliseconds timeout;
     };
 
     void pump();

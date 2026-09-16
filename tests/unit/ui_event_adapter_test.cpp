@@ -167,6 +167,36 @@ TEST(UiEventAdapter, WorkspaceEventUpdatesDaemonStatus) {
     EXPECT_EQ(model.workspaces.at(kWorkspaceB).daemonStatus, DaemonStatus::Dead);
 }
 
+TEST(UiEventAdapter, HostNoticeSessionLifecycleCarriesSessionId) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+    const SessionId peer{"peer-session"};
+
+    protocol::HostNotice created;
+    created.kind = protocol::HostNoticeKind::SessionCreated;
+    created.session = peer;
+    adapter.onHostNotice(kWorkspaceB, created);
+    adapter.onHostNotice(kWorkspaceB, created);
+
+    const auto workspace = model.workspaces.find(kWorkspaceB);
+    ASSERT_NE(workspace, model.workspaces.end());
+    std::size_t matches = 0;
+    for (const SessionCell& cell : workspace->second.sessions) {
+        if (cell.id == peer) {
+            ++matches;
+        }
+    }
+    EXPECT_EQ(matches, 1u)
+        << "SessionCreated must insert exactly one cell for notice.session";
+
+    protocol::HostNotice closed;
+    closed.kind = protocol::HostNoticeKind::SessionClosed;
+    closed.session = peer;
+    adapter.onHostNotice(kWorkspaceB, closed);
+
+    EXPECT_EQ(model.session(peer), nullptr) << "SessionClosed must erase the session";
+}
+
 TEST(UiEventAdapter, AggregateCountsAcrossWorkspaces) {
     UiModel model = make_model();
     UiEventAdapter adapter(model);

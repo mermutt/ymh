@@ -117,8 +117,26 @@ const char* daemon_status_glyph(DaemonStatus status) {
             return "-";
         case DaemonStatus::Dead:
             return "x";
+        case DaemonStatus::Stopping:
+            return "s";
+        case DaemonStatus::NotRunning:
+            return ".";
     }
     return "?";
+}
+
+const char* ownership_mark_name(OwnershipMark mark) {
+    switch (mark) {
+        case OwnershipMark::Owned:
+            return "owned";
+        case OwnershipMark::NotRunning:
+            return "not running";
+        case OwnershipMark::Stopping:
+            return "stopping";
+        case OwnershipMark::Unreachable:
+            return "unreachable";
+    }
+    return "unknown";
 }
 
 std::string short_id(const SessionId& id) {
@@ -351,6 +369,43 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
     return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) | ftxui::center;
 }
 
+Element render_exit_confirm(const UiModel& model, const Theme& theme) {
+    const ExitConfirmState& confirm = model.exitConfirm;
+    Elements rows;
+    const std::size_t count = confirm.orphaning.size();
+    rows.push_back(ftxui::text("Exiting will terminate " + std::to_string(count) +
+                               (count == 1 ? " workspace daemon:" : " workspace daemons:")));
+    for (const WorkspaceId& workspace : confirm.orphaning) {
+        std::string title = workspace.value;
+        const auto it = model.workspaces.find(workspace);
+        if (it != model.workspaces.end() && !it->second.title.empty()) {
+            title = it->second.title;
+        }
+        rows.push_back(ftxui::text("  • " + title));
+    }
+    rows.push_back(ftxui::text(std::to_string(confirm.sessions) + " session" +
+                               (confirm.sessions == 1 ? "" : "s") + " · " +
+                               std::to_string(confirm.running) + " running") |
+                   ftxui::dim);
+    rows.push_back(ftxui::separator());
+    rows.push_back(ftxui::paragraph("In-flight turns will be cancelled. Sessions are "
+                                    "saved; the daemons restart automatically the next "
+                                    "time you use them.") |
+                   ftxui::dim);
+    rows.push_back(ftxui::separator());
+    const char* options[] = {"[ Terminate and exit ]", "[ Cancel ]"};
+    for (int index = 0; index < 2; ++index) {
+        Element row = ftxui::text(options[index]);
+        if (index == confirm.selected) {
+            row = row | ftxui::inverted;
+        }
+        rows.push_back(row);
+    }
+    rows.push_back(ftxui::text("y terminate · n cancel · Esc cancel") | ftxui::dim);
+    (void)theme;
+    return ftxui::window(ftxui::text("Exiting"), ftxui::vbox(std::move(rows))) | ftxui::center;
+}
+
 Element render_switcher(const UiModel& model, const Theme& theme) {
     const SwitcherOverlayModel& switcher = model.switcher;
     Elements rows;
@@ -365,8 +420,10 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         const bool collapsed = switcher.collapsed.find(workspace.id) != switcher.collapsed.end();
         const std::string title =
             workspace.title.empty() ? workspace.id.value : workspace.title;
-        Element row = ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " +
-                                  daemon_status_glyph(workspace.status));
+        Element row =
+            ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " +
+                        daemon_status_glyph(workspace.status) + " [" +
+                        ownership_mark_name(workspace.mark) + "]");
         if (on_workspace) {
             row = paint(row, ftxui::Color::Cyan, theme) | ftxui::bold;
         }
@@ -467,6 +524,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     rows.push_back(render_status(model, active, theme));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
+    if (model.exitConfirm.open) {
+        return ftxui::dbox({main, render_exit_confirm(model, theme)});
+    }
     if (model.dialog.open) {
         return ftxui::dbox({main, render_dialog(model, theme)});
     }

@@ -14,6 +14,11 @@ protocol::ClientInstanceId process_client_instance() {
     return instance;
 }
 
+bool is_orphaning_view(const protocol::OwnershipView& view) noexcept {
+    return view.live_supervisors == 1 && view.live_automation == 0 &&
+           view.other_fresh_owners == 0;
+}
+
 SupervisorPresence::SupervisorPresence(WorkspaceRegistry& registry, SupervisorId id,
                                        Options options)
     : registry_(&registry), id_(std::move(id)), options_(std::move(options)),

@@ -221,6 +221,22 @@ public:
         return text_since(offset).find(needle) != std::string::npos;
     }
 
+    bool wait_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return true;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            int status = 0;
+            if (::waitpid(pid_, &status, WNOHANG) == pid_) {
+                pid_ = -1;
+                return true;
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        return false;
+    }
+
     void terminate() {
         if (pid_ > 0) {
             ::kill(pid_, SIGTERM);
@@ -402,6 +418,81 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     guard.stop();
 
     EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
+    ShortTempRoot root("ymh_pty_exit");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "exit-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "exit-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for("active ·", 10s)) << child.text();
+    ASSERT_FALSE(host_processes(&workspace_id.value).empty())
+        << "supervisor did not spawn its daemon";
+
+    const std::size_t prompt_mark = child.raw_size();
+    child.write("\x04");
+    ASSERT_TRUE(child.wait_for_since(prompt_mark, "Terminate and exit", 15s)) << child.text();
+    ASSERT_TRUE(child.wait_for_since(prompt_mark, "1 workspace daemon", 5s)) << child.text();
+
+    const std::size_t cancel_mark = child.raw_size();
+    child.write("n");
+    ASSERT_TRUE(child.wait_for_since(cancel_mark, "Type a message and press Enter", 10s))
+        << child.text();
+    EXPECT_FALSE(host_processes(&workspace_id.value).empty())
+        << "cancel must leave the daemon running";
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(registry_config);
+        EXPECT_EQ(registry->listSupervisors().size(), 1u)
+            << "cancel must not deregister the supervisor";
+    }
+
+    const std::size_t confirm_mark = child.raw_size();
+    child.write("\x04");
+    ASSERT_TRUE(child.wait_for_since(confirm_mark, "Terminate and exit", 15s)) << child.text();
+    child.write("y");
+    EXPECT_TRUE(child.wait_exit(25s)) << child.text();
+
+    for (int attempt = 0; attempt < 400; ++attempt) {
+        if (host_processes(&workspace_id.value).empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+    EXPECT_TRUE(host_processes(&workspace_id.value).empty())
+        << "confirm must tear the daemon down";
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(registry_config);
+        EXPECT_TRUE(registry->listSupervisors().empty())
+            << "confirm must deregister the supervisor";
+    }
+
+    guard.stop();
 }
 
 } // namespace

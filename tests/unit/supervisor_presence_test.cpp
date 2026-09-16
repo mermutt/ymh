@@ -167,7 +167,32 @@ TEST(SupervisorPresenceTest, RunOptionsDefaultsAreNullAndPinned) {
     EXPECT_EQ(options.registry, nullptr);
     EXPECT_FALSE(options.no_prompt);
     EXPECT_EQ(options.scan_interval, 2s);
+    EXPECT_EQ(options.ownership_query_timeout, 2s);
+    EXPECT_EQ(options.teardown_grace, 5s);
     EXPECT_EQ(options.identity.role, protocol::ClientRole::Supervisor);
+}
+
+TEST(SupervisorPresenceTest, OrphaningViewTruthTable) {
+    protocol::OwnershipView view;
+    view.live_supervisors = 1;
+    view.live_automation = 0;
+    view.other_fresh_owners = 0;
+    EXPECT_TRUE(is_orphaning_view(view)) << "sole live supervisor with no other owner";
+
+    view.live_supervisors = 2;
+    EXPECT_FALSE(is_orphaning_view(view)) << "a peer supervisor holds the daemon";
+
+    view.live_supervisors = 1;
+    view.live_automation = 1;
+    EXPECT_FALSE(is_orphaning_view(view)) << "ymh run holds the daemon";
+
+    view.live_automation = 0;
+    view.other_fresh_owners = 1;
+    EXPECT_FALSE(is_orphaning_view(view)) << "a fresh owner row survives the caller";
+
+    view.live_supervisors = 0;
+    view.other_fresh_owners = 0;
+    EXPECT_FALSE(is_orphaning_view(view)) << "caller must be counted";
 }
 
 TEST(DaemonSetScannerTest, ScanOnceReturnsOnlyLiveClaims) {

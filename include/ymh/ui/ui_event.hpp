@@ -33,31 +33,40 @@ struct WorkspaceId {
 };
 
 // Supervisor-local view of a daemon (10 §2.1); never written to the registry.
+// 16 §7.6 (additive): `Stopping` is a daemon draining after last-exit/watchdog;
+// `NotRunning` is a registered workspace with no live daemon (16-D2).
 enum class DaemonStatus : std::uint8_t {
     Connecting,
     Attached,
     Detached,
     Dead,
+    Stopping,
+    NotRunning,
 };
 
 enum class UiMode : std::uint8_t {
     Conversation,
     Switcher,
     Dialog,
+    ExitConfirm,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {
     DaemonAttached,
     DaemonDetached,
     DaemonDied,
+    DaemonStopping,
     SessionOpened,
     SessionClosed,
 };
 
 // Supervisor-local; produced from 05's `HostNotice` (10 §4.5). Never on the wire.
+// 16 §7.6 (C-H1/O-M5): `session` is REQUIRED for SessionOpened/SessionClosed;
+// without it a peer supervisor cannot learn which session appeared.
 struct WorkspaceEvent {
-    WorkspaceId       workspace;
-    WorkspaceEventKind kind = WorkspaceEventKind::DaemonAttached;
+    WorkspaceId                workspace;
+    WorkspaceEventKind         kind = WorkspaceEventKind::DaemonAttached;
+    std::optional<SessionId>   session;
 };
 
 // ---- adapted, frontend-facing events (10 §5.1) -----------------------------

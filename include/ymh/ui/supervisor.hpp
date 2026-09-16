@@ -34,6 +34,11 @@ struct SupervisorRunOptions {
     bool                      no_prompt{false};       // --yes; skip the exit prompt
     std::chrono::milliseconds scan_interval{2'000};   // 16 §3.2 daemon-set scan
 
+    // 16 §4.1 C-L5 / §4.3: the exit path's bounded `host.ownership` probe and
+    // the per-daemon `host.shutdown` teardown grace. Tests shrink both.
+    std::chrono::milliseconds ownership_query_timeout{2'000};
+    std::chrono::milliseconds teardown_grace{5'000};
+
     // C-H4 spawn seam (borrowed, non-owning). Both MUST outlive the entire
     // `run_supervisor(options)` call (R-L3): the caller (`run_supervisor_entry`)
     // owns them for the whole TUI session. Null leaves the workspace NotRunning.
