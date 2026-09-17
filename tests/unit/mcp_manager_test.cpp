@@ -455,23 +455,28 @@ TEST(McpPermissionTest, OperatorRuleOutranksServerDefault) {
 
 TEST(McpConfigTest, StrictLoaderParsesAndRejectsUnknownKeys) {
     ymh::test::TempWorkspace workspace("mcp_config");
-    const std::filesystem::path config_path = workspace.path() / "config.toml";
-    workspace.write("config.toml", R"TOML(
-[mcp]
-enabled = true
-max_servers = 2
-
-[[mcp.server]]
-id = "fs"
-transport = "stdio"
-command = "mcp-server-filesystem"
-args = ["."]
-cwd = "."
-allowed_tools = ["read_*"]
-denied_tools = ["write_*"]
-default_verdict = "ask"
-call_timeout_ms = 1000
-)TOML");
+    const std::filesystem::path config_path = workspace.path() / "config.jsonc";
+    workspace.write("config.jsonc", R"JSONC(
+{
+  "mcp": {
+    "enabled": true,
+    "max_servers": 2,
+    "server": [
+      {
+        "id": "fs",
+        "transport": "stdio",
+        "command": "mcp-server-filesystem",
+        "args": ["."],
+        "cwd": ".",
+        "allowed_tools": ["read_*"],
+        "denied_tools": ["write_*"],
+        "default_verdict": "ask",
+        "call_timeout_ms": 1000
+      }
+    ]
+  }
+}
+)JSONC");
     const ymh::Config config = ymh::load_config(ymh::ConfigPaths{{}, config_path});
     ASSERT_EQ(config.mcp.servers.size(), 1u);
     EXPECT_EQ(config.mcp.servers.front().id, "fs");
@@ -479,9 +484,11 @@ call_timeout_ms = 1000
               std::vector<std::string>{"read_*"});
     EXPECT_EQ(config.mcp.max_servers, 2u);
 
-    workspace.write("config.toml", "[mcp]\nbogus = 1\n");
+    workspace.write("config.jsonc", "{ \"mcp\": { \"bogus\": 1 } }\n");
     EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{{}, config_path}), ymh::ConfigError);
 
-    workspace.write("config.toml", "[[mcp.server]]\nid = \"x\"\ncommand = \"c\"\nbogus = 1\n");
+    workspace.write("config.jsonc",
+                    "{ \"mcp\": { \"server\": [ { \"id\": \"x\", \"command\": \"c\", "
+                    "\"bogus\": 1 } ] } }\n");
     EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{{}, config_path}), ymh::ConfigError);
 }

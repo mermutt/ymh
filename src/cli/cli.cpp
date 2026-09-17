@@ -65,7 +65,7 @@ Config load_invocation_config(const CliInvocation& invocation,
                        ? default_global_config_path()
                        : std::filesystem::path{invocation.config_path};
     paths.workspace = workspace_config_path(root);
-    Config config   = load_config(paths);
+    Config config   = load_config(paths, &category_logger(LogCategory::Filesystem));
 
     if (!invocation.model.empty()) {
         config.agent.model = invocation.model;
@@ -111,7 +111,7 @@ void scaffold_for_invocation(const CliInvocation& invocation,
         case CliInvocation::Command::Show:
         case CliInvocation::Command::Replay:
         case CliInvocation::Command::Fork:
-            (void)scaffold_config(root, effective_global_config(invocation),
+            (void)scaffold_config(root, scaffold_target(effective_global_config(invocation)),
                                   &category_logger(LogCategory::Filesystem));
             break;
         case CliInvocation::Command::Workspace:
@@ -130,6 +130,22 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
     std::error_code             error;
     const bool                  exists = std::filesystem::exists(path, error) && !error;
     out << path.string() << (exists ? " (exists)" : " (missing)") << '\n';
+
+    // Legacy-sibling note (21-config-jsonc-errata.md §6.8): reuse the loader's
+    // helpers so it can never disagree with the load-time warning.
+    const std::filesystem::path legacy = legacy_config_path(path);
+    if (!legacy.empty()) {
+        std::error_code legacy_error;
+        if (std::filesystem::exists(legacy, legacy_error) && !legacy_error) {
+            out << "note: " << legacy.string()
+                << " is a legacy TOML file and is ignored; ymh reads JSONC only. Convert it to "
+                << jsonc_target(path).string();
+            if (legacy == path) {
+                out << " and update --config to that path";
+            }
+            out << ".\n";
+        }
+    }
     return 0;
 }
 
@@ -216,7 +232,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
         paths.global = config_path.empty() ? default_global_config_path()
                                            : std::filesystem::path{config_path};
         paths.workspace = workspace_config_path(canonical);
-        config = load_config(paths);
+        config = load_config(paths, &category_logger(LogCategory::Filesystem));
     } catch (const ConfigError& config_error) {
         err << "ymh --host: " << config_error.what() << '\n';
         return 2;

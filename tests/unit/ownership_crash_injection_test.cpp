@@ -179,7 +179,7 @@ TEST(OwnershipCrashInjection, SpawnThenDieStaleRowFiresNoOwners) {
 // deterministically; this one pins the real binary end to end.
 TEST(OwnershipCrashInjection, SigkillSupervisorDaemonExitsWithinBound) {
     ShortTempRoot root("ymh-crash-sigkill");
-    root.write(".ymh/config.toml", "[permissions]\nread = \"allow\"\n");
+    root.write(".ymh/config.jsonc", "{\n  \"permissions\": { \"read\": \"allow\" }\n}\n");
     root.write("fake.json", R"([{"text": "hello", "finish": "stop"}])");
 
     const std::filesystem::path workspace = root.path() / "alpha";

@@ -80,7 +80,8 @@ constexpr const char* kFakeToolScript = R"([
 ])";
 
 constexpr const char* kAllowAllConfig =
-    "[permissions]\nread = \"allow\"\nwrite = \"allow\"\nshell = \"allow\"\n";
+    "{\n  \"permissions\": {\n    \"read\": \"allow\",\n    \"write\": \"allow\",\n"
+    "    \"shell\": \"allow\"\n  }\n}\n";
 
 void set_env(const char* key, const std::string& value) {
     ::setenv(key, value.c_str(), 1);
@@ -526,7 +527,7 @@ protected:
 TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {
     ShortTempRoot root("ymh-2p-crash");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeToolScript);
     const std::filesystem::path script = root.path() / "fake.json";
 
@@ -657,7 +658,7 @@ std::map<std::string, std::string> supervisor_env(const ShortTempRoot& root) {
 TEST_F(TwoProcess, SupervisorExitWithPeerKeepsDaemon) {
     ShortTempRoot root("ymh-2p-peer");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const std::filesystem::path workspace = root.path() / "alpha";
@@ -732,7 +733,7 @@ TEST_F(TwoProcess, SupervisorExitWithPeerKeepsDaemon) {
 TEST_F(TwoProcess, LastSupervisorExitTearsDaemonDown) {
     ShortTempRoot root("ymh-2p-last");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const std::filesystem::path workspace = root.path() / "alpha";
@@ -778,7 +779,7 @@ TEST_F(TwoProcess, LastSupervisorExitTearsDaemonDown) {
 TEST_F(TwoProcess, TwoSpawnsExactlyOneDaemon) {
     ShortTempRoot root("ymh-2p-race");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
     const std::filesystem::path script = root.path() / "fake.json";
 
@@ -840,7 +841,7 @@ TEST_F(TwoProcess, TwoSpawnsExactlyOneDaemon) {
 TEST_F(TwoProcess, SigstopNeverStolen) {
     ShortTempRoot root("ymh-2p-stop");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const RegistryConfig registry_config = registry_config_for(root.state_dir());
@@ -885,7 +886,7 @@ TEST_F(TwoProcess, SigstopNeverStolen) {
 TEST_F(TwoProcess, AttachIdentityCrossCheck) {
     ShortTempRoot root("ymh-2p-ident");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const RegistryConfig registry_config = registry_config_for(root.state_dir());
@@ -958,7 +959,7 @@ TEST_F(TwoProcess, AttachIdentityCrossCheck) {
 TEST_F(TwoProcess, StaleSocketReplace) {
     ShortTempRoot root("ymh-2p-stale");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
     const std::filesystem::path script = root.path() / "fake.json";
 
@@ -1171,7 +1172,7 @@ TEST_F(TwoProcess, MultiSupervisorFanOutPermissionFirstWins) {
 TEST_F(TwoProcess, CursorInvalidResubscribesFromBeginning) {
     ShortTempRoot root("ymh-2p-cursor");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const std::string workspace_id = generate_uuid_v4();
@@ -1266,7 +1267,7 @@ TEST_F(TwoProcess, CursorInvalidResubscribesFromBeginning) {
 TEST_F(TwoProcess, NoOrphanedDaemonsAfterSuite) {
     ShortTempRoot root("ymh-2p-orphan");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const std::string workspace_id = generate_uuid_v4();
@@ -1290,7 +1291,7 @@ TEST_F(TwoProcess, NoOrphanedDaemonsAfterSuite) {
 TEST_F(TwoProcess, PingKeepsIdleLinkAliveAndDetectsCrash) {
     ShortTempRoot root("ymh-2p-ping");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
 
     const RegistryConfig registry_config = registry_config_for(root.state_dir());
@@ -1349,7 +1350,7 @@ TEST_F(TwoProcess, PingKeepsIdleLinkAliveAndDetectsCrash) {
 TEST_F(TwoProcess, EnsureRunningCarriesAttachIdentity) {
     ShortTempRoot root("ymh-2p-identity");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
     const std::filesystem::path script = root.path() / "fake.json";
 
@@ -1408,7 +1409,7 @@ TEST_F(TwoProcess, EnsureRunningCarriesAttachIdentity) {
 TEST_F(TwoProcess, WorkspaceStopRequiresConfirmationThenForceTearsDown) {
     ShortTempRoot root("ymh-2p-stop");
     configure_workspace(root);
-    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write(".ymh/config.jsonc", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
     const std::filesystem::path script = root.path() / "fake.json";
 
