@@ -81,16 +81,6 @@ if(NOT TARGET asio::asio)
     target_compile_definitions(asio INTERFACE ASIO_STANDALONE)
 endif()
 
-# --- toml++ (configuration; arrives with the config wave) -------------------
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    tomlplusplus
-    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-    GIT_TAG v3.4.0
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(tomlplusplus)
-
 # --- CLI11 (command line) ---------------------------------------------------
 set(CLI11_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(CLI11_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -435,7 +425,7 @@ target_include_directories(ymh_config
 
 target_link_libraries(ymh_config
     PRIVATE
-        tomlplusplus::tomlplusplus
+        nlohmann_json::nlohmann_json
         ymh::warnings
 )
 

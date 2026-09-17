@@ -296,6 +296,7 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace_a = root.path() / "alpha";
     const std::filesystem::path workspace_b = root.path() / "beta";
@@ -366,6 +367,7 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace = root.path() / "help-ws";
     std::filesystem::create_directories(workspace);
@@ -426,6 +428,7 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace = root.path() / "exit-ws";
     std::filesystem::create_directories(workspace);
@@ -507,6 +510,7 @@ TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace = root.path() / "ghost-ws";
     std::filesystem::create_directories(workspace);
@@ -622,6 +626,7 @@ TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
     const std::filesystem::path config = root.path() / "config";
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     write_skill_file(config / "ymh" / "skills", "git-commit", "Write a conventional commit.");
     const std::filesystem::path workspace = root.path() / "skills-ws";
@@ -677,6 +682,7 @@ TEST(UiSupervisorPty, SkillsEmptyState) {
     const std::filesystem::path config = root.path() / "config";
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     std::filesystem::create_directories(config / "ymh" / "skills");
     const std::filesystem::path workspace = root.path() / "empty-ws";
@@ -716,8 +722,9 @@ TEST(UiSupervisorPty, SkillsEmptyState) {
 
 void write_compaction_window(const std::filesystem::path& workspace, std::int64_t window) {
     std::filesystem::create_directories(workspace / ".ymh");
-    std::ofstream(workspace / ".ymh" / "config.toml")
-        << "[agent.compaction]\ncontext_window_tokens = " << window << "\n";
+    std::ofstream(workspace / ".ymh" / "config.jsonc")
+        << "{\n  \"agent\": { \"compaction\": { \"context_window_tokens\": " << window
+        << " } }\n}\n";
 }
 
 TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
@@ -725,6 +732,7 @@ TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace = root.path() / "context-ws";
     std::filesystem::create_directories(workspace);
@@ -772,6 +780,7 @@ TEST(UiSupervisorPty, ContextOverlayShowsNote) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace = root.path() / "context-note-ws";
     std::filesystem::create_directories(workspace);
@@ -812,6 +821,7 @@ TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     const std::filesystem::path workspace = root.path() / "context-refresh-ws";
     std::filesystem::create_directories(workspace);

@@ -1,14 +1,19 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdio>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include <CLI/CLI.hpp>
 
 #include "support/test_env.hpp"
 #include "ymh/cli/cli.hpp"
+#include "ymh/core/logging.hpp"
 
 namespace {
 
@@ -198,6 +203,89 @@ TEST(Cli, WorkspaceStopInteractiveConfirmationDeclined) {
         std::string out;
         EXPECT_FALSE(stop_proceeds(1, 0, false, true, answer, &out)) << "answer=" << answer;
     }
+}
+
+class StderrCapture {
+public:
+    StderrCapture() : saved_(::dup(STDERR_FILENO)) {
+        file_ = std::tmpfile();
+        if (file_ != nullptr) {
+            ::dup2(::fileno(file_), STDERR_FILENO);
+        }
+    }
+
+    ~StderrCapture() {
+        if (saved_ >= 0) {
+            ::dup2(saved_, STDERR_FILENO);
+            ::close(saved_);
+        }
+        if (file_ != nullptr) {
+            std::fclose(file_);
+        }
+    }
+
+    StderrCapture(const StderrCapture&) = delete;
+    StderrCapture& operator=(const StderrCapture&) = delete;
+
+    std::string read() {
+        if (file_ == nullptr) {
+            return {};
+        }
+        std::fflush(nullptr);
+        std::fflush(file_);
+        std::rewind(file_);
+        std::string result;
+        char        buffer[512];
+        std::size_t count = 0;
+        while ((count = std::fread(buffer, 1, sizeof(buffer), file_)) > 0) {
+            result.append(buffer, count);
+        }
+        return result;
+    }
+
+private:
+    int        saved_ = -1;
+    std::FILE* file_  = nullptr;
+};
+
+TEST(Cli, LegacyTomlWarningOnStderr) {
+    shutdown_logging();
+    test::TempWorkspace workspace("cli_legacy_warn");
+    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
+
+    std::ostringstream out;
+    std::ostringstream err;
+    StderrCapture      capture;
+    const int          code = run_cli({"--config", (workspace.path() / "custom.jsonc").string(),
+                                       "--workspace", workspace.path().string(), "list"},
+                                      out, err);
+    const std::string  stderr_text = capture.read();
+
+    EXPECT_EQ(code, 0);
+    EXPECT_NE(stderr_text.find("ignoring legacy TOML"), std::string::npos);
+}
+
+TEST(Cli, ConfigPathLegacyNote) {
+    test::TempWorkspace         workspace("cli_config_note");
+    const std::filesystem::path jsonc = workspace.path() / "config.jsonc";
+    const std::filesystem::path toml  = workspace.path() / "config.toml";
+    workspace.write("config.toml", "[agent]\nmax_steps = 7\n");
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(run_cli({"--config", jsonc.string(), "config", "path"}, out, err), 0);
+    const std::string conventional = out.str();
+    EXPECT_NE(conventional.find(toml.string()), std::string::npos);
+    EXPECT_NE(conventional.find(jsonc.string()), std::string::npos);
+    EXPECT_EQ(conventional.find("update --config"), std::string::npos);
+
+    std::ostringstream legacy_out;
+    std::ostringstream legacy_err;
+    EXPECT_EQ(run_cli({"--config", toml.string(), "config", "path"}, legacy_out, legacy_err), 0);
+    const std::string legacy = legacy_out.str();
+    EXPECT_NE(legacy.find(toml.string()), std::string::npos);
+    EXPECT_NE(legacy.find(jsonc.string()), std::string::npos);
+    EXPECT_NE(legacy.find("update --config to that path"), std::string::npos);
 }
 
 } // namespace

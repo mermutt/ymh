@@ -1,16 +1,17 @@
 #pragma once
 
-// Configuration (00-architecture.md §37, §48; 08-llm-provider.md §5.3).
+// Configuration (00-architecture.md §37, §48; 08-llm-provider.md §5.3;
+// 21-config-jsonc-errata.md).
 //
 // Layered, last-writer-wins:
 //
 //   built-in defaults
-//         -> global config    (~/.config/ymh/config.toml)
-//         -> project config   (<workspace>/.ymh/config.toml)
+//         -> global config    (~/.config/ymh/config.jsonc)
+//         -> project config   (<workspace>/.ymh/config.jsonc)
 //         -> environment       (YMH_* variables)
 //         -> command-line      (applied by the CLI layer)
 //
-// The loader is strict: an unknown key in a TOML file is a `ConfigError`, so a
+// The loader is strict: an unknown key in a JSONC file is a `ConfigError`, so a
 // typo can never be silently ignored (08 §5.3). Secrets are never stored in
 // `Config`; `llm.api_key_env` names the environment variable that holds the
 // secret, and the value is read per request by the provider (08 §6.4).
@@ -176,12 +177,30 @@ struct ConfigPaths {
     std::filesystem::path workspace;
 };
 
-// `$XDG_CONFIG_HOME/ymh/config.toml`, else `$HOME/.config/ymh/config.toml`.
+// `$XDG_CONFIG_HOME/ymh/config.jsonc`, else `$HOME/.config/ymh/config.jsonc`.
 [[nodiscard]] std::filesystem::path default_global_config_path();
 
-// `<root>/.ymh/config.toml`.
+// `<root>/.ymh/config.jsonc`.
 [[nodiscard]] std::filesystem::path workspace_config_path(
     const std::filesystem::path& workspace_root);
+
+// The legacy TOML sibling of a resolved JSONC path. If `jsonc_path` is itself
+// named `config.toml`, that same path is returned (an explicit
+// `--config …/config.toml` override is therefore recognised as legacy). If it is
+// named `config.jsonc`, its conventional sibling `config.toml` is returned. For
+// any other basename the result is empty: a custom-named `--config` slot has no
+// conventional legacy sibling and must not trigger a sibling warning.
+[[nodiscard]] std::filesystem::path legacy_config_path(const std::filesystem::path& jsonc_path);
+
+// The JSONC target for a slot: the slot itself, or its conventional
+// `config.jsonc` sibling when the slot is named `config.toml`. Used only for the
+// migration warning; never throws.
+[[nodiscard]] std::filesystem::path jsonc_target(const std::filesystem::path& slot);
+
+// The scaffold target for a slot: the slot itself, or an **empty** path when the
+// slot is named `config.toml` (a legacy-named `--config` slot must not have a
+// JSONC sibling scaffolded). Never throws.
+[[nodiscard]] std::filesystem::path scaffold_target(const std::filesystem::path& slot);
 
 // `ymh::Logger` (core/logging.hpp); only the pointer is used here so the config
 // component stays free of a logging-library dependency.
@@ -199,10 +218,11 @@ struct ScaffoldResult {
 };
 
 // First-run scaffolding, best-effort and never throwing. Creates the global
-// config directory, writes a commented default `config.toml` there if (and only
+// config directory, writes a commented default `config.jsonc` there if (and only
 // if) it does not already exist, and ensures `<workspace_root>/.ymh/` exists.
-// An existing config file is never overwritten. Failures are reported to
-// `logger` (may be null) and reflected in `ScaffoldResult::ok`.
+// An existing config file is never overwritten. An empty `global_config` target
+// is a deliberate skip (no directory, no write, no warning). Failures are
+// reported to `logger` (may be null) and reflected in `ScaffoldResult::ok`.
 [[nodiscard]] ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
                                              const std::filesystem::path& global_config,
                                              Logger* logger = nullptr);
@@ -212,15 +232,18 @@ struct ScaffoldResult {
 [[nodiscard]] ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
                                              Logger* logger = nullptr);
 
-// Loads defaults, then global, then project, then environment overrides.
-[[nodiscard]] Config load_config(const ConfigPaths& paths);
+// Loads defaults, then global, then project, then environment overrides. When
+// `logger` is non-null, one warning is emitted per call if a legacy
+// `config.toml` sibling exists (21-config-jsonc-errata.md §6).
+[[nodiscard]] Config load_config(const ConfigPaths& paths, Logger* logger = nullptr);
 
 // Convenience overload using `default_global_config_path()`.
-[[nodiscard]] Config load_config(const std::filesystem::path& workspace_root);
+[[nodiscard]] Config load_config(const std::filesystem::path& workspace_root,
+                                 Logger* logger = nullptr);
 
-// Merges one TOML file over `config`. A missing file is a no-op; a parse
-// failure or unknown key throws `ConfigError`.
-void apply_toml_file(Config& config, const std::filesystem::path& path);
+// Merges one JSONC file over `config`. A missing file is a no-op; a parse
+// failure, a non-object root, or an unknown key throws `ConfigError`.
+void apply_jsonc_file(Config& config, const std::filesystem::path& path);
 
 // Merges `YMH_*` environment variables over `config`. Unset variables are a
 // no-op; a malformed value (e.g. non-numeric timeout) throws `ConfigError`.

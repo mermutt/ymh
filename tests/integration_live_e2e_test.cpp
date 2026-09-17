@@ -43,13 +43,16 @@ constexpr const char* kSecret = "zephyr-quokka-4721";
 constexpr const char* kPrompt = "Read note.txt and tell me the secret word";
 constexpr const char* kSessionActive = "Type a message and press Enter";
 constexpr const char* kLiveConfig =
-    "[permissions]\n"
-    "read = \"allow\"\n"
-    "write = \"allow\"\n"
-    "shell = \"allow\"\n"
-    "\n"
-    "[agent]\n"
-    "reasoning_effort = \"low\"\n";
+    "{\n"
+    "  \"permissions\": {\n"
+    "    \"read\": \"allow\",\n"
+    "    \"write\": \"allow\",\n"
+    "    \"shell\": \"allow\"\n"
+    "  },\n"
+    "  \"agent\": {\n"
+    "    \"reasoning_effort\": \"low\"\n"
+    "  }\n"
+    "}\n";
 
 bool live_enabled() {
     const char* flag = std::getenv("YMH_LIVE_LLM");
@@ -80,7 +83,7 @@ class LiveWorkspace {
 public:
     explicit LiveWorkspace(const std::string& prefix) : root_(prefix) {
         root_.write("note.txt", std::string{"The secret word is "} + kSecret + ".\n");
-        root_.write(".ymh/config.toml", kLiveConfig);
+        root_.write(".ymh/config.jsonc", kLiveConfig);
         set_env("XDG_STATE_HOME", root_.state_dir().string());
         set_env("HOME", root_.path().string());
         set_env("XDG_CONFIG_HOME", root_.config_dir().string());

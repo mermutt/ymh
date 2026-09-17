@@ -282,6 +282,7 @@ TEST_F(HostIntegration, RunRoutesThroughLiveDaemon) {
 
     ::setenv("XDG_STATE_HOME", (root.path() / ".state").string().c_str(), 1);
     ::setenv("HOME", root.path().string().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
     std::ostringstream out;
     std::ostringstream err;
@@ -300,9 +301,11 @@ TEST_F(HostIntegration, RunFallsBackInProcessWithoutDaemon) {
 
     ScopedEnv state_env("XDG_STATE_HOME");
     ScopedEnv home_env("HOME");
+    ScopedEnv config_env("XDG_CONFIG_HOME");
     ScopedEnv fake_env("YMH_FAKE_LLM_SCRIPT");
     ::setenv("XDG_STATE_HOME", (root.path() / ".state").string().c_str(), 1);
     ::setenv("HOME", root.path().string().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
     ::setenv("YMH_FAKE_LLM_SCRIPT", (root.path() / "fake.json").string().c_str(), 1);
 
     std::ostringstream out;
