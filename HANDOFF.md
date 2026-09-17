@@ -17,7 +17,8 @@ Supervisor (TUI) process
              └── shared WorkspaceRegistry (registry.db) + per-workspace session DBs
 ```
 
-- **Workspace** = project = one daemon process (own cwd, survives TUI exit).
+- **Workspace** = project = one daemon process (own cwd, **supervisor-owned** —
+  the last supervisor's exit tears it down, per `16-daemon-ownership.md`).
 - **Session** = conversation inside a workspace (immutable `SessionHeader.cwd`).
 - **Shared registry** (`registry.db`): multi-row `workspaces` + `workspace_sessions`, `flock` single-writer, boot-nonce liveness.
 - **Transport**: JSON-RPC 2.0 over length-prefixed Unix socket (Interactive + Automation profiles).
@@ -109,7 +110,7 @@ Write one spec per component, in this order (dependency-ordered — **session fi
 | 01 | **Session & event log** | `Session` (append-only typed log), `SessionEventMap` + turn/step taxonomy, `deriveMessages()`, create/resume/fork/replay, `SessionHeader`. |
 | 02 | **Persistence & write lease** | `SessionPersistence` seam, `SessionHandle`, `session_leases` (boot nonce, TTL, steal), `sessions/events/session_leases` schema, flush/checkpoint, crash recovery. |
 | 03 | **WorkspaceRegistry** | shared `registry.db`, `workspaces` + `workspace_sessions` + `pending_mutation`, `flock` single-writer, WAL readers, heartbeat + boot nonce, bootstrap. |
-| 04 | **WorkspaceHost daemon** | spawn/setsid/socket, attach/detach, survive TUI exit, crash/orphan handling, graceful shutdown. |
+| 04 | **WorkspaceHost daemon** | spawn/setsid/socket, attach/detach, supervisor-owned lifetime (16), crash/orphan handling, graceful shutdown. |
 | 05 | **Transport & protocol** | JSON-RPC 2.0 over length-prefixed Unix socket, Interactive vs Automation profiles, full RPC method catalog, `SessionEnvelope`, event multiplexing, per-session ordered delivery. |
 | 06 | **Agent & loop** | `Agent` handle (`dispose()`/`whenIdle()`), `AgentRegistry` create/resume transaction, inbox (`send`/`followup`/`steer`/`inject`), `AgentLoop`, scope. |
 | 07 | **Tools & execution** | `ToolRegistry`, `ToolContext`, `ExecutionEnvironment` (rooted cwd, realpath canonicalization), sandbox modes, resource caps. |
@@ -196,15 +197,16 @@ capability behind the execution-environment seam (`14`), and the MCP adapter int
 the shared tool registry (`15`). Remaining candidates: LSP tools (§28), remote
 SSH/TCP transport (§47 Mode B), worktrees, and multi-workspace UI polish.
 
-**Spec `16-daemon-ownership.md` is verified but NOT yet implemented.** It changes
-daemon lifetime from "supervisor-independent" to **supervisor-owned**: the last
+**Spec `16-daemon-ownership.md` is implemented** (8 waves). It changes daemon
+lifetime from "supervisor-independent" to **supervisor-owned**: the last
 supervisor's clean exit prompts and tears the daemons down, and every crash path
 is backstopped by a daemon-side owner watchdog. It **supersedes** `04` H8/H9,
 `04` §3.2/§6.5/§14.1(f), `00` §54 D23 and §9.8/§9.9, `10` §2.1, and `11` §8.2
 D20.3; it amends `03`/`04`/`05` (A15/A16) and adds a `supervisors` registry table
 (schema 1→2). Invariants `O1–O22`, failure modes `O-F1–O-F16`. Gated over 5
 rounds by an adversarial critic plus Oracle — **both PASS, zero open HIGH/MEDIUM**
-(2737 lines). Implementation is the next large wave.
+(2737 lines) — then implemented and verified live with two supervisors against
+real DeepSeek.
 
 Two supporting registers were produced alongside it:
 `REQUIREMENTS_BACKLOG.md` (RB-01–RB-11, triaged from `requirements_draft.txt` and
