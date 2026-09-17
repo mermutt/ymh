@@ -505,6 +505,10 @@ protected:
         set_env("HOME", root.path().string());
         set_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
         set_env("XDG_CACHE_HOME", (root.path() / ".cache").string());
+        // M4: every daemon spawned by this fixture needs a required global
+        // config (21-D12), including `TwoSpawnsExactlyOneDaemon`, which starts
+        // no harness. Write it here so it is ordering-independent.
+        root.write(".config/ymh/config.jsonc", "{}\n");
     }
 
     HostHarnessOptions options_for(const ShortTempRoot& root, const std::string& workspace_id,

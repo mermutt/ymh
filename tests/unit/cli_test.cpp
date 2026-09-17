@@ -2,9 +2,12 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -18,6 +21,30 @@
 namespace {
 
 using namespace ymh;
+
+class ScopedEnv {
+public:
+    ScopedEnv(std::string name, std::string value) : name_(std::move(name)) {
+        if (const char* previous = ::getenv(name_.c_str()); previous != nullptr) {
+            previous_ = previous;
+        }
+        ::setenv(name_.c_str(), value.c_str(), 1);
+    }
+    ~ScopedEnv() {
+        if (previous_.has_value()) {
+            ::setenv(name_.c_str(), previous_->c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    std::string                name_;
+    std::optional<std::string> previous_;
+};
 
 bool stop_proceeds(std::size_t live_supervisors, std::size_t live_automation, bool force,
                    bool interactive, const std::string& answer, std::string* out = nullptr,
@@ -126,9 +153,10 @@ TEST(Cli, SubcommandHelpShowsSubcommandUsage) {
 
 TEST(Cli, RunListEmptyWorkspace) {
     test::TempWorkspace workspace("cli_run_list");
-    std::ostringstream  out;
-    std::ostringstream  err;
-    const std::string   config = (workspace.path() / "missing.toml").string();
+    workspace.write("config.jsonc", "{}\n");
+    std::ostringstream out;
+    std::ostringstream err;
+    const std::string  config = (workspace.path() / "config.jsonc").string();
     EXPECT_EQ(run_cli({"--config", config, "--workspace", workspace.path().string(), "list"}, out,
                       err),
               0);
@@ -150,8 +178,8 @@ TEST(Cli, ConfigPathSubcommandParses) {
 TEST(Cli, ConfigPathPrintsEffectivePath) {
     std::ostringstream out;
     std::ostringstream err;
-    EXPECT_EQ(run_cli({"--config", "/tmp/ymh-test-config.toml", "config", "path"}, out, err), 0);
-    EXPECT_NE(out.str().find("/tmp/ymh-test-config.toml"), std::string::npos);
+    EXPECT_EQ(run_cli({"--config", "/tmp/ymh-test-config.jsonc", "config", "path"}, out, err), 0);
+    EXPECT_NE(out.str().find("/tmp/ymh-test-config.jsonc"), std::string::npos);
     EXPECT_TRUE(err.str().empty());
 }
 
@@ -205,87 +233,67 @@ TEST(Cli, WorkspaceStopInteractiveConfirmationDeclined) {
     }
 }
 
-class StderrCapture {
-public:
-    StderrCapture() : saved_(::dup(STDERR_FILENO)) {
-        file_ = std::tmpfile();
-        if (file_ != nullptr) {
-            ::dup2(::fileno(file_), STDERR_FILENO);
-        }
-    }
-
-    ~StderrCapture() {
-        if (saved_ >= 0) {
-            ::dup2(saved_, STDERR_FILENO);
-            ::close(saved_);
-        }
-        if (file_ != nullptr) {
-            std::fclose(file_);
-        }
-    }
-
-    StderrCapture(const StderrCapture&) = delete;
-    StderrCapture& operator=(const StderrCapture&) = delete;
-
-    std::string read() {
-        if (file_ == nullptr) {
-            return {};
-        }
-        std::fflush(nullptr);
-        std::fflush(file_);
-        std::rewind(file_);
-        std::string result;
-        char        buffer[512];
-        std::size_t count = 0;
-        while ((count = std::fread(buffer, 1, sizeof(buffer), file_)) > 0) {
-            result.append(buffer, count);
-        }
-        return result;
-    }
-
-private:
-    int        saved_ = -1;
-    std::FILE* file_  = nullptr;
-};
-
-TEST(Cli, LegacyTomlWarningOnStderr) {
-    shutdown_logging();
-    test::TempWorkspace workspace("cli_legacy_warn");
-    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
-
-    std::ostringstream out;
-    std::ostringstream err;
-    StderrCapture      capture;
-    const int          code = run_cli({"--config", (workspace.path() / "custom.jsonc").string(),
-                                       "--workspace", workspace.path().string(), "list"},
-                                      out, err);
-    const std::string  stderr_text = capture.read();
-
-    EXPECT_EQ(code, 0);
-    EXPECT_NE(stderr_text.find("ignoring legacy TOML"), std::string::npos);
+TEST(Cli, ExplicitConfigMissingIsNotCreated) {
+    test::TempWorkspace         workspace("cli_explicit_missing");
+    const std::filesystem::path missing = workspace.path() / "missing.jsonc";
+    std::ostringstream          out;
+    std::ostringstream          err;
+    EXPECT_NE(run_cli({"--config", missing.string(), "--workspace", workspace.path().string(),
+                       "list"},
+                      out, err),
+              0);
+    EXPECT_NE(err.str().find("required global config not found"), std::string::npos) << err.str();
+    EXPECT_FALSE(std::filesystem::exists(missing));
+    EXPECT_TRUE(std::filesystem::is_directory(workspace.path() / ".ymh"));
 }
 
-TEST(Cli, ConfigPathLegacyNote) {
-    test::TempWorkspace         workspace("cli_config_note");
-    const std::filesystem::path jsonc = workspace.path() / "config.jsonc";
-    const std::filesystem::path toml  = workspace.path() / "config.toml";
-    workspace.write("config.toml", "[agent]\nmax_steps = 7\n");
+TEST(Cli, ConventionalMissingIsScaffoldedThenLoads) {
+    test::TempWorkspace         workspace("cli_conventional_scaffold");
+    const std::filesystem::path xdg      = workspace.path() / "xdg";
+    const std::filesystem::path expected = xdg / "ymh" / "config.jsonc";
+    ScopedEnv                   xdg_env("XDG_CONFIG_HOME", xdg.string());
+    ScopedEnv                   home_env("HOME", (workspace.path() / "home").string());
+    ASSERT_FALSE(std::filesystem::exists(expected));
 
     std::ostringstream out;
     std::ostringstream err;
-    EXPECT_EQ(run_cli({"--config", jsonc.string(), "config", "path"}, out, err), 0);
-    const std::string conventional = out.str();
-    EXPECT_NE(conventional.find(toml.string()), std::string::npos);
-    EXPECT_NE(conventional.find(jsonc.string()), std::string::npos);
-    EXPECT_EQ(conventional.find("update --config"), std::string::npos);
+    EXPECT_EQ(run_cli({"--workspace", workspace.path().string(), "list"}, out, err), 0) << err.str();
+    EXPECT_TRUE(std::filesystem::is_regular_file(expected));
+    EXPECT_TRUE(std::filesystem::is_directory(workspace.path() / ".ymh"));
+}
 
-    std::ostringstream legacy_out;
-    std::ostringstream legacy_err;
-    EXPECT_EQ(run_cli({"--config", toml.string(), "config", "path"}, legacy_out, legacy_err), 0);
-    const std::string legacy = legacy_out.str();
-    EXPECT_NE(legacy.find(toml.string()), std::string::npos);
-    EXPECT_NE(legacy.find(jsonc.string()), std::string::npos);
-    EXPECT_NE(legacy.find("update --config to that path"), std::string::npos);
+TEST(Cli, ScaffoldFailureThenRequiredError) {
+    test::TempWorkspace workspace("cli_scaffold_fail");
+    workspace.write("blocker", "not a directory");
+    const std::filesystem::path xdg = workspace.path() / "blocker";
+    ScopedEnv                   xdg_env("XDG_CONFIG_HOME", xdg.string());
+    ScopedEnv                   home_env("HOME", (workspace.path() / "home").string());
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(run_cli({"--workspace", workspace.path().string(), "list"}, out, err), 2);
+    EXPECT_NE(err.str().find("required global config not found"), std::string::npos) << err.str();
+    EXPECT_FALSE(std::filesystem::exists(xdg / "ymh" / "config.jsonc"));
+}
+
+TEST(Cli, WorkspaceCommandNeedsNoConfig) {
+    test::TempWorkspace         workspace("cli_workspace_noconfig");
+    const std::filesystem::path xdg   = workspace.path() / "xdg";
+    const std::filesystem::path state = workspace.path() / "state";
+    ScopedEnv                   xdg_env("XDG_CONFIG_HOME", xdg.string());
+    ScopedEnv                   home_env("HOME", (workspace.path() / "home").string());
+    ScopedEnv                   state_env("XDG_STATE_HOME", state.string());
+
+    std::ostringstream add_out;
+    std::ostringstream add_err;
+    EXPECT_EQ(run_cli({"workspace", "add", workspace.path().string()}, add_out, add_err), 0)
+        << add_err.str();
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(run_cli({"workspace", "list"}, out, err), 0) << err.str();
+    EXPECT_EQ(err.str().find("ConfigError"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(xdg / "ymh" / "config.jsonc"));
 }
 
 } // namespace

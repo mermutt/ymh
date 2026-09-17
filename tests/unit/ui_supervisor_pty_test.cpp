@@ -48,16 +48,16 @@ std::string strip_ansi(const std::string& input) {
     return output;
 }
 
-// Teardown confirms daemons from `/proc/<pid>/cmdline` (`ymh --host ...
-// --workspace <id>`) because a registry read can lag the daemon's claim/exit.
-bool is_host_process(pid_t pid, const std::string* workspace_id) {
+// `/proc/<pid>/cmdline` is a NUL-separated argv blob.
+std::vector<std::string> proc_args(pid_t pid) {
     std::ifstream input("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
     if (!input) {
-        return false;
+        return {};
     }
-    std::string blob((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const std::string blob((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
     std::vector<std::string> args;
-    std::string current;
+    std::string              current;
     for (const char character : blob) {
         if (character == '\0') {
             args.push_back(std::move(current));
@@ -69,7 +69,14 @@ bool is_host_process(pid_t pid, const std::string* workspace_id) {
     if (!current.empty()) {
         args.push_back(std::move(current));
     }
-    bool host = false;
+    return args;
+}
+
+// Teardown confirms daemons from `/proc/<pid>/cmdline` (`ymh --host ...
+// --workspace <id>`) because a registry read can lag the daemon's claim/exit.
+bool is_host_process(pid_t pid, const std::string* workspace_id) {
+    const std::vector<std::string> args = proc_args(pid);
+    bool                           host = false;
     bool workspace_match = workspace_id == nullptr;
     for (std::size_t index = 0; index < args.size(); ++index) {
         if (args[index] == "--host") {
@@ -138,7 +145,8 @@ public:
     ~PtyChild() { terminate(); }
 
     bool spawn(const std::filesystem::path& binary, const std::filesystem::path& cwd,
-               const std::map<std::string, std::string>& env) {
+               const std::map<std::string, std::string>& env,
+               const std::vector<std::string>& args = {}) {
         master_ = ::posix_openpt(O_RDWR | O_NOCTTY);
         if (master_ < 0) {
             return false;
@@ -178,7 +186,16 @@ public:
             if (::chdir(cwd.c_str()) != 0) {
                 ::_exit(126);
             }
-            ::execl(binary.c_str(), binary.c_str(), static_cast<char*>(nullptr));
+            std::vector<std::string> argv_storage;
+            argv_storage.push_back(binary.string());
+            argv_storage.insert(argv_storage.end(), args.begin(), args.end());
+            std::vector<char*> argv;
+            argv.reserve(argv_storage.size() + 1);
+            for (std::string& argument : argv_storage) {
+                argv.push_back(argument.data());
+            }
+            argv.push_back(nullptr);
+            ::execv(binary.c_str(), argv.data());
             ::_exit(127);
         }
         ::close(slave);
@@ -859,6 +876,60 @@ TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
     child.terminate();
     guard.stop();
 
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
+    ShortTempRoot root("ymh_pty_config");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "config-ws";
+    std::filesystem::create_directories(workspace);
+    const std::filesystem::path explicit_config = root.path() / "explicit.jsonc";
+    {
+        std::ofstream(explicit_config, std::ios::binary) << "{}\n";
+    }
+    ASSERT_FALSE(std::filesystem::exists(root.path() / ".config" / "ymh" / "config.jsonc"));
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "config-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["XDG_CONFIG_HOME"] = (root.path() / ".config").string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env,
+                            {"--config", explicit_config.string()}));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::vector<pid_t> hosts = host_processes(&workspace_id.value);
+    ASSERT_FALSE(hosts.empty()) << "supervisor did not spawn its daemon";
+    const std::vector<std::string> daemon_args = proc_args(hosts.front());
+    bool                           carried = false;
+    for (std::size_t index = 0; index + 1 < daemon_args.size(); ++index) {
+        if (daemon_args[index] == "--config" && daemon_args[index + 1] == explicit_config.string()) {
+            carried = true;
+        }
+    }
+    EXPECT_TRUE(carried) << "daemon argv did not carry --config " << explicit_config.string();
+    EXPECT_FALSE(std::filesystem::exists(root.path() / ".config" / "ymh" / "config.jsonc"));
+
+    child.terminate();
+    guard.stop();
     EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
 }
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -450,6 +451,34 @@ TEST(ForkExecLauncherTest, BuildArgvMatchesPinnedHostEntry) {
         "boot-123",
     };
     EXPECT_EQ(argv, expected);
+}
+
+TEST(ForkExecLauncherTest, BuildArgvCarriesConfigPath) {
+    HostConfig config;
+    config.workspace      = WorkspaceId{"22222222-2222-4222-8222-222222222222"};
+    config.workspace_root = "/tmp/ws";
+    config.socket_path    = "/tmp/ws/.ymh/host.sock";
+    config.config_path    = "/x/my.jsonc";
+
+    const std::vector<std::string> argv = ForkExecLauncher::build_argv(config, "/opt/ymh");
+    const std::vector<std::string> expected = {
+        "/opt/ymh",
+        "--host",
+        "--workspace",
+        "22222222-2222-4222-8222-222222222222",
+        "--root",
+        "/tmp/ws",
+        "--socket",
+        "/tmp/ws/.ymh/host.sock",
+        "--config",
+        "/x/my.jsonc",
+    };
+    EXPECT_EQ(argv, expected);
+
+    config.config_path.clear();
+    const std::vector<std::string> without =
+        ForkExecLauncher::build_argv(config, "/opt/ymh");
+    EXPECT_EQ(std::find(without.begin(), without.end(), "--config"), without.end());
 }
 
 class FakeLauncher final : public HostLauncher {

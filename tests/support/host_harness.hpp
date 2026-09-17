@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -81,6 +82,15 @@ public:
 
     void start() {
         std::filesystem::create_directories(options_.workspace_root / ".ymh");
+        // M4: the daemon's global layer is required (21-D12). Write the
+        // conventional config under the XDG_CONFIG_HOME this harness exports so
+        // `ymh --host` never fails J-F5, independent of test ordering.
+        const std::filesystem::path global_config =
+            options_.workspace_root / ".config" / "ymh" / "config.jsonc";
+        std::filesystem::create_directories(global_config.parent_path());
+        if (!std::filesystem::exists(global_config)) {
+            std::ofstream(global_config, std::ios::binary) << "{}\n";
+        }
         stdout_capture_ = options_.workspace_root / ".ymh" / "host.stdout.log";
         stderr_capture_ = options_.workspace_root / ".ymh" / "host.stderr.log";
 

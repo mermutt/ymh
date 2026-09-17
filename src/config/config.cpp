@@ -25,9 +25,8 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr std::string_view kGlobalDir       = "ymh";
-constexpr std::string_view kConfigFile      = "config.jsonc";
-constexpr std::string_view kLegacyConfigFile = "config.toml";
+constexpr std::string_view kGlobalDir  = "ymh";
+constexpr std::string_view kConfigFile = "config.jsonc";
 
 [[noreturn]] void fail(const std::filesystem::path& source, std::string_view detail) {
     throw ConfigError("config " + source.string() + ": " + std::string{detail});
@@ -120,7 +119,11 @@ void reject_unknown(const Json& table,
             }
         }
         if (!known) {
-            fail(source, "unknown key '" + std::string{table_name} + "." + std::string{name} + "'");
+            const std::string qualified =
+                table_name.empty()
+                    ? std::string{name}
+                    : std::string{table_name} + "." + std::string{name};
+            fail(source, "unknown key '" + qualified + "'");
         }
     }
 }
@@ -710,76 +713,6 @@ bool write_default_config(const std::filesystem::path& file, Logger* logger, boo
 
 } // namespace
 
-std::filesystem::path legacy_config_path(const std::filesystem::path& jsonc_path) {
-    if (jsonc_path.filename() == kLegacyConfigFile) {
-        return jsonc_path;  // itself legacy
-    }
-    if (jsonc_path.filename() == kConfigFile) {
-        return jsonc_path.parent_path() / kLegacyConfigFile;  // conventional sibling
-    }
-    return {};  // custom basename: no sibling (V3-6)
-}
-
-std::filesystem::path jsonc_target(const std::filesystem::path& slot) {
-    return slot.filename() == kLegacyConfigFile ? slot.parent_path() / kConfigFile : slot;
-}
-
-std::filesystem::path scaffold_target(const std::filesystem::path& slot) {
-    return slot.filename() == kLegacyConfigFile ? std::filesystem::path{} : slot;
-}
-
-namespace {
-
-struct LegacyFile {
-    std::filesystem::path legacy;                  // the existing config.toml
-    std::filesystem::path target;                  // the JSONC path to convert to
-    bool                  slot_is_legacy = false;  // slot itself named config.toml
-};
-
-// Never throws. Returns 0, 1, or 2 entries (global + workspace slots).
-std::vector<LegacyFile> collect_legacy(const ConfigPaths& paths) {
-    std::vector<LegacyFile> found;
-    for (const std::filesystem::path& slot : {paths.global, paths.workspace}) {
-        if (slot.empty()) {
-            continue;
-        }
-        const std::filesystem::path legacy = legacy_config_path(slot);
-        if (legacy.empty()) {
-            continue;  // custom-named slot: never probe a sibling (V3-6)
-        }
-        std::error_code error;
-        if (std::filesystem::exists(legacy, error) && !error) {
-            found.push_back(LegacyFile{legacy, jsonc_target(slot),
-                                       slot.filename() == kLegacyConfigFile});
-        }
-    }
-    return found;
-}
-
-void warn_legacy(const std::vector<LegacyFile>& legacy, Logger* logger) {
-    if (logger == nullptr || legacy.empty()) {
-        return;
-    }
-    std::ostringstream message;
-    message << "config: ignoring legacy TOML file(s); ymh reads JSONC only.\n";
-    for (const LegacyFile& entry : legacy) {
-        message << "  " << entry.legacy.string() << "  ->  " << entry.target.string();
-        if (entry.slot_is_legacy) {
-            message << "   (explicit --config slot: update --config)";
-        }
-        message << '\n';
-    }
-    message << "convert to JSONC (// and /* */ comments; # is not a comment; "
-               "trailing commas are NOT allowed). this file is not read. For a "
-               "conventional slot, ymh uses the config.jsonc beside it when "
-               "present, otherwise built-in defaults for that layer. An explicitly "
-               "named --config slot is not substituted: convert the file and point "
-               "--config at the JSONC path.";
-    logger->warn(message.str());
-}
-
-} // namespace
-
 std::optional<std::string> env_value(std::string_view name) {
     const char* raw = std::getenv(std::string{name}.c_str());
     if (raw == nullptr || *raw == '\0') {
@@ -830,13 +763,22 @@ ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root, Logg
     return scaffold_config(workspace_root, default_global_config_path(), logger);
 }
 
-void apply_jsonc_file(Config& config, const std::filesystem::path& path) {
+void apply_jsonc_file(Config& config, const std::filesystem::path& path, bool required) {
     if (path.empty()) {
+        if (required) {
+            throw ConfigError("config: required global config path is empty");
+        }
         return;
     }
     std::error_code error;
     if (!std::filesystem::exists(path, error)) {
+        if (required) {
+            fail(path, "required global config not found");
+        }
         return;
+    }
+    if (!std::filesystem::is_regular_file(path, error)) {
+        fail(path, "config path is not a regular file");
     }
 
     std::ifstream input{path, std::ios::binary};
@@ -926,28 +868,19 @@ void apply_env_overrides(Config& config) {
     }
 }
 
-Config load_config(const ConfigPaths& paths, Logger* logger) {
+Config load_config(const ConfigPaths& paths) {
     Config config;
-    warn_legacy(collect_legacy(paths), logger);  // once per call (21-D4)
-
-    const auto loadable = [](const std::filesystem::path& p) {
-        return !p.empty() && p.filename() != kLegacyConfigFile;
-    };
-    if (loadable(paths.global)) {
-        apply_jsonc_file(config, paths.global);
-    }
-    if (loadable(paths.workspace)) {
-        apply_jsonc_file(config, paths.workspace);
-    }
+    apply_jsonc_file(config, paths.global, /*required=*/true);
+    apply_jsonc_file(config, paths.workspace, /*required=*/false);
     apply_env_overrides(config);
     return config;
 }
 
-Config load_config(const std::filesystem::path& workspace_root, Logger* logger) {
+Config load_config(const std::filesystem::path& workspace_root) {
     ConfigPaths paths;
     paths.global    = default_global_config_path();
     paths.workspace = workspace_config_path(workspace_root);
-    return load_config(paths, logger);
+    return load_config(paths);
 }
 
 std::string effective_model(const Config& config) {

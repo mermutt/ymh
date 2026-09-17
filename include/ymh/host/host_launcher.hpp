@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ymh/host/workspace_host.hpp"
@@ -95,8 +96,9 @@ enum class ReapResult : std::uint8_t {
 
 class HostLifecycle {
 public:
-    HostLifecycle(HostLauncher& launcher, WorkspaceRegistry& registry)
-        : launcher_(launcher), registry_(registry) {}
+    HostLifecycle(HostLauncher& launcher, WorkspaceRegistry& registry,
+                  std::filesystem::path config_path = {})
+        : launcher_(launcher), registry_(registry), config_path_(std::move(config_path)) {}
 
     // Attach to a live daemon or spawn one. NEVER kills a process. May clear a
     // stale claim (lazy reap) under the D22 write lock (03 §6.4, H10, H11).
@@ -119,6 +121,7 @@ private:
 
     HostLauncher&      launcher_;
     WorkspaceRegistry& registry_;
+    std::filesystem::path config_path_;
 };
 
 } // namespace ymh
