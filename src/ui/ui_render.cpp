@@ -1,8 +1,13 @@
 #include "ymh/ui/ui_render.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
@@ -483,7 +488,290 @@ Element render_header(const UiModel& model, const Theme& theme) {
                         ftxui::filler(), ftxui::text(session_title)});
 }
 
+// 18 §5: the `/context` overlay. Chrome is exactly 10 rows in every view and
+// every size (border 2 + title/status 1 + body 6 + bottom line 1).
+constexpr int kContextGridMaxCols = 72;
+constexpr int kContextGridMaxRows = 12;
+constexpr int kContextGridMinCols = 40;
+constexpr int kContextGridMinRows = 10;
+constexpr int kContextOverlayChromeRows = 10;
+constexpr int kContextOverlayBorderCols = 2;
+constexpr int kContextInventoryRows = 6;
+constexpr std::string_view kContextFallbackHint =
+    "terminal too small for the grid (need >= 40x10)";
+
+constexpr std::array<ContextSegmentKind, 6> kContextSegmentOrder = {
+    ContextSegmentKind::SystemPrompt,
+    ContextSegmentKind::ToolSchemas,
+    ContextSegmentKind::McpToolSchemas,
+    ContextSegmentKind::Conversation,
+    ContextSegmentKind::CompactionSummary,
+    ContextSegmentKind::FreeSpace,
+};
+
+ftxui::Color context_segment_color(ContextSegmentKind kind) {
+    switch (kind) {
+        case ContextSegmentKind::SystemPrompt:
+            return ftxui::Color::Blue;
+        case ContextSegmentKind::ToolSchemas:
+            return ftxui::Color::Green;
+        case ContextSegmentKind::McpToolSchemas:
+            return ftxui::Color::Magenta;
+        case ContextSegmentKind::Conversation:
+            return ftxui::Color::Default;
+        case ContextSegmentKind::CompactionSummary:
+            return ftxui::Color::Cyan;
+        case ContextSegmentKind::FreeSpace:
+            return ftxui::Color::GrayDark;
+    }
+    return ftxui::Color::Default;
+}
+
+char context_segment_glyph(ContextSegmentKind kind) {
+    switch (kind) {
+        case ContextSegmentKind::SystemPrompt:
+            return 'S';
+        case ContextSegmentKind::ToolSchemas:
+            return 'T';
+        case ContextSegmentKind::McpToolSchemas:
+            return 'M';
+        case ContextSegmentKind::Conversation:
+            return 'C';
+        case ContextSegmentKind::CompactionSummary:
+            return '~';
+        case ContextSegmentKind::FreeSpace:
+            return '.';
+    }
+    return '?';
+}
+
+std::string_view context_segment_label(ContextSegmentKind kind) {
+    switch (kind) {
+        case ContextSegmentKind::SystemPrompt:
+            return "system prompt";
+        case ContextSegmentKind::ToolSchemas:
+            return "tool schemas";
+        case ContextSegmentKind::McpToolSchemas:
+            return "mcp tool schemas";
+        case ContextSegmentKind::Conversation:
+            return "conversation";
+        case ContextSegmentKind::CompactionSummary:
+            return "compaction summary";
+        case ContextSegmentKind::FreeSpace:
+            return "free";
+    }
+    return "";
+}
+
+std::string format_thousands(std::uint64_t value) {
+    const std::string digits = std::to_string(value);
+    std::string       out;
+    out.reserve(digits.size() + digits.size() / 3);
+    for (std::size_t index = 0; index < digits.size(); ++index) {
+        if (index > 0 && (digits.size() - index) % 3 == 0) {
+            out.push_back(',');
+        }
+        out.push_back(digits[index]);
+    }
+    return out;
+}
+
+std::string pad_left(const std::string& text, std::size_t width) {
+    if (text.size() >= width) {
+        return text;
+    }
+    return std::string(width - text.size(), ' ') + text;
+}
+
+std::string pad_right(const std::string& text, std::size_t width) {
+    if (text.size() >= width) {
+        return text;
+    }
+    return text + std::string(width - text.size(), ' ');
+}
+
+// `tokens * 100 / window`, truncated (floor) to one decimal (18 §5.3 C5).
+std::string format_percent(std::uint64_t tokens, std::uint64_t window) {
+    if (window == 0) {
+        return "—";
+    }
+    const std::uint64_t tenths = tokens * 1000 / window;
+    return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "%";
+}
+
+std::string context_title(const ContextSnapshot& snapshot) {
+    std::string title;
+    if (snapshot.budget.window_tokens > 0) {
+        title = "used " + format_thousands(snapshot.used_tokens) + " / window " +
+                format_thousands(snapshot.budget.window_tokens) + " (" +
+                format_percent(snapshot.used_tokens, snapshot.budget.window_tokens) + ")";
+    } else {
+        title = "used tokens (budget unknown)";
+    }
+    title += "  @" + std::to_string(snapshot.captured_sequence);
+    return title;
+}
+
+std::string context_totals(const ContextSnapshot& snapshot) {
+    if (snapshot.budget.window_tokens == 0) {
+        return "used " + format_thousands(snapshot.used_tokens) +
+               " tokens (budget unknown)  threshold —  reserve —";
+    }
+    return "used " + format_thousands(snapshot.used_tokens) + " / " +
+           format_thousands(snapshot.budget.window_tokens) + " (" +
+           format_percent(snapshot.used_tokens, snapshot.budget.window_tokens) +
+           ")  threshold " + format_thousands(snapshot.budget.effective_threshold_tokens) +
+           "  reserve " + format_thousands(snapshot.budget.reserve_output_tokens);
+}
+
+Element render_context_grid(const ContextSnapshot& snapshot, int cols, int rows,
+                            const Theme& theme) {
+    const int cells_total = cols * rows;
+    Elements  lines;
+    lines.reserve(static_cast<std::size_t>(rows));
+    for (int row = 0; row < rows; ++row) {
+        Elements cells;
+        cells.reserve(static_cast<std::size_t>(cols));
+        for (int col = 0; col < cols; ++col) {
+            const ContextSegmentKind kind =
+                context_cell_kind(snapshot, cells_total, row * cols + col);
+            cells.push_back(paint(ftxui::text(std::string(1, context_segment_glyph(kind))),
+                                  context_segment_color(kind), theme));
+        }
+        lines.push_back(ftxui::hbox(std::move(cells)));
+    }
+    return ftxui::vbox(std::move(lines));
+}
+
+Element render_context_legend(const ContextSnapshot& snapshot, const Theme& theme) {
+    const std::uint64_t window = snapshot.budget.window_tokens;
+    Elements            rows;
+    rows.reserve(kContextSegmentOrder.size());
+    for (const ContextSegmentKind kind : kContextSegmentOrder) {
+        const ContextSegment* segment = nullptr;
+        for (const ContextSegment& candidate : snapshot.segments) {
+            if (candidate.kind == kind) {
+                segment = &candidate;
+                break;
+            }
+        }
+        const std::uint64_t tokens = segment != nullptr ? segment->tokens : 0;
+        const std::string   token_text = kind == ContextSegmentKind::FreeSpace && window == 0
+                                             ? "—"
+                                             : format_thousands(tokens);
+        const std::string   pct = window == 0 ? "—" : format_percent(tokens, window);
+        const std::string   rest = "  " + pad_right(std::string(context_segment_label(kind)), 20) +
+                                   pad_left(token_text, 7) + " tok " + pad_left(pct, 6);
+        rows.push_back(ftxui::hbox(
+            {paint(ftxui::text(std::string(1, context_segment_glyph(kind))),
+                   context_segment_color(kind), theme),
+             ftxui::text(rest)}));
+    }
+    return ftxui::vbox(std::move(rows));
+}
+
+Element render_context_inventory(const ContextSnapshot& snapshot, int scroll,
+                                 const Theme& theme) {
+    (void)theme;
+    std::vector<std::string> lines;
+    lines.push_back("servers");
+    for (const ContextServerEntry& server : snapshot.mcp_servers) {
+        std::string line = server.id + "  " + server.state + "  tools=" +
+                           std::to_string(server.tool_count);
+        if (server.skipped > 0) {
+            line += "  skipped=" + std::to_string(server.skipped);
+        }
+        if (server.has_error) {
+            line += "  !";
+        }
+        lines.push_back(std::move(line));
+    }
+    lines.push_back("tools");
+    for (const ContextToolEntry& tool : snapshot.tools) {
+        lines.push_back(tool.name + "  " + tool.provenance + "  ~" +
+                        std::to_string(tool.schema_tokens) + " tok");
+    }
+
+    const int max_scroll =
+        std::max<int>(0, static_cast<int>(lines.size()) - kContextInventoryRows);
+    const int first = std::clamp(scroll, 0, max_scroll);
+    Elements  rows;
+    rows.reserve(kContextInventoryRows);
+    for (int index = 0; index < kContextInventoryRows; ++index) {
+        const int line_index = first + index;
+        if (line_index >= 0 && line_index < static_cast<int>(lines.size())) {
+            rows.push_back(ftxui::text(lines[static_cast<std::size_t>(line_index)]));
+        } else {
+            rows.push_back(ftxui::text(" "));
+        }
+    }
+    return ftxui::vbox(std::move(rows));
+}
+
+Element render_context_overlay(const UiModel& model, TerminalSize size, const Theme& theme) {
+    const ContextOverlayModel& overlay = model.context;
+    const ContextSnapshot&     snapshot = overlay.snapshot;
+    const ContextGridGeometry  geometry = context_grid_geometry(size.width, size.height);
+    const std::uint64_t        grid_total = snapshot.budget.window_tokens > 0
+                                                ? snapshot.budget.window_tokens
+                                                : snapshot.used_tokens;
+    const bool grid_ok = geometry.cols >= kContextGridMinCols &&
+                         geometry.rows >= kContextGridMinRows && geometry.cols > 0 &&
+                         geometry.rows > 0 && grid_total > 0;
+
+    Elements content;
+    content.push_back(ftxui::text(context_title(snapshot)));
+    if (grid_ok) {
+        content.push_back(render_context_grid(snapshot, geometry.cols, geometry.rows, theme));
+    }
+    if (overlay.view == 1) {
+        content.push_back(render_context_inventory(snapshot, overlay.scroll, theme));
+    } else {
+        content.push_back(render_context_legend(snapshot, theme));
+    }
+    if (!overlay.note.empty()) {
+        content.push_back(ftxui::text(overlay.note));
+    } else if (grid_ok) {
+        content.push_back(ftxui::text(context_totals(snapshot)));
+    } else {
+        content.push_back(ftxui::text(std::string(kContextFallbackHint)));
+    }
+    return ftxui::window(ftxui::text(""), ftxui::vbox(std::move(content))) |
+           ftxui::clear_under;
+}
+
 } // namespace
+
+ContextGridGeometry context_grid_geometry(int width, int height) noexcept {
+    ContextGridGeometry geometry;
+    const int           inner_width = std::max(width - kContextOverlayBorderCols, 0);
+    geometry.cols = std::clamp(inner_width, 0, kContextGridMaxCols);
+    geometry.rows = std::clamp(height - kContextOverlayChromeRows, 0, kContextGridMaxRows);
+    return geometry;
+}
+
+ContextSegmentKind context_cell_kind(const ContextSnapshot& snapshot, int cells_total,
+                                     int cell_index) noexcept {
+    if (cells_total <= 0 || cell_index < 0 || cell_index >= cells_total) {
+        return ContextSegmentKind::FreeSpace;
+    }
+    const std::uint64_t grid_total = snapshot.budget.window_tokens > 0
+                                         ? snapshot.budget.window_tokens
+                                         : snapshot.used_tokens;
+    if (grid_total == 0) {
+        return ContextSegmentKind::FreeSpace;
+    }
+    const std::uint64_t lo = static_cast<std::uint64_t>(cell_index) * grid_total /
+                             static_cast<std::uint64_t>(cells_total);
+    std::uint64_t running = 0;
+    for (const ContextSegment& segment : snapshot.segments) {
+        if (lo >= running && lo < running + segment.tokens) {
+            return segment.kind;
+        }
+        running += segment.tokens;
+    }
+    return ContextSegmentKind::FreeSpace;
+}
 
 LayoutMode calculate_layout(int width) {
     if (width < 90) {
@@ -529,6 +817,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     }
     if (model.dialog.open) {
         return ftxui::dbox({main, render_dialog(model, theme)});
+    }
+    if (model.mode == UiMode::Context && model.context.open) {
+        return ftxui::dbox({main, render_context_overlay(model, size, theme)});
     }
     if (model.mode == UiMode::Switcher) {
         return ftxui::dbox({main, render_switcher(model, theme)});

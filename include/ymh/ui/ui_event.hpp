@@ -49,6 +49,7 @@ enum class UiMode : std::uint8_t {
     Switcher,
     Dialog,
     ExitConfirm,
+    Context,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {

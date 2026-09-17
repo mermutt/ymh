@@ -922,4 +922,45 @@ TEST_F(HostRuntimeTest, AutoNameAppendFailureIsSwallowed) {
     }
 }
 
+TEST_F(HostRuntimeTest, ShowContextProjectsAssembledStateReadOnly) {
+    Bridge                        bridge("hr_context");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+
+    nlohmann::json message;
+    message["role"] = "user";
+    message["content"] =
+        nlohmann::json::array({nlohmann::json{{"kind", "text"}, {"text", "hi there"}}});
+    bridge.host().agentPrompt(created.session, message);
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+
+    const std::size_t before = bridge.runtime().store().read(created.session, 0).size();
+    const nlohmann::json snapshot = bridge.host().showContext(created.session);
+    const std::size_t after = bridge.runtime().store().read(created.session, 0).size();
+    EXPECT_EQ(before, after);
+
+    EXPECT_GT(snapshot.at("used_tokens").get<std::uint64_t>(), 0u);
+    EXPECT_EQ(snapshot.at("captured_sequence").get<std::uint64_t>(),
+              bridge.runtime().store().headSequence(created.session));
+    bool saw_conversation = false;
+    for (const nlohmann::json& segment : snapshot.at("segments")) {
+        if (segment.at("kind") == "conversation") {
+            saw_conversation = true;
+            EXPECT_GT(segment.at("items").get<std::size_t>(), 0u);
+        }
+    }
+    EXPECT_TRUE(saw_conversation);
+    EXPECT_EQ(snapshot.at("budget").at("window_tokens").get<std::uint64_t>(), 0u);
+    EXPECT_NE(snapshot.at("note").get<std::string>().find("budget unknown"), std::string::npos);
+}
+
+TEST_F(HostRuntimeTest, ShowContextUnknownSessionIsTypedError) {
+    Bridge bridge("hr_context_unknown");
+    try {
+        (void)bridge.host().showContext(SessionId{"nope"});
+        FAIL() << "expected RpcException";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::AppCode::UnknownSession));
+    }
+}
+
 } // namespace

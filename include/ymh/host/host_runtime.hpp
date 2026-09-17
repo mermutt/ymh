@@ -151,6 +151,7 @@ public:
 
     std::vector<protocol::SessionSummary> listSessions() override;
     protocol::SessionDetail               showSession(const SessionId& id) override;
+    nlohmann::json                        showContext(const SessionId& id) override;
 
     protocol::SessionCreated createSession(const nlohmann::json& params) override;
     protocol::SessionResumed resumeSession(const SessionId& id) override;

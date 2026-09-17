@@ -609,7 +609,7 @@ void from_json(const nlohmann::json& json, SessionDetail& detail) {
 
 namespace {
 
-constexpr std::array<std::string_view, 32> kMethodCatalog{{
+constexpr std::array<std::string_view, 33> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kHostOwnership,
@@ -622,6 +622,7 @@ constexpr std::array<std::string_view, 32> kMethodCatalog{{
     method::kAgentInject,      method::kAgentCancel,      method::kAgentStatus,
     method::kPermissionDecide, method::kEventSubscribe,   method::kEventUnsubscribe,
     method::kSessionRename,    method::kSkillsList,       method::kSkillsShow,
+    method::kContextShow,
 }};
 
 } // namespace

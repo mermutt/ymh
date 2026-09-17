@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -249,6 +251,42 @@ TEST(McpManagerTest, StartInstallsToolsAndEmitsStatus) {
 
     manager.shutdown(100ms).get();
     EXPECT_FALSE(registry.contains(ToolName{"mcp.alpha.echo"}));
+}
+
+// 18 §3.5 (C8, CTX-F6): `statuses()` (dispatch thread) races `refresh()` (the
+// reconnect path); the additive mutex must make the `slots_` access race-free.
+// Run under -DYMH_TSAN=ON for the full check.
+TEST(McpManagerTest, StatusesAndRefreshAreRaceFree) {
+    ymh::test::ToolEnv env("mcp_manager_race");
+    ToolRegistry        registry;
+    McpConfig           config;
+    config.servers.push_back(stdio_server("alpha"));
+    ymh::McpManager manager(config, ToolConfig{}, env.env, env.governor, registry, env.bus,
+                            env.logger);
+    manager.setClientFactory(
+        [](const McpServerConfig& server, McpConfig&, ymh::ExecutionEnvironment&,
+           ymh::ResourceGovernor&, ymh::Logger&) -> std::unique_ptr<ymh::McpClient> {
+            return std::make_unique<FakeManagerClient>(server,
+                                                       std::vector<McpToolInfo>{echo_tool()});
+        });
+    manager.start({}).get();
+    registry.freeze();
+
+    std::atomic<bool> stop{false};
+    std::thread       reader([&manager, &stop] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            (void)manager.statuses();
+        }
+    });
+    for (int index = 0; index < 2000; ++index) {
+        manager.refresh(McpServerId{"alpha"}, {}).get();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    ASSERT_EQ(manager.statuses().size(), 1u);
+    EXPECT_EQ(manager.statuses().front().state, McpServerState::Ready);
+    manager.shutdown(100ms).get();
 }
 
 TEST(McpManagerTest, ZeroToolsIsDegradedAndRequiredRejects) {

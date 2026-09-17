@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -74,10 +75,13 @@ private:
     std::unique_ptr<McpClient> makeClient(const McpServerConfig& config,
                                           std::chrono::milliseconds handshake_timeout);
     std::size_t effectiveResultBytes(const McpServerConfig& config) const;
-    void installTools(ServerSlot& slot, std::vector<McpToolInfo> tools);
-    void emitStatus(const ServerSlot& slot, std::string reason);
-    void setState(ServerSlot& slot, McpServerState state, std::string reason);
-    ServerSlot* findSlot(const McpServerId& id);
+
+    // 18 §3.5 (C8): lock-held helpers. The caller holds `mutex_`; none of these
+    // acquires it (the mutex is non-recursive, so a re-lock would deadlock).
+    ServerSlot* findSlotLocked(const McpServerId& id);
+    Event       makeStatusEventLocked(const ServerSlot& slot, std::string reason);
+    Event       setStateLocked(ServerSlot& slot, McpServerState state, std::string reason);
+    Event       installToolsLocked(ServerSlot& slot, std::vector<McpToolInfo> tools);
 
     McpConfig              config_;
     ToolConfig             tool_config_;
@@ -91,6 +95,13 @@ private:
     std::vector<ServerSlot> slots_;
     bool                   shutdown_ = false;
     std::uint64_t          status_sequence_ = 0;
+
+    // 18 §3.5 (C8): the sole synchronization for `slots_` and every
+    // `ServerSlot` field. `mutable` because `statuses()` is const. Entry points
+    // (`start`/`refresh`/`shutdown`/`statuses`) take it; the helpers above never
+    // re-lock; it is never held across a blocking client call and the bus is
+    // published only after it is released.
+    mutable std::mutex mutex_;
 };
 
 } // namespace ymh

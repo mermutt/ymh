@@ -392,6 +392,8 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             respond(conn, request.id, std::move(array));
         } else if (method_name == method::kSessionShow) {
             respond(conn, request.id, to_json_value(host_.showSession(session_param(request.params))));
+        } else if (method_name == method::kContextShow) {
+            respond(conn, request.id, host_.showContext(session_param(request.params)));
         } else if (method_name == method::kSessionCreate) {
             const SessionCreated created = host_.createSession(object_params(request.params));
             respond(conn, request.id,

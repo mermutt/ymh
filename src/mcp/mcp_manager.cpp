@@ -57,7 +57,12 @@ McpManager::McpManager(McpConfig               config,
 }
 
 McpManager::~McpManager() {
-    if (!shutdown_) {
+    bool already_shutdown = false;
+    {
+        const std::lock_guard lock(mutex_);
+        already_shutdown = shutdown_;
+    }
+    if (!already_shutdown) {
         (void)shutdown(std::chrono::milliseconds{200}).get();
     }
 }
@@ -113,7 +118,7 @@ std::unique_ptr<McpClient> McpManager::makeClient(
     return factory_(config, client_config, environment_, governor_, logger_);
 }
 
-McpManager::ServerSlot* McpManager::findSlot(const McpServerId& id) {
+McpManager::ServerSlot* McpManager::findSlotLocked(const McpServerId& id) {
     for (ServerSlot& slot : slots_) {
         if (slot.config.id == id) {
             return &slot;
@@ -122,7 +127,7 @@ McpManager::ServerSlot* McpManager::findSlot(const McpServerId& id) {
     return nullptr;
 }
 
-void McpManager::emitStatus(const ServerSlot& slot, std::string reason) {
+Event McpManager::makeStatusEventLocked(const ServerSlot& slot, std::string reason) {
     payload::McpServerStatusChanged status;
     status.server = slot.config.id;
     status.state = slot.state;
@@ -135,18 +140,18 @@ void McpManager::emitStatus(const ServerSlot& slot, std::string reason) {
     event.timestamp = std::chrono::system_clock::now();
     event.type = EventType::McpServerStatusChanged;
     event.payload = status;
-    bus_.publish(std::move(event));
+    return event;
 }
 
-void McpManager::setState(ServerSlot& slot, McpServerState state, std::string reason) {
+Event McpManager::setStateLocked(ServerSlot& slot, McpServerState state, std::string reason) {
     slot.state = state;
     if (!reason.empty()) {
         slot.last_error = reason;
     }
-    emitStatus(slot, std::move(reason));
+    return makeStatusEventLocked(slot, std::move(reason));
 }
 
-void McpManager::installTools(ServerSlot& slot, std::vector<McpToolInfo> tools) {
+Event McpManager::installToolsLocked(ServerSlot& slot, std::vector<McpToolInfo> tools) {
     std::vector<std::unique_ptr<Tool>> built;
     std::vector<std::string>           skipped;
     std::set<std::string>              seen;
@@ -185,39 +190,68 @@ void McpManager::installTools(ServerSlot& slot, std::vector<McpToolInfo> tools) 
     slot.scope->replace(std::move(built));
     slot.tool_count = slot.scope->size();
     slot.skipped_tools = std::move(skipped);
-    setState(slot, slot.tool_count == 0 ? McpServerState::Degraded
-                                        : McpServerState::Ready,
-             {});
+    return setStateLocked(slot, slot.tool_count == 0 ? McpServerState::Degraded
+                                                     : McpServerState::Ready,
+                          {});
 }
 
 Task<void> McpManager::start(CancellationToken cancel) {
     const McpClock::time_point deadline = now_() + config_.startup_deadline;
     std::size_t started = 0;
+    const std::size_t slot_count = slots_.size();
 
-    for (ServerSlot& slot : slots_) {
-        if (!config_.enabled || !slot.config.enabled) {
-            slot.state = McpServerState::Disabled;
-            continue;
+    for (std::size_t index = 0; index < slot_count; ++index) {
+        McpServerConfig config;
+        bool cap_exhausted = false;
+        bool cap_required = false;
+        std::optional<Event> cap_event;
+        {
+            const std::lock_guard lock(mutex_);
+            ServerSlot& slot = slots_[index];
+            config = slot.config;
+            if (!config_.enabled || !slot.config.enabled) {
+                slot.state = McpServerState::Disabled;
+                continue;
+            }
+            if (started >= config_.max_servers) {
+                cap_exhausted = true;
+                cap_required = slot.config.required;
+                cap_event = setStateLocked(slot, McpServerState::Failed, "max_servers reached");
+            } else {
+                ++started;
+            }
         }
-        if (started >= config_.max_servers) {
-            setState(slot, McpServerState::Failed, "max_servers reached");
-            if (slot.config.required) {
+        if (cap_exhausted) {
+            if (cap_event.has_value()) {
+                bus_.publish(std::move(*cap_event));
+            }
+            if (cap_required) {
                 throw McpError{McpErrorCode::CapExhausted, "max_servers reached"};
             }
             continue;
         }
-        ++started;
 
+        std::optional<ToolRegistry::AdapterScope> scope;
         try {
-            slot.scope = registry_.openAdapter("mcp." + slot.config.id.value + ".");
+            scope = registry_.openAdapter("mcp." + config.id.value + ".");
         } catch (const std::exception& error) {
-            setState(slot, McpServerState::Failed, error.what());
-            if (slot.config.required) {
+            std::optional<Event> event;
+            {
+                const std::lock_guard lock(mutex_);
+                event = setStateLocked(slots_[index], McpServerState::Failed, error.what());
+            }
+            bus_.publish(std::move(*event));
+            if (config.required) {
                 throw McpError{McpErrorCode::ConfigInvalid, error.what()};
             }
             continue;
         }
+        {
+            const std::lock_guard lock(mutex_);
+            slots_[index].scope = std::move(scope);
+        }
 
+        std::shared_ptr<McpClient> client;
         try {
             const auto remaining =
                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now_());
@@ -225,9 +259,9 @@ Task<void> McpManager::start(CancellationToken cancel) {
                 throw McpError{McpErrorCode::HandshakeTimeout, "startup deadline exceeded"};
             }
             const auto handshake = std::min(config_.handshake_timeout, remaining);
-            slot.client = makeClient(slot.config, handshake);
-            const McpServerId id = slot.config.id;
-            slot.client->setNotificationHandler(
+            client = makeClient(config, handshake);
+            const McpServerId id = config.id;
+            client->setNotificationHandler(
                 [](std::string_view, const nlohmann::json&) {},
                 [this, id] {
                     try {
@@ -236,36 +270,77 @@ Task<void> McpManager::start(CancellationToken cancel) {
                     }
                 });
         } catch (const McpError& error) {
-            setState(slot, McpServerState::Failed, std::string{to_string(error.code())});
-            if (slot.config.required) {
+            std::optional<Event> event;
+            {
+                const std::lock_guard lock(mutex_);
+                event = setStateLocked(slots_[index], McpServerState::Failed,
+                                       std::string{to_string(error.code())});
+            }
+            bus_.publish(std::move(*event));
+            if (config.required) {
                 throw;
             }
             continue;
         } catch (const std::exception& error) {
-            setState(slot, McpServerState::Failed, error.what());
-            if (slot.config.required) {
+            std::optional<Event> event;
+            {
+                const std::lock_guard lock(mutex_);
+                event = setStateLocked(slots_[index], McpServerState::Failed, error.what());
+            }
+            bus_.publish(std::move(*event));
+            if (config.required) {
                 throw McpError{McpErrorCode::Internal, error.what()};
             }
             continue;
         }
+        {
+            const std::lock_guard lock(mutex_);
+            slots_[index].client = client;
+        }
+
+        {
+            std::optional<Event> event;
+            {
+                const std::lock_guard lock(mutex_);
+                event = setStateLocked(slots_[index], McpServerState::Starting, {});
+            }
+            bus_.publish(std::move(*event));
+        }
 
         try {
-            setState(slot, McpServerState::Starting, {});
-            slot.client->start(cancel).get();
-            std::vector<McpToolInfo> tools = slot.client->listTools(cancel).get();
-            installTools(slot, std::move(tools));
-            if (slot.config.required && slot.state != McpServerState::Ready) {
+            client->start(cancel).get();
+            std::vector<McpToolInfo> tools = client->listTools(cancel).get();
+            std::optional<Event> event;
+            bool ready = false;
+            {
+                const std::lock_guard lock(mutex_);
+                event = installToolsLocked(slots_[index], std::move(tools));
+                ready = slots_[index].state == McpServerState::Ready;
+            }
+            bus_.publish(std::move(*event));
+            if (config.required && !ready) {
                 throw McpError{McpErrorCode::HandshakeRejected,
                                "required server has no usable tools"};
             }
         } catch (const McpError& error) {
-            setState(slot, McpServerState::Failed, std::string{to_string(error.code())});
-            if (slot.config.required) {
+            std::optional<Event> event;
+            {
+                const std::lock_guard lock(mutex_);
+                event = setStateLocked(slots_[index], McpServerState::Failed,
+                                       std::string{to_string(error.code())});
+            }
+            bus_.publish(std::move(*event));
+            if (config.required) {
                 throw;
             }
         } catch (const std::exception& error) {
-            setState(slot, McpServerState::Failed, error.what());
-            if (slot.config.required) {
+            std::optional<Event> event;
+            {
+                const std::lock_guard lock(mutex_);
+                event = setStateLocked(slots_[index], McpServerState::Failed, error.what());
+            }
+            bus_.publish(std::move(*event));
+            if (config.required) {
                 throw McpError{McpErrorCode::Internal, error.what()};
             }
         }
@@ -274,55 +349,115 @@ Task<void> McpManager::start(CancellationToken cancel) {
 }
 
 Task<void> McpManager::refresh(McpServerId id, CancellationToken cancel) {
-    ServerSlot* slot = findSlot(id);
-    if (slot == nullptr || slot->client == nullptr) {
-        return Task<void>{};
+    McpServerConfig config;
+    std::shared_ptr<McpClient> client;
+    {
+        const std::lock_guard lock(mutex_);
+        ServerSlot* slot = findSlotLocked(id);
+        if (slot == nullptr || slot->client == nullptr) {
+            return Task<void>{};
+        }
+        config = slot->config;
+        client = slot->client;
     }
     try {
-        const McpServerState current = slot->client->state();
+        const McpServerState current = client->state();
         if (current != McpServerState::Ready && current != McpServerState::Degraded &&
             current != McpServerState::Stopped) {
-            slot->reconnect_attempt += 1;
-            slot->next_backoff = compute_mcp_backoff(slot->reconnect_attempt, config_, 0.5);
-            slot->client->shutdown(std::chrono::milliseconds{0}).get();
-            slot->client->start(cancel).get();
+            {
+                const std::lock_guard lock(mutex_);
+                ServerSlot* slot = findSlotLocked(id);
+                if (slot != nullptr) {
+                    slot->reconnect_attempt += 1;
+                    slot->next_backoff =
+                        compute_mcp_backoff(slot->reconnect_attempt, config_, 0.5);
+                }
+            }
+            client->shutdown(std::chrono::milliseconds{0}).get();
+            client->start(cancel).get();
         }
-        std::vector<McpToolInfo> tools = slot->client->listTools(cancel).get();
-        installTools(*slot, std::move(tools));
-        slot->reconnect_attempt = 0;
+        std::vector<McpToolInfo> tools = client->listTools(cancel).get();
+        std::optional<Event> event;
+        {
+            const std::lock_guard lock(mutex_);
+            ServerSlot* slot = findSlotLocked(id);
+            if (slot != nullptr) {
+                event = installToolsLocked(*slot, std::move(tools));
+                slot->reconnect_attempt = 0;
+            }
+        }
+        if (event.has_value()) {
+            bus_.publish(std::move(*event));
+        }
     } catch (const McpError& error) {
-        slot->last_error = std::string{to_string(error.code())};
-        emitStatus(*slot, slot->last_error);
-        if (slot->config.required) {
+        std::optional<Event> event;
+        {
+            const std::lock_guard lock(mutex_);
+            ServerSlot* slot = findSlotLocked(id);
+            if (slot != nullptr) {
+                slot->last_error = std::string{to_string(error.code())};
+                event = makeStatusEventLocked(*slot, slot->last_error);
+            }
+        }
+        if (event.has_value()) {
+            bus_.publish(std::move(*event));
+        }
+        if (config.required) {
             throw;
         }
     } catch (const std::exception& error) {
-        slot->last_error = error.what();
-        emitStatus(*slot, slot->last_error);
+        std::optional<Event> event;
+        {
+            const std::lock_guard lock(mutex_);
+            ServerSlot* slot = findSlotLocked(id);
+            if (slot != nullptr) {
+                slot->last_error = error.what();
+                event = makeStatusEventLocked(*slot, slot->last_error);
+            }
+        }
+        if (event.has_value()) {
+            bus_.publish(std::move(*event));
+        }
     }
     return Task<void>{};
 }
 
 Task<void> McpManager::shutdown(std::chrono::milliseconds grace) {
-    if (shutdown_) {
-        return Task<void>{};
+    {
+        const std::lock_guard lock(mutex_);
+        if (shutdown_) {
+            return Task<void>{};
+        }
+        shutdown_ = true;
     }
-    shutdown_ = true;
-    for (ServerSlot& slot : slots_) {
-        if (slot.client != nullptr) {
+    const std::size_t slot_count = slots_.size();
+    for (std::size_t index = 0; index < slot_count; ++index) {
+        std::shared_ptr<McpClient> client;
+        {
+            const std::lock_guard lock(mutex_);
+            client = slots_[index].client;
+        }
+        if (client != nullptr) {
             try {
-                slot.client->shutdown(grace).get();
+                client->shutdown(grace).get();
             } catch (const std::exception&) {
             }
         }
-        slot.scope.reset();
-        slot.tool_count = 0;
-        setState(slot, McpServerState::Stopped, {});
+        std::optional<Event> event;
+        {
+            const std::lock_guard lock(mutex_);
+            ServerSlot& slot = slots_[index];
+            slot.scope.reset();
+            slot.tool_count = 0;
+            event = setStateLocked(slot, McpServerState::Stopped, {});
+        }
+        bus_.publish(std::move(*event));
     }
     return Task<void>{};
 }
 
 std::vector<McpServerStatus> McpManager::statuses() const {
+    const std::lock_guard lock(mutex_);
     std::vector<McpServerStatus> result;
     result.reserve(slots_.size());
     for (const ServerSlot& slot : slots_) {

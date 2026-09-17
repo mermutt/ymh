@@ -82,6 +82,10 @@ public:
     virtual std::vector<SessionSummary> listSessions() = 0;
     virtual SessionDetail showSession(const SessionId& id) = 0;
 
+    // 18 §3.4 (CX-13): read-only assembled-context snapshot, alongside
+    // `showSession`. Returns the `ContextSnapshot` JSON form.
+    virtual nlohmann::json showContext(const SessionId& id) = 0;
+
     virtual SessionCreated createSession(const nlohmann::json& params) = 0;
     virtual SessionResumed resumeSession(const SessionId& id) = 0;
     virtual SessionCreated forkSession(const SessionId& id, std::int64_t seed_length) = 0;

@@ -31,6 +31,7 @@ public:
 
     std::vector<std::string> calls;
     std::optional<nlohmann::json> last_message;
+    std::optional<nlohmann::json> context_result;
     std::optional<std::string> last_reason;
     std::optional<protocol::ShutdownReason> last_shutdown_reason;
     std::shared_ptr<const std::vector<protocol::ClientInstanceId>> owner_snapshot{
@@ -102,6 +103,29 @@ public:
         detail.header = nlohmann::json{{"id", id.value}};
         detail.event_count = logs_.at(id.value).size();
         return detail;
+    }
+
+    nlohmann::json showContext(const SessionId& id) override {
+        calls.push_back("context.show");
+        if (!sessionExists(id)) {
+            throw protocol::RpcException(static_cast<int>(protocol::AppCode::UnknownSession),
+                                         "unknown session");
+        }
+        if (context_result.has_value()) {
+            return *context_result;
+        }
+        return nlohmann::json{{"session", id.value},
+                              {"captured_sequence", 0},
+                              {"used_tokens", 0},
+                              {"budget",
+                               {{"window_tokens", 0},
+                                {"reserve_output_tokens", 0},
+                                {"effective_threshold_tokens", 0}}},
+                              {"segments", nlohmann::json::array()},
+                              {"tools", nlohmann::json::array()},
+                              {"mcp_servers", nlohmann::json::array()},
+                              {"truncated", false},
+                              {"note", ""}};
     }
 
     protocol::SessionCreated createSession(const nlohmann::json& params) override {

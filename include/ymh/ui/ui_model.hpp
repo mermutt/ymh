@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ymh/agent/context_snapshot.hpp"
 #include "ymh/ui/ui_event.hpp"
 
 namespace ymh::ui {
@@ -333,6 +334,22 @@ struct ExitConfirmState {
     int                      selected = 1;
 };
 
+// 18 §4.2 (CX-04): the read-only `/context` overlay state. Purely
+// presentational; the snapshot is a daemon RPC reply, never a UiEvent.
+struct ContextOverlayModel {
+    bool            open = false;
+    bool            loaded = false;
+    SessionId       session;
+    ContextSnapshot snapshot;   // ymh::ContextSnapshot (agent value type, 18 §3)
+    int             view = 0;   // 0 = grid+legend, 1 = tools/servers
+    int             scroll = 0;
+    // The note string the overlay renders verbatim in its bottom-line slot
+    // (§5.1 CX-D12) when non-empty. On success it is the daemon's
+    // `snapshot.note` (e.g. "budget unknown"); on a UI-local failure it is
+    // "malformed snapshot" or the transport error. Empty means no note.
+    std::string     note;
+};
+
 struct UiModel {
     std::map<WorkspaceId, WorkspaceModel> workspaces;
     WorkspaceId                           activeWorkspaceId;
@@ -341,6 +358,7 @@ struct UiModel {
     SwitcherOverlayModel                  switcher;
     PermissionDialogModel                 dialog;
     ExitConfirmState                      exitConfirm;
+    ContextOverlayModel                   context;
     UiMode                                mode = UiMode::Conversation;
     bool                                  shouldExit = false;
     std::string                           mcp_status;

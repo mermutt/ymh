@@ -30,6 +30,7 @@
 #include "ymh/session/session_persistence.hpp"
 #include "ymh/transport/protocol.hpp"
 #include "ymh/ui/command_registry.hpp"
+#include "ymh/ui/context_request.hpp"
 #include "ymh/ui/session_export.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
@@ -45,6 +46,7 @@ constexpr std::chrono::milliseconds kFrameInterval{50};
 constexpr std::chrono::milliseconds kMaxFrameDelta{250};
 constexpr std::chrono::milliseconds kExitQueryMargin{500};
 constexpr std::chrono::milliseconds kOwnershipRetryInterval{100};
+constexpr int kContextScrollPage = 6;
 
 DaemonStatus daemon_status_for(SupervisorLinkState state) {
     switch (state) {
@@ -58,6 +60,17 @@ DaemonStatus daemon_status_for(SupervisorLinkState state) {
             return DaemonStatus::Dead;
     }
     return DaemonStatus::Connecting;
+}
+
+// 18 §4.3: the daemon's `context.show` reply is parsed into the agent snapshot
+// value type; a malformed reply is surfaced as a UI-local note, never a crash.
+bool parse_context_snapshot(const nlohmann::json& json, ContextSnapshot& out) {
+    try {
+        out = json.get<ContextSnapshot>();
+        return true;
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
 }
 
 protocol::PermissionAnswer wire_answer(payload::PermissionDecisionKind decision) {
@@ -1143,6 +1156,7 @@ private:
         context.export_session = [this](const std::string& args) { return export_session(args); };
         context.skills = [this](const std::string& args) { request_skills(args); };
         context.skill = [this](const std::string& name) { request_skill(name); };
+        context.context = [this] { open_context(); };
         return registry_.dispatch(line, context);
     }
 
@@ -1445,6 +1459,99 @@ private:
         return false;
     }
 
+    // 18 §4.3 (M9): opens the read-only context overlay. Every request bumps the
+    // generation, superseding any in-flight one; the reply is applied only while
+    // its generation still matches (checked on the pump thread and again on the
+    // UI thread), so a late reply can never re-open a dismissed overlay.
+    void open_context() {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        SessionUiState* state = active();
+        if (workspace == nullptr || state == nullptr) {
+            return;
+        }
+        const SessionId     session = state->id;
+        const std::uint64_t generation = bump_context_generation(context_generation_);
+        submit_to(workspace->id, std::string(protocol::method::kContextShow),
+                  nlohmann::json{{"session", session.value}},
+                  [this, session, generation](SupervisorReply reply) {
+                      if (!context_reply_is_current(context_generation_, generation)) {
+                          return;
+                      }
+                      ContextOverlayModel overlay;
+                      overlay.session = session;
+                      if (reply.ok) {
+                          overlay.loaded =
+                              parse_context_snapshot(reply.result, overlay.snapshot);
+                          if (!overlay.loaded) {
+                              overlay.note = "malformed snapshot";
+                          } else {
+                              overlay.note = overlay.snapshot.note;
+                          }
+                      } else {
+                          overlay.note = reply.error;
+                      }
+                      enqueue([this, overlay = std::move(overlay), generation]() mutable {
+                          if (!context_reply_is_current(context_generation_, generation)) {
+                              return;
+                          }
+                          model_.context = std::move(overlay);
+                          model_.context.open = true;
+                          model_.mode = UiMode::Context;
+                          model_.dirty.markAggregate();
+                      });
+                  });
+    }
+
+    void close_context() {
+        (void)bump_context_generation(context_generation_);
+        model_.context.open = false;
+        model_.mode = UiMode::Conversation;
+        model_.dirty.markAggregate();
+    }
+
+    bool handle_context(const ftxui::Event& event) {
+        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC ||
+            (event.is_character() && event.character() == "q")) {
+            close_context();
+            return true;
+        }
+        if (event.is_character() && event.character() == "r") {
+            open_context();
+            return true;
+        }
+        if (event.is_character() && event.character() == "g") {
+            model_.context.view = 0;
+            model_.context.scroll = 0;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event.is_character() && event.character() == "t") {
+            model_.context.view = 1;
+            model_.context.scroll = 0;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::Tab) {
+            model_.context.view = model_.context.view == 0 ? 1 : 0;
+            model_.context.scroll = 0;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowDown || event == ftxui::Event::PageDown) {
+            const int step = event == ftxui::Event::PageDown ? kContextScrollPage : 1;
+            model_.context.scroll += step;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowUp || event == ftxui::Event::PageUp) {
+            const int step = event == ftxui::Event::PageUp ? kContextScrollPage : 1;
+            model_.context.scroll = std::max(0, model_.context.scroll - step);
+            model_.dirty.markAggregate();
+            return true;
+        }
+        return true;
+    }
+
     bool handle_event(ftxui::Event event) {
         if (event == ftxui::Event::Custom) {
             drain();
@@ -1455,6 +1562,9 @@ private:
         }
         if (model_.dialog.open) {
             return handle_dialog(event);
+        }
+        if (model_.mode == UiMode::Context && model_.context.open) {
+            return handle_context(event);
         }
         if (model_.mode == UiMode::Switcher) {
             return handle_switcher(event);
@@ -1554,6 +1664,10 @@ private:
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
     std::atomic<bool> quit_{false};
+    // 18 §4.3 (M9/C1): written on the UI thread (open/close) and read on the
+    // pump thread (reply early-out), so it MUST be atomic. It guards no other
+    // memory; relaxed ordering is provably sufficient (see context_request.hpp).
+    std::atomic<std::uint64_t> context_generation_{0};
     std::chrono::steady_clock::time_point last_tick_ = std::chrono::steady_clock::now();
 };
 

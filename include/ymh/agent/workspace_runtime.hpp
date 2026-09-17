@@ -46,7 +46,9 @@ class LLMPool;
 class SessionPersistence;
 class Executor;
 class SkillCatalog;
+class TokenEstimator;
 struct AgentConfig;
+struct CompactionPolicy;
 struct LLMProviderConfig;
 struct SessionId;
 
@@ -147,6 +149,11 @@ public:
 
     [[nodiscard]] const AgentConfig&       agent_config() const noexcept;
     [[nodiscard]] const LLMProviderConfig& provider_config() const noexcept;
+
+    // 18 §3.4 (CX-08): read-only accessors for the assembled-context inspector.
+    [[nodiscard]] const TokenEstimator&        estimator() const noexcept;
+    [[nodiscard]] const CompactionPolicy*      compaction_policy() const noexcept;
+    [[nodiscard]] std::vector<McpServerStatus> mcp_statuses() const;
 
     // Write-lease convenience: the durable store is the sole lease authority
     // (02 §5). `acquireLease` returns false when another writer holds the

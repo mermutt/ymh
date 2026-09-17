@@ -38,7 +38,10 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 }
 
 TEST(TransportProtocol, MethodCatalogIsComplete) {
-    EXPECT_EQ(protocol::all_methods().size(), 32u);
+    // 18 §3.4.1 (CX-D11/M10): the size is relative to landing order. Before
+    // `context.show` the catalog is `C = 32`; this errata adds exactly one
+    // entry, so the landing total is `C + 1 = 33` (never a hard-coded number).
+    EXPECT_EQ(protocol::all_methods().size(), 33u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
@@ -46,6 +49,7 @@ TEST(TransportProtocol, MethodCatalogIsComplete) {
     EXPECT_TRUE(protocol::is_known_method("session.rename"));
     EXPECT_TRUE(protocol::is_known_method("skills.list"));
     EXPECT_TRUE(protocol::is_known_method("skills.show"));
+    EXPECT_TRUE(protocol::is_known_method("context.show"));
     EXPECT_FALSE(protocol::is_known_method("host.nope"));
 }
 
@@ -67,6 +71,8 @@ TEST(TransportProtocol, ProfileGating) {
                                             protocol::method::kEventSubscribe));
     EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
                                             protocol::method::kSessionRename));
+    EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                            protocol::method::kContextShow));
 }
 
 TEST(TransportProtocol, HostErrorMapping) {
