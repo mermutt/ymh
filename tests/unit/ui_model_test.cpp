@@ -480,10 +480,13 @@ TEST(UiModel, CommandRegistryDispatchesCompact) {
     EXPECT_TRUE(registry.dispatch("/compact", context));
     EXPECT_TRUE(compacted);
 
+    // 18 §4.1 adds `/context`, so the "co" prefix now completes both commands.
     const std::vector<const Command*> matches = registry.complete("co");
-    ASSERT_EQ(matches.size(), 1u);
-    EXPECT_EQ(matches.front()->name, "compact");
-    EXPECT_EQ(matches.front()->description, "Summarize history to reclaim context");
+    ASSERT_EQ(matches.size(), 2u);
+    const Command* compact = registry.find("compact");
+    ASSERT_NE(compact, nullptr);
+    EXPECT_EQ(compact->description, "Summarize history to reclaim context");
+    EXPECT_NE(registry.find("context"), nullptr);
 }
 
 TEST(UiModel, CommandOutputWhileScrolledRaisesUnseen) {
@@ -559,7 +562,7 @@ TEST(UiModel, LongestCommonPrefixOverZeroOneAndManyMatches) {
     EXPECT_EQ(CommandRegistry::longest_common_prefix(one), "help");
 
     const std::vector<const Command*> many = registry.complete("c");
-    ASSERT_EQ(many.size(), 2u);
+    ASSERT_EQ(many.size(), 3u);
     EXPECT_EQ(CommandRegistry::longest_common_prefix(many), "c");
 }
 

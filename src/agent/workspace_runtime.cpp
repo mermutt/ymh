@@ -303,6 +303,17 @@ const LLMProviderConfig& WorkspaceRuntime::provider_config() const noexcept {
     return impl_->provider_config_;
 }
 
+const TokenEstimator& WorkspaceRuntime::estimator() const noexcept { return impl_->estimator_; }
+
+const CompactionPolicy* WorkspaceRuntime::compaction_policy() const noexcept {
+    return impl_->compactor_ != nullptr ? &impl_->compactor_->policy() : nullptr;
+}
+
+std::vector<McpServerStatus> WorkspaceRuntime::mcp_statuses() const {
+    return impl_->mcp_ != nullptr ? impl_->mcp_->statuses()
+                                  : std::vector<McpServerStatus>{};
+}
+
 bool WorkspaceRuntime::acquireLease(const SessionId& id) {
     if (!hasDurableStore()) {
         return true;

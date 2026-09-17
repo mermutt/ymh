@@ -31,6 +31,8 @@ struct CommandContext {
     std::function<void(const std::string& args)> skills;
     // 20 §5.8: `/skill NAME` loads a skill's instructions into the active session.
     std::function<void(const std::string& name)> skill;
+    // 18 §4.1: opens the read-only context overlay for the active session.
+    std::function<void()> context;
 };
 
 // 20 §6.1: the non-static, callable-from-supervisor form of the file-local

@@ -207,6 +207,13 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "context", "show the assembled context window (grid, tools, MCP)",
+        [](CommandContext& context, const std::string&) {
+            if (context.context) {
+                context.context();
+            }
+        }});
+    registry.add(Command{
         "exit", "quit the supervisor",
         [](CommandContext& context, const std::string&) {
             if (context.request_exit) {

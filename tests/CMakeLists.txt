@@ -26,6 +26,7 @@ add_executable(ymh_tests
     unit/agent_turn_executor_test.cpp
     unit/agent_coalescer_test.cpp
     unit/compaction_test.cpp
+    unit/context_snapshot_test.cpp
     unit/llm_pool_test.cpp
     unit/workspace_runtime_test.cpp
     unit/host_runtime_test.cpp
@@ -43,6 +44,7 @@ add_executable(ymh_tests
     unit/session_cli_test.cpp
     unit/headless_live_test.cpp
     unit/ui_model_test.cpp
+    unit/ui_context_overlay_test.cpp
     unit/session_export_test.cpp
     unit/ui_event_adapter_test.cpp
     unit/supervisor_connection_test.cpp

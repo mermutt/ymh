@@ -714,4 +714,142 @@ TEST(UiSupervisorPty, SkillsEmptyState) {
     EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
 }
 
+void write_compaction_window(const std::filesystem::path& workspace, std::int64_t window) {
+    std::filesystem::create_directories(workspace / ".ymh");
+    std::ofstream(workspace / ".ymh" / "config.toml")
+        << "[agent.compaction]\ncontext_window_tokens = " << window << "\n";
+}
+
+TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
+    ShortTempRoot root("ymh_pty_context");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "context-ws";
+    std::filesystem::create_directories(workspace);
+    write_compaction_window(workspace, 64000);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "context-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::size_t open_mark = child.raw_size();
+    child.write("/context\r");
+    ASSERT_TRUE(child.wait_for_since(open_mark, "system prompt", 15s)) << child.text();
+    EXPECT_NE(child.text().find("window"), std::string::npos);
+    EXPECT_NE(child.text().find("@"), std::string::npos);
+
+    const std::size_t close_mark = child.raw_size();
+    child.write("\x1b");
+    ASSERT_TRUE(child.wait_for_since(close_mark, "Type a message and press Enter", 10s))
+        << child.text();
+
+    child.terminate();
+    guard.stop();
+
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+TEST(UiSupervisorPty, ContextOverlayShowsNote) {
+    ShortTempRoot root("ymh_pty_context_note");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "context-note-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "context-note-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::size_t mark = child.raw_size();
+    child.write("/context\r");
+    ASSERT_TRUE(child.wait_for_since(mark, "budget unknown", 15s)) << child.text();
+    EXPECT_NE(child.text().find("used tokens (budget unknown)  @"), std::string::npos);
+
+    child.terminate();
+    guard.stop();
+
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
+    ShortTempRoot root("ymh_pty_context_refresh");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "context-refresh-ws";
+    std::filesystem::create_directories(workspace);
+    write_compaction_window(workspace, 64000);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "context-refresh-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::size_t open_mark = child.raw_size();
+    child.write("/context\r");
+    ASSERT_TRUE(child.wait_for_since(open_mark, "system prompt", 15s)) << child.text();
+
+    const std::size_t refresh_mark = child.raw_size();
+    child.write("r");
+    ASSERT_TRUE(child.wait_for_since(refresh_mark, "system prompt", 10s)) << child.text();
+    EXPECT_NE(child.text().find("@"), std::string::npos);
+
+    child.terminate();
+    guard.stop();
+
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
 } // namespace

@@ -589,4 +589,180 @@ TEST(UiRenderGolden, SwitcherShowsOwnershipMarks) {
     EXPECT_NE(rendered.find("[unreachable]"), std::string::npos);
 }
 
+ContextSnapshot context_fixture() {
+    ContextSnapshot snapshot;
+    snapshot.session = kSession;
+    snapshot.used_tokens = 41300;
+    snapshot.budget = ContextBudget{64000, 4096, 47923};
+    snapshot.captured_sequence = 1842;
+    snapshot.segments = {
+        ContextSegment{ContextSegmentKind::SystemPrompt, "agent.system_prompt", 412, 1},
+        ContextSegment{ContextSegmentKind::ToolSchemas, "ToolRegistry::schemas()", 3980, 2},
+        ContextSegment{ContextSegmentKind::McpToolSchemas, "ToolRegistry::schemas() (mcp.)", 2240,
+                       2},
+        ContextSegment{ContextSegmentKind::Conversation, "deriveMessages(header, log)", 33540, 42},
+        ContextSegment{ContextSegmentKind::CompactionSummary, "payload::ContextCompaction.summary",
+                       1128, 1},
+        ContextSegment{ContextSegmentKind::FreeSpace, "window − used", 22700, 0},
+    };
+    snapshot.tools = {
+        ContextToolEntry{"read_file", "builtin", 32},
+        ContextToolEntry{"shell", "builtin", 30},
+        ContextToolEntry{"mcp.alpha.search", "mcp", 48},
+        ContextToolEntry{"mcp.beta.fetch", "mcp", 40},
+    };
+    snapshot.mcp_servers = {
+        ContextServerEntry{"alpha", "ready", 2, 0, false},
+        ContextServerEntry{"beta", "degraded", 1, 1, true},
+    };
+    return snapshot;
+}
+
+UiModel context_model(ContextSnapshot snapshot, int view = 0, std::string note = "") {
+    UiModel model = build_model();
+    model.mode = UiMode::Context;
+    model.context.open = true;
+    model.context.loaded = true;
+    model.context.session = snapshot.session;
+    model.context.snapshot = std::move(snapshot);
+    model.context.view = view;
+    model.context.note = std::move(note);
+    return model;
+}
+
+std::string repeat(char value, int count) { return std::string(static_cast<std::size_t>(count), value); }
+
+TEST(UiRenderGolden, ContextOverlayGridGolden) {
+    const UiModel model = context_model(context_fixture());
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{66, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("used 41,300 / window 64,000 (64.5%)  @1842"), std::string::npos);
+    EXPECT_NE(rendered.find("used 41,300 / 64,000 (64.5%)  threshold 47,923  reserve 4,096"),
+              std::string::npos);
+    EXPECT_NE(rendered.find(repeat('S', 5) + repeat('T', 39) + repeat('M', 20)), std::string::npos);
+    EXPECT_NE(rendered.find(repeat('M', 3) + repeat('C', 61)), std::string::npos);
+    EXPECT_NE(rendered.find(repeat('C', 18) + repeat('~', 11) + repeat('.', 35)), std::string::npos);
+    EXPECT_NE(rendered.find("~  compaction summary    1,128 tok   1.7%"), std::string::npos);
+    EXPECT_NE(rendered.find(".  free                 22,700 tok  35.4%"), std::string::npos);
+    EXPECT_EQ(rendered.find("1.8%"), std::string::npos);
+    EXPECT_EQ(rendered.find("35.5%"), std::string::npos);
+    std::size_t rows = 1;
+    for (const char character : rendered) {
+        rows += character == '\n' ? 1 : 0;
+    }
+    EXPECT_EQ(rows, 20u);
+    EXPECT_EQ(render_to_ansi(model, TerminalSize{66, 20}, Theme{false}),
+              render_to_ansi(model, TerminalSize{66, 20}, Theme{false}));
+}
+
+TEST(UiRenderGolden, ContextOverlayMonochrome) {
+    const UiModel model = context_model(context_fixture());
+    const std::string raw = render_to_ansi(model, TerminalSize{66, 20}, Theme{false});
+    SCOPED_TRACE(raw);
+    EXPECT_NE(raw.find(repeat('S', 5) + repeat('T', 39) + repeat('M', 20)), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[34m"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[32m"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[35m"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[36m"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextOverlayColor) {
+    const UiModel model = context_model(context_fixture());
+    const std::string raw = render_to_ansi(model, TerminalSize{66, 20}, Theme{true});
+    SCOPED_TRACE(raw);
+    EXPECT_NE(raw.find("\x1b[34m"), std::string::npos);
+    EXPECT_NE(raw.find("\x1b[32m"), std::string::npos);
+    EXPECT_NE(raw.find("\x1b[35m"), std::string::npos);
+    EXPECT_NE(raw.find("\x1b[36m"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextOverlaySmallTerminal) {
+    const UiModel model = context_model(context_fixture());
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{52, 10}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("terminal too small for the grid (need >= 40x10)"), std::string::npos);
+    EXPECT_NE(rendered.find("used 41,300 / window 64,000 (64.5%)  @1842"), std::string::npos);
+    EXPECT_NE(rendered.find("system prompt"), std::string::npos);
+    EXPECT_EQ(rendered.find("threshold"), std::string::npos);
+    std::size_t rows = 1;
+    for (const char character : rendered) {
+        rows += character == '\n' ? 1 : 0;
+    }
+    EXPECT_EQ(rows, 10u);
+}
+
+TEST(UiRenderGolden, ContextOverlaySmallTerminalNote) {
+    const UiModel model = context_model(context_fixture(), 0, "budget unknown");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{52, 10}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("budget unknown"), std::string::npos);
+    EXPECT_EQ(rendered.find("terminal too small for the grid"), std::string::npos);
+    EXPECT_EQ(rendered.find("threshold"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextOverlaySmallTerminalInventory) {
+    const UiModel model = context_model(context_fixture(), 1);
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{52, 10}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("servers"), std::string::npos);
+    EXPECT_NE(rendered.find("alpha  ready  tools=2"), std::string::npos);
+    EXPECT_EQ(rendered.find("system prompt"), std::string::npos);
+    EXPECT_NE(rendered.find("terminal too small for the grid (need >= 40x10)"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextOverlayInventoryView) {
+    const UiModel model = context_model(context_fixture(), 1);
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{66, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("servers"), std::string::npos);
+    EXPECT_NE(rendered.find("alpha  ready  tools=2"), std::string::npos);
+    EXPECT_NE(rendered.find("beta  degraded  tools=1  skipped=1  !"), std::string::npos);
+    EXPECT_NE(rendered.find("tools"), std::string::npos);
+    EXPECT_NE(rendered.find("read_file  builtin  ~32 tok"), std::string::npos);
+    EXPECT_NE(rendered.find("shell  builtin  ~30 tok"), std::string::npos);
+    EXPECT_EQ(rendered.find("system prompt"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextOverlayBudgetUnknown) {
+    ContextSnapshot snapshot = context_fixture();
+    snapshot.budget = ContextBudget{0, 4096, 0};
+    snapshot.note = "budget unknown";
+    snapshot.segments.back().tokens = 0;
+    const UiModel model = context_model(std::move(snapshot), 0, "budget unknown");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{66, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("used tokens (budget unknown)  @1842"), std::string::npos);
+    EXPECT_NE(rendered.find("budget unknown"), std::string::npos);
+    EXPECT_EQ(rendered.find("threshold"), std::string::npos);
+    EXPECT_EQ(rendered.find("%"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextOverlayOverBudget) {
+    ContextSnapshot snapshot = context_fixture();
+    snapshot.used_tokens = 70000;
+    snapshot.segments = {
+        ContextSegment{ContextSegmentKind::SystemPrompt, "agent.system_prompt", 412, 1},
+        ContextSegment{ContextSegmentKind::ToolSchemas, "ToolRegistry::schemas()", 3980, 2},
+        ContextSegment{ContextSegmentKind::McpToolSchemas, "ToolRegistry::schemas() (mcp.)", 2240,
+                       2},
+        ContextSegment{ContextSegmentKind::Conversation, "deriveMessages(header, log)", 62240, 42},
+        ContextSegment{ContextSegmentKind::CompactionSummary, "payload::ContextCompaction.summary",
+                       1128, 1},
+        ContextSegment{ContextSegmentKind::FreeSpace, "window − used", 0, 0},
+    };
+    const UiModel model = context_model(std::move(snapshot));
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{66, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("used 70,000 / 64,000 (109.3%)  threshold 47,923  reserve 4,096"),
+              std::string::npos);
+    EXPECT_EQ(rendered.find(">100%"), std::string::npos);
+}
+
 } // namespace

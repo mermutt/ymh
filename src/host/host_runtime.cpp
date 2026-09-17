@@ -15,6 +15,7 @@
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
+#include "ymh/agent/context_snapshot.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/core/logging.hpp"
@@ -487,6 +488,51 @@ protocol::SessionDetail HostRuntime::showSession(const SessionId& id) {
         detail.header = nlohmann::json(*header);
         detail.event_count = runtime_.store().read(id, 0).size();
         return detail;
+    });
+}
+
+nlohmann::json HostRuntime::showContext(const SessionId& id) {
+    return translate([&]() -> nlohmann::json {
+        const std::optional<SessionHeader> header = runtime_.store().load(id);
+        if (!header.has_value()) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
+                                   "UnknownSession"});
+        }
+        const EventRange events = runtime_.store().read(id, 0);
+
+        // Bind to named locals: ContextSnapshotInputs holds references, and a
+        // temporary would dangle before build_context_snapshot() runs.
+        const std::vector<ToolSchema> tools = runtime_.context().tools();
+        const CompactionPolicy*       policy = runtime_.compaction_policy();
+
+        // MCP status is best-effort (CTX-F6): a failure degrades to an empty
+        // server section plus a note, never to a failed snapshot (M7).
+        std::vector<McpServerStatus> servers;
+        bool mcp_available = true;
+        try {
+            servers = runtime_.mcp_statuses();
+        } catch (const std::exception&) {
+            mcp_available = false;
+        }
+
+        const ContextBudget budget{
+            policy != nullptr ? policy->context_window_tokens : 0,
+            policy != nullptr ? policy->reserve_output_tokens : 0,
+            policy != nullptr ? policy->effective_threshold_tokens() : 0,
+        };
+        const ContextSnapshotInputs inputs{*header,
+                                           events,
+                                           runtime_.agent_config().system_prompt,
+                                           tools,
+                                           servers,
+                                           runtime_.estimator(),
+                                           budget,
+                                           256,
+                                           mcp_available};
+        const ContextSnapshot snapshot = build_context_snapshot(inputs);
+        nlohmann::json out;
+        to_json(out, snapshot);
+        return out;
     });
 }
 

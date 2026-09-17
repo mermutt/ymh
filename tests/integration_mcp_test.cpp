@@ -12,6 +12,8 @@
 #include <nlohmann/json.hpp>
 #include <unistd.h>
 
+#include "ymh/agent/context_assembler.hpp"
+#include "ymh/agent/context_snapshot.hpp"
 #include "ymh/core/logger.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/tools/tool_registry.hpp"
@@ -232,4 +234,53 @@ TEST(McpIntegrationTest, ShutdownKillsIgnoringServerAndReapsIt) {
     errno = 0;
     EXPECT_EQ(::kill(pid, 0), -1);
     EXPECT_EQ(errno, ESRCH);
+}
+
+TEST(McpIntegrationTest, ContextSnapshotListsMcpToolsWithProvenance) {
+    ymh::test::ToolEnv env("mcp_integration_context");
+    ToolRegistry registry;
+    ymh::McpManager manager(scenario_config("happy"), ToolConfig{}, env.env, env.governor,
+                            registry, env.bus, env.logger);
+    manager.start({}).get();
+    registry.freeze();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 1u);
+    EXPECT_EQ(statuses.front().state, McpServerState::Ready);
+    EXPECT_EQ(statuses.front().tool_count, 2u);
+    EXPECT_TRUE(statuses.front().last_error.empty());
+
+    ymh::SessionHeader       header;
+    header.id = ymh::SessionId{"mcp-context-session"};
+    const ymh::EventRange    events;
+    const std::vector<ymh::ToolSchema> tools = registry.schemas();
+    ymh::DefaultTokenEstimator         estimator;
+    const ymh::ContextSnapshotInputs   inputs{header,   events, "",      tools, statuses,
+                                              estimator, ymh::ContextBudget{100000, 0, 0}, 256,
+                                              true};
+    const ymh::ContextSnapshot snapshot = ymh::build_context_snapshot(inputs);
+
+    ASSERT_EQ(snapshot.mcp_servers.size(), 1u);
+    EXPECT_EQ(snapshot.mcp_servers.front().state, "ready");
+    EXPECT_EQ(snapshot.mcp_servers.front().tool_count, 2u);
+    EXPECT_FALSE(snapshot.mcp_servers.front().has_error);
+
+    std::size_t mcp_items = 0;
+    for (const ymh::ContextSegment& segment : snapshot.segments) {
+        if (segment.kind == ymh::ContextSegmentKind::McpToolSchemas) {
+            mcp_items = segment.items;
+        }
+    }
+    EXPECT_EQ(mcp_items, 2u);
+
+    std::size_t mcp_tools = 0;
+    for (const ymh::ContextToolEntry& tool : snapshot.tools) {
+        if (tool.name.starts_with("mcp.fake.")) {
+            ++mcp_tools;
+            EXPECT_EQ(tool.provenance, "mcp");
+        }
+    }
+    EXPECT_EQ(mcp_tools, 2u);
+
+    manager.shutdown(300ms).get();
 }
