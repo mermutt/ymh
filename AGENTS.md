@@ -104,6 +104,18 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
   host registration, single `flock` writer, WAL readers) is separate from each
   workspace's session DB. The focused/active session is supervisor-local state,
   not registry state.
+- **Workspace vs session, in the UI.** A **workspace** is a live daemon plus its
+  durable row in `registry.db`; a **session** is stored per-workspace event-log
+  history on disk (`<workspace>/.ymh/sessions.db`). The **Ctrl-S switcher is
+  live-only** (live daemon with `Attached`/`Stopping`; entries are evicted when
+  the daemon dies; `NotRunning`/`Unreachable` never render), ordered by title
+  ascending, case-insensitive, `canonical_path` tie-break. **`/sessions`** lists
+  stored sessions read **directly from disk** for every **registered** workspace,
+  live or not (no daemon needed; orphan DBs are not scanned). Selecting a session
+  in a non-running workspace spawns/attaches its daemon then resumes it, and a
+  failure surfaces a status-bar notice, never a phantom workspace. **`ymh
+  --resume <id>` works in TUI mode** (unknown id → exit 1). See
+  `docs/design/22-switcher-sessions-errata.md`.
 - **Config is JSONC; TOML is retired.** The sole config file is `config.jsonc`
   in both slots: `$XDG_CONFIG_HOME/ymh/config.jsonc` (else
   `$HOME/.config/ymh/config.jsonc`) and `<workspace>/.ymh/config.jsonc`. ymh has

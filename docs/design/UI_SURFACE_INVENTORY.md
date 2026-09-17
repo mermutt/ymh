@@ -6,10 +6,13 @@ and **RB-11** (bottom line = counts only) from designing the same pixels twice,
 inconsistently. This is an inventory + seam definition, **not** a design.
 
 Method: every current behavior below is verified against `src/` / `include/` with
-`file:line`; docs are not cited for current behavior. Read-only analysis.
+`file:line`; docs are not cited for current behavior (spec-22 rows cite the
+pinned decision in `22-switcher-sessions-errata.md` §… alongside the code
+anchor). Read-only analysis.
 
-Ownership legend: **SPEC-16** = spec 16 owns the change; **BACKLOG** = RB-xx owns
-it; **SHARED** = both touch the same widget, seam stated explicitly.
+Ownership legend: **SPEC-16** = spec 16 owns the change; **SPEC-22** =
+`22-switcher-sessions-errata.md` owns the change; **BACKLOG** = RB-xx owns it;
+**SHARED** = both touch the same widget, seam stated explicitly.
 
 ---
 
@@ -52,26 +55,52 @@ it; **SHARED** = both touch the same widget, seam stated explicitly.
   *what the counts mean*, RB-11 changes *whether the list is shown*.
   **Verdict: SHARED.**
 
-## Surface 3 — Switcher
+## Surface 3 — Switcher (Live) and `/sessions` (History)
 
-- **Current:** `SwitcherOverlayModel` (`include/ymh/ui/ui_model.hpp:243-255`);
-  `open()` (`src/ui/ui_model.cpp:649-668`) builds a **workspaces → sessions** tree
-  across **all** `model.workspaces`, sorted by title. Rendered by
-  `render_switcher()` (`src/ui/ui_render.cpp:314-360`). Tab toggles expand
-  (`src/ui/supervisor.cpp:591-594`); Enter focuses a session/workspace
-  (`:595-604` → `UiModel::focusSession`/`focusWorkspace`,
-  `src/ui/ui_model.cpp:632-647`).
+- **Current (Live):** `SwitcherOverlayModel`
+  (`include/ymh/ui/ui_model.hpp:308`); `open()` (`src/ui/ui_model.cpp:910`) builds
+  a **workspaces → sessions** tree. Spec 22 (`22-switcher-sessions-errata.md` §3)
+  makes it **live-only**: a workspace node renders iff `WorkspaceModel::live ==
+  true` AND `daemonStatus ∈ {Attached, Stopping}`, and entries are **evicted**
+  when their daemon dies (`evict_dead_workspaces`,
+  `src/ui/supervisor.cpp:995`). `NotRunning` and `Unreachable` no longer render;
+  only `Owned`/`Stopping` marks remain reachable (§3.4). Ordering is **title
+  ascending, case-insensitive, tie-broken by `canonical_path`** (§3.7, 22-D1).
+  The old "across **all** `model.workspaces`, sorted by title" claim and the
+  "title order matches the registry canonical-path order" claim are both false
+  and superseded (§1.3.1 22-S1/22-S3, 22-A5). Rendered by `render_switcher()`
+  (`src/ui/ui_render.cpp:461`). Tab toggles expand
+  (`src/ui/supervisor.cpp:1711`); Enter focuses a session/workspace
+  (`src/ui/supervisor.cpp:1725-1726` → `UiModel::focusSession`/`focusWorkspace`,
+  `src/ui/ui_model.cpp:885,893`).
+- **Current (History, `/sessions`):** the same `SwitcherOverlayModel` and
+  `render_switcher` are reused with `source = SwitcherSource::History`
+  (`SupervisorApp::open_sessions`, `src/ui/supervisor.cpp:775-777`); **no second
+  overlay** (22-D3, §4.3, O14/C4). `/sessions`
+  (`src/ui/command_registry.cpp:217`) lists stored sessions for **every
+  registered workspace** (live or not), read **directly from disk**
+  (`<workspace>/.ymh/sessions.db`), no daemon required, degrading per workspace
+  with a note when a DB is missing / not a file / unreadable / corrupt / schema
+  mismatch / read-only / unavailable (§4.1, §4.4, §4.5). Sessions are
+  newest-first (`updated_at` desc, `id` asc); workspace groups use the same
+  title/`canonical_path` rule (§3.7). Selecting a stored session in a
+  non-running workspace spawns/attaches that daemon then resumes it
+  (`resume_from_history`, `src/ui/supervisor.cpp:888`; §5); a spawn/resume
+  failure surfaces a workspace-independent status-bar notice and never injects a
+  phantom workspace (§5.3).
 - **Cross-workspace data already exists:** the CLI attaches **every registered
   workspace with a live daemon** (read-only discovery, no spawn) at
   `src/cli/cli.cpp:365-393`, and each workspace connection populates its session
-  cells via `session.list` (`src/ui/supervisor.cpp:280-329`). So one supervisor
-  already *lists and can focus* another supervisor's live workspace sessions.
-- **Spec 16** owns the semantics (ownership, attach/detach, liveness markers,
-  "managed elsewhere" indication); it **reuses** this widget.
+  cells via `session.list` (`refresh_sessions`, `src/ui/supervisor.cpp:1093`). So
+  one supervisor already *lists and can focus* another supervisor's live
+  workspace sessions.
+- **Spec 16** owns the ownership/attach/detach semantics; **spec 22** owns the
+  live-only narrowing and the History source. Both **reuse** this widget.
 - **Seam:** spec 16 extends `WorkspaceNode`/`SessionNode` (e.g. an ownership or
-  attached-elsewhere flag) and the `render_switcher` row; no new overlay.
-  RB-11 does **not** touch the switcher. **Verdict: SPEC-16 (semantics) / widget
-  reused; SHARED boundary.**
+  attached-elsewhere flag) and the `render_switcher` row; spec 22 adds the
+  History source to the same overlay; no new overlay. RB-11 does **not** touch
+  the switcher. **Verdict: SPEC-16 (semantics) + SPEC-22 (live-only/History);
+  widget reused; SHARED boundary.**
 
 ## Surface 4 — Exit path
 
@@ -120,7 +149,7 @@ it; **SHARED** = both touch the same widget, seam stated explicitly.
 | C1 | Header **right slot**: RB-10 wants the session name; spec 16 may want a peer/ownership indicator there. | Right slot → RB-10 (session name). Spec-16 indicators go left of the filler or in the switcher. |
 | C2 | Bottom line: raw note 4 says "both supervisors should display that besides the current session there is one more" — read as a *list*, it contradicts RB-11's counts-only. | Must be a **count/badge**, not a per-session list. Counts widget is `render_status` (`ui_render.cpp:273-274`). |
 | C3 | Exit semantics: `/exit` + Ctrl+D currently quit immediately; spec 16 makes exit conditional (last-supervisor prompt). | Spec 16 owns the semantics at `requestExit` (`supervisor.cpp:237`); registry/keybindings stay thin callers. |
-| C4 | Cross-supervisor visibility: the switcher already lists/focuses other live workspaces' sessions (`cli.cpp:365-393`, `ui_model.cpp:649-668`); spec 16 could duplicate this in the header. | Spec 16 **extends** the switcher; do not build a second visibility widget. |
+| C4 | Cross-supervisor visibility: the switcher already lists/focuses other live workspaces' sessions (`cli.cpp:365-393`, `ui_model.cpp:910`); spec 16 could duplicate this in the header. | Spec 16 **extends** the switcher; do not build a second visibility widget. |
 | C5 | Count scope: `AggregateStatus` already spans **all attached workspaces** (`ui_model.cpp:225-241`), not the active one. | RB-11 documents this scope; spec 16 must not redefine it — only extend the notion of "attached" to its ownership model. |
 
 ## Summary
@@ -129,6 +158,6 @@ it; **SHARED** = both touch the same widget, seam stated explicitly.
 |---|---|---|
 | Header / top line | SHARED — right slot → RB-10 | RB-10 name after `filler()`; spec 16 left-side/switcher |
 | Bottom line / session bar | SHARED — RB-11 collapse, spec 16 count scope | delete `render_session_bar`; keep aggregate `render_status` |
-| Switcher | SPEC-16 semantics (reuse widget) | extend `WorkspaceNode`/`render_switcher`; RB-11 untouched |
+| Switcher (Live) + `/sessions` (History) | SPEC-16 semantics + SPEC-22 live-only/History (reuse widget) | extend `WorkspaceNode`/`render_switcher`; RB-11 untouched |
 | Exit path | SPEC-16 | hook `requestExit` (`supervisor.cpp:237`); reuse modal overlay |
 | Command registry | SHARED — spec 16 commands, RB-08 Tab | register in `builtin()`; generic Tab → `complete()` |
