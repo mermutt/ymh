@@ -212,6 +212,7 @@ TEST(RenderGolden, TuiExitConfirmOverlayCountsAndOwnershipMark) {
     workspace.id = model.activeWorkspaceId;
     workspace.title = "alpha";
     workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
     workspace.activeSessionId = SessionId{"session"};
     model.ensureSession(SessionId{"session"});
 

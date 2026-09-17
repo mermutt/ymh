@@ -22,8 +22,12 @@
 
 #include "support/host_harness.hpp"
 #include "support/short_temp.hpp"
+#include "ymh/agent/message.hpp"
+#include "ymh/core/event.hpp"
 #include "ymh/core/ownership.hpp"
 #include "ymh/registry/registry.hpp"
+#include "ymh/session/events.hpp"
+#include "ymh/session/session_persistence.hpp"
 
 namespace {
 
@@ -930,6 +934,251 @@ TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
 
     child.terminate();
     guard.stop();
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+// 22 §10.4: a stored session on disk, written before any daemon exists. Returns
+// the session id. `marker`, when non-empty, is a user-message event that must
+// replay once the session is resumed.
+SessionId write_stored_session(const std::filesystem::path& workspace,
+                               const std::string& title, const std::string& marker) {
+    const std::filesystem::path ymh_dir = workspace / ".ymh";
+    std::filesystem::create_directories(ymh_dir);
+    PersistenceConfig config;
+    config.db_path   = ymh_dir / "sessions.db";
+    config.lock_path = ymh_dir / "sessions.lock";
+    config.boot_id   = BootId{"pty-test"};
+    {
+        const std::unique_ptr<SessionPersistence> store = SessionPersistence::open(config);
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        SessionHeader header;
+        header.id            = SessionId{generate_uuid_v4()};
+        header.cwd           = std::filesystem::canonical(workspace);
+        header.createdAt     = now;
+        header.updatedAt     = now;
+        header.title         = title;
+        header.model         = "deepseek-flash";
+        header.serverProfile = "interactive";
+        header.kind          = SessionKind::Root;
+        store->create(header);
+        if (!marker.empty()) {
+            payload::UserMessage message;
+            message.id = MessageId{generate_uuid_v4()};
+            ContentBlock block;
+            block.kind = ContentBlockKind::Text;
+            block.text = marker;
+            message.content.push_back(std::move(block));
+            TypedEvent<payload::UserMessage> typed;
+            typed.id         = EventId{generate_uuid_v4()};
+            typed.session_id = header.id;
+            typed.timestamp  = std::chrono::system_clock::now();
+            typed.payload    = std::move(message);
+            store->append(header.id, encode(typed));
+        }
+        const SessionId session = header.id;
+        store->releaseLease(session);
+        // Drop the WAL sidecars after close so the read-only catalog open does
+        // not depend on them.
+        std::error_code error;
+        std::filesystem::remove(ymh_dir / "sessions.db-wal", error);
+        std::filesystem::remove(ymh_dir / "sessions.db-shm", error);
+        return session;
+    }
+}
+
+RegistryConfig pty_registry_config(const std::filesystem::path& state) {
+    RegistryConfig config;
+    config.db_path         = state / "ymh" / "registry.db";
+    config.lock_path       = state / "ymh" / "registry.lock";
+    config.workspace_roots = {};
+    return config;
+}
+
+std::map<std::string, std::string> pty_env(const std::filesystem::path& root,
+                                           const std::filesystem::path& state) {
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"]  = state.string();
+    env["XDG_CONFIG_HOME"] = (root / ".config").string();
+    env["HOME"]            = root.string();
+    env["TERM"]            = "xterm-256color";
+    return env;
+}
+
+bool wait_for_host(const std::string& workspace_id, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!host_processes(&workspace_id).empty()) {
+            return true;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return !host_processes(&workspace_id).empty();
+}
+
+// SW-P4 (22 §10.4): with a stopped workspace registered, Ctrl-S (Live) does not
+// show its stored session; `/sessions` (History) does.
+TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
+    ShortTempRoot root("ymh_pty_p4");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        registry->registerWorkspace(beta, "beta");
+    }
+    write_stored_session(beta, "beta-stored", "");
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("\x13");
+    ASSERT_TRUE(child.wait_for("Switcher", 10s)) << child.text();
+    EXPECT_EQ(child.text().find("beta-stored"), std::string::npos)
+        << "Live switcher showed a stopped workspace's stored session";
+
+    child.write("\x1b");
+    std::this_thread::sleep_for(300ms);
+    child.write("/sessions\r");
+    ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
+
+    child.terminate();
+    alpha_guard.stop();
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+// SW-P1 (22 §10.4): selecting a stored session in a stopped workspace from
+// `/sessions` spawns its daemon and resumes it (the transcript replays).
+TEST(UiSupervisorPty, SwP1_SessionsSelectionSpawnsAndResumes) {
+    ShortTempRoot root("ymh_pty_p1");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    const std::string marker = "zzstoredmarkerzz";
+    write_stored_session(beta, "beta-stored", marker);
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    HostDaemonGuard beta_guard(beta_id);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("/sessions\r");
+    ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
+
+    // The History cursor starts on alpha's active session; "j" walks to beta's
+    // workspace then its only session, where further presses settle.
+    child.write("jjjj");
+    child.write("\r");
+
+    EXPECT_TRUE(wait_for_host(beta_id, 25s)) << "selecting the stored session did not spawn beta";
+    ASSERT_TRUE(child.wait_for(marker, 25s))
+        << "resumed session transcript did not replay: " << child.text();
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_guard.stop();
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+// SW-P2 (22 §10.4): `ymh --resume <id>` resumes the session in its own
+// workspace and shows its title in the header.
+TEST(UiSupervisorPty, SwP2_ResumeFlagResumesStoredSession) {
+    ShortTempRoot root("ymh_pty_p2");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    const std::string marker = "zzresumeflagmarkerzz";
+    const SessionId   session = write_stored_session(beta, "beta-stored", marker);
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    HostDaemonGuard beta_guard(beta_id);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state),
+                            {"--resume", session.value}));
+    ASSERT_TRUE(child.wait_for("beta-stored", 30s))
+        << "resumed session title missing from the header: " << child.text();
+    EXPECT_TRUE(wait_for_host(beta_id, 20s)) << "beta daemon was not spawned for --resume";
+    ASSERT_TRUE(child.wait_for(marker, 25s)) << child.text();
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_guard.stop();
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+// SW-F6 (22 §6.2): an unknown `--resume` id exits 1 without starting the TUI.
+TEST(UiSupervisorPty, SwP2_UnknownResumeIdExitsOne) {
+    ShortTempRoot root("ymh_pty_p2bad");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    std::filesystem::create_directories(alpha);
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        registry->registerWorkspace(alpha, "alpha");
+    }
+
+    ChildOptions options;
+    options.argv        = {"ymh", "--resume", "no-such-session"};
+    options.executable  = resolve_ymh_binary();
+    options.cwd         = alpha;
+    options.env         = pty_env(root.path(), state);
+    options.stdout_path = root.path() / "out.log";
+    options.stderr_path = root.path() / "err.log";
+    ChildProcess child(std::move(options));
+    const std::optional<ExitStatus> status = child.wait_for(20s);
+    ASSERT_TRUE(status.has_value()) << "ymh --resume <unknown> did not exit";
+    EXPECT_TRUE(status->exited);
+    EXPECT_EQ(status->code, 1);
+    EXPECT_NE(read_text_file(root.path() / "err.log").find("unknown session"), std::string::npos);
     EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
 }
 

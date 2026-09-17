@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -31,8 +32,10 @@
 #include "ymh/transport/protocol.hpp"
 #include "ymh/ui/command_registry.hpp"
 #include "ymh/ui/context_request.hpp"
+#include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/session_export.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
+#include "ymh/ui/supervisor_harness.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
 #include "ymh/ui/terminal_layer.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
@@ -47,6 +50,12 @@ constexpr std::chrono::milliseconds kMaxFrameDelta{250};
 constexpr std::chrono::milliseconds kExitQueryMargin{500};
 constexpr std::chrono::milliseconds kOwnershipRetryInterval{100};
 constexpr int kContextScrollPage = 6;
+
+// 22 §5.1 (S3): one coalesced lazy-spawn request for the ensure worker.
+struct EnsureRequest {
+    WorkspaceId workspace;
+    SessionId   resume;
+};
 
 DaemonStatus daemon_status_for(SupervisorLinkState state) {
     switch (state) {
@@ -243,6 +252,21 @@ public:
     }
 
     ~SupervisorApp() override {
+        // 22 §4.2 (SW26, MEDIUM-2): stop+join the catalog worker first, before
+        // any member teardown. Its sink calls `enqueue`, which locks
+        // `action_mutex_` and reads `screen_`; letting it outlive them would be
+        // a use-after-free.
+        if (catalog_ != nullptr) {
+            catalog_->stop();
+        }
+        // 22 §5.1 (SW24, H2): stop+join the spawn worker before any member
+        // teardown. The worker checks `stop_requested()` before `enqueue`, so it
+        // never touches `this` after the stop request.
+        ensure_worker_.request_stop();
+        ensure_cv_.notify_all();
+        if (ensure_worker_.joinable()) {
+            ensure_worker_.join();
+        }
         if (scanner_ != nullptr) {
             scanner_->stop();
         }
@@ -272,8 +296,17 @@ public:
             }
         }
 
+        // 22 §6.1 (S4): seed the resume before the FTXUI loop drains any
+        // `on_link_state(Attached)` action, so it is consumed by the shared S3
+        // path (`on_link_state` -> `resume_after_attach`).
+        if (options_.initial_resume.has_value()) {
+            pending_resume_[options_.initial_resume->first] = options_.initial_resume->second;
+        }
+
         register_presence();
         start_scanner();
+        start_catalog();
+        ensure_worker_ = std::jthread([this](std::stop_token stop) { ensure_worker_loop(stop); });
         return run_loop();
     }
 
@@ -330,6 +363,11 @@ public:
     void requestExit() override { begin_exit(); }
 
 private:
+    // 22 §10.1/§10.2: the additive test seam (`SupervisorHarnessImpl`) needs the
+    // private spawn/catalog/eviction surface to make the deferred pinned tests
+    // real; production never uses it.
+    friend class SupervisorHarnessImpl;
+
     // 16 §4.2 (16-D9). The supervisor stays registered until the user confirms:
     // query the orphaning set read-only, then either exit (empty set), auto-
     // confirm (--yes), or open the prompt. Ctrl+D and `/exit` stay thin callers.
@@ -615,6 +653,7 @@ private:
             model.cwd = spec.cwd;
             model.boot_id = spec.boot_id;
             model.daemonStatus = DaemonStatus::Connecting;
+            model.live = false;
             model_.workspaces.emplace(spec.id, std::move(model));
             model_.dirty.markAggregate();
         }
@@ -692,12 +731,295 @@ private:
         scanner_->start();
     }
 
+    // 22 §4.2 (S2): one owned worker reads every registered workspace's
+    // `sessions.db` and posts immutable snapshots back to the UI thread through
+    // `enqueue`. Requires a registry; without one `/sessions` has no source.
+    void start_catalog() {
+        if (options_.registry == nullptr) {
+            return;
+        }
+        catalog_ = std::make_unique<SessionCatalogReader>(
+            *options_.registry,
+            [this](SessionCatalogSnapshot snapshot) {
+                enqueue([this, snapshot = std::move(snapshot)]() mutable {
+                    on_catalog_snapshot(std::move(snapshot));
+                });
+            },
+            options_.catalog_refresh_interval);
+        catalog_->start();
+    }
+
+    // 22 §4.6 (S2): UI thread. Store the snapshot and rebuild the History
+    // overlay in place when it is open, preserving `filter`/`collapsed` and
+    // never closing the overlay (LOW-3). A stale snapshot is displayed as-is
+    // until a newer one arrives.
+    void on_catalog_snapshot(SessionCatalogSnapshot snapshot) {
+        if (model_.catalog.loaded && snapshot.generation < model_.catalog.generation) {
+            return;
+        }
+        model_.catalog.workspaces = std::move(snapshot.workspaces);
+        model_.catalog.loaded = true;
+        model_.catalog.complete = snapshot.complete;
+        model_.catalog.capturedAtMs = snapshot.capturedAtMs;
+        model_.catalog.nowMs = epoch_ms(options_.wall_clock());
+        model_.catalog.generation = snapshot.generation;
+        if (model_.mode == UiMode::Switcher &&
+            model_.switcher.source == SwitcherSource::History) {
+            model_.switcher.openHistory(model_);
+        }
+        model_.dirty.markAggregate();
+    }
+
+    // 22 §4.3 (S2): `/sessions` opens the History source and requests an
+    // immediate rebuild. The loading placeholder shows until the first snapshot.
+    void open_sessions() {
+        model_.switcher.source = SwitcherSource::History;
+        model_.switcher.openHistory(model_);
+        model_.mode = UiMode::Switcher;
+        model_.dirty.markAggregate();
+        if (catalog_ != nullptr) {
+            catalog_->refreshNow();
+        }
+    }
+
+    void push_notice(std::string text) { model_.pushNotice(std::move(text)); }
+
+    // 22 §3.3: the switcher overlay is a snapshot. Rebuild it in place (not via
+    // `openSwitcher()`, so `mode`/`source` survive) whenever the live set
+    // changes while a Live-source switcher is open.
+    void resnapshot_switcher() {
+        if (model_.mode == UiMode::Switcher &&
+            model_.switcher.source == SwitcherSource::Live) {
+            model_.switcher.open(model_);
+        }
+    }
+
+    // 22 §5.1 (S3, H1/SW23): failure notices never inject a workspace. A modeled
+    // session reuses the ErrorOccurred path (a Role::System entry); an unmodeled
+    // one (the primary S3 case) goes to the workspace-independent notice ring.
+    void surface_notice(const WorkspaceId& workspace, const SessionId& session,
+                        std::string text) {
+        (void)workspace;
+        if (model_.sessions.count(session) != 0) {
+            model_.apply(UiEvent{ErrorOccurred{session, std::move(text)}});
+            return;
+        }
+        model_.pushNotice(std::move(text));
+    }
+
+    // 22 §5.1 (S3, SW12): called on the UI thread. Records the last selection for
+    // the workspace and queues a coalesced spawn request for the owned worker;
+    // `ensureRunning` blocks and must never run here.
+    void ensure_workspace_running(const WorkspaceId& workspace, const SessionId& resume) {
+        if (options_.lifecycle == nullptr) {
+            surface_notice(workspace, resume, "cannot start workspace");
+            return;
+        }
+        pending_resume_[workspace] = resume;
+        if (ensure_in_flight_.count(workspace) != 0) {
+            return;
+        }
+        ensure_in_flight_.insert(workspace);
+        {
+            std::lock_guard lock(ensure_mutex_);
+            std::erase_if(ensure_requests_, [&](const EnsureRequest& request) {
+                return request.workspace == workspace;
+            });
+            ensure_requests_.push_back(EnsureRequest{workspace, resume});
+        }
+        ensure_cv_.notify_all();
+    }
+
+    void ensure_worker_loop(std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            EnsureRequest request;
+            {
+                std::unique_lock lock(ensure_mutex_);
+                ensure_cv_.wait(lock, [&] {
+                    return stop.stop_requested() || !ensure_requests_.empty();
+                });
+                if (stop.stop_requested()) {
+                    return;
+                }
+                request = ensure_requests_.front();
+                ensure_requests_.pop_front();
+            }
+
+            std::optional<SupervisorWorkspace> spec;
+            std::string                        notice;
+            try {
+                if (options_.lifecycle == nullptr) {
+                    notice = "cannot start workspace";
+                } else if (options_.registry != nullptr &&
+                           !options_.registry->findById(request.workspace).has_value()) {
+                    notice = "workspace no longer registered";
+                } else {
+                    AttachResult attach = options_.lifecycle->ensureRunning(
+                        WorkspaceId{request.workspace.value}, options_.identity);
+                    (void)attach;   // dropped (RAII close); `attach_workspace` makes
+                                    // its own connection. The supervisor presence
+                                    // keeps the daemon owned.
+                    spec = workspace_spec_from_registry(request.workspace);
+                    if (!spec.has_value()) {
+                        notice = "cannot start workspace: daemon did not register";
+                    }
+                }
+            } catch (const std::exception& error) {
+                notice = "cannot start workspace: " + std::string{error.what()};
+            }
+
+            if (stop.stop_requested()) {
+                return;   // (H2) never touch `this` after a stop request
+            }
+            enqueue([this, request, spec, notice = std::move(notice)] {
+                ensure_in_flight_.erase(request.workspace);
+                if (!spec.has_value()) {
+                    pending_resume_.erase(request.workspace);
+                    surface_notice(request.workspace, request.resume, notice);
+                    return;
+                }
+                attach_workspace(*spec);
+            });
+        }
+    }
+
+    // 22 §5.2 (S3, SW13): the single S3/S4 entry point. An attached workspace
+    // resumes immediately; a non-live one is spawned and resumed on `Attached`.
+    void resume_from_history(const WorkspaceId& workspace, const SessionId& session) {
+        const auto connection = connections_.find(workspace);
+        if (connection != connections_.end() &&
+            connection->second->state() == SupervisorLinkState::Attached) {
+            resume_after_attach(workspace, session);
+            return;
+        }
+        ensure_workspace_running(workspace, session);
+    }
+
+    void resume_after_attach(const WorkspaceId& workspace, const SessionId& session) {
+        submit_to(workspace, std::string(protocol::method::kSessionResume),
+                  nlohmann::json{{"session", session.value}},
+                  [this, workspace, session](SupervisorReply reply) {
+                      if (!reply.ok) {
+                          // 22 §5.3 (SW-F3): a stale/unknown stored row yields a
+                          // definitive `UnknownSession`; report it distinctly from
+                          // a transport failure.
+                          const bool unknown =
+                              reply.error_code ==
+                              static_cast<int>(protocol::AppCode::UnknownSession);
+                          enqueue([this, workspace, session, error = reply.error, unknown] {
+                              surface_notice(workspace, session,
+                                             unknown ? "session not found in " +
+                                                           workspace_label(workspace)
+                                                     : "resume failed: " + error);
+                          });
+                          return;
+                      }
+                      enqueue([this, workspace, session] {
+                          apply_resume_success(workspace, session);
+                      });
+                  });
+    }
+
+    // 22 §5.2 (SW25, MEDIUM-1): the success branch must never inject a workspace.
+    // A workspace evicted between the submit and its reply is reported through
+    // `surface_notice` and left unmodeled.
+    void apply_resume_success(const WorkspaceId& workspace, const SessionId& session) {
+        if (model_.workspaces.count(workspace) == 0) {
+            surface_notice(workspace, session,
+                           "session resumed in a workspace that is no longer open");
+            return;
+        }
+        model_.ensureSessionIn(workspace, session);
+        model_.ensureCellIn(workspace, session);
+        // 22 §5.2 "focus only; no session.activate": `focusSession` sets the
+        // workspace's active session and switches `activeWorkspaceId`, so a
+        // session selected in another workspace becomes the visible one.
+        model_.focusSession(session);
+    }
+
+    std::optional<SupervisorWorkspace> workspace_spec_from_registry(
+        const WorkspaceId& workspace) const {
+        if (options_.registry == nullptr) {
+            return std::nullopt;
+        }
+        const std::optional<WorkspaceRecord> row = options_.registry->findById(workspace);
+        if (!row.has_value() || !row->host.has_value()) {
+            return std::nullopt;
+        }
+        SupervisorWorkspace spec;
+        spec.id          = WorkspaceId{row->id.value};
+        spec.cwd         = row->canonicalPath.string();
+        spec.title       = row->displayTitle;
+        spec.socket_path = row->host->socketPath.string();
+        spec.boot_id     = row->host->bootId.value;
+        return spec;
+    }
+
     void on_scan(std::vector<SupervisorWorkspace> live) {
         enqueue([this, live = std::move(live)] {
+            std::set<WorkspaceId> live_ids;
+            for (const SupervisorWorkspace& spec : live) {
+                live_ids.insert(spec.id);
+            }
+            for (const SupervisorWorkspace& spec : live) {
+                const auto connection = connections_.find(spec.id);
+                const auto pinned = specs_.find(spec.id);
+                if (connection == connections_.end() || pinned == specs_.end()) {
+                    continue;
+                }
+                if (pinned->second.boot_id != spec.boot_id) {
+                    connection->second->stop();
+                    connections_.erase(connection);
+                    specs_.erase(pinned);
+                    model_.eraseWorkspace(spec.id);
+                }
+            }
             for (const SupervisorWorkspace& spec : live) {
                 attach_workspace(spec);
             }
+            for (const WorkspaceId& id : live_ids) {
+                const auto it = model_.workspaces.find(id);
+                const auto connection = connections_.find(id);
+                if (it != model_.workspaces.end() && connection != connections_.end() &&
+                    connection->second->state() == SupervisorLinkState::Attached) {
+                    it->second.live = true;
+                }
+            }
+            if (model_.mode != UiMode::ExitConfirm) {
+                evict_dead_workspaces(live_ids);
+            }
+            resnapshot_switcher();
         });
+    }
+
+    void evict_dead_workspaces(const std::set<WorkspaceId>& live_ids) {
+        std::set<WorkspaceId> connecting_ids;
+        for (const auto& [id, connection] : connections_) {
+            if (connection->state() == SupervisorLinkState::Connecting) {
+                connecting_ids.insert(id);
+            }
+        }
+        std::vector<WorkspaceId> doomed =
+            switcher_eviction_candidates(model_.workspaces, live_ids, connecting_ids);
+        // 22 §3.2 rule 8 (M5, SW21): a scan tick landing during an in-flight
+        // spawn must not erase the workspace or its `pending_resume_`; the later
+        // `Attached` still consumes it.
+        std::erase_if(doomed, [this](const WorkspaceId& id) {
+            return ensure_in_flight_.count(id) != 0;
+        });
+        for (const WorkspaceId& id : doomed) {
+            if (auto connection = connections_.find(id); connection != connections_.end()) {
+                connection->second->stop();
+                connections_.erase(connection);
+            }
+            specs_.erase(id);
+            pending_creates_.erase(id);
+            pending_resume_.erase(id);
+            model_.eraseWorkspace(id);
+        }
+        if (!doomed.empty()) {
+            model_.dirty.markAggregate();
+        }
     }
 
     void tick_presence() {
@@ -740,10 +1062,20 @@ private:
                 return;
             }
             it->second.daemonStatus = daemon_status_for(state);
+            apply_daemon_status_liveness(it->second, it->second.daemonStatus);
             model_.dirty.markAggregate();
             if (state == SupervisorLinkState::Attached) {
                 refresh_sessions(workspace);
+                // 22 §5.1 (S3/S4, SW14/SW15): consume the pending resume exactly
+                // once per successful attach through the shared resume path.
+                const auto pending = pending_resume_.find(workspace);
+                if (pending != pending_resume_.end()) {
+                    const SessionId session = pending->second;
+                    pending_resume_.erase(pending);
+                    resume_after_attach(workspace, session);
+                }
             }
+            resnapshot_switcher();
         });
     }
 
@@ -1157,6 +1489,7 @@ private:
         context.skills = [this](const std::string& args) { request_skills(args); };
         context.skill = [this](const std::string& name) { request_skill(name); };
         context.context = [this] { open_context(); };
+        context.sessions = [this] { open_sessions(); };
         return registry_.dispatch(line, context);
     }
 
@@ -1328,6 +1661,38 @@ private:
         resolvePermission(dialog.session, dialog.request, decision, scope);
     }
 
+    std::string workspace_label(const WorkspaceId& id) const {
+        const auto modeled = model_.workspaces.find(id);
+        if (modeled != model_.workspaces.end() && !modeled->second.title.empty()) {
+            return modeled->second.title;
+        }
+        for (const WorkspaceHistory& history : model_.catalog.workspaces) {
+            if (history.id == id) {
+                return history.title.empty() ? history.canonicalPath : history.title;
+            }
+        }
+        return id.value;
+    }
+
+    // 22 §4.3/§5.2 (S3): the History Enter path. Selecting a stored session
+    // routes through `resume_from_history` (spawn-and-resume when the workspace
+    // is not running). Selecting a workspace node only focuses an attached one;
+    // an unmodeled workspace is reported through the notice ring (H1).
+    void select_history(const SwitcherCursor& cursor) {
+        if (cursor.session.has_value()) {
+            resume_from_history(cursor.workspace, *cursor.session);
+            return;
+        }
+        const auto connection = connections_.find(cursor.workspace);
+        const bool attached = connection != connections_.end() &&
+                              connection->second->state() == SupervisorLinkState::Attached;
+        if (attached) {
+            model_.focusWorkspace(cursor.workspace);
+            return;
+        }
+        push_notice("workspace not running: " + workspace_label(cursor.workspace));
+    }
+
     bool handle_switcher(const ftxui::Event& event) {
         if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
             model_.switcher.close();
@@ -1346,9 +1711,18 @@ private:
             model_.switcher.toggleExpand();
             return true;
         }
+        if (model_.switcher.source == SwitcherSource::History && event.is_character() &&
+            event.character() == "r") {
+            if (catalog_ != nullptr) {
+                catalog_->refreshNow();
+            }
+            return true;
+        }
         if (event == ftxui::Event::Return) {
             const SwitcherCursor cursor = model_.switcher.cursor;
-            if (cursor.session.has_value()) {
+            if (model_.switcher.source == SwitcherSource::History) {
+                select_history(cursor);
+            } else if (cursor.session.has_value()) {
                 model_.focusSession(*cursor.session);
             } else {
                 model_.focusWorkspace(cursor.workspace);
@@ -1663,6 +2037,19 @@ private:
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
+    // 22 §4.2 (SW26): declared after `action_mutex_`/`actions_`/`screen_` so
+    // reverse destruction stops+joins the catalog worker before them even if
+    // the explicit destructor join is bypassed.
+    std::unique_ptr<SessionCatalogReader> catalog_;
+    // 22 §5.1 (SW24, SW26): the owned spawn worker and its queue. Declared after
+    // `action_mutex_`/`actions_`/`screen_` for the same reverse-destruction
+    // reason (the worker's completion action locks `action_mutex_`).
+    std::jthread              ensure_worker_;
+    std::mutex                ensure_mutex_;
+    std::condition_variable   ensure_cv_;
+    std::deque<EnsureRequest> ensure_requests_;
+    std::set<WorkspaceId>     ensure_in_flight_;
+    std::map<WorkspaceId, SessionId> pending_resume_;
     std::atomic<bool> quit_{false};
     // 18 §4.3 (M9/C1): written on the UI thread (open/close) and read on the
     // pump thread (reply early-out), so it MUST be atomic. It guards no other
@@ -1671,7 +2058,101 @@ private:
     std::chrono::steady_clock::time_point last_tick_ = std::chrono::steady_clock::now();
 };
 
+// 22 §10.1/§10.2: additive test-only seam. Production reaches `SupervisorApp`
+// only through `run_supervisor`; the deferred pinned tests (SW-U12/U13/U14/U18/
+// U19, SW-I9/I10) drive the same private methods through this peer.
+class SupervisorHarnessImpl final : public SupervisorHarness {
+public:
+    explicit SupervisorHarnessImpl(SupervisorRunOptions options)
+        : app_(std::move(options)) {
+        app_.ensure_worker_ =
+            std::jthread([this](std::stop_token stop) { app_.ensure_worker_loop(stop); });
+    }
+
+    void ensure_workspace_running(const WorkspaceId& workspace,
+                                  const SessionId& resume) override {
+        app_.ensure_workspace_running(workspace, resume);
+    }
+
+    void on_scan(std::vector<SupervisorWorkspace> live) override {
+        app_.on_scan(std::move(live));
+    }
+
+    void evict_dead_workspaces(const std::set<WorkspaceId>& live_ids) override {
+        app_.evict_dead_workspaces(live_ids);
+    }
+
+    void on_link_state(const WorkspaceId& workspace, SupervisorLinkState state,
+                       std::string detail) override {
+        app_.on_link_state(workspace, state, std::move(detail));
+    }
+
+    void apply_resume_success(const WorkspaceId& workspace, const SessionId& session) override {
+        app_.apply_resume_success(workspace, session);
+    }
+
+    void drain_actions() override { app_.drain(); }
+
+    void start_catalog_with(WorkspaceCatalogSource source,
+                            std::chrono::milliseconds refresh_interval) override {
+        app_.catalog_ = std::make_unique<SessionCatalogReader>(
+            std::move(source),
+            [this](SessionCatalogSnapshot snapshot) {
+                app_.enqueue([this, snapshot = std::move(snapshot)]() mutable {
+                    app_.on_catalog_snapshot(std::move(snapshot));
+                });
+            },
+            refresh_interval);
+        app_.catalog_->start();
+    }
+
+    void refresh_catalog_now() override {
+        if (app_.catalog_ != nullptr) {
+            app_.catalog_->refreshNow();
+        }
+    }
+
+    void seed_pending_resume(const WorkspaceId& workspace, const SessionId& session) override {
+        app_.pending_resume_[workspace] = session;
+    }
+
+    void seed_ensure_in_flight(const WorkspaceId& workspace) override {
+        app_.ensure_in_flight_.insert(workspace);
+    }
+
+    void seed_workspace(const WorkspaceModel& workspace) override {
+        app_.model_.workspaces[workspace.id] = workspace;
+    }
+
+    [[nodiscard]] const UiModel& model() const override { return app_.model_; }
+    [[nodiscard]] const std::set<WorkspaceId>& ensure_in_flight() const override {
+        return app_.ensure_in_flight_;
+    }
+    [[nodiscard]] const std::map<WorkspaceId, SessionId>& pending_resume() const override {
+        return app_.pending_resume_;
+    }
+    [[nodiscard]] bool has_connection(const WorkspaceId& workspace) const override {
+        return app_.connections_.count(workspace) != 0;
+    }
+    [[nodiscard]] std::optional<std::string> spec_boot_id(
+        const WorkspaceId& workspace) const override {
+        const auto spec = app_.specs_.find(workspace);
+        if (spec == app_.specs_.end()) {
+            return std::nullopt;
+        }
+        return spec->second.boot_id;
+    }
+    [[nodiscard]] bool worker_joinable() const override { return app_.ensure_worker_.joinable(); }
+
+private:
+    SupervisorApp app_;
+};
+
 } // namespace
+
+std::unique_ptr<SupervisorHarness> make_supervisor_harness(SupervisorRunOptions options) {
+    return std::make_unique<SupervisorHarnessImpl>(std::move(options));
+}
 
 int run_supervisor(const SupervisorRunOptions& options) {
     SupervisorApp app(options);

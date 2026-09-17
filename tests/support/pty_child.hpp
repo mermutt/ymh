@@ -89,7 +89,8 @@ public:
     PtyChild& operator=(const PtyChild&) = delete;
 
     bool spawn(const std::filesystem::path& binary, const std::filesystem::path& cwd,
-               const std::map<std::string, std::string>& env, int rows = 30, int cols = 100) {
+               const std::map<std::string, std::string>& env, int rows = 30, int cols = 100,
+               const std::vector<std::string>& args = {}) {
         master_ = ::posix_openpt(O_RDWR | O_NOCTTY);
         if (master_ < 0) {
             return false;
@@ -131,7 +132,16 @@ public:
             if (::chdir(cwd.c_str()) != 0) {
                 ::_exit(126);
             }
-            ::execl(binary.c_str(), binary.c_str(), static_cast<char*>(nullptr));
+            std::vector<std::string> argv_storage;
+            argv_storage.push_back(binary.string());
+            argv_storage.insert(argv_storage.end(), args.begin(), args.end());
+            std::vector<char*> argv;
+            argv.reserve(argv_storage.size() + 1);
+            for (std::string& argument : argv_storage) {
+                argv.push_back(argument.data());
+            }
+            argv.push_back(nullptr);
+            ::execv(binary.c_str(), argv.data());
             ::_exit(127);
         }
         ::close(slave);

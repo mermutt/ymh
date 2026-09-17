@@ -17,20 +17,18 @@
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/ids.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace ymh::ui {
 
-// Reproduced from 03 §2.1 / 01 §2.1 (never a path). Milestone 1 has exactly one
-// workspace (the process cwd); the type is kept so the Milestone 2 fork is
-// mechanical (10 §2.3).
-struct WorkspaceId {
-    std::string value;
-
-    auto operator<=>(const WorkspaceId&) const = default;
-};
+// 03 §2.1 / 01 §2.1 (never a path). 22 §4.6: aliased to the registry's
+// `ymh::WorkspaceId` so the S2 catalog's `WorkspaceHistory` and the UI model's
+// node/connection keys are one type — the two definitions were structurally
+// identical, and keeping both forced an id bridge and ambiguous unqualified use.
+using WorkspaceId = ymh::WorkspaceId;
 
 // Supervisor-local view of a daemon (10 §2.1); never written to the registry.
 // 16 §7.6 (additive): `Stopping` is a daemon draining after last-exit/watchdog;

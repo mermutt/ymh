@@ -8,6 +8,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,6 +32,7 @@
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/transport/host_connection.hpp"
+#include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/supervisor.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
 #include "ymh/ui/ui_application.hpp"
@@ -359,12 +361,78 @@ std::optional<WorkspaceRecord> find_or_register_workspace(
     }
 }
 
+// 22 §6.2/§6.4 (S4): the CLI-side synchronous twin of the catalog reader. It
+// reads each registered workspace's `sessions.db` through the shared
+// `read_workspace_history` helper and returns the workspace storing `session`.
+// An unknown id is `nullopt`; a duplicate resolves to the newest `updatedAt`
+// (tie-break canonical path) with a stderr warning.
+std::optional<WorkspaceRecord> resolve_session_workspace(WorkspaceRegistry& registry,
+                                                         const std::string& session,
+                                                         std::ostream& err) {
+    if (session.empty()) {
+        return std::nullopt;
+    }
+    std::optional<WorkspaceRecord> best;
+    std::int64_t                   best_updated = std::numeric_limits<std::int64_t>::min();
+    std::size_t                    matches = 0;
+    for (const WorkspaceRecord& record : registry.listWorkspaces()) {
+        const bool live = registry.probeLiveness(record.id) == HostLiveness::Live;
+        const ui::WorkspaceHistory history = ui::read_workspace_history(record, live);
+        if (history.note.has_value()) {
+            continue;
+        }
+        for (const ui::SessionHistoryEntry& entry : history.sessions) {
+            if (entry.id.value != session) {
+                continue;
+            }
+            ++matches;
+            const bool newer = !best.has_value() || entry.updatedAt > best_updated;
+            const bool tie = best.has_value() && entry.updatedAt == best_updated &&
+                             record.canonicalPath.string() < best->canonicalPath.string();
+            if (newer || tie) {
+                best         = record;
+                best_updated = entry.updatedAt;
+            }
+            break;
+        }
+    }
+    if (matches > 1) {
+        err << "ymh: warning: session " << session << " found in " << matches
+            << " workspaces; using " << best->canonicalPath.string() << '\n';
+    }
+    return best;
+}
+
 int run_supervisor_entry(const std::filesystem::path& root, const Config& config,
                          const std::filesystem::path& config_path, bool verbose,
-                         std::ostream& err) {
-    const std::optional<std::filesystem::path> canonical = canonicalize(root);
+                         const std::string& resume_session, std::ostream& err) {
+    // 22 §6.1 (S4, decision 22-D5): a `--resume` id resolves the session's own
+    // workspace, which overrides the cwd/`--workspace` root for the supervisor's
+    // initial workspace and daemon target. The config already loaded for the
+    // original root is unchanged.
+    std::filesystem::path        resolved_root = root;
+    std::optional<SessionId>     resume_id;
+    if (!resume_session.empty()) {
+        std::unique_ptr<WorkspaceRegistry> reader;
+        try {
+            reader = WorkspaceRegistry::openReadOnly(default_registry_config());
+        } catch (const std::exception& error) {
+            err << "ymh: registry unavailable: " << error.what() << '\n';
+            return 1;
+        }
+        const std::optional<WorkspaceRecord> resolved =
+            resolve_session_workspace(*reader, resume_session, err);
+        if (!resolved.has_value()) {
+            err << "ymh: unknown session: " << resume_session << '\n';
+            return 1;
+        }
+        resolved_root = resolved->canonicalPath;
+        resume_id     = SessionId{resume_session};
+    }
+
+    const std::optional<std::filesystem::path> canonical = canonicalize(resolved_root);
     if (!canonical.has_value()) {
-        err << "ymh: cannot canonicalize " << root << '\n';
+        err << "ymh: cannot canonicalize " << resolved_root << '\n';
         return 1;
     }
     const std::optional<WorkspaceRecord> row = find_or_register_workspace(*canonical, err);
@@ -416,6 +484,9 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     options.lifecycle = &lifecycle;
     options.registry = registry.get();
     options.identity = identity;
+    if (resume_id.has_value()) {
+        options.initial_resume = std::make_pair(row->id, *resume_id);
+    }
     return ui::run_supervisor(options);
 }
 
@@ -683,8 +754,15 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
 
     switch (invocation.command) {
         case CliInvocation::Command::Tui: {
+            // 22 §6.3 (SW16): `--new` beats `--resume`; a fresh session starts
+            // and the ignored `--resume` is reported.
+            std::string resume = invocation.session;
+            if (invocation.new_session && !resume.empty()) {
+                err << "ymh: --new takes precedence over --resume; ignoring --resume\n";
+                resume.clear();
+            }
             return run_supervisor_entry(root, config, effective_global_config(invocation),
-                                        invocation.verbose, err);
+                                        invocation.verbose, resume, err);
         }
 
         case CliInvocation::Command::Run: {

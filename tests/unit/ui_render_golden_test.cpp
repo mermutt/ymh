@@ -1,14 +1,23 @@
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "ymh/core/event.hpp"
+#include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
 #include "ymh/ui/ui_model.hpp"
 #include "ymh/ui/ui_render.hpp"
@@ -93,6 +102,7 @@ UiModel build_model() {
     workspace.id = model.activeWorkspaceId;
     workspace.cwd = "/work";
     workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
     workspace.activeSessionId = kSession;
     model.workspaces.emplace(workspace.id, workspace);
     model.ensureSession(kSession);
@@ -216,7 +226,8 @@ TEST(UiRenderGolden, MultiWorkspaceSwitcherTree) {
     beta.id = WorkspaceId{"workspace-beta"};
     beta.title = "beta";
     beta.cwd = "/work/beta";
-    beta.daemonStatus = DaemonStatus::Dead;
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live = true;
     beta.activeSessionId = SessionId{"beta-session"};
     SessionCell beta_cell;
     beta_cell.id = SessionId{"beta-session"};
@@ -451,6 +462,7 @@ TEST(UiRenderGolden, SwitcherAttentionBadgeStillRenders) {
     beta.id = WorkspaceId{"workspace-beta"};
     beta.title = "beta";
     beta.cwd = "/work/beta";
+    beta.live = true;
     beta.activeSessionId = SessionId{"beta-session"};
     SessionCell beta_cell;
     beta_cell.id = SessionId{"beta-session"};
@@ -556,37 +568,56 @@ TEST(UiRenderGolden, ExitConfirmPromptZeroOneTwoDaemons) {
     }
 }
 
+// SW-G1 (22 §3.1/§3.3): the Live switcher renders only [owned]/[stopping];
+// [not running]/[unreachable] are unreachable, including for a live Connecting
+// workspace (the SW20 gate).
 TEST(UiRenderGolden, SwitcherShowsOwnershipMarks) {
     UiModel model = build_model();
     model.workspaces[model.activeWorkspaceId].title = "owned-ws";
     model.workspaces[model.activeWorkspaceId].daemonStatus = DaemonStatus::Attached;
+    model.workspaces[model.activeWorkspaceId].live = true;
 
     WorkspaceModel stopping;
     stopping.id = WorkspaceId{"ws-stopping"};
     stopping.title = "stopping-ws";
     stopping.daemonStatus = DaemonStatus::Stopping;
+    stopping.live = true;
     model.workspaces.emplace(stopping.id, stopping);
+
+    WorkspaceModel connecting;
+    connecting.id = WorkspaceId{"ws-connecting"};
+    connecting.title = "connecting-ws";
+    connecting.daemonStatus = DaemonStatus::Connecting;
+    connecting.live = true;
+    model.workspaces.emplace(connecting.id, connecting);
 
     WorkspaceModel not_running;
     not_running.id = WorkspaceId{"ws-notrunning"};
     not_running.title = "notrunning-ws";
     not_running.daemonStatus = DaemonStatus::NotRunning;
+    not_running.live = true;
     model.workspaces.emplace(not_running.id, not_running);
 
     WorkspaceModel unreachable;
     unreachable.id = WorkspaceId{"ws-unreachable"};
     unreachable.title = "unreachable-ws";
     unreachable.daemonStatus = DaemonStatus::Dead;
+    unreachable.live = true;
     model.workspaces.emplace(unreachable.id, unreachable);
 
     model.openSwitcher();
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
     SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("workspaces"), std::string::npos);
+    EXPECT_NE(rendered.find("Switcher"), std::string::npos);
     EXPECT_NE(rendered.find("[owned]"), std::string::npos);
     EXPECT_NE(rendered.find("[stopping]"), std::string::npos);
-    EXPECT_NE(rendered.find("[not running]"), std::string::npos);
-    EXPECT_NE(rendered.find("[unreachable]"), std::string::npos);
+    EXPECT_EQ(rendered.find("[not running]"), std::string::npos);
+    EXPECT_EQ(rendered.find("[unreachable]"), std::string::npos);
+    EXPECT_EQ(rendered.find("notrunning-ws"), std::string::npos);
+    EXPECT_EQ(rendered.find("unreachable-ws"), std::string::npos);
+    EXPECT_EQ(rendered.find("connecting-ws"), std::string::npos);
 }
 
 ContextSnapshot context_fixture() {
@@ -763,6 +794,198 @@ TEST(UiRenderGolden, ContextOverlayOverBudget) {
     EXPECT_NE(rendered.find("used 70,000 / 64,000 (109.3%)  threshold 47,923  reserve 4,096"),
               std::string::npos);
     EXPECT_EQ(rendered.find(">100%"), std::string::npos);
+}
+
+class HistoryTempDir {
+public:
+    explicit HistoryTempDir(const std::string& prefix) {
+        path_ = std::filesystem::temp_directory_path() /
+                (prefix + "_" + std::to_string(::getpid()) + "_" +
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(path_);
+    }
+
+    ~HistoryTempDir() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    HistoryTempDir(const HistoryTempDir&) = delete;
+    HistoryTempDir& operator=(const HistoryTempDir&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+WorkspaceHistory history_workspace(const char* id, const char* title, const char* path, bool live) {
+    WorkspaceHistory history;
+    history.id = WorkspaceId{id};
+    history.title = title;
+    history.canonicalPath = path;
+    history.live = live;
+    return history;
+}
+
+SessionHistoryEntry history_session(const char* id, const char* title, std::int64_t updated,
+                                    const char* kind, const char* model,
+                                    std::optional<SessionId> parent = std::nullopt) {
+    SessionHistoryEntry entry;
+    entry.id = SessionId{id};
+    entry.title = title;
+    entry.kind = kind;
+    entry.model = model;
+    entry.updatedAt = updated;
+    entry.parent = std::move(parent);
+    return entry;
+}
+
+UiModel history_model() {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws-beta"};
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"ws-beta"};
+    beta.title = "beta";
+    beta.cwd = "/beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live = true;
+    model.workspaces.emplace(beta.id, beta);
+
+    WorkspaceHistory zeta = history_workspace("ws-zeta", "Zeta", "/zeta", false);
+    zeta.sessions.push_back(
+        history_session("s2", "second", 2000, "fork", "model-z", SessionId{"parent-1234"}));
+    zeta.sessions.push_back(history_session("s1", "first", 5000, "root", "model-a"));
+    WorkspaceHistory alpha = history_workspace("ws-alpha", "alpha", "/alpha", true);
+    alpha.sessions.push_back(history_session("s3", "session-one", 3000, "root", "model-b"));
+
+    model.catalog.workspaces = {zeta, alpha};
+    model.catalog.loaded = true;
+    model.catalog.complete = false;
+    model.catalog.capturedAtMs = 1'000'000;
+    model.catalog.nowMs = 1'005'000;
+    return model;
+}
+
+// SW-G2 (22 §3.7/§4.3): the History overlay orders workspace groups by title
+// (case-insensitive, canonical_path tie-break), lists History sessions
+// `updated_at` desc, marks a non-live group `[history]`/a live one `[owned]`,
+// renders the full session leaf, and shows the `partial` footer.
+TEST(UiRenderGolden, HistoryOverlayGroupsAndLeaves) {
+    UiModel model = history_model();
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+
+    EXPECT_NE(rendered.find("sessions"), std::string::npos);
+    const std::size_t alpha_pos = rendered.find("alpha");
+    const std::size_t zeta_pos = rendered.find("Zeta");
+    ASSERT_NE(alpha_pos, std::string::npos);
+    ASSERT_NE(zeta_pos, std::string::npos);
+    EXPECT_LT(alpha_pos, zeta_pos);
+
+    EXPECT_NE(rendered.find("[owned]"), std::string::npos);
+    EXPECT_NE(rendered.find("[history]"), std::string::npos);
+
+    EXPECT_NE(rendered.find("first · root · model-a · 16m"), std::string::npos);
+    EXPECT_NE(rendered.find("second · fork · model-z · 16m · fork←parent-1"), std::string::npos);
+    EXPECT_NE(rendered.find("session-one · root · model-b · 16m"), std::string::npos);
+    EXPECT_LT(rendered.find("first · root"), rendered.find("second · fork"));
+
+    EXPECT_NE(rendered.find("stored sessions"), std::string::npos);
+    EXPECT_NE(rendered.find("captured 5s ago"), std::string::npos);
+    EXPECT_NE(rendered.find("partial"), std::string::npos);
+}
+
+// SW-G3 (22 §4.2/§4.3): before the first snapshot the History overlay shows the
+// loading placeholder; a loaded workspace with zero stored sessions renders the
+// `(no stored sessions)` leaf.
+TEST(UiRenderGolden, HistoryOverlayLoadingAndEmpty) {
+    UiModel loading = build_model();
+    loading.switcher.openHistory(loading);
+    loading.mode = UiMode::Switcher;
+    const std::string loading_rendered =
+        normalize(render_to_ansi(loading, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(loading_rendered);
+    EXPECT_NE(loading_rendered.find("loading stored sessions"), std::string::npos);
+
+    UiModel empty = history_model();
+    empty.catalog.workspaces[0].sessions.clear();
+    empty.catalog.workspaces[1].sessions.clear();
+    empty.switcher.openHistory(empty);
+    empty.mode = UiMode::Switcher;
+    const std::string empty_rendered =
+        normalize(render_to_ansi(empty, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(empty_rendered);
+    EXPECT_NE(empty_rendered.find("(no stored sessions)"), std::string::npos);
+}
+
+// SW-I4/SW-I7 UI half (22 §4.4/§10.2): the reader's pinned per-workspace notes
+// flow through `openHistory` and render as exactly one marker each, with the
+// `partial` footer, while a good group still lists. The reader half lives in
+// `session_catalog_test.cpp`; here the real read helper is exercised for the
+// uid-independent notes.
+TEST(UiRenderGolden, HistoryOverlayDegradationNotesRender) {
+    HistoryTempDir root("ymh_history_ui");
+    const std::filesystem::path bad = root.path() / "bad";
+    std::filesystem::create_directories(bad / ".ymh");
+    {
+        std::ofstream(bad / ".ymh" / "sessions.db") << "not sqlite";
+    }
+    WorkspaceRecord bad_record;
+    bad_record.id = WorkspaceId{"ws-bad"};
+    bad_record.canonicalPath = bad;
+    bad_record.displayTitle = "bad";
+
+    const std::filesystem::path nodb = root.path() / "nodb";
+    std::filesystem::create_directories(nodb);
+    WorkspaceRecord nodb_record;
+    nodb_record.id = WorkspaceId{"ws-nodb"};
+    nodb_record.canonicalPath = nodb;
+    nodb_record.displayTitle = "nodb";
+
+    WorkspaceRecord gone_record;
+    gone_record.id = WorkspaceId{"ws-gone"};
+    gone_record.canonicalPath = root.path() / "gone";
+    gone_record.displayTitle = "gone";
+
+    WorkspaceHistory bad_history = read_workspace_history(bad_record, false);
+    ASSERT_TRUE(bad_history.note.has_value());
+    EXPECT_EQ(*bad_history.note, "corrupt");
+    WorkspaceHistory nodb_history = read_workspace_history(nodb_record, false);
+    ASSERT_TRUE(nodb_history.note.has_value());
+    EXPECT_EQ(*nodb_history.note, "no sessions.db");
+    WorkspaceHistory gone_history = read_workspace_history(gone_record, false);
+    ASSERT_TRUE(gone_history.note.has_value());
+    EXPECT_EQ(*gone_history.note, "workspace missing");
+
+    WorkspaceHistory read_only = history_workspace("ws-ro", "readonly", "/readonly", false);
+    read_only.note = "read-only location";
+    WorkspaceHistory good = history_workspace("ws-good", "good", "/good", true);
+    good.sessions.push_back(history_session("good-session", "kept", 15000, "root", "m"));
+
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws-good"};
+    model.catalog.loaded = true;
+    model.catalog.complete = false;
+    model.catalog.capturedAtMs = 10'000;
+    model.catalog.nowMs = 20'000;
+    model.catalog.workspaces = {bad_history, nodb_history, gone_history, read_only, good};
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{110, 40}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("(corrupt)"), std::string::npos);
+    EXPECT_NE(rendered.find("(no stored sessions)"), std::string::npos);
+    EXPECT_NE(rendered.find("(workspace missing)"), std::string::npos);
+    EXPECT_NE(rendered.find("(read-only location)"), std::string::npos);
+    EXPECT_NE(rendered.find("partial"), std::string::npos);
+    EXPECT_NE(rendered.find("kept · root · m"), std::string::npos);
 }
 
 } // namespace

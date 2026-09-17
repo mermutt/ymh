@@ -33,6 +33,8 @@ struct CommandContext {
     std::function<void(const std::string& name)> skill;
     // 18 §4.1: opens the read-only context overlay for the active session.
     std::function<void()> context;
+    // 22 §4.3/§4.6 (S2): opens the History catalog overlay (`/sessions`).
+    std::function<void()> sessions;
 };
 
 // 20 §6.1: the non-static, callable-from-supervisor form of the file-local

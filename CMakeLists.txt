@@ -628,6 +628,7 @@ add_library(ymh_ui STATIC
     src/ui/ui_application.cpp
     src/ui/supervisor_connection.cpp
     src/ui/supervisor_presence.cpp
+    src/ui/session_catalog.cpp
     src/ui/supervisor.cpp
 )
 add_library(ymh::ui ALIAS ymh_ui)

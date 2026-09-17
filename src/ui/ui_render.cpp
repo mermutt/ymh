@@ -333,6 +333,9 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     if (active != nullptr && !active->status.note.empty()) {
         left += " · " + active->status.note;
     }
+    if (!model.notices.empty()) {
+        left += " · " + model.notices.back().text;
+    }
     std::string right = std::to_string(counts.activeCount) + " active · " +
                         std::to_string(counts.waitingCount) + " waiting";
     Element aggregate = ftxui::text(right);
@@ -411,13 +414,63 @@ Element render_exit_confirm(const UiModel& model, const Theme& theme) {
     return ftxui::window(ftxui::text("Exiting"), ftxui::vbox(std::move(rows))) | ftxui::center;
 }
 
+std::string relative_age_label(std::int64_t delta_ms) {
+    const std::int64_t clamped = delta_ms < 0 ? 0 : delta_ms;
+    const std::int64_t seconds = clamped / 1000;
+    if (seconds < 60) {
+        return std::to_string(seconds) + "s";
+    }
+    const std::int64_t minutes = seconds / 60;
+    if (minutes < 60) {
+        return std::to_string(minutes) + "m";
+    }
+    const std::int64_t hours = minutes / 60;
+    if (hours < 24) {
+        return std::to_string(hours) + "h";
+    }
+    return std::to_string(hours / 24) + "d";
+}
+
+std::string history_note_leaf(const std::string& note) {
+    if (note == "no sessions.db") {
+        return "(no stored sessions)";
+    }
+    if (note.rfind("unavailable", 0) == 0) {
+        return "(unavailable)";
+    }
+    return "(" + note + ")";
+}
+
+std::string history_session_leaf(const SessionNode& session, const UiModel& model) {
+    std::string body = session.title.empty() ? short_id(session.id) : session.title;
+    if (!session.kind.empty()) {
+        body += " · " + session.kind;
+    }
+    if (!session.model.empty()) {
+        body += " · " + session.model;
+    }
+    if (model.catalog.nowMs > 0) {
+        body += " · " + relative_age_label(model.catalog.nowMs - session.updatedAt);
+    }
+    if (session.parent.has_value()) {
+        body += " · fork←" + short_id(*session.parent);
+    }
+    return body;
+}
+
 Element render_switcher(const UiModel& model, const Theme& theme) {
     const SwitcherOverlayModel& switcher = model.switcher;
+    const bool history = switcher.source == SwitcherSource::History;
     Elements rows;
-    rows.push_back(ftxui::text("Switcher") | ftxui::bold);
+    rows.push_back(ftxui::text(history ? "sessions" : "Switcher") | ftxui::bold);
     rows.push_back(ftxui::separator());
     if (switcher.workspaces.empty()) {
-        rows.push_back(ftxui::text("(no workspaces)") | ftxui::dim);
+        if (history && !model.catalog.loaded) {
+            rows.push_back(ftxui::text("loading stored sessions…") | ftxui::dim);
+        } else {
+            rows.push_back(
+                ftxui::text(history ? "(no stored sessions)" : "(no workspaces)") | ftxui::dim);
+        }
     }
     for (const WorkspaceNode& workspace : switcher.workspaces) {
         const bool on_workspace = switcher.cursor.workspace == workspace.id &&
@@ -425,10 +478,18 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         const bool collapsed = switcher.collapsed.find(workspace.id) != switcher.collapsed.end();
         const std::string title =
             workspace.title.empty() ? workspace.id.value : workspace.title;
-        Element row =
-            ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " +
-                        daemon_status_glyph(workspace.status) + " [" +
-                        ownership_mark_name(workspace.mark) + "]");
+        Element row;
+        if (history) {
+            const std::string tail = workspace.historyOnly
+                                         ? std::string("· [history]")
+                                         : std::string(daemon_status_glyph(workspace.status)) +
+                                               " [owned]";
+            row = ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " + tail);
+        } else {
+            row = ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " +
+                              daemon_status_glyph(workspace.status) + " [" +
+                              ownership_mark_name(workspace.mark) + "]");
+        }
         if (on_workspace) {
             row = paint(row, ftxui::Color::Cyan, theme) | ftxui::bold;
         }
@@ -436,18 +497,30 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         if (collapsed) {
             continue;
         }
+        if (history && workspace.sessions.empty()) {
+            const std::string leaf = workspace.note.has_value()
+                                         ? history_note_leaf(*workspace.note)
+                                         : std::string("(no stored sessions)");
+            rows.push_back(ftxui::text("    " + leaf) | ftxui::dim);
+            continue;
+        }
         for (const SessionNode& session : workspace.sessions) {
             const bool on_session = switcher.cursor.workspace == workspace.id &&
                                     switcher.cursor.session.has_value() &&
                                     *switcher.cursor.session == session.id;
-            const std::string leaf_title =
-                session.title.empty() ? short_id(session.id) : session.title;
-            std::string leaf = "    [" + leaf_title + " " + state_glyph(session.state);
-            if (session.attention) {
-                leaf += "!";
+            Element leaf_element;
+            if (session.fromDisk) {
+                leaf_element = ftxui::text("    [" + history_session_leaf(session, model) + "]");
+            } else {
+                const std::string leaf_title =
+                    session.title.empty() ? short_id(session.id) : session.title;
+                std::string leaf = "    [" + leaf_title + " " + state_glyph(session.state);
+                if (session.attention) {
+                    leaf += "!";
+                }
+                leaf += "]";
+                leaf_element = ftxui::text(leaf);
             }
-            leaf += "]";
-            Element leaf_element = ftxui::text(leaf);
             if (on_session) {
                 leaf_element = leaf_element | ftxui::inverted;
             }
@@ -458,8 +531,23 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         }
     }
     rows.push_back(ftxui::separator());
-    rows.push_back(ftxui::text("j/k move · Tab expand · Enter focus · Esc close") | ftxui::dim);
-    return ftxui::window(ftxui::text("workspaces"), ftxui::vbox(std::move(rows))) |
+    if (history) {
+        std::string footer = "stored sessions";
+        if (model.catalog.capturedAtMs > 0 && model.catalog.nowMs > 0) {
+            footer += " · captured " +
+                      relative_age_label(model.catalog.nowMs - model.catalog.capturedAtMs) +
+                      " ago";
+        }
+        if (!model.catalog.complete) {
+            footer += " · partial";
+        }
+        footer += " · r refresh · Enter resume · Esc close";
+        rows.push_back(ftxui::text(footer) | ftxui::dim);
+    } else {
+        rows.push_back(ftxui::text("j/k move · Tab expand · Enter focus · Esc close") | ftxui::dim);
+    }
+    return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"),
+                         ftxui::vbox(std::move(rows))) |
            ftxui::center;
 }
 
