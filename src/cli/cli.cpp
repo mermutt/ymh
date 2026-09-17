@@ -65,7 +65,7 @@ Config load_invocation_config(const CliInvocation& invocation,
                        ? default_global_config_path()
                        : std::filesystem::path{invocation.config_path};
     paths.workspace = workspace_config_path(root);
-    Config config   = load_config(paths, &category_logger(LogCategory::Filesystem));
+    Config config   = load_config(paths);
 
     if (!invocation.model.empty()) {
         config.agent.model = invocation.model;
@@ -102,23 +102,35 @@ std::filesystem::path effective_global_config(const CliInvocation& invocation) {
     return default_global_config_path();
 }
 
-void scaffold_for_invocation(const CliInvocation& invocation,
-                             const std::filesystem::path& root) {
-    switch (invocation.command) {
+// 21-D17: the commands that scaffold and load config, and get config-derived
+// logging. `Workspace`/`Config`/`Version` run on defaults.
+bool command_loads_config(CliInvocation::Command command) {
+    switch (command) {
         case CliInvocation::Command::Tui:
         case CliInvocation::Command::Run:
         case CliInvocation::Command::List:
         case CliInvocation::Command::Show:
         case CliInvocation::Command::Replay:
         case CliInvocation::Command::Fork:
-            (void)scaffold_config(root, scaffold_target(effective_global_config(invocation)),
-                                  &category_logger(LogCategory::Filesystem));
-            break;
+            return true;
         case CliInvocation::Command::Workspace:
         case CliInvocation::Command::Config:
         case CliInvocation::Command::Version:
-            break;
+            return false;
     }
+    return false;
+}
+
+void scaffold_for_invocation(const CliInvocation& invocation,
+                             const std::filesystem::path& root) {
+    if (!command_loads_config(invocation.command)) {
+        return;
+    }
+    // 21-D13: scaffold only the conventional location; an explicit `--config`
+    // is never created (the empty target hits scaffold_config's skip branch).
+    const std::filesystem::path target =
+        invocation.config_path.empty() ? default_global_config_path() : std::filesystem::path{};
+    (void)scaffold_config(root, target, &category_logger(LogCategory::Filesystem));
 }
 
 int run_config_command(const CliInvocation& invocation, std::ostream& out, std::ostream& err) {
@@ -130,22 +142,6 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
     std::error_code             error;
     const bool                  exists = std::filesystem::exists(path, error) && !error;
     out << path.string() << (exists ? " (exists)" : " (missing)") << '\n';
-
-    // Legacy-sibling note (21-config-jsonc-errata.md §6.8): reuse the loader's
-    // helpers so it can never disagree with the load-time warning.
-    const std::filesystem::path legacy = legacy_config_path(path);
-    if (!legacy.empty()) {
-        std::error_code legacy_error;
-        if (std::filesystem::exists(legacy, legacy_error) && !legacy_error) {
-            out << "note: " << legacy.string()
-                << " is a legacy TOML file and is ignored; ymh reads JSONC only. Convert it to "
-                << jsonc_target(path).string();
-            if (legacy == path) {
-                out << " and update --config to that path";
-            }
-            out << ".\n";
-        }
-    }
     return 0;
 }
 
@@ -232,7 +228,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
         paths.global = config_path.empty() ? default_global_config_path()
                                            : std::filesystem::path{config_path};
         paths.workspace = workspace_config_path(canonical);
-        config = load_config(paths, &category_logger(LogCategory::Filesystem));
+        config = load_config(paths);
     } catch (const ConfigError& config_error) {
         err << "ymh --host: " << config_error.what() << '\n';
         return 2;
@@ -363,7 +359,8 @@ std::optional<WorkspaceRecord> find_or_register_workspace(
     }
 }
 
-int run_supervisor_entry(const std::filesystem::path& root, const Config& config, bool verbose,
+int run_supervisor_entry(const std::filesystem::path& root, const Config& config,
+                         const std::filesystem::path& config_path, bool verbose,
                          std::ostream& err) {
     const std::optional<std::filesystem::path> canonical = canonicalize(root);
     if (!canonical.has_value()) {
@@ -384,7 +381,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     }
 
     ForkExecLauncher launcher;
-    HostLifecycle    lifecycle(launcher, *registry);
+    HostLifecycle    lifecycle(launcher, *registry, config_path);
 
     const AttachIdentity identity{ui::process_client_instance(),
                                   protocol::ClientRole::Supervisor};
@@ -424,10 +421,10 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
 
 // `ymh run` against a live daemon: attach, create/resume a session, stream the turn.
 int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
-                   const std::string& task, const std::string& resume, std::ostream& out,
-                   std::ostream& err) {
+                   const std::filesystem::path& config_path, const std::string& task,
+                   const std::string& resume, std::ostream& out, std::ostream& err) {
     ForkExecLauncher launcher;
-    HostLifecycle    lifecycle(launcher, registry);
+    HostLifecycle    lifecycle(launcher, registry, config_path);
     AttachResult     attach;
     const AttachIdentity identity{protocol::ClientInstanceId{generate_uuid_v4()},
                                   protocol::ClientRole::Automation};
@@ -669,22 +666,25 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
     scaffold_for_invocation(invocation, root);
 
     Config config;
-    try {
-        config = load_invocation_config(invocation, root);
-    } catch (const ConfigError& config_error) {
-        err << "ymh: " << config_error.what() << '\n';
-        return 2;
-    }
+    if (command_loads_config(invocation.command)) {
+        try {
+            config = load_invocation_config(invocation, root);
+        } catch (const ConfigError& config_error) {
+            err << "ymh: " << config_error.what() << '\n';
+            return 2;
+        }
 
-    LoggingOptions logging;
-    logging.level = parse_log_level(config.logging.level).value_or(LogLevel::Info);
-    logging.log_prompts = config.logging.log_prompts;
-    logging.color       = ::isatty(::fileno(stderr)) != 0;
-    init_logging(logging);
+        LoggingOptions logging;
+        logging.level = parse_log_level(config.logging.level).value_or(LogLevel::Info);
+        logging.log_prompts = config.logging.log_prompts;
+        logging.color       = ::isatty(::fileno(stderr)) != 0;
+        init_logging(logging);
+    }
 
     switch (invocation.command) {
         case CliInvocation::Command::Tui: {
-            return run_supervisor_entry(root, config, invocation.verbose, err);
+            return run_supervisor_entry(root, config, effective_global_config(invocation),
+                                        invocation.verbose, err);
         }
 
         case CliInvocation::Command::Run: {
@@ -699,8 +699,8 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                         reader->probeLiveness(row->id) == HostLiveness::Live) {
                         std::unique_ptr<WorkspaceRegistry> writer =
                             WorkspaceRegistry::open(default_registry_config());
-                        return run_via_daemon(*writer, *row, invocation.task, invocation.session,
-                                              out, err);
+                        return run_via_daemon(*writer, *row, effective_global_config(invocation),
+                                              invocation.task, invocation.session, out, err);
                     }
                 }
             } catch (const std::exception&) {

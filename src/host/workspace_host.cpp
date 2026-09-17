@@ -941,6 +941,10 @@ std::vector<std::string> ForkExecLauncher::build_argv(
     argv.push_back(config.workspace_root.string());
     argv.push_back("--socket");
     argv.push_back(config.socket_path.string());
+    if (!config.config_path.empty()) {
+        argv.push_back("--config");
+        argv.push_back(config.config_path.string());
+    }
     if (config.boot_id.has_value()) {
         argv.push_back("--boot-id");
         argv.push_back(config.boot_id->value);
@@ -1033,6 +1037,7 @@ HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     config.workspace_root = record.canonicalPath;
     config.socket_path    = record.canonicalPath / ".ymh" / "host.sock";
     config.log_sink       = record.canonicalPath / ".ymh" / "host.log";
+    config.config_path    = config_path_;
     config.registry       = default_registry_config();
     config.persistence.db_path   = record.canonicalPath / ".ymh" / "sessions.db";
     config.persistence.lock_path = record.canonicalPath / ".ymh" / "sessions.lock";

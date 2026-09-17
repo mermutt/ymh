@@ -61,6 +61,13 @@ std::string read_file(const std::filesystem::path& path) {
     return buffer.str();
 }
 
+// The global layer is required (21-D12); a test that exercises the workspace
+// layer must still supply a valid global document.
+std::filesystem::path write_global(const test::TempWorkspace& workspace) {
+    workspace.write("global.jsonc", "{}\n");
+    return workspace.path() / "global.jsonc";
+}
+
 bool same_config(const Config& a, const Config& b) {
     return a.ui.theme == b.ui.theme && a.ui.show_activity == b.ui.show_activity &&
            a.ui.side_panel == b.ui.side_panel && a.agent.model == b.agent.model &&
@@ -143,7 +150,7 @@ TEST(Config, EnvironmentOverridesFiles) {
     ScopedEnv level("YMH_LOG_LEVEL", "debug");
 
     ConfigPaths paths;
-    paths.global    = workspace.path() / "missing-global.jsonc";
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
 
     const Config config = load_config(paths);
@@ -157,6 +164,7 @@ TEST(Config, UnknownKeyRejected) {
     workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"modle\": \"typo\" } }\n");
 
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -169,6 +177,7 @@ TEST(Config, RetryAndTimeoutsParse) {
                     "\"jitter\": 0.5 }\n  } }\n}\n");
 
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     const Config config = load_config(paths);
     EXPECT_EQ(config.llm.connect_timeout.count(), 1234);
@@ -182,6 +191,7 @@ TEST(Config, MalformedTimeoutRejected) {
     ScopedEnv timeout("YMH_LLM_REQUEST_TIMEOUT_MS", "not-a-number");
 
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -268,6 +278,7 @@ TEST(Config, CompactionPolicyParsesAndMaps) {
                     "      \"retry_on_context_length\": false\n    }\n  }\n}\n");
 
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     const Config config = load_config(paths);
     EXPECT_EQ(config.agent.compaction.threshold_tokens, 5000u);
@@ -288,20 +299,12 @@ TEST(Config, CompactionOversizedSummaryBytesRejected) {
     EXPECT_THROW((void)to_compaction_policy(config), ConfigError);
 }
 
-std::size_t count_occurrences(const std::string& haystack, const std::string& needle) {
-    std::size_t count = 0;
-    for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
-         pos = haystack.find(needle, pos + needle.size())) {
-        ++count;
-    }
-    return count;
-}
-
 TEST(Config, JsoncCommentsAccepted) {
     test::TempWorkspace workspace("config_jsonc_comments");
     workspace.write(".ymh/config.jsonc",
                     "{\n  // line comment\n  \"agent\": { /* block */ \"max_steps\": 5 }\n}\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_EQ(load_config(paths).agent.max_steps, 5u);
 }
@@ -310,6 +313,7 @@ TEST(Config, JsoncTrailingCommaRejected) {
     test::TempWorkspace workspace("config_jsonc_trailing");
     workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": 5, } }\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -318,6 +322,7 @@ TEST(Config, JsoncHashCommentRejected) {
     test::TempWorkspace workspace("config_jsonc_hash");
     workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": 5 # five } }\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -326,6 +331,7 @@ TEST(Config, JsoncWrongTypeRejected) {
     test::TempWorkspace workspace("config_jsonc_type");
     workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": \"many\" } }\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -334,6 +340,7 @@ TEST(Config, JsoncNegativeIntegerRejected) {
     test::TempWorkspace workspace("config_jsonc_negative");
     workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": -1 } }\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -342,6 +349,7 @@ TEST(Config, TopLevelNonObjectRejected) {
     test::TempWorkspace workspace("config_jsonc_toplevel");
     workspace.write(".ymh/config.jsonc", "[1,2,3]\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -349,6 +357,7 @@ TEST(Config, TopLevelNonObjectRejected) {
 TEST(Config, EmptyAndCommentsOnlyAreNoOp) {
     test::TempWorkspace workspace("config_jsonc_empty");
     ConfigPaths         paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     Config expected;
     apply_env_overrides(expected);
@@ -362,6 +371,7 @@ TEST(Config, EmptyAndCommentsOnlyAreNoOp) {
 TEST(Config, NonJsonWhitespaceRejected) {
     test::TempWorkspace workspace("config_jsonc_ws");
     ConfigPaths         paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     for (const std::string& text : {std::string{"\f"}, std::string{"\v"}}) {
         workspace.write(".ymh/config.jsonc", text);
@@ -372,6 +382,7 @@ TEST(Config, NonJsonWhitespaceRejected) {
 TEST(Config, EmptyObjectIsValidNoOp) {
     test::TempWorkspace workspace("config_jsonc_emptyobj");
     ConfigPaths         paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     Config expected;
     apply_env_overrides(expected);
@@ -384,6 +395,7 @@ TEST(Config, EmptyObjectIsValidNoOp) {
 TEST(Config, LeadingBomBoundary) {
     test::TempWorkspace workspace("config_jsonc_bom");
     ConfigPaths         paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     Config expected;
     apply_env_overrides(expected);
@@ -404,6 +416,7 @@ TEST(Config, MalformedJsoncNamesLine) {
     test::TempWorkspace workspace("config_malformed_line");
     workspace.write(".ymh/config.jsonc", "{\n  \"agent\": {\n    \"max_steps\": ,\n  }\n}\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     try {
         (void)load_config(paths);
@@ -419,6 +432,7 @@ TEST(Config, JsoncLlmNestedAndFlatParity) {
         ".ymh/config.jsonc",
         "{\n  \"llm\": { \"default\": { \"model\": \"m\", \"max_concurrency\": 2 } }\n}\n");
     ConfigPaths nested_paths;
+    nested_paths.global    = write_global(nested_workspace);
     nested_paths.workspace = workspace_config_path(nested_workspace.path());
     const Config nested = load_config(nested_paths);
 
@@ -426,6 +440,7 @@ TEST(Config, JsoncLlmNestedAndFlatParity) {
     flat_workspace.write(".ymh/config.jsonc",
                          "{\n  \"llm\": { \"model\": \"m\", \"max_concurrency\": 2 }\n}\n");
     ConfigPaths flat_paths;
+    flat_paths.global    = write_global(flat_workspace);
     flat_paths.workspace = workspace_config_path(flat_workspace.path());
     const Config flat = load_config(flat_paths);
 
@@ -442,6 +457,7 @@ TEST(Config, JsoncMcpServerArrayParses) {
                     "    { \"id\": \"a\", \"command\": \"ca\" },\n"
                     "    { \"id\": \"b\", \"command\": \"cb\" }\n  ] }\n}\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     const Config config = load_config(paths);
     ASSERT_EQ(config.mcp.servers.size(), 2u);
@@ -486,88 +502,11 @@ TEST(Config, PerServerEmptyArrayEqualsAbsent) {
     EXPECT_TRUE(config.mcp.servers[0].env.empty());
 }
 
-TEST(Config, LegacyTomlWarnsOnceAndIgnores) {
-    test::TempWorkspace workspace("config_legacy");
-    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
-    ConfigPaths paths;
-    paths.workspace = workspace_config_path(workspace.path());
-    CapturingLogger logger;
-    const Config    config = load_config(paths, &logger);
-    EXPECT_EQ(config.agent.max_steps, 100u);
-    ASSERT_EQ(logger.warnings.size(), 1u);
-    EXPECT_NE(logger.warnings[0].find("ignoring legacy TOML"), std::string::npos);
-}
-
-TEST(Config, LegacyWarningOncePerCall) {
-    test::TempWorkspace workspace("config_legacy_percall");
-    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
-    ConfigPaths paths;
-    paths.workspace = workspace_config_path(workspace.path());
-    CapturingLogger logger;
-    (void)load_config(paths, &logger);
-    (void)load_config(paths, &logger);
-    EXPECT_EQ(logger.warnings.size(), 2u);
-}
-
-TEST(Config, BothFilesPrefersJsoncAndWarns) {
-    test::TempWorkspace workspace("config_both");
-    workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": 3 } }\n");
-    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
-    ConfigPaths paths;
-    paths.workspace = workspace_config_path(workspace.path());
-    CapturingLogger logger;
-    const Config    config = load_config(paths, &logger);
-    EXPECT_EQ(config.agent.max_steps, 3u);
-    EXPECT_EQ(logger.warnings.size(), 1u);
-}
-
-TEST(Config, LegacyOnlyContinuesOnDefaults) {
-    test::TempWorkspace workspace("config_legacy_only");
-    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
-    ConfigPaths paths;
-    paths.workspace = workspace_config_path(workspace.path());
-    CapturingLogger logger;
-    const Config    config = load_config(paths, &logger);
-    Config          expected;
-    apply_env_overrides(expected);
-    EXPECT_TRUE(same_config(config, expected));
-    EXPECT_EQ(logger.warnings.size(), 1u);
-}
-
-TEST(Config, LegacyWarningTargetsBothSlots) {
-    test::TempWorkspace workspace("config_legacy_both");
-    workspace.write("config.toml", "[agent]\nmax_steps = 7\n");
-    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
-    ConfigPaths paths;
-    paths.global    = workspace.path() / "config.toml";
-    paths.workspace = workspace_config_path(workspace.path());
-    CapturingLogger logger;
-    (void)load_config(paths, &logger);
-    ASSERT_EQ(logger.warnings.size(), 1u);
-    const std::string& message = logger.warnings[0];
-    EXPECT_EQ(count_occurrences(message, "->"), 2u);
-    EXPECT_NE(message.find((workspace.path() / "config.jsonc").string()), std::string::npos);
-    EXPECT_NE(message.find((workspace.path() / ".ymh" / "config.jsonc").string()),
-              std::string::npos);
-    EXPECT_NE(message.find("(explicit --config slot: update --config)"), std::string::npos);
-}
-
-TEST(Config, NoSiblingProbeForCustomBasename) {
-    test::TempWorkspace workspace("config_custom_basename");
-    workspace.write("config.toml", "[agent]\nmax_steps = 7\n");
-    workspace.write("other.jsonc", "{ \"agent\": { \"max_steps\": 2 } }\n");
-    ConfigPaths paths;
-    paths.global = workspace.path() / "other.jsonc";
-    CapturingLogger logger;
-    const Config    config = load_config(paths, &logger);
-    EXPECT_EQ(config.agent.max_steps, 2u);
-    EXPECT_TRUE(logger.warnings.empty());
-}
-
 TEST(Config, ReadStringArrayRejectsNonString) {
     test::TempWorkspace workspace("config_array_type");
     workspace.write(".ymh/config.jsonc", "{ \"workspace\": { \"workspace_roots\": [\"a\", 1] } }\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
@@ -576,28 +515,9 @@ TEST(Config, ReadSizeRejectsUint64Overflow) {
     test::TempWorkspace workspace("config_overflow");
     workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": 18446744073709551615 } }\n");
     ConfigPaths paths;
+    paths.global    = write_global(workspace);
     paths.workspace = workspace_config_path(workspace.path());
     EXPECT_THROW((void)load_config(paths), ConfigError);
-}
-
-TEST(Config, LegacyPathFromJsonc) {
-    EXPECT_EQ(legacy_config_path("/x/ymh/config.jsonc"),
-              std::filesystem::path("/x/ymh/config.toml"));
-    EXPECT_EQ(legacy_config_path("/x/config.toml"), std::filesystem::path("/x/config.toml"));
-    EXPECT_TRUE(legacy_config_path("/x/other.jsonc").empty());
-    EXPECT_TRUE(legacy_config_path("/x/other.toml").empty());
-}
-
-TEST(Config, JsoncTargetPerSlot) {
-    EXPECT_EQ(jsonc_target("/x/ymh/config.jsonc"), std::filesystem::path("/x/ymh/config.jsonc"));
-    EXPECT_EQ(jsonc_target("/x/config.toml"), std::filesystem::path("/x/config.jsonc"));
-}
-
-TEST(Config, ScaffoldTargetPerSlot) {
-    EXPECT_EQ(scaffold_target("/x/ymh/config.jsonc"),
-              std::filesystem::path("/x/ymh/config.jsonc"));
-    EXPECT_TRUE(scaffold_target("/x/config.toml").empty());
-    EXPECT_EQ(scaffold_target("/x/other.jsonc"), std::filesystem::path("/x/other.jsonc"));
 }
 
 TEST(Config, ScaffoldEmptyTargetIsNoOp) {
@@ -627,6 +547,138 @@ TEST(Config, ScaffoldOutputReparsesToDefaults) {
     Config expected;
     apply_env_overrides(expected);
     EXPECT_TRUE(same_config(load_config(paths), expected));
+}
+
+TEST(Config, TomlSiblingIsInvisible) {
+    test::TempWorkspace workspace("config_toml_invisible");
+    workspace.write("global.jsonc", "{}\n");
+    workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_steps\": 3 } }\n");
+    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
+
+    ConfigPaths paths;
+    paths.global    = workspace.path() / "global.jsonc";
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_EQ(load_config(paths).agent.max_steps, 3u);
+}
+
+TEST(Config, TomlOnlyWorkspaceContributesNothing) {
+    test::TempWorkspace workspace("config_toml_only");
+    workspace.write("global.jsonc", "{}\n");
+    workspace.write(".ymh/config.toml", "[agent]\nmax_steps = 7\n");
+
+    ConfigPaths paths;
+    paths.global    = workspace.path() / "global.jsonc";
+    paths.workspace = workspace_config_path(workspace.path());
+    Config expected;
+    apply_env_overrides(expected);
+    EXPECT_TRUE(same_config(load_config(paths), expected));
+}
+
+TEST(Config, MissingGlobalConfigThrows) {
+    try {
+        (void)load_config(ConfigPaths{});
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_EQ(std::string{error.what()}, "config: required global config path is empty");
+    }
+}
+
+TEST(Config, MissingGlobalFileThrows) {
+    test::TempWorkspace         workspace("config_global_absent");
+    const std::filesystem::path absent = workspace.path() / "absent.jsonc";
+    ConfigPaths                 paths;
+    paths.global = absent;
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + absent.string() + ": required global config not found");
+    }
+}
+
+TEST(Config, TopLevelUnknownKeyMessage) {
+    test::TempWorkspace workspace("config_unknown_toplevel");
+    workspace.write(".ymh/config.jsonc", "{ \"auto_compact_enabled\": true }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("unknown key 'auto_compact_enabled'"), std::string::npos) << message;
+        EXPECT_EQ(message.find("'.auto_compact_enabled"), std::string::npos) << message;
+    }
+}
+
+TEST(Config, NestedUnknownKeyMessage) {
+    test::TempWorkspace workspace("config_unknown_nested");
+    workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"compaction\": { \"foo\": 1 } } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("unknown key 'agent.compaction.foo'"),
+                  std::string::npos)
+            << error.what();
+    }
+}
+
+TEST(Config, WorkspaceLayerOptional) {
+    test::TempWorkspace workspace("config_workspace_optional");
+    ConfigPaths         paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace.path() / "absent.jsonc";
+    Config expected;
+    apply_env_overrides(expected);
+    EXPECT_TRUE(same_config(load_config(paths), expected));
+}
+
+TEST(Config, ApplyJsoncRequiredFlag) {
+    test::TempWorkspace workspace("config_required_flag");
+    const std::filesystem::path absent = workspace.path() / "absent.jsonc";
+
+    Config config;
+    EXPECT_THROW(apply_jsonc_file(config, std::filesystem::path{}, true), ConfigError);
+    EXPECT_THROW(apply_jsonc_file(config, absent, true), ConfigError);
+    EXPECT_NO_THROW(apply_jsonc_file(config, std::filesystem::path{}, false));
+    EXPECT_NO_THROW(apply_jsonc_file(config, absent, false));
+}
+
+TEST(Config, GlobalConfigDirectoryRejected) {
+    test::TempWorkspace         workspace("config_global_dir");
+    const std::filesystem::path directory = workspace.path() / "adir";
+    std::filesystem::create_directories(directory);
+    ConfigPaths paths;
+    paths.global = directory;
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + directory.string() + ": config path is not a regular file");
+    }
+}
+
+TEST(Config, WorkspaceNonRegularRejected) {
+    test::TempWorkspace         workspace("config_workspace_dir");
+    const std::filesystem::path directory = workspace.path() / "adir";
+    std::filesystem::create_directories(directory);
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = directory;
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + directory.string() + ": config path is not a regular file");
+    }
 }
 
 } // namespace

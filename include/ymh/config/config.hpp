@@ -171,7 +171,8 @@ struct Config {
     SkillsSettings     skills;
 };
 
-// Explicit layer sources. `global`/`workspace` may be empty to skip a layer.
+// Explicit layer sources. `global` is required (21-D12): it must be non-empty
+// and name an existing regular file. `workspace` may be empty (optional).
 struct ConfigPaths {
     std::filesystem::path global;
     std::filesystem::path workspace;
@@ -183,24 +184,6 @@ struct ConfigPaths {
 // `<root>/.ymh/config.jsonc`.
 [[nodiscard]] std::filesystem::path workspace_config_path(
     const std::filesystem::path& workspace_root);
-
-// The legacy TOML sibling of a resolved JSONC path. If `jsonc_path` is itself
-// named `config.toml`, that same path is returned (an explicit
-// `--config …/config.toml` override is therefore recognised as legacy). If it is
-// named `config.jsonc`, its conventional sibling `config.toml` is returned. For
-// any other basename the result is empty: a custom-named `--config` slot has no
-// conventional legacy sibling and must not trigger a sibling warning.
-[[nodiscard]] std::filesystem::path legacy_config_path(const std::filesystem::path& jsonc_path);
-
-// The JSONC target for a slot: the slot itself, or its conventional
-// `config.jsonc` sibling when the slot is named `config.toml`. Used only for the
-// migration warning; never throws.
-[[nodiscard]] std::filesystem::path jsonc_target(const std::filesystem::path& slot);
-
-// The scaffold target for a slot: the slot itself, or an **empty** path when the
-// slot is named `config.toml` (a legacy-named `--config` slot must not have a
-// JSONC sibling scaffolded). Never throws.
-[[nodiscard]] std::filesystem::path scaffold_target(const std::filesystem::path& slot);
 
 // `ymh::Logger` (core/logging.hpp); only the pointer is used here so the config
 // component stays free of a logging-library dependency.
@@ -232,18 +215,22 @@ struct ScaffoldResult {
 [[nodiscard]] ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
                                              Logger* logger = nullptr);
 
-// Loads defaults, then global, then project, then environment overrides. When
-// `logger` is non-null, one warning is emitted per call if a legacy
-// `config.toml` sibling exists (21-config-jsonc-errata.md §6).
-[[nodiscard]] Config load_config(const ConfigPaths& paths, Logger* logger = nullptr);
+// Loads defaults, then global, then project, then environment overrides. The
+// global layer is REQUIRED (21-D12): an empty or absent `paths.global` throws
+// `ConfigError`; the workspace layer stays optional.
+[[nodiscard]] Config load_config(const ConfigPaths& paths);
 
 // Convenience overload using `default_global_config_path()`.
-[[nodiscard]] Config load_config(const std::filesystem::path& workspace_root,
-                                 Logger* logger = nullptr);
+[[nodiscard]] Config load_config(const std::filesystem::path& workspace_root);
 
-// Merges one JSONC file over `config`. A missing file is a no-op; a parse
-// failure, a non-object root, or an unknown key throws `ConfigError`.
-void apply_jsonc_file(Config& config, const std::filesystem::path& path);
+// Applies one JSONC document over `config`. `required == false` (the optional
+// workspace layer): an empty path or an absent file contributes nothing.
+// `required == true` (the global layer): an empty path or an absent file throws
+// `ConfigError` (21-D12). A present path that is not a regular file is a
+// `ConfigError` for either layer (21-D16). A parse failure or unknown key always
+// throws.
+void apply_jsonc_file(Config& config, const std::filesystem::path& path,
+                      bool required = false);
 
 // Merges `YMH_*` environment variables over `config`. Unset variables are a
 // no-op; a malformed value (e.g. non-numeric timeout) throws `ConfigError`.

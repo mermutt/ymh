@@ -477,7 +477,7 @@ TEST(McpConfigTest, StrictLoaderParsesAndRejectsUnknownKeys) {
   }
 }
 )JSONC");
-    const ymh::Config config = ymh::load_config(ymh::ConfigPaths{{}, config_path});
+    const ymh::Config config = ymh::load_config(ymh::ConfigPaths{config_path, {}});
     ASSERT_EQ(config.mcp.servers.size(), 1u);
     EXPECT_EQ(config.mcp.servers.front().id, "fs");
     EXPECT_EQ(config.mcp.servers.front().allowed_tools,
@@ -485,10 +485,10 @@ TEST(McpConfigTest, StrictLoaderParsesAndRejectsUnknownKeys) {
     EXPECT_EQ(config.mcp.max_servers, 2u);
 
     workspace.write("config.jsonc", "{ \"mcp\": { \"bogus\": 1 } }\n");
-    EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{{}, config_path}), ymh::ConfigError);
+    EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{config_path, {}}), ymh::ConfigError);
 
     workspace.write("config.jsonc",
                     "{ \"mcp\": { \"server\": [ { \"id\": \"x\", \"command\": \"c\", "
                     "\"bogus\": 1 } ] } }\n");
-    EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{{}, config_path}), ymh::ConfigError);
+    EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{config_path, {}}), ymh::ConfigError);
 }

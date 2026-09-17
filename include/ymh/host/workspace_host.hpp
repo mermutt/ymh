@@ -108,6 +108,11 @@ struct HostConfig {
     std::filesystem::path socket_path;     // v1 default <root>/.ymh/host.sock
     std::filesystem::path log_sink;        // v1 default <root>/.ymh/host.log
 
+    // The global config the daemon must load (21-D15). Additive and defaulted:
+    // empty keeps the daemon's own `default_global_config_path()` resolution.
+    // May be relative; both sides resolve it before any `chdir`.
+    std::filesystem::path config_path;
+
     RegistryConfig    registry;     // 03 §4.1
     PersistenceConfig persistence;  // 02 §4.1; run() sets boot_id before open()
 
