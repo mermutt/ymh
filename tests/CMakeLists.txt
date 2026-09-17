@@ -46,6 +46,7 @@ add_executable(ymh_tests
     unit/ui_event_adapter_test.cpp
     unit/supervisor_connection_test.cpp
     unit/supervisor_presence_test.cpp
+    unit/ownership_crash_injection_test.cpp
     unit/ui_render_golden_test.cpp
     unit/syntax_renderer_test.cpp
     unit/markdown_renderer_test.cpp
@@ -63,6 +64,7 @@ add_executable(ymh_tests
     integration_host_harness_test.cpp
     integration_pty_test.cpp
     integration_two_process_test.cpp
+    integration_ownership_two_supervisor_test.cpp
     integration_mcp_test.cpp
     integration_live_e2e_test.cpp
 )

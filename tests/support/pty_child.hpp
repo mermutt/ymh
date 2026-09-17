@@ -175,6 +175,32 @@ public:
         return strip_ansi(buffer_).find(needle) != std::string::npos;
     }
 
+    // Waits for the child to exit on its own and returns its exit status, or
+    // nullopt on timeout. Drains the master each iteration so a busy TUI never
+    // blocks writing a frame to a full PTY buffer (which would stall its input
+    // processing). The spec-16 last-exit tests need "the supervisor exits 0"
+    // without a sleep (16 §8.4.2 scenario 5).
+    [[nodiscard]] std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (pid_ > 0 && std::chrono::steady_clock::now() < deadline) {
+            read_available();
+            int         status = 0;
+            const pid_t result = ::waitpid(pid_, &status, WNOHANG);
+            if (result == pid_) {
+                pid_ = -1;
+                if (WIFEXITED(status)) {
+                    return WEXITSTATUS(status);
+                }
+                if (WIFSIGNALED(status)) {
+                    return 128 + WTERMSIG(status);
+                }
+                return -1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] const std::string& raw() const noexcept { return buffer_; }
     [[nodiscard]] std::string plain() const { return strip_ansi(buffer_); }
     [[nodiscard]] std::string last_frame() const { return last_frame_plain(buffer_, rows_); }
