@@ -29,20 +29,28 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 |----|-------|-----|-------|----------|--------|------|-----------|
 | RB-01 | Message styling: drop role labels, highlight user input | 1 | **DONE** | P0 | S | Low | No |
 | RB-02 | Fold reasoning + tool output by default, Ctrl+O expand | 2 | **DONE** | P0 | M | Med | errata 17 (verified) |
-| RB-03 | Auto-name + rename sessions | 3 | PARTIAL | P1 | M | Med | Additive errata (01/05) |
-| RB-04 | Supervisor-owned daemons (no unsupervised daemons) | 4 | ARCH | P0 (design) | L | High | **Yes — 16 verified** |
-| RB-05 | `/skills` command | 5 | NEW | P1 | L | Med | **Yes — new spec** |
-| RB-06 | `/context` visualizer (grid + MCP/tools) | 6 | PARTIAL | P1 | M | Low | Additive errata (10/13) |
-| RB-07 | `/export` session to file (+ edit in `$EDITOR`) | 7 | NEW | P1 | S | Low | No (UI-local) |
+| RB-03 | Auto-name + rename sessions | 3 | PARTIAL | P1 | M | Med | `19-session-rename-errata.md` (gate r2) |
+| RB-04 | Supervisor-owned daemons (no unsupervised daemons) | 4 | **DONE** | P0 | L | High | **16 verified + implemented** |
+| RB-05 | `/skills` command | 5 | NEW | P1 | L | Med | `20-skills.md` (gate r2) |
+| RB-06 | `/context` visualizer (grid + MCP/tools) | 6 | PARTIAL | P1 | M | Low | `18-context-errata.md` (gate r2) |
+| RB-07 | `/export` session to file (+ edit in `$EDITOR`) | 7 | **DONE** | P1 | S | Low | No (UI-local) |
 | RB-08 | `<Tab>` completes slash commands | 8 | **DONE** | P0 | S | Low | No |
-| RB-09 | Config in `~/.config/ymh/config.jsonc` (JSONC) | 9 | NEW | P1 | M | Med | **Yes — format decision** |
+| RB-09 | Config in `~/.config/ymh/config.jsonc` (JSONC) | 9 | **DONE** | P1 | M | Med | `21-config-jsonc-errata.md` (verified + implemented) |
 | RB-10 | Current session name in top line, right-aligned | 10 | **DONE** | P0 | XS | Low | No |
 | RB-11 | Bottom line: counts only, not the full session list | 11 | **DONE** | P0 | XS | Low | No |
+| RB-12 | Modal input focus: keystrokes must not split between dialog and composer | — (live testing) | NEW | P1 | S | Low | No |
 
 **Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
 per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY
-against real DeepSeek. RB-04 remains design-only (spec `16` is verified but not
-implemented).
+against real DeepSeek. RB-04 landed in 8 waves (`036e4e4e1`…`065e221d9`) per the
+verified spec `16-daemon-ownership.md`, also verified live with two supervisors.
+RB-07 landed in `38c8a6214` (gate-free UI-local item).
+
+**In flight (design-first, gate not yet passed):** RB-06 → `18-context-errata.md`,
+RB-03 → `19-session-rename-errata.md`, RB-05 → `20-skills.md`. All three are in
+gate round 2 against an adversarial Oracle; **no implementation code may be
+written for them until they pass with zero open HIGH/MEDIUM.** RB-09 is
+implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
 
 ---
 
@@ -207,18 +215,15 @@ implemented).
 - **Requirement (raw 7):** Develop `/export` to write the current session to a
   file in cwd. Nice-to-have: launch vim with the content so the user can edit it
   or write it as-is.
-- **Current state: NEW.** No export command or session serializer exists.
-  Building blocks are present: every event payload has `to_json`
-  (`include/ymh/session/events.hpp:365+`) and persistence already serializes
-  sessions to JSON (`src/session/session_persistence.cpp:959-960`); the
-  workspace cwd is available to the supervisor. No editor integration exists.
-- **What remains:** a `/export [path]` command that renders the active session
-  (markdown or JSON) to a file under cwd; optional `$EDITOR`/`vim` launch via
-  PTY (spec 14 PTY capability is implemented and could host the editor). Needs a
-  format decision (markdown vs JSON vs both) and path-safety via
-  `ExecutionEnvironment::resolve()`.
-- **Effort:** S–M (0.5–1.5d). **Risk:** Low. **Deps:** RB-08; PTY (spec 14) for
-  the editor launch. **Priority:** P1.
+- **Current state: DONE** (`38c8a6214`). `/export [path]` renders the active
+  session to markdown under the workspace root; `/export --edit` (`-e`) writes the
+  file then hands the terminal to the editor via FTXUI `WithRestoredIO` ($VISUAL →
+  $EDITOR → vi). The transcript is reconstructed from the durable event log
+  (`session/session_persistence.hpp`), not the trimmed TUI model. Path safety goes
+  through `ExecutionEnvironment::resolve()`; the filename stem is sanitized and
+  capped so a title cannot traverse. Markdown was chosen as the format (readable,
+  diffable, editor-friendly); the JSON view remains available via persistence.
+  Tests: +7 (`session_export_test.cpp`).
 
 ### RB-08 — `<Tab>` completes slash commands
 - **Requirement (raw 8):** Develop `<Tab>` to complete slash commands.
@@ -243,28 +248,48 @@ implemented).
 ### RB-09 — Config in `~/.config/ymh/config.jsonc` (JSONC)
 - **Requirement (raw 9):** Make `ymh` read config using the file format of
   `~/.config/ymh/config.jsonc` (JSONC).
-- **Current state: NEW (format is TOML today).**
-  - Global config file is **`config.toml`**: `src/config/config.cpp:21`
-    (`kConfigFile = "config.toml"`), documented at `include/ymh/config/config.hpp:8`.
-  - Default path resolution: `src/config/config.cpp:579-587`
-    (`$XDG_CONFIG_HOME/ymh/config.toml`, else `~/.config/ymh/config.toml`).
-  - Parser is **toml++** (`src/config/config.cpp:13`, `apply_toml_file` `:619-640`);
-    unknown keys are hard errors (`reject_unknown`, `:27`).
-  - Layering: defaults → global TOML → `<workspace>/.ymh/config.toml` → `YMH_*`
-    env → CLI (`include/ymh/config/config.hpp:5-16`). Full schema:
-    `[ui] [agent] [workspace] [permissions] [logging] [llm] [mcp]`
-    (`config.hpp:36-…`, `config.cpp:400-437`).
-  - `nlohmann_json` is already a dependency, but JSON has **no comment support**
-    natively; JSONC needs a comment-stripping pre-pass or a dedicated parser.
-- **What remains:** a **format decision** — replace TOML with JSONC, support
-  both, or accept `.jsonc` alongside `.toml`. If JSONC: comment-tolerant parse,
-  same strict unknown-key behavior, same layer order, migrate
-  `write_default_config`/scaffold and any docs. This changes a frozen config
-  interface, so it needs an explicit decision + spec errata before code.
+- **DECISION (user, 2026-09-16): JSONC only; TOML is retired.** `config.jsonc` is
+  the sole config file in both slots. `#` is not a comment and trailing commas
+  are not allowed. ymh has **no TOML awareness**: it never stats, opens, parses,
+  mentions, or warns about `config.toml`, so a leftover `config.toml` is
+  invisible and contributes nothing (21-D11). No dual-read, no precedence rule.
+  `toml++` is no longer a dependency.
+- **Current state: DONE** (`9db17cd54`, spec `21-config-jsonc-errata.md`).
+  - Global config file is **`config.jsonc`**: `src/config/config.cpp:29`
+    (`kConfigFile = "config.jsonc"`); the workspace file is
+    `<workspace>/.ymh/config.jsonc` (`workspace_config_path`, `config.cpp:734`).
+  - Default path resolution: `default_global_config_path()` (`config.cpp:724`)
+    returns `$XDG_CONFIG_HOME/ymh/config.jsonc`, else
+    `~/.config/ymh/config.jsonc` (unchanged branch order).
+  - Parser is **nlohmann/json** with `ignore_comments = true`
+    (`apply_jsonc_file`); unknown keys are hard errors (`reject_unknown`), and the
+    top-level message has no leading dot (`unknown key 'auto_compact_enabled'`;
+    nested `unknown key 'agent.compaction.foo'`, 21-D14). A malformed document is
+    a `ConfigError` naming file + line.
+  - Layering is unchanged: defaults → global → workspace → `YMH_*` env → CLI
+    (`include/ymh/config/config.hpp`). Full schema: `ui`, `agent`, `workspace`,
+    `permissions`, `logging`, `llm`, `mcp`, `skills`.
+- **Final contract (Rev 5–8):**
+  - **Global layer required.** An empty or absent global path is a `ConfigError`
+    (`config: required global config path is empty` / `config <path>: required
+    global config not found`, exit 2); the workspace layer stays optional and
+    contributes nothing when absent (21-D12).
+  - **First run scaffolds** the conventional global `config.jsonc` (and
+    `<workspace>/.ymh/`). An explicit `--config <path>` is **never**
+    auto-created: a missing explicit path is the hard error above (21-D13).
+  - **A present path must be a regular file** for either layer; a directory /
+    FIFO / socket / device fails with `config path is not a regular file`
+    (21-D16).
+  - **Config loads only for** `ymh`, `ymh run`, `ymh list`, `ymh show`,
+    `ymh replay`, `ymh fork`; `ymh workspace …`, `ymh config …`, and
+    `ymh version` never load config (nor config-derived logging) (21-D17).
+  - **The supervisor passes its effective global path to the daemon**
+    (`ymh --host … --config <path>`), so the daemon loads exactly the same file
+    as its supervisor (21-D15).
 - **Effort:** M (1–2d, mostly tests + migration). **Risk:** Med (breaking change
   to an existing config surface; strictness parity). **Deps:** none. **Priority:** P1.
-- **GATE:** needs a format decision + spec errata (00 §37 / 08 §5.3) verified
-  before code.
+- **GATE:** satisfied — spec `21-config-jsonc-errata.md` is verified
+  (Rev 5–8, 21-D11–21-D17) and implemented.
 
 ### RB-10 — Current session name in top line, right-aligned
 - **Requirement (raw 10):** Display the name of the current session in the top
@@ -301,6 +326,29 @@ implemented).
   updates.
 - **Effort:** XS (≤1h). **Risk:** Low. **Deps:** none; interacts with RB-04
   (cross-supervisor session counts) and RB-10 (header name). **Priority:** P0.
+
+### RB-12 — Modal input focus: keystrokes must not split between dialog and composer
+- **Requirement (discovered by live PTY verification, 2026-09-16):** while a
+  modal (the permission dialog, the exit-confirm prompt, the switcher) has focus,
+  typed characters must go to the modal only. Today a printable keystroke that the
+  modal does not bind falls through into the composer, so a command typed during a
+  modal is split between the two: typing `/rename repo overview` with the
+  permission dialog open consumed the `r` as a dialog key and left
+  `ame repo overview` in the composer — which, once the dialog closed, was
+  submitted as a chat message.
+- **Current state: NEW.** Observed live; not covered by any test. The permission
+  dialog binds `1/2/3/0/y/n/Esc` (`render_permission`), and unmatched printable
+  input is not consumed.
+- **What remains:** make every modal swallow unhandled printable input (and
+  optionally buffer it) instead of letting it reach the composer; clear or discard
+  any composer text that accumulated while a modal was open. Decide between
+  "discard" and "deliver to the composer after the modal closes" — the former is
+  less surprising. Needs a PTY test that types a command while a permission dialog
+  is open and asserts the composer is unaffected.
+- **Effort:** S (≤0.5d). **Risk:** Low (input routing only). **Deps:** none.
+  **Priority:** P1 (user-visible, but only when a modal is open).
+- **Note:** this is exactly the class of defect the hermetic suite structurally
+  cannot catch — it needs a real terminal driving real keystrokes.
 
 ---
 
@@ -355,9 +403,8 @@ change.
 2. **RB-05 — `/skills`.** New subsystem with no existing concept; needs a new
    component spec (e.g. `17-skills.md`): skill model, discovery, storage,
    invocation, context injection.
-3. **RB-09 — JSONC config.** Breaking change to a frozen config interface; needs
-   an explicit format decision (replace TOML / dual-read / new file) plus errata
-   to the config spec (00 §37 / 08 §5.3).
+3. **RB-09 — JSONC config.** **Resolved** by `21-config-jsonc-errata.md`
+   (verified Rev 5–8; JSONC only, TOML retired); implemented in `9db17cd54`.
 4. **RB-03 — session rename.** Additive but wire- and log-visible; needs an
    errata to `01-session.md` + `05-transport.md` (new event + method) before code.
 5. **RB-02 — reasoning capture.** Additive errata to `10-supervisor-tui.md`
