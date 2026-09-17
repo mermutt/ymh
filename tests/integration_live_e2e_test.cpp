@@ -224,14 +224,12 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
     LiveWorkspace   workspace("ymh-live-crash");
     HostDaemonGuard guard(workspace.id().value);
 
-    {
-        PtyChild first;
-        ASSERT_TRUE(first.spawn(resolve_ymh_binary(), workspace.path(), workspace.child_env()));
-        ASSERT_TRUE(drive_live_turn(first, kSecret, 180s)) << first.plain();
-        first.write("/exit\r");
-        first.terminate();
-    }
+    PtyChild first;
+    ASSERT_TRUE(first.spawn(resolve_ymh_binary(), workspace.path(), workspace.child_env()));
+    ASSERT_TRUE(drive_live_turn(first, kSecret, 180s)) << first.plain();
 
+    // Spec 16 supersedes "the daemon survives supervisor exit": inject the crash
+    // while the supervisor is still attached, then let it exit with no daemon.
     const std::vector<pid_t> daemons = host_processes(&workspace.id().value);
     ASSERT_FALSE(daemons.empty()) << "no daemon to crash";
     for (const pid_t pid : daemons) {
@@ -242,6 +240,9 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
         std::this_thread::sleep_for(20ms);
     }
     ASSERT_TRUE(host_processes(&workspace.id().value).empty()) << "daemon survived SIGKILL";
+
+    first.write("/exit\r");
+    first.terminate();
 
     PtyChild second;
     ASSERT_TRUE(second.spawn(resolve_ymh_binary(), workspace.path(), workspace.child_env()));
@@ -275,7 +276,54 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
     EXPECT_EQ(user_messages, 1u) << "user message duplicated in the session log";
 
     second.write("/exit\r");
+    ASSERT_TRUE(second.wait_for("Exiting will terminate", 30s)) << second.plain();
+    second.write("y");
     second.terminate();
+    guard.stop();
+    EXPECT_TRUE(host_processes(&workspace.id().value).empty()) << "daemon leaked";
+}
+
+// 16 §8.4.5: two real PTY supervisors on one workspace. The non-last exit keeps
+// the daemon serving; the last owner's confirmed exit tears it down, leaving no
+// orphan.
+TEST(LiveE2E, TwoSupervisorsCleanExitNoOrphan) {
+    if (!live_enabled()) {
+        GTEST_SKIP() << "opt-in: set YMH_LIVE_LLM=1 and DEEPSEEK_API_KEY to run";
+    }
+
+    LiveWorkspace   workspace("ymh-live-two");
+    HostDaemonGuard guard(workspace.id().value);
+
+    PtyChild first;
+    ASSERT_TRUE(first.spawn(resolve_ymh_binary(), workspace.path(), workspace.child_env()));
+    ASSERT_TRUE(drive_live_turn(first, kSecret, 180s)) << first.plain();
+
+    PtyChild second;
+    ASSERT_TRUE(second.spawn(resolve_ymh_binary(), workspace.path(), workspace.child_env()));
+    ASSERT_TRUE(second.wait_for(kSessionActive, 60s)) << second.plain();
+
+    first.write("/exit\r");
+    const std::optional<int> first_status = first.wait_for_exit(30s);
+    ASSERT_TRUE(first_status.has_value()) << first.plain();
+    EXPECT_EQ(*first_status, 0) << "a non-last supervisor exits without a prompt";
+    EXPECT_EQ(host_processes(&workspace.id().value).size(), 1u)
+        << "the daemon must survive while the peer supervisor remains";
+
+    second.write("/exit\r");
+    std::optional<int> second_status;
+    const auto         exit_deadline = std::chrono::steady_clock::now() + 60s;
+    while (!second_status.has_value() && std::chrono::steady_clock::now() < exit_deadline) {
+        if (second.plain().find("Exiting will terminate") != std::string::npos) {
+            second.write("y");
+        }
+        second_status = second.wait_for_exit(200ms);
+    }
+    ASSERT_TRUE(second_status.has_value()) << second.plain();
+    EXPECT_EQ(*second_status, 0);
+    for (int attempt = 0;
+         attempt < 600 && !host_processes(&workspace.id().value).empty(); ++attempt) {
+        std::this_thread::sleep_for(20ms);
+    }
     guard.stop();
     EXPECT_TRUE(host_processes(&workspace.id().value).empty()) << "daemon leaked";
 }

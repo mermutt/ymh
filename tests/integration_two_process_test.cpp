@@ -7,11 +7,18 @@
 // short temp root so the Unix socket path fits `sun_path`.
 //
 // Acceptance matrix (docs/design/11-m2-errata.md §8–§11, 04 §6/§7/§13.2-13.3,
-// 10 §5.4/§16.2): crash/respawn/reconnect without loss or duplicate; supervisor
-// exit leaves the daemon serving; the spawn race yields one daemon; SIGSTOP is
-// never stolen; attach identity is cross-checked; a stale socket is replaced;
-// multi-supervisor fan-out with permission first-wins; CursorInvalid falls back
-// to `beginning`; and no daemon is orphaned.
+// 10 §5.4/§16.2, and the spec-16 ownership model, 16 §2.1/§4/§8.4.2):
+// crash/respawn/reconnect without loss or duplicate; the spawn race yields one
+// daemon; SIGSTOP is never stolen; attach identity is cross-checked; a stale
+// socket is replaced; multi-supervisor fan-out with permission first-wins;
+// CursorInvalid falls back to `beginning`; and no daemon is orphaned.
+//
+// Spec 16 supersedes the old "supervisor exit leaves the daemon serving"
+// acceptance: a daemon does **not** outlive its last owner. A non-last
+// supervisor exit leaves it serving while a peer remains (16 §4.1/O11); the
+// last supervisor's confirmed exit prompts and tears the daemons down (16
+// §4.2/§4.3, O12/C-H2). The two cases are pinned by
+// `SupervisorExitWithPeerKeepsDaemon` and `LastSupervisorExitTearsDaemonDown`.
 
 #include <gtest/gtest.h>
 
@@ -411,6 +418,32 @@ public:
         return strip_ansi(buffer_).find(needle) != std::string::npos;
     }
 
+    [[nodiscard]] std::string plain() const { return strip_ansi(buffer_); }
+
+    // Waits for the TUI process to exit on its own (no signal) and returns its
+    // exit status, or nullopt on timeout. Used by the spec-16 last-exit tests
+    // to pin "S2 exits 0" (16 §8.4.2 scenario 5) without a sleep.
+    [[nodiscard]] std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (pid_ > 0 && std::chrono::steady_clock::now() < deadline) {
+            read_available();
+            int         status = 0;
+            const pid_t result = ::waitpid(pid_, &status, WNOHANG);
+            if (result == pid_) {
+                pid_ = -1;
+                if (WIFEXITED(status)) {
+                    return WEXITSTATUS(status);
+                }
+                if (WIFSIGNALED(status)) {
+                    return 128 + WTERMSIG(status);
+                }
+                return -1;
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        return std::nullopt;
+    }
+
     void terminate() {
         if (pid_ > 0) {
             ::kill(pid_, SIGTERM);
@@ -609,8 +642,95 @@ TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {
     harness.stop();
 }
 
-TEST_F(TwoProcess, SupervisorExitDaemonSurvives) {
-    ShortTempRoot root("ymh-2p-pty");
+std::map<std::string, std::string> supervisor_env(const ShortTempRoot& root) {
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
+    env["HOME"]                = root.path().string();
+    env["TERM"]                = "xterm-256color";
+    env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
+    return env;
+}
+
+// 16 §8.4.2 (4), O11: a NON-last supervisor exit. Two supervisors own the same
+// daemon; the first quits cleanly, so its orphaning set is empty (no prompt),
+// the daemon keeps serving, and the first supervisor's presence row is gone.
+TEST_F(TwoProcess, SupervisorExitWithPeerKeepsDaemon) {
+    ShortTempRoot root("ymh-2p-peer");
+    configure_workspace(root);
+    root.write(".ymh/config.toml", kAllowAllConfig);
+    root.write("fake.json", kFakeTextScript);
+
+    const std::filesystem::path workspace = root.path() / "alpha";
+    std::filesystem::create_directories(workspace);
+
+    const RegistryConfig registry_config = registry_config_for(root.state_dir());
+    WorkspaceId          workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "alpha").id;
+    }
+    DaemonGuard guard(workspace_id.value);
+    const std::map<std::string, std::string> env = supervisor_env(root);
+
+    PtyChild first;
+    ASSERT_TRUE(first.spawn(binary_, workspace, env));
+    ASSERT_TRUE(first.wait_for("Type a message and press Enter", 30s))
+        << "first supervisor did not become ready";
+
+    PtyChild second;
+    ASSERT_TRUE(second.spawn(binary_, workspace, env));
+    ASSERT_TRUE(second.wait_for("Type a message and press Enter", 30s))
+        << "second supervisor did not attach";
+
+    auto supervisor_rows = [&]() {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::openReadOnly(registry_config);
+        return registry->listSupervisors().size();
+    };
+    auto wait_for = [&](auto predicate, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (predicate()) {
+                return true;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        return predicate();
+    };
+
+    ASSERT_TRUE(wait_for([&] { return supervisor_rows() >= 2; }, 15s))
+        << "both supervisors must register before the exit";
+    const std::size_t rows_before = supervisor_rows();
+
+    first.write("/exit\r");
+    const std::optional<int> first_status = first.wait_for_exit(20s);
+    ASSERT_TRUE(first_status.has_value()) << first.plain();
+    EXPECT_EQ(*first_status, 0) << "a non-last supervisor exits cleanly with no prompt";
+
+    EXPECT_TRUE(wait_for([&] { return supervisor_rows() == rows_before - 1; }, 15s))
+        << "the exiting supervisor's presence row must be deregistered";
+
+    ASSERT_EQ(count_hosts(workspace_id.value), 1u)
+        << "the daemon must survive while a peer supervisor remains";
+
+    // `second` is now the sole owner, so its own clean exit prompts and tears the
+    // daemon down; a prompt here proves `first`'s exit did not orphan the daemon.
+    second.write("/exit\r");
+    ASSERT_TRUE(second.wait_for("Exiting will terminate", 20s)) << second.plain();
+    second.write("y");
+    const std::optional<int> second_status = second.wait_for_exit(30s);
+    ASSERT_TRUE(second_status.has_value()) << second.plain();
+    EXPECT_EQ(*second_status, 0);
+    EXPECT_TRUE(wait_for([&] { return count_hosts(workspace_id.value) == 0; }, 20s))
+        << "the last supervisor's exit must tear the daemon down";
+}
+
+// 16 §8.4.2 (5), O12/C-H2: the LAST supervisor's clean exit. The prompt fires
+// because the connection's instance equals the registered row (other_fresh_
+// owners == 0); "y" confirms, the daemon runs the ordered teardown, and the
+// supervisor exits 0. This is the regression C-H2 guards: a fresh random
+// instance at hello would leave other_fresh_owners > 0 and no prompt.
+TEST_F(TwoProcess, LastSupervisorExitTearsDaemonDown) {
+    ShortTempRoot root("ymh-2p-last");
     configure_workspace(root);
     root.write(".ymh/config.toml", kAllowAllConfig);
     root.write("fake.json", kFakeTextScript);
@@ -626,60 +746,33 @@ TEST_F(TwoProcess, SupervisorExitDaemonSurvives) {
     }
     DaemonGuard guard(workspace_id.value);
 
-    PtyChild                           child;
-    std::map<std::string, std::string> env;
-    env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-    env["HOME"]                = root.path().string();
-    env["TERM"]                = "xterm-256color";
-    env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
-    ASSERT_TRUE(child.spawn(binary_, workspace, env));
+    PtyChild child;
+    ASSERT_TRUE(child.spawn(binary_, workspace, supervisor_env(root)));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 30s))
         << "supervisor did not auto-create a session";
 
-    std::string session;
-    HostPid     daemon_pid = 0;
-    std::string boot_id;
-    {
-        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::openReadOnly(registry_config);
-        const std::optional<WorkspaceRecord> record = registry->findById(workspace_id);
-        ASSERT_TRUE(record.has_value());
-        ASSERT_TRUE(record->host.has_value());
-        daemon_pid = record->host->pid;
-        boot_id    = record->host->bootId.value;
-        const std::vector<WorkspaceSessionRecord> sessions = registry->listSessions(workspace_id);
-        ASSERT_FALSE(sessions.empty());
-        session = sessions.front().sessionId.value;
-    }
     ASSERT_EQ(count_hosts(workspace_id.value), 1u);
 
-    child.terminate();
-    std::this_thread::sleep_for(300ms);
+    child.write("/exit\r");
+    ASSERT_TRUE(child.wait_for("Exiting will terminate", 20s)) << child.plain();
+    ASSERT_EQ(count_hosts(workspace_id.value), 1u)
+        << "declining would keep the daemon; the prompt alone must not stop it";
 
-    ASSERT_EQ(count_hosts(workspace_id.value), 1u) << "supervisor exit killed the daemon";
-    {
-        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::openReadOnly(registry_config);
-        const std::optional<WorkspaceRecord> record = registry->findById(workspace_id);
-        ASSERT_TRUE(record.has_value());
-        ASSERT_TRUE(record->host.has_value());
-        EXPECT_EQ(record->host->pid, daemon_pid);
-        EXPECT_EQ(record->host->bootId.value, boot_id);
-    }
+    child.write("y");
+    const std::optional<int> status = child.wait_for_exit(30s);
+    ASSERT_TRUE(status.has_value()) << child.plain();
+    EXPECT_EQ(*status, 0);
 
-    std::unique_ptr<protocol::HostConnection> connection =
-        open_connection(workspace / ".ymh" / "host.sock");
-    EXPECT_EQ(connection->hello().pid, daemon_pid);
-    EXPECT_EQ(connection->hello().boot_id.value, boot_id);
-    const nlohmann::json sessions =
-        connection->request(std::string(protocol::method::kSessionList));
-    ASSERT_TRUE(sessions.is_array());
-    bool found = false;
-    for (const nlohmann::json& entry : sessions) {
-        if (entry.value("id", std::string{}) == session) {
-            found = true;
-        }
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (count_hosts(workspace_id.value) != 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(50ms);
     }
-    EXPECT_TRUE(found) << "re-attach did not see the original session";
-    connection->close();
+    EXPECT_EQ(count_hosts(workspace_id.value), 0u) << "the last owner's exit must stop the daemon";
+    EXPECT_FALSE(std::filesystem::exists(workspace / ".ymh" / "host.sock"))
+        << "the daemon must unlink its socket on the ordered teardown";
+
+    std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::openReadOnly(registry_config);
+    EXPECT_TRUE(registry->listSupervisors().empty()) << "no ownership row may survive a clean exit";
 }
 
 TEST_F(TwoProcess, TwoSpawnsExactlyOneDaemon) {
