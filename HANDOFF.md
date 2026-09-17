@@ -17,12 +17,17 @@ Supervisor (TUI) process
              └── shared WorkspaceRegistry (registry.db) + per-workspace session DBs
 ```
 
-- **Workspace** = project = one daemon process (own cwd, **supervisor-owned** —
-  the last supervisor's exit tears it down, per `16-daemon-ownership.md`).
-- **Session** = conversation inside a workspace (immutable `SessionHeader.cwd`).
+- **Workspace** = a row in the shared `registry.db` `workspaces` table plus,
+  when live, its daemon (own cwd, **supervisor-owned** — the last supervisor's
+  exit tears it down, per `16-daemon-ownership.md`). A workspace is durable
+  whether or not a daemon runs.
+- **Session** = stored per-workspace event-log history on disk
+  (`<workspace>/.ymh/sessions.db`); a conversation inside a workspace (immutable
+  `SessionHeader.cwd`). Distinct from a workspace; see
+  `22-switcher-sessions-errata.md` §1.5.
 - **Shared registry** (`registry.db`): multi-row `workspaces` + `workspace_sessions`, `flock` single-writer, boot-nonce liveness.
 - **Transport**: JSON-RPC 2.0 over length-prefixed Unix socket (Interactive + Automation profiles).
-- **UI**: tree switcher (workspaces → sessions), aggregate status line (`2 active · 3 waiting`), ~1s edge-triggered flash.
+- **UI**: tree switcher (workspaces → sessions; **Ctrl-S is live-only**), `/sessions` lists stored sessions read from disk for every registered workspace, aggregate status line (`2 active · 3 waiting`), ~1s edge-triggered flash.
 
 ---
 
@@ -214,3 +219,15 @@ deduplicated against shipped code; six items need a spec/errata before code) and
 `UI_SURFACE_INVENTORY.md` (the spec-16 ↔ RB-10/RB-11 UI seam; most
 cross-supervisor visibility already ships, so spec 16's new UI is mainly the
 last-supervisor exit prompt).
+
+**Spec `22-switcher-sessions-errata.md` is implemented** (S1–S4). It fixes the
+confusion between *running workspaces* and *recorded sessions*: the Ctrl-S
+switcher is now **live-only** with daemon-death eviction (it no longer shows
+detached/background workspaces, superseding the "ALL workspaces" text in
+`00-architecture.md` §20.24 / `10-supervisor-tui.md` §7.1 and the `NotRunning`
+browsability in `16-daemon-ownership.md` §3.2.1/§7.7), a new **`/sessions`**
+command lists stored sessions read directly from disk for every registered
+workspace (no daemon required), selecting a session in a non-running workspace
+spawns/attaches its daemon then resumes it, and `ymh --resume <id>` now works in
+TUI mode (unknown id → exit 1). Gated over 5 rounds (Oracle **PASS**, zero open
+HIGH/MEDIUM).

@@ -39,12 +39,17 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 | RB-10 | Current session name in top line, right-aligned | 10 | **DONE** | P0 | XS | Low | No |
 | RB-11 | Bottom line: counts only, not the full session list | 11 | **DONE** | P0 | XS | Low | No |
 | RB-12 | Modal input focus: keystrokes must not split between dialog and composer | — (live testing) | NEW | P1 | S | Low | No |
+| RB-13 | Live-only Ctrl-S switcher + `/sessions` disk catalog (workspace vs session) | — (reported confusion) | **DONE** | P0 | L | Med | `22-switcher-sessions-errata.md` (verified + implemented) |
+| RB-14 | Test isolation: pin `XDG_STATE_HOME` in a process-wide fixture | — (spec 22 §11.2) | NEW | P2 | S | Low | No (test infra) |
+| RB-15 | Guard the `session.create` reply path against an evicted workspace | — (spec 22 §11.7) | NEW | P2 | S | Low | No |
 
 **Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
 per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY
 against real DeepSeek. RB-04 landed in 8 waves (`036e4e4e1`…`065e221d9`) per the
 verified spec `16-daemon-ownership.md`, also verified live with two supervisors.
-RB-07 landed in `38c8a6214` (gate-free UI-local item).
+RB-07 landed in `38c8a6214` (gate-free UI-local item). **RB-13** landed per the
+verified spec `22-switcher-sessions-errata.md` (S1–S4: live-only Ctrl-S switcher
++ `/sessions` disk catalog), also verified live.
 
 **In flight (design-first, gate not yet passed):** RB-06 → `18-context-errata.md`,
 RB-03 → `19-session-rename-errata.md`, RB-05 → `20-skills.md`. All three are in
@@ -349,6 +354,53 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   **Priority:** P1 (user-visible, but only when a modal is open).
 - **Note:** this is exactly the class of defect the hermetic suite structurally
   cannot catch — it needs a real terminal driving real keystrokes.
+
+### RB-13 — Live-only Ctrl-S switcher + `/sessions` disk catalog
+- **Requirement (reported confusion):** the Ctrl-S switcher listed every
+  workspace ever seen live (the reporter saw 42 entries while exactly one daemon
+  was live), and there was no way to see a stopped workspace's stored sessions.
+  The user asked for a clear split between *running workspaces* and *recorded
+  sessions*.
+- **Current state: DONE.** Implemented per the verified spec
+  `22-switcher-sessions-errata.md` (S1–S4; Oracle PASS after 5 rounds):
+  - **S1** — the Ctrl-S switcher is **live-only** (`live && daemonStatus ∈
+    {Attached, Stopping}`) and entries are **evicted** when their daemon dies; it
+    no longer shows detached/background workspaces (§3).
+  - **S2** — `/sessions` lists stored sessions read **directly from disk**
+    (`<workspace>/.ymh/sessions.db`) for every **registered** workspace, live or
+    not, degrading per workspace; it reuses the switcher overlay rather than
+    adding a second one (§4).
+  - **S3** — selecting a session in a non-running workspace spawns/attaches its
+    daemon then resumes it; failures surface a status-bar notice, never a phantom
+    workspace (§5).
+  - **S4** — `ymh --resume <id>` works in TUI mode (unknown id → exit 1) (§6).
+- **Effort:** L. **Risk:** Med. **Deps:** RB-04 (daemon ownership).
+  **Priority:** P0.
+- **GATE:** `22-switcher-sessions-errata.md` verified + implemented.
+
+### RB-14 — Test isolation: pin `XDG_STATE_HOME` in a process-wide fixture
+- **Requirement (spec 22 §11.2, recorded):** some live-test paths do not pin
+  `XDG_STATE_HOME`, so they can leak real workspace rows into the developer's
+  `~/.local/state/ymh/registry.db`. A leaked row is exactly the kind of stale
+  workspace the old switcher retained forever, and `/sessions` now enumerates
+  leaked rows too.
+- **Current state: NEW.** Out of scope for spec 22; needs a separate test-infra
+  fix that pins `XDG_STATE_HOME` in a process-wide fixture. Pointers:
+  `tests/support/host_harness.hpp`, `tests/unit/ui_supervisor_pty_test.cpp`,
+  `tests/integration_live_e2e_test.cpp`.
+- **Effort:** S. **Risk:** Low. **Deps:** none. **Priority:** P2.
+
+### RB-15 — Guard the `session.create` reply path against an evicted workspace
+- **Requirement (spec 22 §11.7, recorded):** `SupervisorApp::create_session`'s
+  reply handler calls `model_.ensureSessionIn`/`ensureCellIn` with **no**
+  workspace guard (`src/ui/supervisor.cpp:854-859`). If the workspace were evicted
+  between the `session.create` submit and its reply, that path could inject a
+  phantom `WorkspaceModel` (the same defect class as spec 22's MEDIUM-1, but
+  pre-existing and on the `create_session` path).
+- **Current state: NEW** (pre-existing, out of scope for spec 22; LOW-6).
+- **What remains:** apply the same `model_.workspaces.count(workspace)` guard
+  that SW25 uses on the resume path to the `create_session` handler.
+- **Effort:** XS. **Risk:** Low. **Deps:** none. **Priority:** P2.
 
 ---
 
