@@ -1,20 +1,16 @@
 #include <gtest/gtest.h>
 
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/ioctl.h>
-#include <sys/wait.h>
-#include <termios.h>
-#include <unistd.h>
-
 #include <chrono>
-#include <csignal>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <map>
+#include <random>
 #include <string>
 #include <thread>
 
 #include "support/pty_child.hpp"
-#include "support/test_env.hpp"
+#include "support/short_temp.hpp"
 
 #ifndef YMH_TEST_BINARY
 #define YMH_TEST_BINARY "ymh"
@@ -30,175 +26,80 @@ bool live_enabled() {
     return flag != nullptr && std::string{flag} == "1" && key != nullptr && *key != '\0';
 }
 
-std::string strip_ansi(const std::string& input) {
-    std::string output;
-    output.reserve(input.size());
-    for (std::size_t index = 0; index < input.size(); ++index) {
-        if (input[index] == '\x1b' && index + 1 < input.size() && input[index + 1] == '[') {
-            index += 2;
-            while (index < input.size() &&
-                   (input[index] == ';' || (input[index] >= '0' && input[index] <= '9'))) {
-                ++index;
-            }
-            continue;
-        }
-        output.push_back(input[index]);
+// A token that cannot be predicted by the test fixture, so its appearance in the
+// transcript can only come from the model actually echoing it back. It must be
+// short enough that the echoed user line never wraps (the PTY is 100 columns).
+std::string make_nonce() {
+    const auto ticks = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    std::random_device device;
+    const std::uint64_t salt =
+        (static_cast<std::uint64_t>(device()) << 32) ^ static_cast<std::uint64_t>(device());
+    const std::uint64_t value = ticks ^ salt;
+
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string token = "tok";
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        token.push_back(digits[(value >> shift) & 0xFU]);
     }
-    return output;
+    return token;
 }
-
-class PtyProcess {
-public:
-    PtyProcess() = default;
-    ~PtyProcess() { terminate(); }
-
-    PtyProcess(const PtyProcess&) = delete;
-    PtyProcess& operator=(const PtyProcess&) = delete;
-
-    bool spawn(const std::string& binary, const std::string& cwd) {
-        master_ = ::posix_openpt(O_RDWR | O_NOCTTY);
-        if (master_ < 0) {
-            return false;
-        }
-        if (::grantpt(master_) != 0 || ::unlockpt(master_) != 0) {
-            return false;
-        }
-        winsize window{};
-        window.ws_row = 24;
-        window.ws_col = 100;
-        ::ioctl(master_, TIOCSWINSZ, &window);
-
-        const char* slave_name = ::ptsname(master_);
-        if (slave_name == nullptr) {
-            return false;
-        }
-        const int slave = ::open(slave_name, O_RDWR | O_NOCTTY);
-        if (slave < 0) {
-            return false;
-        }
-        pid_ = ::fork();
-        if (pid_ < 0) {
-            return false;
-        }
-        if (pid_ == 0) {
-            ::setsid();
-            ::ioctl(slave, TIOCSCTTY, 0);
-            ::dup2(slave, STDIN_FILENO);
-            ::dup2(slave, STDOUT_FILENO);
-            ::dup2(slave, STDERR_FILENO);
-            if (slave > 2) {
-                ::close(slave);
-            }
-            ::close(master_);
-            if (::chdir(cwd.c_str()) != 0) {
-                _exit(126);
-            }
-            ::execl(binary.c_str(), "ymh", static_cast<char*>(nullptr));
-            _exit(127);
-        }
-        ::close(slave);
-        return true;
-    }
-
-    void write_all(const std::string& data) const {
-        if (master_ >= 0) {
-            const ssize_t written = ::write(master_, data.data(), data.size());
-            (void)written;
-        }
-    }
-
-    std::string read_available(int timeout_ms) const {
-        std::string output;
-        if (master_ < 0) {
-            return output;
-        }
-        pollfd descriptor{};
-        descriptor.fd = master_;
-        descriptor.events = POLLIN;
-        if (::poll(&descriptor, 1, timeout_ms) <= 0) {
-            return output;
-        }
-        char buffer[4096];
-        for (;;) {
-            const ssize_t count = ::read(master_, buffer, sizeof(buffer));
-            if (count <= 0) {
-                break;
-            }
-            output.append(buffer, static_cast<std::size_t>(count));
-            if (count < static_cast<ssize_t>(sizeof(buffer))) {
-                break;
-            }
-        }
-        return output;
-    }
-
-    void terminate() {
-        if (pid_ > 0) {
-            int status = 0;
-            if (::waitpid(pid_, &status, WNOHANG) == 0) {
-                ::kill(pid_, SIGTERM);
-                std::this_thread::sleep_for(std::chrono::milliseconds{200});
-                if (::waitpid(pid_, &status, WNOHANG) == 0) {
-                    ::kill(pid_, SIGKILL);
-                    ::waitpid(pid_, &status, 0);
-                }
-            }
-            pid_ = -1;
-        }
-        if (master_ >= 0) {
-            ::close(master_);
-            master_ = -1;
-        }
-    }
-
-private:
-    int   master_ = -1;
-    pid_t pid_ = -1;
-};
 
 TEST(UiLivePty, StreamsAssistantReply) {
     if (!live_enabled()) {
         GTEST_SKIP() << "opt-in: set YMH_LIVE_LLM=1 and DEEPSEEK_API_KEY to run";
     }
 
-    test::TempWorkspace workspace("ui_live_pty");
-    PtyProcess pty;
-    ASSERT_TRUE(pty.spawn(YMH_TEST_BINARY, workspace.path().string()));
+    // Hermetic root: the child's registry/config/home all live under this short
+    // temp directory, so the live run never touches the developer's real
+    // `~/.local/state/ymh/registry.db` or `~/.config/ymh/config.jsonc`.
+    test::ShortTempRoot root("ui_live_pty");
+    const std::filesystem::path workspace = root.path() / "ws";
+    std::filesystem::create_directories(workspace);
+
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = root.state_dir().string();
+    env["XDG_CONFIG_HOME"] = root.config_dir().string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+
+    test::PtyChild child;
+    ASSERT_TRUE(child.spawn(YMH_TEST_BINARY, workspace, env));
 
     // The no-args binary is the M2 supervisor TUI, which auto-creates the first
     // session asynchronously; keystrokes typed before it is active are dropped.
-    std::string output;
-    const auto startup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
-    while (std::chrono::steady_clock::now() < startup_deadline) {
-        output += pty.read_available(200);
-        if (strip_ansi(output).find("Type a message and press Enter") != std::string::npos) {
-            break;
-        }
-    }
+    child.wait_for("Type a message and press Enter", std::chrono::seconds{30});
 
-    pty.write_all("Reply with exactly the word pong and do not call any tools.\r");
+    const std::string nonce = make_nonce();
+    child.write("Reply with exactly this token and nothing else: " + nonce + "\r");
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{90};
     bool saw_reply = false;
     bool answered_permission = false;
     while (std::chrono::steady_clock::now() < deadline) {
-        output += pty.read_available(500);
-        const std::string plain = strip_ansi(output);
+        child.read_available();
+        const std::string plain = child.plain();
         if (!answered_permission && plain.find("Permission required") != std::string::npos) {
-            pty.write_all("y");
+            child.write("y");
             answered_permission = true;
         }
-        if (plain.find("pong") != std::string::npos) {
+        // Count inside a single rendered frame, not the accumulated buffer: the
+        // echoed user line is repainted on every frame, so the accumulated
+        // buffer would show the nonce twice with no LLM call at all. One frame
+        // holds the echo once and the assistant reply once.
+        const std::string frame = child.last_frame();
+        if (test::count_occurrences(frame, nonce) >= 2) {
             saw_reply = true;
             break;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds{200});
     }
 
-    pty.write_all("/exit\r");
-    pty.terminate();
-    test::stop_hosts_for_root(workspace.path());
+    child.write("/exit\r");
+    child.terminate();
+    test::stop_hosts_for_root(workspace);
 
-    EXPECT_TRUE(saw_reply) << strip_ansi(output);
+    EXPECT_TRUE(saw_reply) << child.plain();
 }
 
 } // namespace
