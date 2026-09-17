@@ -62,7 +62,7 @@ ctest --test-dir build --output-on-failure
 
 - Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`) — never suppress them.
 - Deps: system SQLite3 / nlohmann_json / spdlog / fmt / libcurl / libgit2 /
-  cmark-gfm; CMake **FetchContent** for FTXUI / Asio / toml++ / CLI11 / GoogleTest.
+  cmark-gfm; CMake **FetchContent** for FTXUI / Asio / CLI11 / GoogleTest.
 - **Live tests** (real LLM) are opt-in: set `YMH_LIVE_LLM=1` and
   `DEEPSEEK_API_KEY` (the key lives in `~/.apikey.deepseek`, an
   `export DEEPSEEK_API_KEY=…` snippet); they skip otherwise. Model
@@ -104,13 +104,25 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
   host registration, single `flock` writer, WAL readers) is separate from each
   workspace's session DB. The focused/active session is supervisor-local state,
   not registry state.
+- **Config is JSONC; TOML is retired.** The sole config file is `config.jsonc`
+  in both slots: `$XDG_CONFIG_HOME/ymh/config.jsonc` (else
+  `$HOME/.config/ymh/config.jsonc`) and `<workspace>/.ymh/config.jsonc`. ymh has
+  **no TOML awareness** — a leftover `config.toml` is invisible (never read,
+  probed, or warned about), and `toml++` is not a dependency. The **global layer
+  is required** (empty/absent/non-regular ⇒ `ConfigError`, exit 2); the workspace
+  layer is optional. First run scaffolds only the conventional global path: an
+  explicit `--config <path>` is **never** auto-created. Config loads only for
+  `ymh`, `ymh run`, `ymh list`, `ymh show`, `ymh replay`, `ymh fork`;
+  `workspace`/`config`/`version` never load it. The supervisor passes its
+  effective path to the daemon (`ymh --host … --config <path>`). See
+  `docs/design/21-config-jsonc-errata.md` §6.
 - **Logging.** Never dump full prompts or sensitive tool output to normal logs by
   default; the session event log is the authoritative trace.
 
 ## Conventions
 
 - Modern C++23; **CMake + Ninja**. Core deps: FTXUI, Asio, SQLite3,
-  nlohmann/json, toml++, spdlog, CLI11. Add cmark-gfm / tree-sitter / libgit2
+  nlohmann/json, spdlog, CLI11. Add cmark-gfm / tree-sitter / libgit2
   only when the feature arrives. Do not build a giant umbrella dependency.
 - **No warning/error suppression**: no `-w`, no blanket
   `#pragma GCC diagnostic ignored`, no casts/`reinterpret_cast` used to silence
