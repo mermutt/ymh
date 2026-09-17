@@ -38,12 +38,14 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 }
 
 TEST(TransportProtocol, MethodCatalogIsComplete) {
-    EXPECT_EQ(protocol::all_methods().size(), 30u);
+    EXPECT_EQ(protocol::all_methods().size(), 32u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
     EXPECT_TRUE(protocol::is_known_method("host.ownership"));
     EXPECT_TRUE(protocol::is_known_method("session.rename"));
+    EXPECT_TRUE(protocol::is_known_method("skills.list"));
+    EXPECT_TRUE(protocol::is_known_method("skills.show"));
     EXPECT_FALSE(protocol::is_known_method("host.nope"));
 }
 

@@ -506,6 +506,15 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
                                  to_json_value(UnsubscribedNotice{SubscriptionId{subscription},
                                                                   "unsubscribed"})));
             }
+        } else if (method_name == method::kSkillsList) {
+            respond(conn, request.id, host_.listSkills());
+        } else if (method_name == method::kSkillsShow) {
+            const auto it = object_params(request.params).find("name");
+            if (it == request.params.end() || !it->is_string()) {
+                throw RpcException(code_value(RpcCode::InvalidParams),
+                                   "name must be a string");
+            }
+            respond(conn, request.id, host_.showSkill(it->get<std::string>()));
         } else {
             respond_error(conn, request.id, code_value(RpcCode::MethodNotFound),
                           "unhandled method");

@@ -224,6 +224,24 @@ public:
         return known_permissions.count(request_id) > 0;
     }
 
+    nlohmann::json listSkills() override {
+        calls.push_back("skills.list");
+        return skills_list;
+    }
+
+    nlohmann::json showSkill(const std::string& name) override {
+        calls.push_back("skills.show");
+        const auto it = skill_bodies.find(name);
+        if (it == skill_bodies.end()) {
+            throw protocol::RpcException(protocol::code_value(protocol::RpcCode::InvalidParams),
+                                         "unknown skill");
+        }
+        return it->second;
+    }
+
+    nlohmann::json                        skills_list = nlohmann::json::object();
+    std::map<std::string, nlohmann::json> skill_bodies;
+
     bool sessionExists(const SessionId& id) const override {
         return logs_.find(id.value) != logs_.end();
     }

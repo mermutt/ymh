@@ -61,6 +61,11 @@ add_executable(ymh_tests
     unit/mcp_client_test.cpp
     unit/mcp_manager_test.cpp
     unit/mcp_live_status_test.cpp
+    unit/skills_frontmatter_test.cpp
+    unit/skills_catalog_test.cpp
+    unit/skills_tool_test.cpp
+    unit/skills_wiring_test.cpp
+    unit/skills_rpc_test.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp
     integration_pty_test.cpp
@@ -94,6 +99,7 @@ target_link_libraries(ymh_tests
         ymh::permission
         ymh::tools
         ymh::mcp
+        ymh::skills
         ymh::agent
         ymh::runtime
         ymh::registry

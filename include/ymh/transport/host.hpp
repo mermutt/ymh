@@ -95,9 +95,14 @@ public:
     virtual void agentPrompt(const SessionId& id, const nlohmann::json& message) = 0;
     virtual void agentFollowup(const SessionId& id, const nlohmann::json& message) = 0;
     virtual void agentSteer(const SessionId& id, const nlohmann::json& message) = 0;
-    virtual void agentInject(const SessionId& id, const nlohmann::json& context) = 0;
-    virtual bool agentCancel(const SessionId& id, const std::optional<std::string>& reason) = 0;
+    virtual void        agentInject(const SessionId& id, const nlohmann::json& context) = 0;
+    virtual bool        agentCancel(const SessionId& id, const std::optional<std::string>& reason) = 0;
     virtual std::string agentStatus(const SessionId& id) = 0;
+
+    // 20 §5.7: read-only skill listing/detail. Daemon-owned catalog; the
+    // supervisor never reads skill files.
+    virtual nlohmann::json listSkills() = 0;
+    virtual nlohmann::json showSkill(const std::string& name) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,
                                   PermissionScope scope) = 0;

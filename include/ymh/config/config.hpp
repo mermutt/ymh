@@ -148,6 +148,17 @@ struct McpSettings {
     bool                         allow_network_servers = false;
 };
 
+// [skills] — the skill subsystem (20 §5.6). Additive.
+struct SkillsSettings {
+    bool        enabled = true;
+    bool        expose_workspace = false;  // DANGER: exposes repo-authored skills
+    std::size_t max_skills = 256;
+    std::size_t max_skill_bytes = 64u * 1024u;
+    std::size_t max_description_bytes = 512;
+    std::size_t max_index_bytes = 8u * 1024u;
+    std::size_t max_frontmatter_bytes = 4u * 1024u;
+};
+
 struct Config {
     UiConfig           ui;
     AgentDefaults      agent;
@@ -156,6 +167,7 @@ struct Config {
     LoggingSettings    logging;
     LlmSettings        llm;
     McpSettings        mcp;
+    SkillsSettings     skills;
 };
 
 // Explicit layer sources. `global`/`workspace` may be empty to skip a layer.

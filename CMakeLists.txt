@@ -357,6 +357,34 @@ target_link_libraries(ymh_mcp
 )
 
 # ---------------------------------------------------------------------------
+# Skills library (component 20): discovery, frontmatter, the `skill` tool
+# ---------------------------------------------------------------------------
+
+add_library(ymh_skills STATIC
+    src/skills/skill_types.cpp
+    src/skills/frontmatter.cpp
+    src/skills/skill_catalog.cpp
+    src/skills/skill_tool.cpp
+)
+add_library(ymh::skills ALIAS ymh_skills)
+
+target_include_directories(ymh_skills
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_skills
+    PUBLIC
+        ymh::core
+        ymh::execution
+        ymh::tools
+    PRIVATE
+        ymh::config
+        ymh::warnings
+        nlohmann_json::nlohmann_json
+)
+
+# ---------------------------------------------------------------------------
 # Agent & loop library (component 06)
 # ---------------------------------------------------------------------------
 
@@ -454,6 +482,7 @@ target_link_libraries(ymh_wiring
         ymh::llm
         ymh::mcp
         ymh::policy
+        ymh::skills
     PRIVATE
         ymh::registry
         ymh::warnings
@@ -481,6 +510,7 @@ target_link_libraries(ymh_runtime
         ymh::mcp
         ymh::wiring
     PRIVATE
+        ymh::skills
         ymh::warnings
 )
 
@@ -563,6 +593,7 @@ target_link_libraries(ymh_host
         ymh::permission
         ymh::agent
     PRIVATE
+        ymh::skills
         nlohmann_json::nlohmann_json
         Threads::Threads
         ymh::warnings

@@ -504,6 +504,8 @@ inline constexpr std::string_view kPermissionDecide = "permission.decide";
 inline constexpr std::string_view kEventSubscribe   = "event.subscribe";
 inline constexpr std::string_view kEventUnsubscribe = "event.unsubscribe";
 inline constexpr std::string_view kSessionRename    = "session.rename";
+inline constexpr std::string_view kSkillsList       = "skills.list";
+inline constexpr std::string_view kSkillsShow       = "skills.show";
 } // namespace method
 
 // The full catalog, in the order of 05 §7. `host.hello` is first.

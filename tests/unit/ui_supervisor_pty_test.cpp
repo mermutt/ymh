@@ -608,4 +608,110 @@ TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
     guard.stop();
 }
 
+void write_skill_file(const std::filesystem::path& root, const std::string& name,
+                      const std::string& description) {
+    const std::filesystem::path directory = root / name;
+    std::filesystem::create_directories(directory);
+    std::ofstream(directory / "SKILL.md")
+        << "---\nname: " << name << "\ndescription: " << description << "\n---\nBody.\n";
+}
+
+TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
+    ShortTempRoot root("ymh_pty_skills");
+    const std::filesystem::path state = root.state_dir();
+    const std::filesystem::path config = root.path() / "config";
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    write_skill_file(config / "ymh" / "skills", "git-commit", "Write a conventional commit.");
+    const std::filesystem::path workspace = root.path() / "skills-ws";
+    std::filesystem::create_directories(workspace);
+    write_skill_file(workspace / ".ymh" / "skills", "repo-conventions", "Repo conventions.");
+    const std::filesystem::path broken = workspace / ".ymh" / "skills" / "broken";
+    std::filesystem::create_directories(broken);
+    std::ofstream(broken / "SKILL.md") << "name: broken\ndescription: no fence\n";
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "skills-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["XDG_CONFIG_HOME"] = config.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::size_t completion_mark = child.raw_size();
+    child.write("/sk\t");
+    ASSERT_TRUE(child.wait_for_since(completion_mark, "/skill", 10s)) << child.text();
+    child.write("\x15");
+
+    const std::size_t listing_mark = child.raw_size();
+    child.write("/skills\r");
+    ASSERT_TRUE(child.wait_for_since(listing_mark, "git-commit", 15s)) << child.text();
+    EXPECT_NE(child.text().find("[user]"), std::string::npos);
+    EXPECT_NE(child.text().find("repo-conventions"), std::string::npos);
+    EXPECT_NE(child.text().find("[workspace]"), std::string::npos);
+    EXPECT_NE(child.text().find("skills skipped"), std::string::npos);
+
+    child.terminate();
+    guard.stop();
+
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
+TEST(UiSupervisorPty, SkillsEmptyState) {
+    ShortTempRoot root("ymh_pty_skills_empty");
+    const std::filesystem::path state = root.state_dir();
+    const std::filesystem::path config = root.path() / "config";
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    std::filesystem::create_directories(config / "ymh" / "skills");
+    const std::filesystem::path workspace = root.path() / "empty-ws";
+    std::filesystem::create_directories(workspace / ".ymh" / "skills");
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "empty-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["XDG_CONFIG_HOME"] = config.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::size_t mark = child.raw_size();
+    child.write("/skills\r");
+    ASSERT_TRUE(child.wait_for_since(mark, "no skills found.", 15s)) << child.text();
+    EXPECT_NE(child.text().find("a skill file starts with"), std::string::npos);
+
+    child.terminate();
+    guard.stop();
+
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+}
+
 } // namespace

@@ -486,6 +486,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     runtime_options.root                  = canonical_root_;
     runtime_options.boot_id               = to_boot_id(boot_id_);
     runtime_options.attach_permission_gate = false;
+    runtime_options.attach_permission_resolver = true;
     runtime_options.store_factory         = config_.store_factory;
     runtime_options.provider_factory      = config_.provider_factory;
     runtime_options.executor              = executor_.get();

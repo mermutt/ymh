@@ -27,7 +27,15 @@ struct CommandContext {
     // Serializes the active session transcript to a markdown file; `args` is the
     // raw command-line tail (`[path] [--edit]`). Returns the notice to surface.
     std::function<std::string(const std::string&)> export_session;
+    // 20 §5.8: `/skills [--show NAME]` lists discovered skills (read-only).
+    std::function<void(const std::string& args)> skills;
+    // 20 §5.8: `/skill NAME` loads a skill's instructions into the active session.
+    std::function<void(const std::string& name)> skill;
 };
+
+// 20 §6.1: the non-static, callable-from-supervisor form of the file-local
+// `append_system`. Appends a System conversation entry and marks it dirty.
+void append_system_entry(UiModel& model, SessionUiState& state, std::string text);
 
 struct Command {
     std::string name;   // without the leading '/'

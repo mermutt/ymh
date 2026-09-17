@@ -152,6 +152,18 @@ McpConfig to_mcp_config(const Config& config) {
     return mcp;
 }
 
+SkillCatalogConfig to_skill_catalog_config(const Config& config) {
+    SkillCatalogConfig skills;
+    skills.enabled               = config.skills.enabled;
+    skills.expose_workspace      = config.skills.expose_workspace;
+    skills.max_skills            = config.skills.max_skills;
+    skills.max_skill_bytes       = config.skills.max_skill_bytes;
+    skills.max_description_bytes = config.skills.max_description_bytes;
+    skills.max_index_bytes       = config.skills.max_index_bytes;
+    skills.max_frontmatter_bytes = config.skills.max_frontmatter_bytes;
+    return skills;
+}
+
 AgentConfig to_agent_config(const Config& config) {
     AgentConfig agent;
     agent.model       = effective_model(config);
