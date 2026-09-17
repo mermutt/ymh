@@ -171,6 +171,9 @@ public:
                             const std::optional<std::string>& reason) override;
     std::string agentStatus(const SessionId& id) override;
 
+    nlohmann::json listSkills() override;
+    nlohmann::json showSkill(const std::string& name) override;
+
     bool decidePermission(const std::string& request_id, protocol::PermissionAnswer decision,
                           protocol::PermissionScope scope) override;
 

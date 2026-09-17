@@ -397,9 +397,34 @@ void apply_mcp(Config& config, const toml::table& table, const std::filesystem::
     }
 }
 
+void apply_skills(Config& config, const toml::table& table, const std::filesystem::path& source) {
+    reject_unknown(table, "skills",
+                   {"enabled", "expose_workspace", "max_skills", "max_skill_bytes",
+                    "max_description_bytes", "max_index_bytes", "max_frontmatter_bytes"},
+                   source);
+    SkillsSettings& skills = config.skills;
+    skills.enabled = read_value<bool>(table, "enabled", "skills", skills.enabled, source);
+    skills.expose_workspace = read_value<bool>(table, "expose_workspace", "skills",
+                                               skills.expose_workspace, source);
+    skills.max_skills = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_skills", "skills", static_cast<std::int64_t>(skills.max_skills), source));
+    skills.max_skill_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_skill_bytes", "skills", static_cast<std::int64_t>(skills.max_skill_bytes),
+        source));
+    skills.max_description_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_description_bytes", "skills",
+        static_cast<std::int64_t>(skills.max_description_bytes), source));
+    skills.max_index_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_index_bytes", "skills", static_cast<std::int64_t>(skills.max_index_bytes),
+        source));
+    skills.max_frontmatter_bytes = static_cast<std::size_t>(read_value<std::int64_t>(
+        table, "max_frontmatter_bytes", "skills",
+        static_cast<std::int64_t>(skills.max_frontmatter_bytes), source));
+}
+
 void apply_document(Config& config, const toml::table& table, const std::filesystem::path& source) {
     reject_unknown(table, "",
-                   {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp"},
+                   {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills"},
                    source);
 
     const auto section = [&](std::string_view name) -> const toml::table* {
@@ -434,6 +459,9 @@ void apply_document(Config& config, const toml::table& table, const std::filesys
     }
     if (const toml::table* mcp = section("mcp"); mcp != nullptr) {
         apply_mcp(config, *mcp, source);
+    }
+    if (const toml::table* skills = section("skills"); skills != nullptr) {
+        apply_skills(config, *skills, source);
     }
 }
 
@@ -685,6 +713,29 @@ void apply_env_overrides(Config& config) {
     }
     if (const auto value = env_value("YMH_LLM_LOG_PROMPTS")) {
         config.logging.log_prompts = truthy(*value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_ENABLED")) {
+        config.skills.enabled = truthy(*value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_EXPOSE_WORKSPACE")) {
+        config.skills.expose_workspace = truthy(*value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_MAX_SKILLS")) {
+        config.skills.max_skills = parse_size("YMH_SKILLS_MAX_SKILLS", *value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_MAX_SKILL_BYTES")) {
+        config.skills.max_skill_bytes = parse_size("YMH_SKILLS_MAX_SKILL_BYTES", *value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_MAX_DESCRIPTION_BYTES")) {
+        config.skills.max_description_bytes =
+            parse_size("YMH_SKILLS_MAX_DESCRIPTION_BYTES", *value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_MAX_INDEX_BYTES")) {
+        config.skills.max_index_bytes = parse_size("YMH_SKILLS_MAX_INDEX_BYTES", *value);
+    }
+    if (const auto value = env_value("YMH_SKILLS_MAX_FRONTMATTER_BYTES")) {
+        config.skills.max_frontmatter_bytes =
+            parse_size("YMH_SKILLS_MAX_FRONTMATTER_BYTES", *value);
     }
 }
 

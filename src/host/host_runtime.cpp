@@ -22,6 +22,7 @@
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
+#include "ymh/skills/skill_catalog.hpp"
 #include "ymh/transport/protocol_server.hpp"
 
 namespace ymh {
@@ -188,6 +189,44 @@ std::string mcp_status_detail(const Event& event) {
         detail.resize(256);
     }
     return detail;
+}
+
+nlohmann::json skill_list_json(const SkillCatalog& catalog) {
+    nlohmann::json skills = nlohmann::json::array();
+    for (const Skill& skill : catalog.all()) {
+        skills.push_back(nlohmann::json{{"name", skill.meta.name.value},
+                                        {"description", skill.meta.description},
+                                        {"trust", std::string{skill_trust_name(skill.trust)}},
+                                        {"source", std::string{skill_source_name(skill.source)}},
+                                        {"version", skill.meta.version},
+                                        {"tags", skill.meta.tags},
+                                        {"allowed_tools", skill.meta.allowed_tools}});
+    }
+    nlohmann::json warnings = nlohmann::json::array();
+    for (const SkillLoadWarning& warning : catalog.warnings()) {
+        warnings.push_back(nlohmann::json{{"file", warning.file.string()},
+                                          {"reason", warning.reason}});
+    }
+    const bool truncated =
+        catalog.index_section().find("more skills not shown") != std::string::npos;
+    const std::string note = catalog.config().expose_workspace
+                                 ? "workspace skills are exposed to the model"
+                                 : std::string{};
+    return nlohmann::json{{"skills", std::move(skills)},
+                          {"truncated", truncated},
+                          {"warnings", std::move(warnings)},
+                          {"note", note}};
+}
+
+nlohmann::json skill_show_json(const Skill& skill) {
+    return nlohmann::json{{"name", skill.meta.name.value},
+                          {"description", skill.meta.description},
+                          {"trust", std::string{skill_trust_name(skill.trust)}},
+                          {"source", std::string{skill_source_name(skill.source)}},
+                          {"version", skill.meta.version},
+                          {"tags", skill.meta.tags},
+                          {"allowed_tools", skill.meta.allowed_tools},
+                          {"body", skill.body}};
 }
 
 } // namespace
@@ -768,6 +807,21 @@ bool HostRuntime::decidePermission(const std::string& request_id,
         params.decision = decision;
         params.scope = scope;
         return broker_.onDecision(params);
+    });
+}
+
+nlohmann::json HostRuntime::listSkills() {
+    return translate([&]() -> nlohmann::json { return skill_list_json(runtime_.skills()); });
+}
+
+nlohmann::json HostRuntime::showSkill(const std::string& name) {
+    return translate([&]() -> nlohmann::json {
+        const Skill* skill = runtime_.skills().find(name);
+        if (skill == nullptr) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        return skill_show_json(*skill);
     });
 }
 

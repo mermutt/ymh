@@ -15,6 +15,7 @@
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
+#include "ymh/skills/skill_catalog.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace ymh {
@@ -25,6 +26,9 @@ namespace ymh {
 
 // 15 §4.1/§5.6: map the layered `[mcp]` section onto the adapter config.
 [[nodiscard]] McpConfig to_mcp_config(const Config& config);
+
+// 20 §5.6: map the layered `[skills]` section onto the catalog config.
+[[nodiscard]] SkillCatalogConfig to_skill_catalog_config(const Config& config);
 
 // `system_prompt` defaults to `default_system_prompt()` when the config's
 // `agent.system_prompt` is empty.

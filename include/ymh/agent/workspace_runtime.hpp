@@ -45,6 +45,7 @@ class LLMProvider;
 class LLMPool;
 class SessionPersistence;
 class Executor;
+class SkillCatalog;
 struct AgentConfig;
 struct LLMProviderConfig;
 struct SessionId;
@@ -74,6 +75,13 @@ struct WorkspaceRuntimeOptions {
     // (the interactive TUI path). When false, the loop consults the policy
     // verdict directly and an `Ask` fails closed (the headless path).
     bool attach_permission_gate = false;
+
+    // 20 §5.5 (round-2 H1): the daemon installs a `PermissionBroker`-backed
+    // resolver immediately after building the runtime, so the skill tool's
+    // usability predicate must know a prompt path will exist even though
+    // `attach_permission_gate` is false. Set true only where a resolver is
+    // installed (`workspace_host.cpp`); headless leaves it false.
+    bool attach_permission_resolver = false;
 
     // Test hook (mirrors `HeadlessOptions::provider_factory`): when set and it
     // returns a provider, that provider is used instead of resolving one from
@@ -131,6 +139,8 @@ public:
     [[nodiscard]] ToolRegistry&         tools() noexcept;
     [[nodiscard]] PermissionPolicy&     policy() noexcept;
     [[nodiscard]] PermissionGate&       gate() noexcept;
+    [[nodiscard]] SkillCatalog&         skills() noexcept;
+    [[nodiscard]] const SkillCatalog&   skills() const noexcept;
     [[nodiscard]] LLMProvider*          provider() noexcept;
     [[nodiscard]] LLMPool&              pool() noexcept;
     [[nodiscard]] ContextAssembler&     context() noexcept;
@@ -160,5 +170,11 @@ private:
 // Convenience factory over `WorkspaceRuntime::create`.
 [[nodiscard]] std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError>
 make_workspace_runtime(WorkspaceRuntimeOptions options);
+
+// 20 §5.5 (SK17): whether the model-invoked `skill` tool is usable in a runtime
+// with the given policy and permission path. `Deny` is always unusable; `Allow`
+// needs no prompt path; `Ask` needs one (the M1 gate or the M2 broker resolver).
+[[nodiscard]] bool skill_tool_usable(const PermissionPolicy& policy,
+                                     bool                   prompt_path_available);
 
 } // namespace ymh

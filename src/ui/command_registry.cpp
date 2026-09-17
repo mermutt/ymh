@@ -24,12 +24,7 @@ void append_system(CommandContext& context, std::string text) {
     if (context.session == nullptr) {
         return;
     }
-    ConversationEntry entry;
-    entry.role = ConversationRole::System;
-    entry.text = std::move(text);
-    context.session->conversation.entries.push_back(std::move(entry));
-    context.session->scroll.onNewContent();
-    context.model.dirty.mark(context.session->id, UiDirtyFlag::Conversation);
+    append_system_entry(context.model, *context.session, std::move(text));
 }
 
 std::string command_names(const CommandRegistry& registry) {
@@ -44,6 +39,15 @@ std::string command_names(const CommandRegistry& registry) {
 }
 
 } // namespace
+
+void append_system_entry(UiModel& model, SessionUiState& state, std::string text) {
+    ConversationEntry entry;
+    entry.role = ConversationRole::System;
+    entry.text = std::move(text);
+    state.conversation.entries.push_back(std::move(entry));
+    state.scroll.onNewContent();
+    model.dirty.mark(state.id, UiDirtyFlag::Conversation);
+}
 
 void CommandRegistry::add(Command command) {
     commands_.push_back(std::move(command));
@@ -186,6 +190,20 @@ CommandRegistry CommandRegistry::builtin() {
             const std::string notice = context.export_session(args);
             if (!notice.empty()) {
                 append_system(context, notice);
+            }
+        }});
+    registry.add(Command{
+        "skills", "list discovered skills (--show NAME for detail)",
+        [](CommandContext& context, const std::string& args) {
+            if (context.skills) {
+                context.skills(args);
+            }
+        }});
+    registry.add(Command{
+        "skill", "load a skill's instructions into context",
+        [](CommandContext& context, const std::string& name) {
+            if (context.skill) {
+                context.skill(name);
             }
         }});
     registry.add(Command{

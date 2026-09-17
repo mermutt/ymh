@@ -127,6 +127,101 @@ std::optional<std::string> tty_name() {
     return std::string{name};
 }
 
+std::string trim_command_arg(const std::string& value) {
+    std::size_t begin = 0;
+    while (begin < value.size() && (value[begin] == ' ' || value[begin] == '\t')) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\t')) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::string collapse_to_single_line(std::string value) {
+    for (char& character : value) {
+        if (character == '\n' || character == '\r' || character == '\t') {
+            character = ' ';
+        }
+    }
+    return value;
+}
+
+std::string pad_field(const std::string& value, std::size_t width) {
+    if (value.size() >= width) {
+        return value;
+    }
+    return value + std::string(width - value.size(), ' ');
+}
+
+std::string join_json_strings(const nlohmann::json& array) {
+    std::string joined;
+    for (const auto& item : array) {
+        if (!item.is_string()) {
+            continue;
+        }
+        if (!joined.empty()) {
+            joined += ", ";
+        }
+        joined += item.get<std::string>();
+    }
+    return joined;
+}
+
+std::string format_skills_listing(const nlohmann::json& result) {
+    const nlohmann::json skills = result.value("skills", nlohmann::json::array());
+    const nlohmann::json warnings = result.value("warnings", nlohmann::json::array());
+    const std::string    note = result.value("note", std::string{});
+    std::string          out;
+    if (!note.empty()) {
+        out += "note: " + note + "\n";
+    }
+    if (!skills.is_array() || skills.empty()) {
+        out += "no skills found.\n";
+        out += "add a skill at <workspace>/.ymh/skills/<name>/SKILL.md\n";
+        out += "or at ~/.config/ymh/skills/<name>/SKILL.md (trusted).\n";
+        out += "a skill file starts with '---', then 'name:' and 'description:'.\n";
+    } else {
+        out += "skills (" + std::to_string(skills.size()) + "):\n";
+        for (const auto& skill : skills) {
+            const std::string name = skill.value("name", std::string{});
+            const std::string trust = skill.value("trust", std::string{});
+            const std::string description =
+                collapse_to_single_line(skill.value("description", std::string{}));
+            const std::string tier = trust == "trusted" ? "[user]" : "[workspace]";
+            out += "  " + pad_field(name, 18) + pad_field(tier, 13) + description + "\n";
+        }
+        out += "activate with /skill <name>; detail with /skills --show <name>\n";
+    }
+    if (warnings.is_array() && !warnings.empty()) {
+        out += std::to_string(warnings.size()) + " skills skipped:\n";
+        for (const auto& warning : warnings) {
+            out += "  " + warning.value("file", std::string{}) + ": " +
+                   warning.value("reason", std::string{}) + "\n";
+        }
+    }
+    return out;
+}
+
+std::string format_skill_detail(const nlohmann::json& result) {
+    std::string out;
+    out += "skill " + result.value("name", std::string{}) + "\n";
+    out += "  trust:   " + result.value("trust", std::string{}) + "\n";
+    out += "  source:  " + result.value("source", std::string{}) + "\n";
+    out += "  version: " + std::to_string(result.value("version", 0)) + "\n";
+    const nlohmann::json tags = result.value("tags", nlohmann::json::array());
+    if (tags.is_array() && !tags.empty()) {
+        out += "  tags:    " + join_json_strings(tags) + "\n";
+    }
+    const nlohmann::json tools = result.value("allowed_tools", nlohmann::json::array());
+    if (tools.is_array() && !tools.empty()) {
+        out += "  allowed-tools: " + join_json_strings(tools) + "\n";
+    }
+    out += "\n" + result.value("body", std::string{});
+    return out;
+}
+
 class SupervisorApp final : public UiController {
 public:
     explicit SupervisorApp(SupervisorRunOptions options)
@@ -898,6 +993,115 @@ private:
         return result;
     }
 
+    SessionUiState* active_session_of(const WorkspaceId& id) {
+        const auto it = model_.workspaces.find(id);
+        if (it == model_.workspaces.end()) {
+            return nullptr;
+        }
+        return model_.session(it->second.activeSessionId);
+    }
+
+    void request_skills(const std::string& args) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+            return;
+        }
+        const WorkspaceId id = workspace->id;
+        const std::string trimmed = trim_command_arg(args);
+        if (trimmed.rfind("--show", 0) == 0) {
+            const std::string name = trim_command_arg(trimmed.substr(6));
+            if (name.empty()) {
+                if (SessionUiState* state = model_.session(workspace->activeSessionId);
+                    state != nullptr) {
+                    append_system_entry(model_, *state, "usage: /skills --show <name>");
+                }
+                return;
+            }
+            submit_to(id, std::string(protocol::method::kSkillsShow),
+                      nlohmann::json{{"name", name}},
+                      [this, id, name](SupervisorReply reply) {
+                          enqueue([this, id, name, reply = std::move(reply)] {
+                              append_skill_detail(id, name, reply);
+                          });
+                      });
+            return;
+        }
+        submit_to(id, std::string(protocol::method::kSkillsList), nlohmann::json::object(),
+                  [this, id](SupervisorReply reply) {
+                      enqueue([this, id, reply = std::move(reply)] {
+                          append_skills_reply(id, reply);
+                      });
+                  });
+    }
+
+    void append_skills_reply(const WorkspaceId& id, const SupervisorReply& reply) {
+        SessionUiState* state = active_session_of(id);
+        if (state == nullptr) {
+            return;
+        }
+        if (!reply.ok) {
+            append_system_entry(model_, *state,
+                                "skills: " + (reply.error.empty() ? std::string{"request failed"}
+                                                                  : reply.error));
+            return;
+        }
+        append_system_entry(model_, *state, format_skills_listing(reply.result));
+    }
+
+    void append_skill_detail(const WorkspaceId& id, const std::string& name,
+                             const SupervisorReply& reply) {
+        SessionUiState* state = active_session_of(id);
+        if (state == nullptr) {
+            return;
+        }
+        if (!reply.ok) {
+            append_system_entry(model_, *state, "skills: unknown skill '" + name + "'");
+            return;
+        }
+        append_system_entry(model_, *state, format_skill_detail(reply.result));
+    }
+
+    void request_skill(const std::string& name) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+            return;
+        }
+        const std::string trimmed = trim_command_arg(name);
+        if (trimmed.empty()) {
+            if (SessionUiState* state = model_.session(workspace->activeSessionId);
+                state != nullptr) {
+                append_system_entry(model_, *state, "usage: /skill <name>");
+            }
+            return;
+        }
+        const WorkspaceId id = workspace->id;
+        const SessionId   session = workspace->activeSessionId;
+        submit_to(id, std::string(protocol::method::kSkillsShow), nlohmann::json{{"name", trimmed}},
+                  [this, id, session, trimmed](SupervisorReply reply) {
+                      enqueue([this, id, session, trimmed, reply = std::move(reply)] {
+                          activate_skill(id, session, trimmed, reply);
+                      });
+                  });
+    }
+
+    void activate_skill(const WorkspaceId& id, const SessionId& session,
+                        const std::string& name, const SupervisorReply& reply) {
+        if (!reply.ok) {
+            if (SessionUiState* state = model_.session(session); state != nullptr) {
+                append_system_entry(model_, *state, "skill: unknown skill '" + name + "'");
+            }
+            return;
+        }
+        const std::string actual = reply.result.value("name", name);
+        const std::string body = reply.result.value("body", std::string{});
+        nlohmann::json    context{{"role", "system"},
+                                  {"text", "[skill: " + actual + "]\n" + body},
+                                  {"starts_turn", false}};
+        submit_to(id, std::string(protocol::method::kAgentInject),
+                  nlohmann::json{{"session", session.value}, {"context", std::move(context)}},
+                  nullptr);
+    }
+
     bool dispatch_command(const std::string& line) {
         CommandContext context{model_};
         context.session = active();
@@ -937,6 +1141,8 @@ private:
                       });
         };
         context.export_session = [this](const std::string& args) { return export_session(args); };
+        context.skills = [this](const std::string& args) { request_skills(args); };
+        context.skill = [this](const std::string& name) { request_skill(name); };
         return registry_.dispatch(line, context);
     }
 
