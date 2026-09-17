@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -12,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -25,8 +27,10 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/registry/registry.hpp"
+#include "ymh/session/session_persistence.hpp"
 #include "ymh/transport/protocol.hpp"
 #include "ymh/ui/command_registry.hpp"
+#include "ymh/ui/session_export.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
 #include "ymh/ui/terminal_layer.hpp"
@@ -87,6 +91,32 @@ bool is_shift_up(const ftxui::Event& event) {
 
 bool is_shift_down(const ftxui::Event& event) {
     return event.input() == "\x1b[1;2B";
+}
+
+struct ExportRequest {
+    std::string path;
+    bool        edit = false;
+    std::string error;
+};
+
+ExportRequest parse_export_request(const std::string& args) {
+    ExportRequest    request;
+    std::istringstream stream(args);
+    std::string        token;
+    while (stream >> token) {
+        if (token == "--edit" || token == "-e") {
+            request.edit = true;
+        } else if (!token.empty() && token.front() == '-') {
+            if (request.error.empty()) {
+                request.error = "unknown option: " + token;
+            }
+        } else if (request.path.empty()) {
+            request.path = token;
+        } else if (request.error.empty()) {
+            request.error = "unexpected argument: " + token;
+        }
+    }
+    return request;
 }
 
 std::optional<std::string> tty_name() {
@@ -792,6 +822,82 @@ private:
         }
     }
 
+    int edit_export_file(const std::filesystem::path& file) {
+        if (screen_ == nullptr) {
+            return -1;
+        }
+        int status = -1;
+        screen_->WithRestoredIO(
+            [&status, &file] { status = run_editor(file, editor_from_environment()); })();
+        return status;
+    }
+
+    // /export: reads the active session's durable event log from the workspace
+    // store, renders markdown, writes it under the workspace root, and optionally
+    // opens the editor with the terminal temporarily restored.
+    std::string export_session(const std::string& args) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+            return "export: no active session";
+        }
+        if (workspace->cwd.empty()) {
+            return "export: workspace path is unavailable";
+        }
+        const ExportRequest request = parse_export_request(args);
+        if (!request.error.empty()) {
+            return "export: " + request.error;
+        }
+
+        const std::filesystem::path root{workspace->cwd};
+        PersistenceConfig           config;
+        config.db_path   = root / ".ymh" / "sessions.db";
+        config.lock_path = root / ".ymh" / "sessions.lock";
+
+        const SessionId                session = workspace->activeSessionId;
+        std::optional<SessionHeader>   header;
+        EventRange                     events;
+        try {
+            std::unique_ptr<SessionPersistence> store = SessionPersistence::openReadOnly(config);
+            header = store->load(session);
+            if (header.has_value()) {
+                events = store->read(session);
+            }
+        } catch (const std::exception& error) {
+            return std::string{"export: cannot read session log: "} + error.what();
+        }
+        if (!header.has_value()) {
+            return "export: unknown session " + session.value;
+        }
+
+        std::filesystem::path output;
+        try {
+            LocalEnvironment environment{root};
+            output = resolve_export_path(environment, request.path, header->title,
+                                         std::time(nullptr));
+        } catch (const std::exception& error) {
+            return std::string{"export: "} + error.what();
+        }
+
+        const std::string markdown = render_session_markdown(*header, events);
+        if (!write_export_file(output, markdown)) {
+            return "export: cannot write " + output.string();
+        }
+
+        std::error_code       relative_error;
+        const std::filesystem::path shown = std::filesystem::relative(output, root, relative_error);
+        std::string           result = "exported session to " +
+                                       (relative_error ? output.string() : shown.string());
+        if (request.edit) {
+            const int status = edit_export_file(output);
+            if (status != 0) {
+                result += " (editor exited with status " + std::to_string(status) + ")";
+            } else {
+                result += " (edited)";
+            }
+        }
+        return result;
+    }
+
     bool dispatch_command(const std::string& line) {
         CommandContext context{model_};
         context.session = active();
@@ -807,6 +913,7 @@ private:
             submit_to(workspace->id, std::string(protocol::method::kSessionCompact),
                       std::move(params), nullptr);
         };
+        context.export_session = [this](const std::string& args) { return export_session(args); };
         return registry_.dispatch(line, context);
     }
 
