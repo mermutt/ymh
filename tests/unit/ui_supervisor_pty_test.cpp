@@ -22,6 +22,7 @@
 
 #include "support/host_harness.hpp"
 #include "support/short_temp.hpp"
+#include "ymh/core/ownership.hpp"
 #include "ymh/registry/registry.hpp"
 
 namespace {
@@ -470,6 +471,118 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
             << "cancel must not deregister the supervisor";
     }
 
+    const std::size_t confirm_mark = child.raw_size();
+    child.write("\x04");
+    ASSERT_TRUE(child.wait_for_since(confirm_mark, "Terminate and exit", 15s)) << child.text();
+    child.write("y");
+    EXPECT_TRUE(child.wait_exit(25s)) << child.text();
+
+    for (int attempt = 0; attempt < 400; ++attempt) {
+        if (host_processes(&workspace_id.value).empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+    EXPECT_TRUE(host_processes(&workspace_id.value).empty())
+        << "confirm must tear the daemon down";
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(registry_config);
+        EXPECT_TRUE(registry->listSupervisors().empty())
+            << "confirm must deregister the supervisor";
+    }
+
+    guard.stop();
+}
+
+// 16 §4.1/O10 regression. The daemon serves `other_fresh_owners` from its
+// watchdog-cached snapshot, which lags the registry by up to one
+// `kOwnerWatchdogInterval`. A peer that has just exited cleanly is still listed
+// in that cache; the last supervisor must not mistake the ghost for a live owner
+// and exit without the §4.2 prompt or the §4.3 teardown. The existing tests never
+// exercise a stale owner snapshot, so the silent exit went unnoticed.
+TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
+    ShortTempRoot root("ymh_pty_ghost_owner");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "ghost-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "ghost-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for("active ·", 10s)) << child.text();
+    ASSERT_FALSE(host_processes(&workspace_id.value).empty())
+        << "supervisor did not spawn its daemon";
+
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    };
+    const SupervisorId ghost{"ghost-peer-0000-0000"};
+
+    // A fresh peer row lives long enough for the daemon's watchdog to publish it
+    // into its owner snapshot.
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        SupervisorRow row;
+        row.id = ghost;
+        row.pid = ::getpid();
+        row.bootId = "ghost-boot";
+        row.startedAtMs = now_ms();
+        row.heartbeatMs = now_ms();
+        row.tty = "/dev/pts/0";
+        registry->registerSupervisor(row);
+    }
+    std::this_thread::sleep_for(kOwnerWatchdogInterval + 700ms);
+
+    // The peer cleanly exits (deregisters), but the daemon's cached snapshot still
+    // lists it. This is the last supervisor, so exiting MUST prompt.
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        EXPECT_TRUE(registry->deregisterSupervisor(ghost));
+    }
+
+    const std::size_t prompt_mark = child.raw_size();
+    child.write("\x04");
+    ASSERT_TRUE(child.wait_for_since(prompt_mark, "Terminate and exit", 15s)) << child.text();
+    ASSERT_TRUE(child.wait_for_since(prompt_mark, "1 workspace daemon", 5s)) << child.text();
+
+    // Cancel keeps both the daemon and this supervisor's row (§4.2).
+    const std::size_t cancel_mark = child.raw_size();
+    child.write("n");
+    ASSERT_TRUE(child.wait_for_since(cancel_mark, "Type a message and press Enter", 10s))
+        << child.text();
+    EXPECT_FALSE(host_processes(&workspace_id.value).empty())
+        << "cancel must leave the daemon running";
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(registry_config);
+        EXPECT_EQ(registry->listSupervisors().size(), 1u)
+            << "cancel must not deregister the supervisor";
+    }
+
+    // Confirm tears the daemon down and exits (§4.3).
     const std::size_t confirm_mark = child.raw_size();
     child.write("\x04");
     ASSERT_TRUE(child.wait_for_since(confirm_mark, "Terminate and exit", 15s)) << child.text();
