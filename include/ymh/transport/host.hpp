@@ -55,6 +55,13 @@ struct SessionResumed {
     std::string status;   // Idle | Running (01 §9.8)
 };
 
+// 19 §5.4: the `session.rename` result. Named `...Result` to avoid colliding
+// with `payload::SessionRenamed` (the durable event payload).
+struct SessionRenamedResult {
+    SessionId   session;
+    std::string title;
+};
+
 class TransportHost {
 public:
     virtual ~TransportHost() = default;
@@ -78,6 +85,7 @@ public:
     virtual SessionCreated createSession(const nlohmann::json& params) = 0;
     virtual SessionResumed resumeSession(const SessionId& id) = 0;
     virtual SessionCreated forkSession(const SessionId& id, std::int64_t seed_length) = 0;
+    virtual SessionRenamedResult renameSession(const nlohmann::json& params) = 0;
     virtual void closeSession(const SessionId& id) = 0;
     virtual void deleteSession(const SessionId& id) = 0;
     virtual void activateSession(const SessionId& id) = 0;

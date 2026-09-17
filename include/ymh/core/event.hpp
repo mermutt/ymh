@@ -68,6 +68,7 @@ enum class EventType : std::uint16_t {
     TokenUsage,          // wire: usage
     SubagentSpawned,     // wire: subagent/spawned
     SubagentFanIn,       // wire: subagent/fan_in
+    SessionRenamed,      // wire: session/renamed  (19 §5.1)
     // Live-only (15 §4.7, AM-1): never in the durable SessionEventMap, never
     // appended to the session log. Delivered to global EventBus subscribers.
     McpServerStatusChanged,  // wire: mcp/server_status_changed

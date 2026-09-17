@@ -162,6 +162,21 @@ CommandRegistry CommandRegistry::builtin() {
             append_system(context, "compaction requested");
         }});
     registry.add(Command{
+        "rename", "rename the current session",
+        [](CommandContext& context, const std::string& args) {
+            if (context.session == nullptr) {
+                append_system(context, "no active session");
+                return;
+            }
+            if (args.empty()) {
+                append_system(context, "usage: /rename <title>");
+                return;
+            }
+            if (context.rename_session) {
+                context.rename_session(args);
+            }
+        }});
+    registry.add(Command{
         "export", "write the session transcript to a markdown file (--edit to open it)",
         [](CommandContext& context, const std::string& args) {
             if (!context.export_session) {

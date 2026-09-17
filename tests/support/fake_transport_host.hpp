@@ -172,6 +172,15 @@ public:
         require_session(id);
     }
 
+    protocol::SessionRenamedResult renameSession(const nlohmann::json& params) override {
+        calls.push_back("session.rename");
+        const SessionId id{params.value("session", std::string{})};
+        const std::string title = params.value("title", std::string{});
+        require_session(id);
+        titles_[id.value] = title;
+        return protocol::SessionRenamedResult{id, title};
+    }
+
     void agentPrompt(const SessionId& id, const nlohmann::json& message) override {
         calls.push_back("agent.prompt");
         require_session(id);

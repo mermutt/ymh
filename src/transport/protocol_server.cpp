@@ -397,6 +397,10 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             respond(conn, request.id,
                     nlohmann::json{{"session", created.session.value}, {"header", created.header}});
             onSessionCreated(created.session);
+        } else if (method_name == method::kSessionRename) {
+            const SessionRenamedResult renamed = host_.renameSession(request.params);
+            respond(conn, request.id,
+                    nlohmann::json{{"session", renamed.session.value}, {"title", renamed.title}});
         } else if (method_name == method::kSessionResume) {
             const SessionResumed resumed = host_.resumeSession(session_param(request.params));
             respond(conn, request.id,

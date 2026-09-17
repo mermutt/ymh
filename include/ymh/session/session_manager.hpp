@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +43,20 @@ public:
     SessionId resumeSession(const SessionId& id);
     SessionId forkSession(const SessionId& parent, std::size_t seedLength);
     SessionId replaySession(const SessionId& id);
+
+    // 19 §5.4: append a User rename. Loads the session if not resident (like
+    // forkSession). Validates `title` via normalize_title (RN8); throws
+    // std::invalid_argument on a bad title and UnknownSession when absent.
+    // LeaseLost / StoreError propagate from the store (RN13).
+    Sequence renameSession(const SessionId& id, std::string title);
+
+    // 19 §4.3: daemon-only. Appends SessionRenamed{origin=Auto} iff RN5/RN6
+    // hold and derive_auto_title yields a value; otherwise a no-op. Never
+    // throws for a suppressed name. May still throw LeaseLost/StoreError from
+    // the store append; the sole call site (HostRuntime::agentPrompt) swallows
+    // those so advisory auto-naming cannot fail the prompt (19 §4.3). Returns
+    // the assigned Sequence when an event was appended.
+    std::optional<Sequence> maybeAutoName(const SessionId& id, std::string_view firstUserText);
 
     void closeSession(const SessionId& id);
     void deleteSession(const SessionId& id);

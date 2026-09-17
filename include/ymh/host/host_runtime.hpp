@@ -156,6 +156,7 @@ public:
     protocol::SessionResumed resumeSession(const SessionId& id) override;
     protocol::SessionCreated forkSession(const SessionId& id,
                                          std::int64_t seed_length) override;
+    protocol::SessionRenamedResult renameSession(const nlohmann::json& params) override;
     void                     closeSession(const SessionId& id) override;
     void                     deleteSession(const SessionId& id) override;
     void                     activateSession(const SessionId& id) override;

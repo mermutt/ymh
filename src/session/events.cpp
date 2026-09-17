@@ -11,6 +11,7 @@ namespace {
 
 using payload::AssistantChunkKind;
 using payload::PermissionDecisionKind;
+using payload::RenameOrigin;
 using payload::SessionEndReason;
 using payload::SubagentOutcome;
 using payload::ToolOutcome;
@@ -109,6 +110,16 @@ AssistantChunkKind parse_chunk_kind(std::string_view value) {
     reject_enum("assistant chunk kind", value);
 }
 
+RenameOrigin parse_rename_origin(std::string_view value) {
+    if (value == "user") {
+        return RenameOrigin::User;
+    }
+    if (value == "auto") {
+        return RenameOrigin::Auto;
+    }
+    reject_enum("rename origin", value);
+}
+
 } // namespace
 
 std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept {
@@ -181,6 +192,16 @@ std::string_view assistant_chunk_kind_name(payload::AssistantChunkKind kind) noe
             return "text";
         case payload::AssistantChunkKind::Reasoning:
             return "reasoning";
+    }
+    return {};
+}
+
+std::string_view rename_origin_name(payload::RenameOrigin origin) noexcept {
+    switch (origin) {
+        case payload::RenameOrigin::User:
+            return "user";
+        case payload::RenameOrigin::Auto:
+            return "auto";
     }
     return {};
 }
@@ -447,6 +468,18 @@ void from_json(const nlohmann::json& json, SubagentFanIn& value) {
     value.subagent.value = json.at("subagent").get<std::string>();
     value.outcome        = parse_subagent_outcome(json.at("outcome").get<std::string>());
     value.summary        = json.value("summary", std::string{});
+}
+
+void to_json(nlohmann::json& json, const SessionRenamed& value) {
+    json = nlohmann::json{
+        {"title", value.title},
+        {"origin", std::string{rename_origin_name(value.origin)}},
+    };
+}
+
+void from_json(const nlohmann::json& json, SessionRenamed& value) {
+    value.title  = json.at("title").get<std::string>();
+    value.origin = parse_rename_origin(json.at("origin").get<std::string>());
 }
 
 } // namespace payload

@@ -486,6 +486,14 @@ public:
                 insert.bindText(5, event.payload.dump());
                 insert.step();
                 sequences.push_back(static_cast<Sequence>(sqlite3_last_insert_rowid(db)));
+
+                // 19 §5.2: materialize sessions.title in the same transaction.
+                if (event.type == EventType::SessionRenamed) {
+                    Statement set_title{db, "UPDATE sessions SET title = ? WHERE id = ?"};
+                    set_title.bindText(1, event.payload.get<payload::SessionRenamed>().title);
+                    set_title.bindText(2, id.value);
+                    set_title.step();
+                }
             }
 
             Statement update_header{db, "UPDATE sessions SET updated_at = ? WHERE id = ?"};

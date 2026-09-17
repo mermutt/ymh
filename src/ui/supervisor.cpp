@@ -913,6 +913,29 @@ private:
             submit_to(workspace->id, std::string(protocol::method::kSessionCompact),
                       std::move(params), nullptr);
         };
+        context.rename_session = [this](const std::string& title) {
+            WorkspaceModel* workspace = model_.activeWorkspace();
+            if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+                return;
+            }
+            const SessionId session = workspace->activeSessionId;
+            // 19 §6.1 (M1): the reply surfaces a rejected rename. It runs on the
+            // pump thread, so it marshals to the UI thread via enqueue and
+            // reuses the ErrorOccurred path, which appends a Role::System entry.
+            // Success is silent: session/renamed updates the title via the
+            // stream (RN9/RN11).
+            submit_to(workspace->id, std::string(protocol::method::kSessionRename),
+                      nlohmann::json{{"session", session.value}, {"title", title}},
+                      [this, session](SupervisorReply reply) {
+                          if (reply.ok) {
+                              return;
+                          }
+                          enqueue([this, session, error = reply.error] {
+                              model_.apply(UiEvent{ErrorOccurred{
+                                  session, "rename failed: " + error}});
+                          });
+                      });
+        };
         context.export_session = [this](const std::string& args) { return export_session(args); };
         return registry_.dispatch(line, context);
     }

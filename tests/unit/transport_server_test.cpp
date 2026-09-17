@@ -354,6 +354,55 @@ TEST(TransportServer, SessionCreateAndAgentPrompt) {
     EXPECT_EQ(harness.host.last_message->at("text").get<std::string>(), "hi");
 }
 
+TEST(TransportServer, SessionRenameReturnsEchoAndRecordsCall) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionRename,
+                                         nlohmann::json{{"session", session.value},
+                                                        {"title", "fix the flaky PTY test"}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].at("result").at("session").get<std::string>(), session.value);
+    EXPECT_EQ(frames[0].at("result").at("title").get<std::string>(), "fix the flaky PTY test");
+    ASSERT_EQ(harness.host.calls.size(), 1u);
+    EXPECT_EQ(harness.host.calls[0], "session.rename");
+    ASSERT_EQ(harness.host.listSessions().size(), 1u);
+    EXPECT_EQ(harness.host.listSessions()[0].title, "fix the flaky PTY test");
+}
+
+TEST(TransportServer, SessionRenameUnknownSessionIsTypedError) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionRename,
+                                         nlohmann::json{{"session", "missing"},
+                                                        {"title", "nope"}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]),
+              protocol::code_value(protocol::AppCode::UnknownSession));
+}
+
+TEST(TransportServer, SessionRenameIsAllowedForAutomation) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Automation, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionRename,
+                                         nlohmann::json{{"session", session.value},
+                                                        {"title", "auto ok"}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_FALSE(frames[0].contains("error"));
+    EXPECT_EQ(frames[0].at("result").at("title").get<std::string>(), "auto ok");
+}
+
 TEST(TransportServer, DeleteRequiresConfirm) {
     Harness harness;
     Peer* peer = harness.open();

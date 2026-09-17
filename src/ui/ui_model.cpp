@@ -686,6 +686,8 @@ void UiModel::apply(const UiEvent& event) {
                 }
                 state.conversation.entries.push_back(std::move(entry));
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
+            } else if constexpr (std::is_same_v<T, SessionTitleChanged>) {
+                setCellTitle(state.workspace, e.session, e.title);
             }
             refreshCell(e.session);
         },
