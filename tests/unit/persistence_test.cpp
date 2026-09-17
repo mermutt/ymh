@@ -146,6 +146,16 @@ Event make_event_with_id(const SessionId& session, const EventId& id) {
     return encode(typed);
 }
 
+Event make_rename(const SessionId& session, const std::string& title,
+                  payload::RenameOrigin origin = payload::RenameOrigin::User) {
+    TypedEvent<payload::SessionRenamed> typed;
+    typed.id         = make_event_id();
+    typed.session_id = session;
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload::SessionRenamed{title, origin};
+    return encode(typed);
+}
+
 TEST(Persistence, OpenAppliesSchemaAndPragmas) {
     TempWorkspace workspace;
     auto          store = SessionPersistence::open(workspace.config());
@@ -552,6 +562,117 @@ TEST(BootNonce, MintIsUuidV4AndAdaptersRoundTrip) {
     EXPECT_EQ(host.value, boot.value);
     EXPECT_EQ(to_boot_id(host).value, boot.value);
     EXPECT_EQ(to_protocol_boot_id(host).value, boot.value);
+}
+
+TEST(PersistenceRename, AppendMaterializesTitleAndAdvancesUpdatedAt) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    const auto timestamp = std::chrono::system_clock::time_point{std::chrono::milliseconds{777000}};
+    Event rename = make_rename(header.id, "renamed");
+    rename.timestamp = timestamp;
+    store->append(header.id, rename);
+
+    const auto loaded = store->load(header.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->title, "renamed");
+    EXPECT_EQ(loaded->updatedAt, 777000);
+    EXPECT_EQ(store->list()[0].title, "renamed");
+
+    auto read_only = SessionPersistence::openReadOnly(workspace.config());
+    const auto reopened = read_only->load(header.id);
+    ASSERT_TRUE(reopened.has_value());
+    EXPECT_EQ(reopened->title, "renamed");
+}
+
+TEST(PersistenceRename, ReloadReconcilesHeaderFromOwnLogButNotColumn) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    store->append(header.id, make_rename(header.id, "from-own-log"));
+
+    RawDb raw(workspace.db_path());
+    ASSERT_EQ(raw.exec("UPDATE sessions SET title = 'stale' WHERE id = '" + header.id.value + "'"),
+              SQLITE_OK);
+
+    EventBus bus;
+    SessionHeader loaded = *store->load(header.id);
+    ASSERT_EQ(loaded.title, "stale");
+    Session session = Session::resume(loaded, *store, bus);
+    EXPECT_EQ(session.header().title, "from-own-log");
+
+    const auto column = store->load(header.id);
+    ASSERT_TRUE(column.has_value());
+    EXPECT_EQ(column->title, "stale");
+}
+
+TEST(PersistenceRename, ForkDoesNotInheritParentTitle) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_rename(parent.id, "parent renamed"));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 2;
+    store->create(child);
+
+    EventBus bus;
+    Session fork = Session::resume(*store->load(child.id), *store, bus);
+    EXPECT_EQ(fork.header().title, "");
+    EXPECT_TRUE(fork.ownEvents().empty());
+
+    const auto child_header = store->load(child.id);
+    ASSERT_TRUE(child_header.has_value());
+    EXPECT_EQ(child_header->title, "");
+    for (const SessionHeader& listed : store->list()) {
+        if (listed.id == child.id) {
+            EXPECT_EQ(listed.title, "");
+        }
+    }
+
+    store->append(child.id, make_rename(child.id, "child renamed"));
+    EXPECT_EQ(store->load(child.id)->title, "child renamed");
+    EXPECT_EQ(store->load(parent.id)->title, "parent renamed");
+}
+
+TEST(PersistenceRename, ReplayReproducesFinalTitleAndMessages) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+
+    TypedEvent<payload::UserMessage> message;
+    message.id         = make_event_id();
+    message.session_id = header.id;
+    message.timestamp  = std::chrono::system_clock::now();
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "hello";
+    message.payload = payload::UserMessage{MessageId{"m1"}, {block}};
+    store->append(header.id, encode(message));
+
+    store->append(header.id, make_rename(header.id, "first"));
+    store->append(header.id, make_rename(header.id, "second", payload::RenameOrigin::Auto));
+
+    EventBus bus;
+    Session replayed = Session::replay(*store->load(header.id), *store, bus);
+    EXPECT_EQ(replayed.header().title, "second");
+    const std::vector<Message> messages = replayed.deriveMessages();
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages[0].role, Role::User);
+    ASSERT_EQ(messages[0].content.size(), 1u);
+    EXPECT_EQ(messages[0].content[0].text, "hello");
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : replayed.ownEvents()) {
+        if (record.event.type == EventType::SessionRenamed) {
+            ++renames;
+        }
+    }
+    EXPECT_EQ(renames, 2u);
 }
 
 } // namespace

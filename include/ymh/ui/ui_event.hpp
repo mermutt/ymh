@@ -190,6 +190,11 @@ struct CompactionOutcomeNotice {
     std::string       reason;
 };
 
+struct SessionTitleChanged {
+    SessionId   session;
+    std::string title;
+};
+
 struct UiEvent {
     std::variant<
         UserMessage,
@@ -209,7 +214,8 @@ struct UiEvent {
         TokenUsageUpdated,
         StatusChanged,
         CompactionMarker,
-        CompactionOutcomeNotice>
+        CompactionOutcomeNotice,
+        SessionTitleChanged>
         value;
 };
 

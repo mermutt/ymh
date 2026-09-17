@@ -17,6 +17,7 @@
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
+#include "ymh/core/logging.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session.hpp"
@@ -113,6 +114,18 @@ Message message_from_json(const nlohmann::json& value) {
         return message;
     }
     return value.get<Message>();
+}
+
+// 19 §4.3: the text of the first Text content block, or empty when there is
+// none. Used only to derive an advisory auto-title; later text blocks are
+// deliberately not concatenated (R2-03).
+std::string first_text_of(const Message& message) {
+    for (const ContentBlock& block : message.content) {
+        if (block.kind == ContentBlockKind::Text) {
+            return block.text;
+        }
+    }
+    return {};
 }
 
 ContextMessage context_from_json(const nlohmann::json& value) {
@@ -490,6 +503,32 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
     });
 }
 
+protocol::SessionRenamedResult HostRuntime::renameSession(const nlohmann::json& params) {
+    return translate([&]() -> protocol::SessionRenamedResult {
+        if (!params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const auto session_it = params.find("session");
+        const auto title_it   = params.find("title");
+        if (session_it == params.end() || !session_it->is_string() ||
+            title_it == params.end() || !title_it->is_string()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const SessionId id{session_it->get<std::string>()};
+        std::string normalized;
+        try {
+            normalized = normalize_title(title_it->get<std::string>());
+        } catch (const std::invalid_argument&) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        (void)runtime_.sessions().renameSession(id, normalized);
+        return protocol::SessionRenamedResult{id, std::move(normalized)};
+    });
+}
+
 protocol::SessionResumed HostRuntime::resumeSession(const SessionId& id) {
     return translate([&]() -> protocol::SessionResumed {
         std::expected<AgentId, AgentError> resumed = runtime_.agents().resume(id);
@@ -606,6 +645,20 @@ void HostRuntime::agentPrompt(const SessionId& id, const nlohmann::json& message
         }
         ensureAgent(id);
         const Message parsed = message_from_json(message);
+        // 19 §4.3: advisory first-turn auto-name. maybeAutoName is a no-op
+        // unless RN5/RN6 hold; the own-log scan, title read, and append run as
+        // one critical section on the session's appendMutex_ (I18), so it
+        // cannot race a TurnExecutor worker append. The append is synchronous,
+        // so a second prompt cannot re-fire it. Auto-naming must not fail the
+        // user's prompt: a LeaseLost/StoreError means only that the cosmetic
+        // name was not written (the transaction rolled back), so swallow it and
+        // log at Warn. Any other exception is a genuine bug and propagates.
+        try {
+            static_cast<void>(runtime_.sessions().maybeAutoName(id, first_text_of(parsed)));
+        } catch (const StoreError& error) {
+            category_logger(LogCategory::Session)
+                .warn(std::string{"auto-name skipped: "} + error.what());
+        }
         if (!turns_.submit([this, id, parsed]() {
                 if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
                     agent->send(parsed);

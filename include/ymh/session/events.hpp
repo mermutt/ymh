@@ -188,6 +188,22 @@ struct SubagentFanIn {
     std::string     summary;
 };
 
+// ---- rename (19 §5.1) ------------------------------------------------------
+
+// 19 §5.1: who produced a rename. `User` is an explicit /rename or
+// session.rename; `Auto` is the daemon's first-turn heuristic (19 §4.3).
+enum class RenameOrigin : std::uint8_t {
+    User,
+    Auto,
+};
+
+// 19 §5.1: the only way a title changes after creation. Append-only; the
+// latest SessionRenamed in the session's own log is authoritative (RN2).
+struct SessionRenamed {
+    std::string  title;
+    RenameOrigin origin = RenameOrigin::User;
+};
+
 } // namespace payload
 
 // ---------------------------------------------------------------------------
@@ -270,6 +286,10 @@ template <>
 struct SessionEventMap<EventType::SubagentFanIn> {
     using type = payload::SubagentFanIn;
 };
+template <>
+struct SessionEventMap<EventType::SessionRenamed> {
+    using type = payload::SessionRenamed;
+};
 
 // Payload type -> EventType (01 §4.4).
 template <>
@@ -348,6 +368,10 @@ template <>
 struct EventTraits<payload::SubagentFanIn> {
     static constexpr EventType type = EventType::SubagentFanIn;
 };
+template <>
+struct EventTraits<payload::SessionRenamed> {
+    static constexpr EventType type = EventType::SessionRenamed;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -358,6 +382,7 @@ struct EventTraits<payload::SubagentFanIn> {
 [[nodiscard]] std::string_view subagent_outcome_name(payload::SubagentOutcome outcome) noexcept;
 [[nodiscard]] std::string_view assistant_chunk_kind_name(
     payload::AssistantChunkKind kind) noexcept;
+[[nodiscard]] std::string_view rename_origin_name(payload::RenameOrigin origin) noexcept;
 
 } // namespace ymh
 
@@ -406,5 +431,7 @@ void to_json(nlohmann::json& json, const SubagentSpawned& value);
 void from_json(const nlohmann::json& json, SubagentSpawned& value);
 void to_json(nlohmann::json& json, const SubagentFanIn& value);
 void from_json(const nlohmann::json& json, SubagentFanIn& value);
+void to_json(nlohmann::json& json, const SessionRenamed& value);
+void from_json(const nlohmann::json& json, SessionRenamed& value);
 
 } // namespace ymh::payload

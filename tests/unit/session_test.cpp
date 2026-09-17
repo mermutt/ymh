@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -520,6 +522,297 @@ TEST(SessionStoreDefaults, FakeStoreHeadSequenceAndBoundedReadAfter) {
     EXPECT_EQ(bounded[0].seq, first);
     EXPECT_EQ(store.readAfter(header.id, first, kUnbounded).size(), 1u);
     EXPECT_THROW(static_cast<void>(store.headSequence(SessionId{"missing"})), UnknownSession);
+}
+
+TEST(SessionRename, PayloadJsonRoundTripAndOriginParsing) {
+    const payload::SessionRenamed user{"fix the flaky test", payload::RenameOrigin::User};
+    const nlohmann::json         json = user;
+    EXPECT_EQ(json.at("origin").get<std::string>(), "user");
+    const payload::SessionRenamed restored = json.get<payload::SessionRenamed>();
+    EXPECT_EQ(restored.title, user.title);
+    EXPECT_EQ(restored.origin, payload::RenameOrigin::User);
+
+    nlohmann::json auto_json = user;
+    auto_json["origin"]      = "auto";
+    EXPECT_EQ(auto_json.get<payload::SessionRenamed>().origin, payload::RenameOrigin::Auto);
+
+    nlohmann::json bogus = user;
+    bogus["origin"]      = "bogus";
+    EXPECT_THROW(static_cast<void>(bogus.get<payload::SessionRenamed>()), std::runtime_error);
+}
+
+TEST(SessionRename, WireNameIsPinned) {
+    EXPECT_EQ(wire_name(EventType::SessionRenamed), "session/renamed");
+    const std::optional<EventType> parsed = parse_event_type("session/renamed");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(*parsed, EventType::SessionRenamed);
+}
+
+TEST(SessionRename, DeriveMessagesIgnoresRename) {
+    const SessionId session = make_session_id();
+    const EventRange before  = {
+        record(1, session, payload::SessionStarted{"m", "interactive", "t"}),
+        record(2, session, payload::UserMessage{MessageId{"m1"}, {text_block("hi")}}),
+    };
+    EventRange with_rename = before;
+    with_rename.push_back(
+        record(3, session, payload::SessionRenamed{"renamed", payload::RenameOrigin::User}));
+
+    SessionHeader header = make_header(make_temp_dir());
+    header.id            = session;
+    const std::vector<Message> plain  = deriveMessages(header, before);
+    const std::vector<Message> renamed = deriveMessages(header, with_rename);
+    ASSERT_EQ(plain.size(), renamed.size());
+    for (std::size_t index = 0; index < plain.size(); ++index) {
+        EXPECT_EQ(plain[index].role, renamed[index].role);
+        ASSERT_EQ(plain[index].content.size(), renamed[index].content.size());
+        for (std::size_t block = 0; block < plain[index].content.size(); ++block) {
+            EXPECT_EQ(plain[index].content[block].text, renamed[index].content[block].text);
+        }
+    }
+}
+
+TEST(SessionTitle, PlaceholderSet) {
+    EXPECT_TRUE(is_placeholder_title(""));
+    EXPECT_TRUE(is_placeholder_title("tui"));
+    EXPECT_TRUE(is_placeholder_title("main"));
+    EXPECT_FALSE(is_placeholder_title("my title"));
+    EXPECT_FALSE(is_placeholder_title("tui2"));
+}
+
+TEST(SessionTitle, NormalizeTrimsOnlyThePinnedSet) {
+    EXPECT_EQ(normalize_title("  my title  "), "my title");
+    EXPECT_EQ(normalize_title("\tmy title\t"), "my title");
+    EXPECT_EQ(normalize_title("\rmy title\f"), "my title");
+    EXPECT_EQ(normalize_title("\vmy title\v"), "my title");
+    EXPECT_EQ(normalize_title("a  b"), "a  b");
+    EXPECT_THROW(static_cast<void>(normalize_title("")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("   ")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\t\r\v\f")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\nmy title")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("my title\n")), std::invalid_argument);
+}
+
+TEST(SessionTitle, NormalizeRejectsControlsDelAndInvalidUtf8) {
+    EXPECT_THROW(static_cast<void>(normalize_title("a\x01" "b")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("a\x7f" "b")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\xc0\xaf")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\xed\xa0\x80")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\xf4\x90\x80\x80")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\xe2\x82")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\x80")), std::invalid_argument);
+
+    EXPECT_EQ(normalize_title("\xc3\xa9"), "\xc3\xa9");
+    EXPECT_EQ(normalize_title("\xe2\x82\xac"), "\xe2\x82\xac");
+    EXPECT_EQ(normalize_title("\xf0\x9f\x98\x80"), "\xf0\x9f\x98\x80");
+}
+
+TEST(SessionTitle, NormalizeLengthIsBytesRejectedNotTruncated) {
+    const std::string exactly_120(120, 'a');
+    EXPECT_EQ(normalize_title(exactly_120), exactly_120);
+    EXPECT_THROW(static_cast<void>(normalize_title(std::string(121, 'a'))),
+                 std::invalid_argument);
+}
+
+TEST(SessionTitle, DeriveAutoTitleFirstLineTrimCollapse) {
+    ASSERT_TRUE(derive_auto_title("hello\nworld").has_value());
+    EXPECT_EQ(*derive_auto_title("hello\nworld"), "hello");
+    EXPECT_EQ(*derive_auto_title("  spaced \t out  "), "spaced out");
+    EXPECT_EQ(*derive_auto_title("no newline here"), "no newline here");
+    EXPECT_FALSE(derive_auto_title("").has_value());
+    EXPECT_FALSE(derive_auto_title("   ").has_value());
+    EXPECT_FALSE(derive_auto_title("\nleading newline").has_value());
+    EXPECT_FALSE(derive_auto_title("bad\x01text").has_value());
+    EXPECT_FALSE(derive_auto_title("\xc0\xaf").has_value());
+}
+
+TEST(SessionTitle, DeriveAutoTitleCutsOnCodePointBoundary) {
+    const std::string long_ascii(100, 'a');
+    const std::optional<std::string> ascii = derive_auto_title(long_ascii);
+    ASSERT_TRUE(ascii.has_value());
+    EXPECT_EQ(ascii->size(), 63u);
+    EXPECT_EQ(ascii->substr(ascii->size() - 3), "...");
+    EXPECT_EQ(ascii->substr(0, 60), std::string(60, 'a'));
+
+    // 1 + 30 * 3-byte code points: byte 60 falls inside the 20th code point.
+    std::string multibyte = "a";
+    for (int index = 0; index < 30; ++index) {
+        multibyte += "\xe2\x82\xac";
+    }
+    const std::optional<std::string> cut = derive_auto_title(multibyte);
+    ASSERT_TRUE(cut.has_value());
+    EXPECT_EQ(cut->size(), 61u);
+    EXPECT_EQ(cut->substr(cut->size() - 3), "...");
+    EXPECT_NO_THROW(static_cast<void>(normalize_title(*cut)));
+}
+
+TEST(SessionManagerRename, AppendsUserRenameAndUpdatesHeader) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "tui";
+    const SessionId id    = manager.createSession(options);
+
+    const Sequence sequence = manager.renameSession(id, "  my  title  ");
+    EXPECT_GT(sequence, 0);
+    EXPECT_EQ(manager.session(id).header().title, "my  title");
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : manager.session(id).ownEvents()) {
+        if (record.event.type != EventType::SessionRenamed) {
+            continue;
+        }
+        ++renames;
+        const auto payload = record.event.payload.get<payload::SessionRenamed>();
+        EXPECT_EQ(payload.title, "my  title");
+        EXPECT_EQ(payload.origin, payload::RenameOrigin::User);
+    }
+    EXPECT_EQ(renames, 1u);
+}
+
+TEST(SessionManagerRename, UnknownIdAndBadTitle) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "tui";
+    const SessionId id    = manager.createSession(options);
+
+    EXPECT_THROW(manager.renameSession(SessionId{"missing"}, "x"), UnknownSession);
+    EXPECT_THROW(manager.renameSession(id, "   "), std::invalid_argument);
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : manager.session(id).ownEvents()) {
+        if (record.event.type == EventType::SessionRenamed) {
+            ++renames;
+        }
+    }
+    EXPECT_EQ(renames, 0u);
+}
+
+TEST(SessionManagerAutoName, FiresOnceWithDerivedTitle) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "tui";
+    const SessionId id    = manager.createSession(options);
+
+    const std::optional<Sequence> first = manager.maybeAutoName(id, "fix the flaky PTY test");
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(manager.session(id).header().title, "fix the flaky PTY test");
+
+    const std::optional<Sequence> second = manager.maybeAutoName(id, "second prompt");
+    EXPECT_FALSE(second.has_value());
+    EXPECT_EQ(manager.session(id).header().title, "fix the flaky PTY test");
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : manager.session(id).ownEvents()) {
+        if (record.event.type != EventType::SessionRenamed) {
+            continue;
+        }
+        ++renames;
+        EXPECT_EQ(record.event.payload.get<payload::SessionRenamed>().origin,
+                  payload::RenameOrigin::Auto);
+    }
+    EXPECT_EQ(renames, 1u);
+}
+
+TEST(SessionManagerAutoName, ManualRenameIsNeverOverwritten) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "tui";
+    const SessionId id    = manager.createSession(options);
+
+    manager.renameSession(id, "manual name");
+    const std::optional<Sequence> suppressed = manager.maybeAutoName(id, "first prompt");
+    EXPECT_FALSE(suppressed.has_value());
+    EXPECT_EQ(manager.session(id).header().title, "manual name");
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : manager.session(id).ownEvents()) {
+        if (record.event.type != EventType::SessionRenamed) {
+            continue;
+        }
+        ++renames;
+        EXPECT_EQ(record.event.payload.get<payload::SessionRenamed>().origin,
+                  payload::RenameOrigin::User);
+    }
+    EXPECT_EQ(renames, 1u);
+}
+
+TEST(SessionManagerAutoName, NonPlaceholderAndEmptyPromptSuppress) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "headless-style";
+    const SessionId id    = manager.createSession(options);
+
+    EXPECT_FALSE(manager.maybeAutoName(id, "prompt").has_value());
+
+    FakeStore      empty_store;
+    EventBus       empty_bus;
+    SessionManager empty_manager(empty_store, empty_bus);
+    options.title = "";
+    const SessionId empty_id = empty_manager.createSession(options);
+    EXPECT_FALSE(empty_manager.maybeAutoName(empty_id, "").has_value());
+    EXPECT_FALSE(empty_manager.maybeAutoName(empty_id, "   \n  ").has_value());
+    EXPECT_FALSE(empty_manager.maybeAutoName(SessionId{"missing"}, "prompt").has_value());
+}
+
+TEST(SessionAutoName, ConcurrentAppendAndAutoNameAppendsExactlyOnce) {
+    FakeStore    store;
+    EventBus     bus;
+    SessionHeader header = make_header(make_temp_dir());
+    header.title         = "tui";
+    store.create(header);
+    Session session(header, store, bus);
+
+    std::atomic<bool> start{false};
+    std::thread worker([&session, &start] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (int index = 0; index < 200; ++index) {
+            session.append(payload::ContextInjected{MessageId{"m" + std::to_string(index)},
+                                                    Role::System, "x"});
+        }
+    });
+    std::thread io([&session, &start] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        static_cast<void>(session.appendAutoRename("fix the flaky PTY test"));
+    });
+    start.store(true, std::memory_order_release);
+    worker.join();
+    io.join();
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : session.ownEvents()) {
+        if (record.event.type == EventType::SessionRenamed) {
+            ++renames;
+        }
+    }
+    EXPECT_EQ(renames, 1u);
+    EXPECT_EQ(session.header().title, "fix the flaky PTY test");
 }
 
 } // namespace

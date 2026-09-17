@@ -71,6 +71,29 @@ void validateWorkspaceRoot(const std::filesystem::path& cwd);
 // 01 I7/S2: records must be ascending by Sequence. Throws CorruptionError.
 void validateLog(const EventRange& events);
 
+// 19 §4.2: the auto-name byte budget (content only; an appended "..." may
+// exceed it by 3 bytes) and the hard cap every rename-path title obeys (RN8).
+// Create-time SessionStarted.title is not validated by this errata (RN8).
+inline constexpr std::size_t kAutoTitleBytes       = 60;
+inline constexpr std::size_t kMaxSessionTitleBytes = 120;
+
+// 19 §4.2: a title the daemon may auto-replace. `"tui"` is the live supervisor
+// placeholder (src/ui/supervisor.cpp); `"main"` is the dead `run_tui`
+// placeholder (src/ui/ui_application.cpp, spec 17 §1); `""` is the fork
+// default (src/session/session.cpp).
+[[nodiscard]] bool is_placeholder_title(std::string_view title) noexcept;
+
+// 19 §4.2: pure. Returns the normalized auto-title, or nullopt when the prompt
+// yields no usable text (RN7: no clock, no I/O, no randomness).
+[[nodiscard]] std::optional<std::string> derive_auto_title(std::string_view prompt);
+
+// 19 §4.2: user-supplied titles. The single validator for the wire and the
+// auto path (RN8). Trims the R-F4 whitespace set (space/tab/CR/FF/VT -- NOT
+// '\n'), rejects empty-after-trim, any remaining C0 control or DEL, invalid
+// UTF-8 (RFC 3629), and any title longer than kMaxSessionTitleBytes. Throws
+// std::invalid_argument on rejection; never truncates.
+[[nodiscard]] std::string normalize_title(std::string_view title);
+
 // 01 S5: fork boundary must be within the parent's resolved view.
 class InvalidForkBoundary : public StoreError {
 public:
@@ -195,6 +218,16 @@ public:
 
     Sequence appendEvent(Event event);
 
+    // 19 §5.3: atomically evaluate the auto-name policy (RN5/RN6/RN7) and
+    // append SessionRenamed{origin = Auto} iff it holds. The own-log scan, the
+    // header_.title read, and the append all run under appendMutex_ (I18), so
+    // the check cannot race a TurnExecutor worker-thread append and no rename
+    // can interleave between the check and the append. Returns the assigned
+    // Sequence, or std::nullopt when suppressed. Never throws for a suppressed
+    // name (R-F6); LeaseLost / StoreError propagate from the store append
+    // (RN13) and are swallowed by the advisory caller (19 §4.3).
+    [[nodiscard]] std::optional<Sequence> appendAutoRename(std::string_view firstUserText);
+
     // One transaction for the whole span; publishes after commit in input
     // order and returns the store-assigned sequences (02 §4.4, A4/A5).
     std::vector<Sequence> appendBatch(std::span<const Event> events);
@@ -216,6 +249,11 @@ public:
 
 private:
     void reload();
+
+    // 19 §5.3: the body of `appendEvent` minus the lock. `appendEvent` and
+    // `appendAutoRename` both call it while holding appendMutex_; the title
+    // mirror lives here so every single-event append materializes it.
+    Sequence appendEventLocked(Event event);
 
     SessionHeader header_;
     SessionStore* store_ = nullptr;

@@ -301,4 +301,27 @@ TEST(UiEventAdapter, MaintenanceTurnEmitsNotNeededNotice) {
     EXPECT_TRUE(notice);
 }
 
+TEST(UiEventAdapter, SessionRenamedAdaptsToTitleChangeOnly) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    Event event;
+    event.id.value   = "rename-1";
+    event.session_id = kSessionA;
+    event.timestamp  = std::chrono::system_clock::now();
+    event.type       = EventType::SessionRenamed;
+    event.payload    = payload::SessionRenamed{"short-name", payload::RenameOrigin::User};
+
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(event));
+
+    const SessionUiState* state = model.session(kSessionA);
+    ASSERT_NE(state, nullptr);
+    EXPECT_TRUE(state->conversation.entries.empty());
+
+    const auto workspace = model.workspaces.find(kWorkspaceA);
+    ASSERT_NE(workspace, model.workspaces.end());
+    ASSERT_FALSE(workspace->second.sessions.empty());
+    EXPECT_EQ(workspace->second.sessions.front().title, "short-name");
+}
+
 } // namespace

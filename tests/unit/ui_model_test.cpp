@@ -618,6 +618,75 @@ TEST(UiModel, SetCellTitlePopulatesCell) {
     EXPECT_EQ(workspace->second.sessions.front().title, "my title");
 }
 
+TEST(UiModel, SessionTitleChangedUpdatesCellAndMarks) {
+    UiModel model = make_model();
+    model.setCellTitle(WorkspaceId{"workspace"}, kSession, "tui");
+    model.apply(UiEvent{SessionTitleChanged{kSession, "renamed"}});
+
+    const auto workspace = model.workspaces.find(WorkspaceId{"workspace"});
+    ASSERT_NE(workspace, model.workspaces.end());
+    ASSERT_FALSE(workspace->second.sessions.empty());
+    EXPECT_EQ(workspace->second.sessions.front().title, "renamed");
+    const UiDirtyFlag flags = model.dirty.peek(kSession);
+    EXPECT_TRUE(any_flag(flags & UiDirtyFlag::Layout));
+    EXPECT_TRUE(any_flag(flags & UiDirtyFlag::SessionBar));
+}
+
+TEST(UiModel, ErrorOccurredAppendsSystemEntryAndLeavesTitle) {
+    UiModel model = make_model();
+    model.setCellTitle(WorkspaceId{"workspace"}, kSession, "keep me");
+    model.apply(UiEvent{ErrorOccurred{kSession, "rename failed: InvalidParams"}});
+
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->conversation.entries.size(), 1u);
+    EXPECT_EQ(state->conversation.entries[0].role, ConversationRole::System);
+    EXPECT_EQ(state->conversation.entries[0].text, "error: rename failed: InvalidParams");
+    EXPECT_EQ(state->status.last_error, "rename failed: InvalidParams");
+    const UiDirtyFlag flags = model.dirty.peek(kSession);
+    EXPECT_TRUE(any_flag(flags & UiDirtyFlag::Conversation));
+    EXPECT_TRUE(any_flag(flags & UiDirtyFlag::Status));
+    EXPECT_TRUE(any_flag(flags & UiDirtyFlag::Attention));
+
+    const auto workspace = model.workspaces.find(WorkspaceId{"workspace"});
+    ASSERT_NE(workspace, model.workspaces.end());
+    EXPECT_EQ(workspace->second.sessions.front().title, "keep me");
+}
+
+TEST(UiModel, CommandRegistryDispatchesRename) {
+    UiModel model = make_model();
+    const CommandRegistry registry = CommandRegistry::builtin();
+    std::string renamed;
+    CommandContext context{model};
+    context.session = model.session(kSession);
+    context.rename_session = [&renamed](const std::string& title) { renamed = title; };
+
+    EXPECT_TRUE(registry.dispatch("/rename", context));
+    EXPECT_TRUE(renamed.empty());
+    ASSERT_FALSE(model.session(kSession)->conversation.entries.empty());
+    EXPECT_NE(model.session(kSession)->conversation.entries.back().text.find("usage"),
+              std::string::npos);
+
+    EXPECT_TRUE(registry.dispatch("/rename my title", context));
+    EXPECT_EQ(renamed, "my title");
+
+    const std::vector<const Command*> matches = registry.complete("re");
+    ASSERT_EQ(matches.size(), 1u);
+    EXPECT_EQ(matches.front()->name, "rename");
+}
+
+TEST(UiModel, CommandRegistryRenameWithoutSessionMakesNoCall) {
+    UiModel model = make_model();
+    const CommandRegistry registry = CommandRegistry::builtin();
+    bool called = false;
+    CommandContext context{model};
+    context.session = nullptr;
+    context.rename_session = [&called](const std::string&) { called = true; };
+
+    EXPECT_TRUE(registry.dispatch("/rename title", context));
+    EXPECT_FALSE(called);
+}
+
 TEST(UiModel, WorkspaceEventCarriesSessionId) {
     WorkspaceEvent event;
     event.workspace = WorkspaceId{"workspace"};

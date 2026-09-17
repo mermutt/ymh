@@ -785,4 +785,141 @@ TEST_F(HostRuntimeTest, AttachRebroadcastsPendingPermission) {
     EXPECT_EQ(future.wait_for(0ms), std::future_status::ready);
 }
 
+TEST_F(HostRuntimeTest, RenameSessionValidatesNormalizesAndForwards) {
+    Bridge bridge("hr_rename");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const SessionId              session = created.session;
+    bridge.clear_forwarded();
+
+    const protocol::SessionRenamedResult result = bridge.host().renameSession(
+        nlohmann::json{{"session", session.value}, {"title", "  trimmed title  "}});
+    EXPECT_EQ(result.session.value, session.value);
+    EXPECT_EQ(result.title, "trimmed title");
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "trimmed title");
+
+    bool forwarded = false;
+    for (const EventRecord& record : bridge.forwarded()) {
+        if (record.event.type == EventType::SessionRenamed) {
+            forwarded = true;
+        }
+    }
+    EXPECT_TRUE(forwarded);
+
+    const RpcFailure missing_title = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(nlohmann::json{{"session", session.value}}));
+    });
+    EXPECT_EQ(missing_title.code, protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    const RpcFailure non_string = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(
+            nlohmann::json{{"session", session.value}, {"title", 5}}));
+    });
+    EXPECT_EQ(non_string.code, protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    const RpcFailure empty = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(
+            nlohmann::json{{"session", session.value}, {"title", "   "}}));
+    });
+    EXPECT_EQ(empty.code, protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    const RpcFailure control = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(
+            nlohmann::json{{"session", session.value}, {"title", "a\nb"}}));
+    });
+    EXPECT_EQ(control.code, protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    const RpcFailure oversize = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(
+            nlohmann::json{{"session", session.value}, {"title", std::string(121, 'a')}}));
+    });
+    EXPECT_EQ(oversize.code, protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    const RpcFailure bad_utf8 = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(
+            nlohmann::json{{"session", session.value}, {"title", "\xc0\xaf"}}));
+    });
+    EXPECT_EQ(bad_utf8.code, protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    const RpcFailure unknown = expect_rpc([&] {
+        static_cast<void>(bridge.host().renameSession(
+            nlohmann::json{{"session", "missing"}, {"title", "x"}}));
+    });
+    EXPECT_EQ(unknown.code, protocol::code_value(protocol::AppCode::UnknownSession));
+
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "trimmed title");
+}
+
+TEST_F(HostRuntimeTest, AgentPromptAutoNamesOnce) {
+    Bridge bridge("hr_autoname");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const SessionId              session = created.session;
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "");
+
+    bridge.host().agentPrompt(session, nlohmann::json("fix the flaky PTY test"));
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "fix the flaky PTY test");
+
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(session, nlohmann::json("a second prompt"));
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "fix the flaky PTY test");
+
+    std::size_t renames = 0;
+    for (const EventRecord& record : bridge.runtime().sessions().session(session).ownEvents()) {
+        if (record.event.type == EventType::SessionRenamed) {
+            ++renames;
+        }
+    }
+    EXPECT_EQ(renames, 1u);
+}
+
+TEST_F(HostRuntimeTest, ManualRenameIsNotOverwrittenByAutoName) {
+    Bridge bridge("hr_manualwin");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const SessionId              session = created.session;
+
+    const protocol::SessionRenamedResult renamed = bridge.host().renameSession(
+        nlohmann::json{{"session", session.value}, {"title", "manual name"}});
+    EXPECT_EQ(renamed.title, "manual name");
+
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(session, nlohmann::json("first prompt"));
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "manual name");
+
+    std::size_t user_renames = 0;
+    std::size_t auto_renames = 0;
+    for (const EventRecord& record : bridge.runtime().sessions().session(session).ownEvents()) {
+        if (record.event.type != EventType::SessionRenamed) {
+            continue;
+        }
+        const auto payload = record.event.payload.get<payload::SessionRenamed>();
+        if (payload.origin == payload::RenameOrigin::Auto) {
+            ++auto_renames;
+        } else {
+            ++user_renames;
+        }
+    }
+    EXPECT_EQ(user_renames, 1u);
+    EXPECT_EQ(auto_renames, 0u);
+}
+
+TEST_F(HostRuntimeTest, AutoNameAppendFailureIsSwallowed) {
+    Bridge bridge("hr_autofail");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const SessionId              session = created.session;
+
+    auto* memory = dynamic_cast<MemorySessionStore*>(&bridge.runtime().store());
+    ASSERT_NE(memory, nullptr);
+    memory->throw_on_append_type = EventType::SessionRenamed;
+
+    EXPECT_NO_THROW(bridge.host().agentPrompt(session, nlohmann::json("first prompt")));
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+
+    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "");
+    for (const EventRecord& record : bridge.runtime().sessions().session(session).ownEvents()) {
+        EXPECT_NE(record.event.type, EventType::SessionRenamed);
+    }
+}
+
 } // namespace

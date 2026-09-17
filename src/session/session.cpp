@@ -68,6 +68,64 @@ std::int64_t epoch_ms(std::chrono::system_clock::time_point point) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(point.time_since_epoch()).count();
 }
 
+bool is_trim_byte(char value) noexcept {
+    return value == ' ' || value == '\t' || value == '\r' || value == '\f' || value == '\v';
+}
+
+// RFC 3629 acceptance: well-formed sequences only, rejecting overlongs,
+// surrogates, > U+10FFFF, truncated sequences, and stray continuations (RN8).
+bool is_valid_utf8(std::string_view text) noexcept {
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[index]);
+        if (lead <= 0x7F) {
+            ++index;
+            continue;
+        }
+        std::size_t     continuation_count = 0;
+        unsigned char   first_lower        = 0x80;
+        unsigned char   first_upper        = 0xBF;
+        if (lead >= 0xC2 && lead <= 0xDF) {
+            continuation_count = 1;
+        } else if (lead == 0xE0) {
+            continuation_count = 2;
+            first_lower        = 0xA0;
+        } else if (lead >= 0xE1 && lead <= 0xEC) {
+            continuation_count = 2;
+        } else if (lead == 0xED) {
+            continuation_count = 2;
+            first_upper        = 0x9F;
+        } else if (lead >= 0xEE && lead <= 0xEF) {
+            continuation_count = 2;
+        } else if (lead == 0xF0) {
+            continuation_count = 3;
+            first_lower        = 0x90;
+        } else if (lead >= 0xF1 && lead <= 0xF3) {
+            continuation_count = 3;
+        } else if (lead == 0xF4) {
+            continuation_count = 3;
+            first_upper        = 0x8F;
+        } else {
+            return false;
+        }
+        if (index + continuation_count >= text.size()) {
+            return false;
+        }
+        const unsigned char first = static_cast<unsigned char>(text[index + 1]);
+        if (first < first_lower || first > first_upper) {
+            return false;
+        }
+        for (std::size_t offset = 2; offset <= continuation_count; ++offset) {
+            const unsigned char byte = static_cast<unsigned char>(text[index + offset]);
+            if (byte < 0x80 || byte > 0xBF) {
+                return false;
+            }
+        }
+        index += continuation_count + 1;
+    }
+    return true;
+}
+
 Message make_text_message(Role role, std::string text) {
     Message message;
     message.role = role;
@@ -123,6 +181,88 @@ std::optional<SessionKind> parse_session_kind(std::string_view name) noexcept {
         return SessionKind::Subagent;
     }
     return std::nullopt;
+}
+
+bool is_placeholder_title(std::string_view title) noexcept {
+    return title.empty() || title == "tui" || title == "main";
+}
+
+std::string normalize_title(std::string_view title) {
+    std::size_t begin = 0;
+    std::size_t end   = title.size();
+    while (begin < end && is_trim_byte(title[begin])) {
+        ++begin;
+    }
+    while (end > begin && is_trim_byte(title[end - 1])) {
+        --end;
+    }
+    std::string normalized{title.substr(begin, end - begin)};
+    if (normalized.empty()) {
+        throw std::invalid_argument("session title must not be empty");
+    }
+    for (const char value : normalized) {
+        const unsigned char byte = static_cast<unsigned char>(value);
+        if (byte < 0x20 || byte == 0x7F) {
+            throw std::invalid_argument("session title must not contain control characters");
+        }
+    }
+    if (!is_valid_utf8(normalized)) {
+        throw std::invalid_argument("session title must be valid UTF-8");
+    }
+    if (normalized.size() > kMaxSessionTitleBytes) {
+        throw std::invalid_argument("session title exceeds the maximum byte length");
+    }
+    return normalized;
+}
+
+std::optional<std::string> derive_auto_title(std::string_view prompt) {
+    const std::size_t newline = prompt.find('\n');
+    const std::string_view line =
+        newline == std::string_view::npos ? prompt : prompt.substr(0, newline);
+
+    std::size_t begin = 0;
+    std::size_t end   = line.size();
+    while (begin < end && is_trim_byte(line[begin])) {
+        ++begin;
+    }
+    while (end > begin && is_trim_byte(line[end - 1])) {
+        --end;
+    }
+
+    std::string collapsed;
+    bool        pending_space = false;
+    for (std::size_t index = begin; index < end; ++index) {
+        if (is_trim_byte(line[index])) {
+            pending_space = true;
+            continue;
+        }
+        if (pending_space && !collapsed.empty()) {
+            collapsed.push_back(' ');
+        }
+        pending_space = false;
+        collapsed.push_back(line[index]);
+    }
+    if (collapsed.empty()) {
+        return std::nullopt;
+    }
+    for (const char value : collapsed) {
+        const unsigned char byte = static_cast<unsigned char>(value);
+        if (byte < 0x20 || byte == 0x7F) {
+            return std::nullopt;
+        }
+    }
+    if (!is_valid_utf8(collapsed)) {
+        return std::nullopt;
+    }
+    if (collapsed.size() > kAutoTitleBytes) {
+        std::size_t cut = kAutoTitleBytes;
+        while (cut > 0 && (static_cast<unsigned char>(collapsed[cut]) & 0xC0) == 0x80) {
+            --cut;
+        }
+        collapsed.resize(cut);
+        collapsed += "...";
+    }
+    return collapsed;
 }
 
 void to_json(nlohmann::json& json, const SessionHeader& header) {
@@ -235,6 +375,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
         switch (event.type) {
             case EventType::SessionStarted:
             case EventType::SessionEnded:
+            case EventType::SessionRenamed:
             case EventType::McpServerStatusChanged:
                 break;
             case EventType::TurnStarted: {
@@ -371,6 +512,14 @@ void Session::reload() {
     log_ = store_->read(header_.id);
     validateLog(log_);
 
+    // 19 §5.2: the own log is authoritative for the title. A fork's resolved
+    // view may carry a parent rename in the seed window; ownEvents() excludes it.
+    for (const EventRecord& record : ownEvents()) {
+        if (record.event.type == EventType::SessionRenamed) {
+            header_.title = record.event.payload.get<payload::SessionRenamed>().title;
+        }
+    }
+
     TurnId maxTurn = 0;
     StepId maxStep = 0;
     for (const EventRecord& record : log_) {
@@ -405,7 +554,10 @@ std::vector<Message> Session::deriveMessages() const {
 
 Sequence Session::appendEvent(Event event) {
     std::lock_guard<std::mutex> lock(appendMutex_);
+    return appendEventLocked(std::move(event));
+}
 
+Sequence Session::appendEventLocked(Event event) {
     if (event.session_id.value != header_.id.value) {
         throw std::invalid_argument("appendEvent: event does not belong to this session");
     }
@@ -415,6 +567,10 @@ Sequence Session::appendEvent(Event event) {
 
     const Sequence seq = store_->append(header_.id, event);
     header_.updatedAt  = epoch_ms(event.timestamp);
+    // 19 §5.2: mirror updatedAt materialization for the title.
+    if (event.type == EventType::SessionRenamed) {
+        header_.title = event.payload.get<payload::SessionRenamed>().title;
+    }
     log_.push_back(EventRecord{seq, event});
     if (event.type == EventType::TurnStarted) {
         nextTurn_ = std::max(nextTurn_, event.payload.get<payload::TurnStarted>().turn + 1);
@@ -423,6 +579,35 @@ Sequence Session::appendEvent(Event event) {
     }
     bus_->publish(event);
     return seq;
+}
+
+std::optional<Sequence> Session::appendAutoRename(std::string_view firstUserText) {
+    std::lock_guard<std::mutex> lock(appendMutex_);
+
+    const std::size_t prefix =
+        (header_.kind == SessionKind::Fork && header_.seedLength.has_value())
+            ? *header_.seedLength
+            : 0;
+    const std::size_t first = std::min(prefix, log_.size());
+    for (std::size_t index = first; index < log_.size(); ++index) {
+        if (log_[index].event.type == EventType::SessionRenamed) {
+            return std::nullopt;
+        }
+    }
+    if (!is_placeholder_title(header_.title)) {
+        return std::nullopt;
+    }
+    const std::optional<std::string> derived = derive_auto_title(firstUserText);
+    if (!derived.has_value()) {
+        return std::nullopt;
+    }
+
+    TypedEvent<payload::SessionRenamed> typed;
+    typed.id         = make_event_id();
+    typed.session_id = id();
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload::SessionRenamed{*derived, payload::RenameOrigin::Auto};
+    return appendEventLocked(encode(typed));
 }
 
 std::vector<Sequence> Session::appendBatch(std::span<const Event> events) {
@@ -441,6 +626,10 @@ std::vector<Sequence> Session::appendBatch(std::span<const Event> events) {
     for (std::size_t index = 0; index < events.size(); ++index) {
         const Event& event = events[index];
         header_.updatedAt  = epoch_ms(event.timestamp);
+        // 19 §5.2: a batched rename mirrors the last such event's title.
+        if (event.type == EventType::SessionRenamed) {
+            header_.title = event.payload.get<payload::SessionRenamed>().title;
+        }
         log_.push_back(EventRecord{sequences[index], event});
         if (event.type == EventType::TurnStarted) {
             nextTurn_ = std::max(nextTurn_, event.payload.get<payload::TurnStarted>().turn + 1);

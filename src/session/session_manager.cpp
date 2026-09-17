@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -102,6 +104,31 @@ SessionId SessionManager::replaySession(const SessionId& id) {
     }
     loadInto(*header);
     return id;
+}
+
+Sequence SessionManager::renameSession(const SessionId& id, std::string title) {
+    const std::string normalized = normalize_title(title);
+    if (const auto it = sessions_.find(id.value); it == sessions_.end()) {
+        const auto header = store_->load(id);
+        if (!header.has_value()) {
+            throw UnknownSession("unknown session: " + id.value);
+        }
+        loadInto(*header);
+    }
+    return session(id).append(
+        payload::SessionRenamed{std::move(normalized), payload::RenameOrigin::User});
+}
+
+std::optional<Sequence> SessionManager::maybeAutoName(const SessionId& id,
+                                                      std::string_view firstUserText) {
+    if (sessions_.find(id.value) == sessions_.end()) {
+        const auto header = store_->load(id);
+        if (!header.has_value()) {
+            return std::nullopt;
+        }
+        loadInto(*header);
+    }
+    return session(id).appendAutoRename(firstUserText);
 }
 
 void SessionManager::closeSession(const SessionId& id) {

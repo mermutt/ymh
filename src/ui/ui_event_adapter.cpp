@@ -150,6 +150,11 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
                 payload.model, payload.summary}});
             break;
         }
+        case EventType::SessionRenamed: {
+            const auto payload = event.payload.get<payload::SessionRenamed>();
+            events.push_back(UiEvent{SessionTitleChanged{session, payload.title}});
+            break;
+        }
         default:
             break;
     }

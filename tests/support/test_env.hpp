@@ -110,6 +110,9 @@ public:
         if (!lease_) {
             throw LeaseLost("memory store is not the lease holder");
         }
+        if (throw_on_append_type.has_value() && event.type == *throw_on_append_type) {
+            throw StoreError("injected append failure");
+        }
         const Sequence seq = ++global_;
         logs_[id.value].push_back(EventRecord{seq, std::move(event)});
         return seq;
@@ -118,6 +121,8 @@ public:
     bool isLeaseHolder(SessionId) const override { return lease_; }
 
     bool lease_ = true;
+    // Test seam: when set, `append` rejects an event of this type (19 §4.3 L7).
+    std::optional<EventType> throw_on_append_type;
 
 private:
     std::unordered_map<std::string, SessionHeader> headers_;
