@@ -43,6 +43,7 @@ add_executable(ymh_tests
     unit/session_cli_test.cpp
     unit/headless_live_test.cpp
     unit/ui_model_test.cpp
+    unit/session_export_test.cpp
     unit/ui_event_adapter_test.cpp
     unit/supervisor_connection_test.cpp
     unit/supervisor_presence_test.cpp

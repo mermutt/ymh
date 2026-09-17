@@ -21,6 +21,9 @@ struct CommandContext {
     std::function<void()>                   create_session;
     std::function<void(const std::string&)> set_model;
     std::function<void()>                   compact;
+    // Serializes the active session transcript to a markdown file; `args` is the
+    // raw command-line tail (`[path] [--edit]`). Returns the notice to surface.
+    std::function<std::string(const std::string&)> export_session;
 };
 
 struct Command {

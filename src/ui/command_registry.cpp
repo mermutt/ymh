@@ -162,6 +162,18 @@ CommandRegistry CommandRegistry::builtin() {
             append_system(context, "compaction requested");
         }});
     registry.add(Command{
+        "export", "write the session transcript to a markdown file (--edit to open it)",
+        [](CommandContext& context, const std::string& args) {
+            if (!context.export_session) {
+                append_system(context, "export is unavailable");
+                return;
+            }
+            const std::string notice = context.export_session(args);
+            if (!notice.empty()) {
+                append_system(context, notice);
+            }
+        }});
+    registry.add(Command{
         "exit", "quit the supervisor",
         [](CommandContext& context, const std::string&) {
             if (context.request_exit) {
