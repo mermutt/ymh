@@ -214,6 +214,13 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "sessions", "list stored sessions for every workspace",
+        [](CommandContext& context, const std::string&) {
+            if (context.sessions) {
+                context.sessions();
+            }
+        }});
+    registry.add(Command{
         "exit", "quit the supervisor",
         [](CommandContext& context, const std::string&) {
             if (context.request_exit) {

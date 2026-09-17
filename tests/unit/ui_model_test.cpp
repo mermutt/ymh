@@ -6,6 +6,8 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <optional>
+#include <set>
 #include <string>
 #include <variant>
 #include <vector>
@@ -19,6 +21,7 @@
 #include "ymh/ui/ui_application.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
 #include "ymh/ui/ui_model.hpp"
+#include "ymh/ui/ui_render.hpp"
 
 namespace {
 
@@ -49,6 +52,7 @@ UiModel make_model() {
     workspace.id = model.activeWorkspaceId;
     workspace.cwd = "/tmp/workspace";
     workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
     workspace.activeSessionId = kSession;
     model.workspaces.emplace(workspace.id, workspace);
     model.ensureSession(kSession);
@@ -301,6 +305,7 @@ TEST(UiModel, SwitcherNavigatesAcrossWorkspaces) {
     beta.id = WorkspaceId{"workspace-2"};
     beta.title = "beta";
     beta.daemonStatus = DaemonStatus::Attached;
+    beta.live = true;
     beta.activeSessionId = second;
     SessionCell cell;
     cell.id = second;
@@ -774,7 +779,8 @@ TEST(UiModel, SwitcherNodesCarryOwnershipMark) {
     WorkspaceModel beta;
     beta.id = WorkspaceId{"workspace-2"};
     beta.title = "beta";
-    beta.daemonStatus = DaemonStatus::Dead;
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live = true;
     beta.activeSessionId = second;
     SessionCell cell;
     cell.id = second;
@@ -783,15 +789,374 @@ TEST(UiModel, SwitcherNodesCarryOwnershipMark) {
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-2"}, second);
 
+    WorkspaceModel dead;
+    dead.id = WorkspaceId{"workspace-dead"};
+    dead.title = "dead";
+    dead.daemonStatus = DaemonStatus::Dead;
+    dead.live = true;
+    model.workspaces.emplace(dead.id, std::move(dead));
+
     model.openSwitcher();
     ASSERT_EQ(model.switcher.workspaces.size(), 2u);
     for (const WorkspaceNode& node : model.switcher.workspaces) {
-        if (node.id == WorkspaceId{"workspace"}) {
-            EXPECT_EQ(node.mark, OwnershipMark::Owned);
-        } else {
-            EXPECT_EQ(node.mark, OwnershipMark::Unreachable);
-        }
+        EXPECT_EQ(node.mark, OwnershipMark::Owned);
+        EXPECT_NE(node.id, WorkspaceId{"workspace-dead"});
     }
+}
+
+// SW-U1 (22 §3.1, SW1/SW20): the Live source copies only renderable workspaces.
+TEST(UiModel, SwitcherOpenIsLiveOnly) {
+    UiModel model = make_model();
+    const auto add = [&model](const char* id, const char* title, DaemonStatus status, bool live) {
+        WorkspaceModel workspace;
+        workspace.id = WorkspaceId{id};
+        workspace.title = title;
+        workspace.cwd = std::string{"/work/"} + id;
+        workspace.daemonStatus = status;
+        workspace.live = live;
+        model.workspaces.emplace(workspace.id, std::move(workspace));
+    };
+    add("ws-attached", "attached", DaemonStatus::Attached, true);
+    add("ws-stopping", "stopping", DaemonStatus::Stopping, true);
+    add("ws-connecting", "connecting", DaemonStatus::Connecting, true);
+    add("ws-detached", "detached", DaemonStatus::Detached, true);
+    add("ws-dead", "dead", DaemonStatus::Dead, true);
+    add("ws-notrunning", "notrunning", DaemonStatus::NotRunning, true);
+    add("ws-hidden", "hidden", DaemonStatus::Attached, false);
+
+    model.openSwitcher();
+    std::set<WorkspaceId> ids;
+    for (const WorkspaceNode& node : model.switcher.workspaces) {
+        ids.insert(node.id);
+        EXPECT_NE(node.mark, OwnershipMark::Unreachable);
+    }
+    EXPECT_EQ(ids.count(WorkspaceId{"workspace"}), 1u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-attached"}), 1u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-stopping"}), 1u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-connecting"}), 0u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-detached"}), 0u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-dead"}), 0u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-notrunning"}), 0u);
+    EXPECT_EQ(ids.count(WorkspaceId{"ws-hidden"}), 0u);
+}
+
+// SW-U2 (22 §3.5): eraseWorkspace removes the workspace + its sessions, repairs
+// focus, and is a no-op for an unknown id.
+TEST(UiModel, EraseWorkspaceRemovesSessionsAndRepairsFocus) {
+    UiModel model = make_model();
+    const SessionId other{"session-2"};
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-2"};
+    beta.title = "beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live = true;
+    beta.activeSessionId = other;
+    model.workspaces.emplace(beta.id, beta);
+    model.ensureSessionIn(beta.id, other);
+
+    model.eraseWorkspace(WorkspaceId{"workspace"});
+    EXPECT_EQ(model.workspaces.count(WorkspaceId{"workspace"}), 0u);
+    EXPECT_EQ(model.session(kSession), nullptr);
+    EXPECT_EQ(model.activeWorkspaceId, WorkspaceId{"workspace-2"});
+
+    model.dirty.clear();
+    model.eraseWorkspace(WorkspaceId{"nope"});
+    EXPECT_FALSE(model.dirty.hasAny());
+
+    model.eraseWorkspace(WorkspaceId{"workspace-2"});
+    EXPECT_TRUE(model.dirty.hasAny());
+    EXPECT_TRUE(model.activeWorkspaceId.value.empty());
+}
+
+// SW-U3 (22 §3.2): the pure eviction decision retains live and Connecting
+// workspaces and selects the absent, non-Connecting ones.
+TEST(UiModel, SwitcherEvictionCandidates) {
+    UiModel model = make_model();
+    WorkspaceModel dead;
+    dead.id = WorkspaceId{"ws-dead"};
+    dead.daemonStatus = DaemonStatus::Dead;
+    model.workspaces.emplace(dead.id, dead);
+    WorkspaceModel connecting;
+    connecting.id = WorkspaceId{"ws-connecting"};
+    connecting.daemonStatus = DaemonStatus::Connecting;
+    model.workspaces.emplace(connecting.id, connecting);
+
+    const std::set<WorkspaceId> live_ids{WorkspaceId{"workspace"}};
+    const std::set<WorkspaceId> connecting_ids{WorkspaceId{"ws-connecting"}};
+    const std::vector<WorkspaceId> doomed =
+        switcher_eviction_candidates(model.workspaces, live_ids, connecting_ids);
+    ASSERT_EQ(doomed.size(), 1u);
+    EXPECT_EQ(doomed[0], WorkspaceId{"ws-dead"});
+}
+
+// SW-U9 (22 §3.1): a dead link clears `live` at once, hiding the workspace from
+// a Live open before any eviction.
+TEST(UiModel, DaemonDeathHidesWorkspace) {
+    WorkspaceModel workspace;
+    workspace.id = WorkspaceId{"ws"};
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    apply_daemon_status_liveness(workspace, DaemonStatus::Dead);
+    EXPECT_FALSE(workspace.live);
+    apply_daemon_status_liveness(workspace, DaemonStatus::Connecting);
+    EXPECT_FALSE(workspace.live);
+    apply_daemon_status_liveness(workspace, DaemonStatus::Attached);
+    EXPECT_TRUE(workspace.live);
+    apply_daemon_status_liveness(workspace, DaemonStatus::Stopping);
+    EXPECT_TRUE(workspace.live);
+
+    UiModel model = make_model();
+    WorkspaceEvent died;
+    died.workspace = model.activeWorkspaceId;
+    died.kind = WorkspaceEventKind::DaemonDied;
+    model.apply(died);
+    model.openSwitcher();
+    EXPECT_TRUE(model.switcher.workspaces.empty());
+}
+
+// SW-U11 (22 §3.6, H1): the notice ring is bounded and marks the model dirty.
+TEST(UiModel, NoticeRingIsBounded) {
+    UiModel model = make_model();
+    model.dirty.clear();
+    model.pushNotice("first");
+    ASSERT_EQ(model.notices.size(), 1u);
+    EXPECT_EQ(model.notices.back().text, "first");
+    EXPECT_TRUE(model.dirty.hasAny());
+
+    for (std::size_t index = 0; index < kMaxNotices + 3; ++index) {
+        model.pushNotice("n" + std::to_string(index));
+    }
+    EXPECT_EQ(model.notices.size(), kMaxNotices);
+    EXPECT_EQ(model.notices.front().text, "n3");
+}
+
+// SW-U15 (22 §3.7): case-insensitive title order with a cwd tie-break; the Live
+// source preserves the daemon's session.list order.
+TEST(UiModel, SwitcherOrderingAndSessionOrder) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws-b"};
+    const auto add = [&model](const char* id, const char* title, const char* cwd) {
+        WorkspaceModel workspace;
+        workspace.id = WorkspaceId{id};
+        workspace.title = title;
+        workspace.cwd = cwd;
+        workspace.daemonStatus = DaemonStatus::Attached;
+        workspace.live = true;
+        model.workspaces.emplace(workspace.id, std::move(workspace));
+    };
+    add("ws-b", "same", "/b");
+    add("ws-a", "same", "/a");
+    add("ws-g", "Gamma", "/g");
+    add("ws-beta", "beta", "/beta");
+
+    SessionCell second;
+    second.id = SessionId{"s2"};
+    second.title = "two";
+    SessionCell first;
+    first.id = SessionId{"s1"};
+    first.title = "one";
+    model.workspaces[WorkspaceId{"ws-b"}].sessions = {second, first};
+
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 4u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-g"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-b"});
+    ASSERT_EQ(model.switcher.workspaces[3].sessions.size(), 2u);
+    EXPECT_EQ(model.switcher.workspaces[3].sessions[0].id, SessionId{"s2"});
+    EXPECT_EQ(model.switcher.workspaces[3].sessions[1].id, SessionId{"s1"});
+
+    // History source (22 §3.7/SW17): the same workspace rule; sessions are
+    // `updated_at` desc, `id` asc. The Live source above was NOT re-sorted.
+    const auto add_history = [&model](const char* id, const char* title, const char* path) {
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.title = title;
+        history.canonicalPath = path;
+        history.live = false;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_history("ws-b", "same", "/b");
+    add_history("ws-a", "same", "/a");
+    add_history("ws-g", "Gamma", "/g");
+    add_history("ws-beta", "beta", "/beta");
+    model.catalog.loaded = true;
+
+    SessionHistoryEntry older;
+    older.id = SessionId{"s1"};
+    older.updatedAt = 100;
+    SessionHistoryEntry newer;
+    newer.id = SessionId{"s2"};
+    newer.updatedAt = 200;
+    model.catalog.workspaces[0].sessions = {older, newer};
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 4u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-g"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-b"});
+    ASSERT_EQ(model.switcher.workspaces[3].sessions.size(), 2u);
+    EXPECT_EQ(model.switcher.workspaces[3].sessions[0].id, SessionId{"s2"});
+    EXPECT_EQ(model.switcher.workspaces[3].sessions[1].id, SessionId{"s1"});
+}
+
+// SW-U16 (22 §3.6, L1): openSwitcher resets the source to Live; close leaves it.
+TEST(UiModel, SwitcherSourceResetsToLive) {
+    UiModel model = make_model();
+    model.openSwitcher();
+    EXPECT_EQ(model.switcher.source, SwitcherSource::Live);
+    model.switcher.source = SwitcherSource::History;
+    model.switcher.close();
+    EXPECT_EQ(model.switcher.source, SwitcherSource::History);
+    model.openSwitcher();
+    EXPECT_EQ(model.switcher.source, SwitcherSource::Live);
+}
+
+// SW-U17 (22 §3.3, L3): the cursor is validated against the built node list.
+TEST(UiModel, SwitcherCursorValidatedAgainstNodes) {
+    UiModel model = make_model();
+    WorkspaceModel hidden;
+    hidden.id = WorkspaceId{"ws-hidden"};
+    hidden.title = "hidden";
+    hidden.cwd = "/hidden";
+    hidden.daemonStatus = DaemonStatus::Dead;
+    hidden.live = true;
+    model.workspaces.emplace(hidden.id, hidden);
+    model.ensureSessionIn(hidden.id, SessionId{"hidden-session"});
+
+    model.switcher.cursor.workspace = WorkspaceId{"ws-hidden"};
+    model.switcher.cursor.session = SessionId{"hidden-session"};
+    model.switcher.open(model);
+    EXPECT_EQ(model.switcher.cursor.workspace, model.activeWorkspaceId);
+    EXPECT_EQ(model.switcher.cursor.session, std::optional<SessionId>{kSession});
+
+    model.switcher.cursor.session = SessionId{"bogus"};
+    model.switcher.open(model);
+    EXPECT_EQ(model.switcher.cursor.workspace, model.activeWorkspaceId);
+    EXPECT_FALSE(model.switcher.cursor.session.has_value());
+
+    model.activeWorkspaceId = WorkspaceId{"ws-hidden"};
+    model.switcher.cursor = SwitcherCursor{};
+    model.switcher.open(model);
+    ASSERT_FALSE(model.switcher.workspaces.empty());
+    EXPECT_EQ(model.switcher.cursor.workspace, model.switcher.workspaces.front().id);
+}
+
+// SW-U6 (22 §3.7/§4.3): openHistory builds nodes from `model.catalog`; a
+// non-live workspace is `historyOnly` and carries its note; History sessions
+// are `updated_at` desc / `id` asc; workspace groups are title-ascending
+// (case-insensitive) with a canonical_path tie-break.
+TEST(UiModel, SwitcherOpenHistoryBuildsFromCatalog) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws-live"};
+
+    WorkspaceHistory live;
+    live.id = WorkspaceId{"ws-live"};
+    live.title = "Live";
+    live.canonicalPath = "/live";
+    live.live = true;
+    SessionHistoryEntry newest;
+    newest.id = SessionId{"s-new"};
+    newest.title = "new";
+    newest.kind = "root";
+    newest.model = "m1";
+    newest.updatedAt = 5000;
+    SessionHistoryEntry oldest;
+    oldest.id = SessionId{"s-old"};
+    oldest.title = "old";
+    oldest.kind = "fork";
+    oldest.model = "m2";
+    oldest.updatedAt = 1000;
+    SessionHistoryEntry middle;
+    middle.id = SessionId{"s-mid"};
+    middle.title = "mid";
+    middle.kind = "subagent";
+    middle.model = "m3";
+    middle.updatedAt = 5000;
+    live.sessions = {oldest, newest, middle};
+
+    WorkspaceHistory stopped;
+    stopped.id = WorkspaceId{"ws-stop"};
+    stopped.title = "Stopped";
+    stopped.canonicalPath = "/stopped";
+    stopped.live = false;
+    stopped.note = "corrupt";
+
+    WorkspaceHistory tie_b;
+    tie_b.id = WorkspaceId{"ws-tie-b"};
+    tie_b.title = "Tie";
+    tie_b.canonicalPath = "/b";
+    tie_b.live = false;
+    WorkspaceHistory tie_a;
+    tie_a.id = WorkspaceId{"ws-tie-a"};
+    tie_a.title = "Tie";
+    tie_a.canonicalPath = "/a";
+    tie_a.live = false;
+
+    model.catalog.workspaces = {live, stopped, tie_b, tie_a};
+    model.catalog.loaded = true;
+
+    model.switcher.openHistory(model);
+    EXPECT_EQ(model.switcher.source, SwitcherSource::History);
+
+    ASSERT_EQ(model.switcher.workspaces.size(), 4u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-live"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-stop"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-tie-a"});
+    EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-tie-b"});
+
+    const WorkspaceNode& stopped_node = model.switcher.workspaces[1];
+    EXPECT_TRUE(stopped_node.historyOnly);
+    EXPECT_FALSE(stopped_node.live);
+    ASSERT_TRUE(stopped_node.note.has_value());
+    EXPECT_EQ(*stopped_node.note, "corrupt");
+    EXPECT_TRUE(stopped_node.sessions.empty());
+
+    const WorkspaceNode& live_node = model.switcher.workspaces[0];
+    EXPECT_FALSE(live_node.historyOnly);
+    EXPECT_TRUE(live_node.live);
+    EXPECT_FALSE(live_node.note.has_value());
+    ASSERT_EQ(live_node.sessions.size(), 3u);
+    EXPECT_EQ(live_node.sessions[0].id, SessionId{"s-mid"});
+    EXPECT_EQ(live_node.sessions[1].id, SessionId{"s-new"});
+    EXPECT_EQ(live_node.sessions[2].id, SessionId{"s-old"});
+    EXPECT_TRUE(live_node.sessions[0].fromDisk);
+    EXPECT_EQ(live_node.sessions[2].kind, "fork");
+    EXPECT_EQ(live_node.sessions[2].model, "m2");
+    EXPECT_EQ(live_node.sessions[2].updatedAt, 1000);
+}
+
+// SW-U7 (22 §4.3/§4.6): `/sessions` dispatch opens the History source in
+// Switcher mode; a context without the callback is a no-op; before the first
+// snapshot the render shows the loading placeholder.
+TEST(UiModel, SessionsCommandOpensHistoryAndLoadingPlaceholder) {
+    CommandRegistry registry = CommandRegistry::builtin();
+    UiModel model = make_model();
+
+    CommandContext unset{model};
+    EXPECT_TRUE(registry.dispatch("/sessions", unset));
+    EXPECT_EQ(model.mode, UiMode::Conversation);
+    EXPECT_EQ(model.switcher.source, SwitcherSource::Live);
+
+    CommandContext context{model};
+    bool called = false;
+    context.sessions = [&] {
+        called = true;
+        model.switcher.source = SwitcherSource::History;
+        model.switcher.openHistory(model);
+        model.mode = UiMode::Switcher;
+    };
+    EXPECT_TRUE(registry.dispatch("/sessions", context));
+    EXPECT_TRUE(called);
+    EXPECT_EQ(model.switcher.source, SwitcherSource::History);
+    EXPECT_EQ(model.mode, UiMode::Switcher);
+    EXPECT_FALSE(model.catalog.loaded);
+
+    const std::string rendered =
+        render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("loading stored sessions"), std::string::npos);
 }
 
 } // namespace

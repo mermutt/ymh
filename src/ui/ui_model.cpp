@@ -1,6 +1,7 @@
 #include "ymh/ui/ui_model.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <type_traits>
 #include <utility>
 
@@ -55,6 +56,62 @@ void apply_reasoning_delta(ConversationModel& conversation, const AssistantTextD
         }
     }
     conversation.by_reasoning_message[delta.message] = assistant;
+}
+
+std::string lower_ascii(std::string value) {
+    for (char& character : value) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return value;
+}
+
+// 22 §3.3 (L3): validate the switcher cursor against the node list it just
+// built, not against `UiModel::workspaces`. Shared by `open` (Live) and
+// `openHistory` (History) so a filtered-out workspace cannot leave a dangling
+// cursor and a stale session cursor is cleared deterministically.
+void revalidate_switcher_cursor(SwitcherOverlayModel& switcher, const UiModel& model) {
+    const auto node_for = [&switcher](const WorkspaceId& id) -> const WorkspaceNode* {
+        for (const WorkspaceNode& node : switcher.workspaces) {
+            if (node.id == id) {
+                return &node;
+            }
+        }
+        return nullptr;
+    };
+
+    const WorkspaceNode* cursor_node = node_for(switcher.cursor.workspace);
+    if (cursor_node == nullptr) {
+        switcher.cursor.workspace = WorkspaceId{};
+        switcher.cursor.session.reset();
+        const WorkspaceNode* target = node_for(model.activeWorkspaceId);
+        if (target == nullptr && !switcher.workspaces.empty()) {
+            target = &switcher.workspaces.front();
+        }
+        if (target != nullptr) {
+            switcher.cursor.workspace = target->id;
+            const auto active = model.workspaces.find(target->id);
+            if (active != model.workspaces.end() &&
+                !active->second.activeSessionId.value.empty()) {
+                for (const SessionNode& session : target->sessions) {
+                    if (session.id == active->second.activeSessionId) {
+                        switcher.cursor.session = session.id;
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (switcher.cursor.session.has_value()) {
+        bool present = false;
+        for (const SessionNode& session : cursor_node->sessions) {
+            if (session.id == *switcher.cursor.session) {
+                present = true;
+                break;
+            }
+        }
+        if (!present) {
+            switcher.cursor.session.reset();
+        }
+    }
 }
 
 } // namespace
@@ -286,6 +343,44 @@ OwnershipMark ownership_mark(DaemonStatus status) noexcept {
     return OwnershipMark::Unreachable;
 }
 
+bool live_switcher_renderable(const WorkspaceModel& workspace) noexcept {
+    return workspace.live && (workspace.daemonStatus == DaemonStatus::Attached ||
+                              workspace.daemonStatus == DaemonStatus::Stopping);
+}
+
+void apply_daemon_status_liveness(WorkspaceModel& workspace, DaemonStatus status) noexcept {
+    switch (status) {
+        case DaemonStatus::Attached:
+            workspace.live = true;
+            break;
+        case DaemonStatus::Detached:
+        case DaemonStatus::Dead:
+        case DaemonStatus::NotRunning:
+            workspace.live = false;
+            break;
+        case DaemonStatus::Connecting:
+        case DaemonStatus::Stopping:
+            break;
+    }
+}
+
+std::vector<WorkspaceId> switcher_eviction_candidates(
+    const std::map<WorkspaceId, WorkspaceModel>& workspaces,
+    const std::set<WorkspaceId>& live_ids, const std::set<WorkspaceId>& connecting_ids) {
+    std::vector<WorkspaceId> doomed;
+    for (const auto& [id, workspace] : workspaces) {
+        (void)workspace;
+        if (live_ids.count(id) != 0) {
+            continue;
+        }
+        if (connecting_ids.count(id) != 0) {
+            continue;
+        }
+        doomed.push_back(id);
+    }
+    return doomed;
+}
+
 void AggregateStatusModel::recompute(const std::map<WorkspaceId, WorkspaceModel>& workspaces,
                                      const std::map<SessionId, SessionUiState>& sessions) {
     AggregateStatus next;
@@ -462,6 +557,50 @@ void UiModel::eraseSession(const WorkspaceId& workspace, const SessionId& id) {
 
 void UiModel::setMcpStatus(std::string detail) {
     mcp_status = std::move(detail);
+    dirty.markAggregate();
+}
+
+void UiModel::pushNotice(std::string text) {
+    notices.push_back(UiNotice{std::move(text), 0});
+    while (notices.size() > kMaxNotices) {
+        notices.pop_front();
+    }
+    dirty.markAggregate();
+}
+
+void UiModel::eraseWorkspace(const WorkspaceId& workspace) {
+    const auto it = workspaces.find(workspace);
+    if (it == workspaces.end()) {
+        return;
+    }
+    for (auto session = sessions.begin(); session != sessions.end();) {
+        if (session->second.workspace == workspace) {
+            session = sessions.erase(session);
+        } else {
+            ++session;
+        }
+    }
+    workspaces.erase(it);
+    if (activeWorkspaceId == workspace) {
+        WorkspaceId promoted;
+        for (const auto& [id, candidate] : workspaces) {
+            if (live_switcher_renderable(candidate)) {
+                promoted = id;
+                break;
+            }
+        }
+        if (promoted.value.empty() && !workspaces.empty()) {
+            promoted = workspaces.begin()->first;
+        }
+        activeWorkspaceId = promoted;
+    }
+    if (mode == UiMode::Switcher && switcher.cursor.workspace == workspace) {
+        if (switcher.source == SwitcherSource::Live) {
+            switcher.open(*this);
+        } else {
+            switcher.cursor = SwitcherCursor{};
+        }
+    }
     dirty.markAggregate();
 }
 
@@ -707,15 +846,19 @@ void UiModel::apply(const WorkspaceEvent& event) {
         switch (event.kind) {
             case WorkspaceEventKind::DaemonAttached:
                 it->second.daemonStatus = DaemonStatus::Attached;
+                apply_daemon_status_liveness(it->second, it->second.daemonStatus);
                 break;
             case WorkspaceEventKind::DaemonDetached:
                 it->second.daemonStatus = DaemonStatus::Detached;
+                apply_daemon_status_liveness(it->second, it->second.daemonStatus);
                 break;
             case WorkspaceEventKind::DaemonDied:
                 it->second.daemonStatus = DaemonStatus::Dead;
+                apply_daemon_status_liveness(it->second, it->second.daemonStatus);
                 break;
             case WorkspaceEventKind::DaemonStopping:
                 it->second.daemonStatus = DaemonStatus::Stopping;
+                apply_daemon_status_liveness(it->second, it->second.daemonStatus);
                 break;
             case WorkspaceEventKind::SessionOpened:
                 if (event.session.has_value()) {
@@ -733,6 +876,7 @@ void UiModel::apply(const WorkspaceEvent& event) {
 }
 
 void UiModel::openSwitcher() {
+    switcher.source = SwitcherSource::Live;
     switcher.open(*this);
     mode = UiMode::Switcher;
     dirty.markAggregate();
@@ -765,19 +909,29 @@ void UiModel::focusSession(const SessionId& id) {
 
 void SwitcherOverlayModel::open(const UiModel& model) {
     workspaces.clear();
+    source = SwitcherSource::Live;
     const bool filtering = filter.has_value() && !filter->empty();
     for (const auto& [workspace_id, workspace] : model.workspaces) {
+        if (!live_switcher_renderable(workspace)) {
+            continue;
+        }
         WorkspaceNode node;
         node.id = workspace_id;
         node.title = workspace.title.empty() ? workspace.cwd : workspace.title;
         node.status = workspace.daemonStatus;
         node.mark = ownership_mark(workspace.daemonStatus);
+        node.live = workspace.live;
         for (const SessionCell& cell : workspace.sessions) {
             if (filtering && cell.title.find(*filter) == std::string::npos &&
                 cell.id.value.find(*filter) == std::string::npos) {
                 continue;
             }
-            node.sessions.push_back(SessionNode{cell.id, cell.title, cell.state, cell.attention});
+            SessionNode session;
+            session.id = cell.id;
+            session.title = cell.title;
+            session.state = cell.state;
+            session.attention = cell.attention;
+            node.sessions.push_back(std::move(session));
         }
         if (filtering && node.sessions.empty() && node.title.find(*filter) == std::string::npos) {
             continue;
@@ -785,23 +939,102 @@ void SwitcherOverlayModel::open(const UiModel& model) {
         workspaces.push_back(std::move(node));
     }
 
-    // The model map is keyed by UUID, so sort by display title to keep the tree
-    // stable and match the registry's canonical-path order in practice.
+    const auto lower = [](std::string value) {
+        for (char& character : value) {
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        }
+        return value;
+    };
     std::sort(workspaces.begin(), workspaces.end(),
-              [](const WorkspaceNode& left, const WorkspaceNode& right) {
-                  return left.title < right.title;
+              [&model, &lower](const WorkspaceNode& left, const WorkspaceNode& right) {
+                  const std::string left_title = lower(left.title);
+                  const std::string right_title = lower(right.title);
+                  if (left_title != right_title) {
+                      return left_title < right_title;
+                  }
+                  const auto left_workspace = model.workspaces.find(left.id);
+                  const auto right_workspace = model.workspaces.find(right.id);
+                  const std::string& left_path = left_workspace == model.workspaces.end()
+                                                     ? left.title
+                                                     : left_workspace->second.cwd;
+                  const std::string& right_path = right_workspace == model.workspaces.end()
+                                                      ? right.title
+                                                      : right_workspace->second.cwd;
+                  return left_path < right_path;
               });
 
-    const auto active = model.workspaces.find(model.activeWorkspaceId);
-    const bool cursor_valid = !cursor.workspace.value.empty() &&
-                              model.workspaces.find(cursor.workspace) != model.workspaces.end();
-    if (!cursor_valid) {
-        cursor.workspace = model.activeWorkspaceId;
-        cursor.session.reset();
-        if (active != model.workspaces.end() && !active->second.activeSessionId.value.empty()) {
-            cursor.session = active->second.activeSessionId;
+    revalidate_switcher_cursor(*this, model);
+}
+
+void SwitcherOverlayModel::openHistory(const UiModel& model) {
+    workspaces.clear();
+    source = SwitcherSource::History;
+    const bool filtering = filter.has_value() && !filter->empty();
+
+    const auto path_of = [&model](const WorkspaceId& id) -> const std::string& {
+        static const std::string empty;
+        for (const WorkspaceHistory& history : model.catalog.workspaces) {
+            if (history.id == id) {
+                return history.canonicalPath;
+            }
         }
+        return empty;
+    };
+
+    for (const WorkspaceHistory& history : model.catalog.workspaces) {
+        WorkspaceNode node;
+        node.id = history.id;
+        node.title = history.title.empty() ? history.canonicalPath : history.title;
+        node.live = history.live;
+        node.historyOnly = !history.live;
+        node.note = history.note;
+        if (history.live) {
+            node.status = DaemonStatus::Attached;
+            node.mark = OwnershipMark::Owned;
+        } else {
+            node.status = DaemonStatus::NotRunning;
+            node.mark = OwnershipMark::NotRunning;
+        }
+        for (const SessionHistoryEntry& entry : history.sessions) {
+            if (filtering && entry.title.find(*filter) == std::string::npos &&
+                entry.id.value.find(*filter) == std::string::npos) {
+                continue;
+            }
+            SessionNode session;
+            session.id = entry.id;
+            session.title = entry.title;
+            session.fromDisk = true;
+            session.kind = entry.kind;
+            session.model = entry.model;
+            session.updatedAt = entry.updatedAt;
+            session.parent = entry.parent;
+            node.sessions.push_back(std::move(session));
+        }
+        if (filtering && node.sessions.empty() && node.title.find(*filter) == std::string::npos) {
+            continue;
+        }
+        // 22 §3.7 (SW17): History sessions are `updated_at` desc, `id` asc.
+        std::sort(node.sessions.begin(), node.sessions.end(),
+                  [](const SessionNode& left, const SessionNode& right) {
+                      if (left.updatedAt != right.updatedAt) {
+                          return left.updatedAt > right.updatedAt;
+                      }
+                      return left.id.value < right.id.value;
+                  });
+        workspaces.push_back(std::move(node));
     }
+
+    std::sort(workspaces.begin(), workspaces.end(),
+              [&path_of](const WorkspaceNode& left, const WorkspaceNode& right) {
+                  const std::string left_title = lower_ascii(left.title);
+                  const std::string right_title = lower_ascii(right.title);
+                  if (left_title != right_title) {
+                      return left_title < right_title;
+                  }
+                  return path_of(left.id) < path_of(right.id);
+              });
+
+    revalidate_switcher_cursor(*this, model);
 }
 
 void SwitcherOverlayModel::close() {

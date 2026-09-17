@@ -1,0 +1,75 @@
+#pragma once
+
+// Test-only seam for `SupervisorApp` internals (22-switcher-sessions-errata.md
+// §10.1/§10.2). The app lives in an anonymous namespace inside
+// `src/ui/supervisor.cpp` and enters the FTXUI loop in `run()`, so its
+// spawn-worker, catalog-reader and eviction paths are not reachable from a test.
+//
+// This header is additive test-support surface. It is compiled into production:
+// `src/ui/supervisor.cpp` includes it because `make_supervisor_harness` must be
+// defined in that TU to reach the anonymous-namespace `SupervisorApp`. Production
+// never *calls* it — `run_supervisor` remains the only production entry point —
+// so the factory and harness are inert in the shipped binary. The harness drives
+// the same private methods on the calling (UI) thread and exposes the pinned
+// lifetime state the deferred tests assert on. `drain_actions` is the FTXUI
+// loop's action pump, which the tests must call after an operation that enqueues.
+
+#include <chrono>
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "ymh/ui/session_catalog.hpp"
+#include "ymh/ui/supervisor.hpp"
+#include "ymh/ui/supervisor_connection.hpp"
+#include "ymh/ui/ui_model.hpp"
+
+namespace ymh::ui {
+
+class SupervisorHarness {
+public:
+    virtual ~SupervisorHarness() = default;
+
+    // UI-thread entry points mirroring the private `SupervisorApp` methods.
+    virtual void ensure_workspace_running(const WorkspaceId& workspace,
+                                          const SessionId& resume) = 0;
+    virtual void on_scan(std::vector<SupervisorWorkspace> live) = 0;
+    virtual void evict_dead_workspaces(const std::set<WorkspaceId>& live_ids) = 0;
+    virtual void on_link_state(const WorkspaceId& workspace, SupervisorLinkState state,
+                               std::string detail) = 0;
+    virtual void apply_resume_success(const WorkspaceId& workspace,
+                                      const SessionId& session) = 0;
+
+    // The FTXUI loop's action pump; runs every action queued so far.
+    virtual void drain_actions() = 0;
+
+    // Replaces the app's catalog reader with one built from `source` and starts
+    // it (SW-U19/SW-I10 need a blocking read). The app owns it and stops+joins
+    // it in its destructor.
+    virtual void start_catalog_with(WorkspaceCatalogSource source,
+                                    std::chrono::milliseconds refresh_interval) = 0;
+    virtual void refresh_catalog_now() = 0;
+
+    // Test-only seeding (SW-U13/SW-U14/SW-U18).
+    virtual void seed_pending_resume(const WorkspaceId& workspace, const SessionId& session) = 0;
+    virtual void seed_ensure_in_flight(const WorkspaceId& workspace) = 0;
+    virtual void seed_workspace(const WorkspaceModel& workspace) = 0;
+
+    // Observers (valid only while the harness lives).
+    [[nodiscard]] virtual const UiModel& model() const = 0;
+    [[nodiscard]] virtual const std::set<WorkspaceId>& ensure_in_flight() const = 0;
+    [[nodiscard]] virtual const std::map<WorkspaceId, SessionId>& pending_resume() const = 0;
+    [[nodiscard]] virtual bool has_connection(const WorkspaceId& workspace) const = 0;
+    [[nodiscard]] virtual std::optional<std::string> spec_boot_id(
+        const WorkspaceId& workspace) const = 0;
+    [[nodiscard]] virtual bool worker_joinable() const = 0;
+};
+
+[[nodiscard]] std::unique_ptr<SupervisorHarness> make_supervisor_harness(
+    SupervisorRunOptions options);
+
+} // namespace ymh::ui

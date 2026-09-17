@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "ymh/agent/context_snapshot.hpp"
+#include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/ui_event.hpp"
 
 namespace ymh::ui {
@@ -232,9 +234,25 @@ struct WorkspaceModel {
     DaemonStatus             daemonStatus = DaemonStatus::Attached;
     SessionId                activeSessionId;
     std::vector<SessionCell> sessions;
+    // 22 §3.1 (S1): true only once this supervisor's handshake is `Attached`.
+    // The Live switcher renders a workspace iff `live && daemonStatus ∈
+    // {Attached, Stopping}` (SW1/SW20). Default false so a workspace created by
+    // a stray `ensureCellIn`/`ensureSessionIn` (default `daemonStatus ==
+    // Attached`) is never rendered.
+    bool                     live = false;
 
     [[nodiscard]] bool hasDaemon() const { return daemonStatus == DaemonStatus::Attached; }
 };
+
+// 22 §3.6 (H1): workspace-independent notice surface. Rendered in the status
+// bar; never routed through `ensureSessionIn`/`ensureCellIn` for an unmodeled
+// workspace.
+struct UiNotice {
+    std::string  text;
+    std::int64_t atMs = 0;
+};
+
+constexpr std::size_t kMaxNotices = 8;
 
 // 16 §3.6 (C4): display-only switcher marker, derived from DaemonStatus. It is
 // supervisor-local and never written to the registry.
@@ -250,14 +268,34 @@ struct SessionNode {
     std::string title;
     AgentState  state = AgentState::Idle;
     bool        attention = false;
+    // 22 §3.6 (S2): History-source fields; default-initialized for the Live
+    // source (`fromDisk == false`).
+    bool                     fromDisk = false;
+    std::string              kind;                 // "root" | "fork" | "subagent"
+    std::string              model;
+    std::int64_t             updatedAt = 0;
+    std::optional<SessionId> parent;
+};
+
+// 22 §3.6: the switcher's projection source. `History` is declared for S2 and
+// is unused by S1.
+enum class SwitcherSource : std::uint8_t {
+    Live,
+    History,
 };
 
 struct WorkspaceNode {
-    WorkspaceId              id;
-    std::string              title;
-    DaemonStatus             status = DaemonStatus::Connecting;
-    OwnershipMark            mark = OwnershipMark::Unreachable;
-    std::vector<SessionNode> sessions;
+    WorkspaceId                id;
+    std::string                title;
+    DaemonStatus               status = DaemonStatus::Connecting;
+    OwnershipMark              mark = OwnershipMark::Unreachable;
+    bool                       live = true;
+    // 22 §3.6 (S2): a registered workspace with no live daemon (History source
+    // only). It renders `[history]` and, when `note` is set, its degradation
+    // leaf; it is never rendered by the Live source.
+    bool                       historyOnly = false;
+    std::optional<std::string> note;
+    std::vector<SessionNode>   sessions;
 };
 
 struct SwitcherCursor {
@@ -273,8 +311,12 @@ public:
     SwitcherCursor             cursor;
     std::optional<std::string> filter;
     std::set<WorkspaceId>      collapsed;
+    SwitcherSource             source = SwitcherSource::Live;
 
     void open(const UiModel& model);
+    // 22 §3.6/§4.3 (S2): History source — builds nodes from `model.catalog`
+    // (every registered workspace, live or not). Sets `source = History`.
+    void openHistory(const UiModel& model);
     void close();
     void moveDown();
     void moveUp();
@@ -350,6 +392,19 @@ struct ContextOverlayModel {
     std::string     note;
 };
 
+// 22 §4.6 (S2): the last delivered catalog snapshot, projected for `/sessions`.
+// `nowMs` is additive (Wave C): the UI-thread wall clock at store time, so the
+// pure renderer can derive `captured <relative> ago` and the per-session
+// relative update without reading a clock (10 U3/D16).
+struct SessionCatalogModel {
+    std::vector<WorkspaceHistory> workspaces;
+    bool                          loaded = false;
+    bool                          complete = false;
+    std::int64_t                  capturedAtMs = 0;
+    std::uint64_t                 generation = 0;
+    std::int64_t                  nowMs = 0;
+};
+
 struct UiModel {
     std::map<WorkspaceId, WorkspaceModel> workspaces;
     WorkspaceId                           activeWorkspaceId;
@@ -359,10 +414,12 @@ struct UiModel {
     PermissionDialogModel                 dialog;
     ExitConfirmState                      exitConfirm;
     ContextOverlayModel                   context;
+    SessionCatalogModel                   catalog;
     UiMode                                mode = UiMode::Conversation;
     bool                                  shouldExit = false;
     std::string                           mcp_status;
     DirtySet                              dirty;
+    std::deque<UiNotice>                  notices;
 
     [[nodiscard]] WorkspaceModel*  activeWorkspace();
     [[nodiscard]] SessionUiState*  activeSession();
@@ -384,6 +441,15 @@ struct UiModel {
     // `HostNoticeKind::McpServerStatus` host notice.
     void            setMcpStatus(std::string detail);
 
+    // 22 §3.6 (H1): appends a status-bar notice, dropping the oldest past
+    // `kMaxNotices`.
+    void            pushNotice(std::string text);
+
+    // 22 §3.5 (S1): removes a workspace and its sessions, repairs
+    // `activeWorkspaceId` by the §3.5 step 4 promotion rule, and re-snapshots a
+    // Live switcher whose cursor targeted it.
+    void            eraseWorkspace(const WorkspaceId& workspace);
+
     // Builds (or refreshes) the switcher node tree from the current workspaces
     // and sessions (10 §7.1). Pure model work; no registry/daemon access.
     void            openSwitcher();
@@ -399,5 +465,22 @@ struct UiModel {
 
 // 16 §3.6: the switcher's display-only ownership mark for one daemon status.
 [[nodiscard]] OwnershipMark ownership_mark(DaemonStatus status) noexcept;
+
+// 22 §3.1 (SW1/SW20): the Live-source display predicate. A workspace is
+// renderable iff `live` and its link is `Attached` or `Stopping`.
+[[nodiscard]] bool live_switcher_renderable(const WorkspaceModel& workspace) noexcept;
+
+// 22 §3.1: the liveness transition driven by a link state. `live` becomes true
+// only for `Attached` and false for `Detached`/`Dead`/`NotRunning`; it is left
+// unchanged for `Connecting` (attach in flight) and `Stopping` (daemon still
+// holds its sidecar lock).
+void apply_daemon_status_liveness(WorkspaceModel& workspace, DaemonStatus status) noexcept;
+
+// 22 §3.2: the workspaces an `on_scan` tick must evict. Pure: a workspace is
+// retained when it is in the live set or its link is still `Connecting`.
+[[nodiscard]] std::vector<WorkspaceId> switcher_eviction_candidates(
+    const std::map<WorkspaceId, WorkspaceModel>& workspaces,
+    const std::set<WorkspaceId>& live_ids,
+    const std::set<WorkspaceId>& connecting_ids);
 
 } // namespace ymh::ui
