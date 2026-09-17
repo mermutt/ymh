@@ -1064,6 +1064,14 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
         // bound but not yet accepting.
         const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
         if (current.has_value() && current->host.has_value()) {
+            // D-F1: a claim whose boot nonce is not ours means a concurrent
+            // supervisor's daemon won the workspace flock and ours is exiting.
+            // Retrying our own nonce can never succeed, so hand off to the
+            // winner-attach path immediately instead of burning the budget.
+            if (current->host->bootId.value != spawned.bootId.value) {
+                last_error = "another daemon owns the workspace";
+                break;
+            }
             try {
                 return AttachResult{connect_checked(spawned.socketPath, record.id,
                                                     spawned.bootId, identity),
