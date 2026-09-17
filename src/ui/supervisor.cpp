@@ -40,6 +40,7 @@ namespace {
 constexpr std::chrono::milliseconds kFrameInterval{50};
 constexpr std::chrono::milliseconds kMaxFrameDelta{250};
 constexpr std::chrono::milliseconds kExitQueryMargin{500};
+constexpr std::chrono::milliseconds kOwnershipRetryInterval{100};
 
 DaemonStatus daemon_status_for(SupervisorLinkState state) {
     switch (state) {
@@ -220,12 +221,60 @@ private:
             if (connection->state() != SupervisorLinkState::Attached) {
                 continue;
             }
-            const std::optional<protocol::OwnershipView> view = query_ownership(*connection);
+            const std::optional<protocol::OwnershipView> view =
+                query_orphaning_view(*connection);
             if (view.has_value() && is_orphaning_view(*view)) {
                 orphaning.push_back(id);
             }
         }
         return orphaning;
+    }
+
+    // 16 §4.1/O10. `other_fresh_owners` is the daemon's watchdog-cached snapshot,
+    // refreshed every `kOwnerWatchdogInterval`, so a peer that just exited cleanly
+    // can still be listed for up to one interval. When the live registry shows no
+    // other fresh supervisor that cached row is a ghost: the daemon IS orphaned.
+    // Re-query until the daemon's cache catches up, so the prompt opens AND the
+    // daemon's own admission (§4.4) will accept the shutdown. A genuinely live (or
+    // crashed, still-fresh) peer keeps `has_other_fresh_supervisor()` true and is
+    // returned unchanged. Bounded by `ownership_query_timeout` + one watchdog tick.
+    std::optional<protocol::OwnershipView> query_orphaning_view(SupervisorConnection& connection) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              options_.ownership_query_timeout + kOwnerWatchdogInterval +
+                              kExitQueryMargin;
+        while (true) {
+            std::optional<protocol::OwnershipView> view = query_ownership(connection);
+            if (!view.has_value() || !is_stale_owner_view(*view) ||
+                has_other_fresh_supervisor()) {
+                return view;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return view;
+            }
+            std::this_thread::sleep_for(kOwnershipRetryInterval);
+        }
+    }
+
+    // The daemon counts only this supervisor's live connection but its cached
+    // fresh-owner snapshot still lists someone else: either a ghost or a peer
+    // whose row has not been reaped yet. The registry disambiguates.
+    static bool is_stale_owner_view(const protocol::OwnershipView& view) noexcept {
+        return view.live_supervisors == 1 && view.live_automation == 0 &&
+               view.other_fresh_owners > 0;
+    }
+
+    bool has_other_fresh_supervisor() const {
+        if (options_.registry == nullptr) {
+            return true;
+        }
+        try {
+            const std::int64_t now = epoch_ms(options_.wall_clock());
+            const std::optional<SupervisorId> me{
+                SupervisorId{options_.identity.client_instance.value}};
+            return options_.registry->freshSupervisorCount(now, kOwnerLeaseTtl, me) > 0;
+        } catch (const std::exception&) {
+            return true;
+        }
     }
 
     std::optional<protocol::OwnershipView> query_ownership(SupervisorConnection& connection) {
