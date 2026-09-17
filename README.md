@@ -25,7 +25,7 @@ Architecture and component specs live in `docs/design/`.
 - System libraries: **SQLite3, nlohmann_json, spdlog, fmt, libcurl, libgit2,
   cmark-gfm**.
 - First configure downloads these via CMake `FetchContent` (network required):
-  FTXUI v6.1.9, Asio 1.38.2, toml++ v3.4.0, CLI11 v2.5.0, GoogleTest v1.17.0
+  FTXUI v6.1.9, Asio 1.38.2, CLI11 v2.5.0, GoogleTest v1.17.0
   (GoogleTest only when tests are enabled, which is the default).
 
 Arch Linux:
@@ -83,47 +83,63 @@ cwd and survives the TUI; running workspaces are tracked in a shared
 
 ## Configuration
 
+Config is **JSONC** (JSON with `//` and `/* */` comments; `#` is not a comment,
+and trailing commas are not allowed). TOML is retired: ymh never reads, probes,
+or warns about `config.toml`, so a leftover `config.toml` is invisible
+(`docs/design/21-config-jsonc-errata.md` §6).
+
 Layered, last writer wins:
 
 ```
 built-in defaults
-  -> global    ($XDG_CONFIG_HOME/ymh/config.toml, else ~/.config/ymh/config.toml)
-  -> workspace (<workspace>/.ymh/config.toml)
+  -> global    ($XDG_CONFIG_HOME/ymh/config.jsonc, else ~/.config/ymh/config.jsonc)
+  -> workspace (<workspace>/.ymh/config.jsonc)
   -> environment (YMH_* variables)
   -> command line
 ```
 
+The global file is **required**: if it is empty or absent, ymh exits with a
+clear error (exit 2). First run scaffolds the conventional global `config.jsonc`
+(and `<workspace>/.ymh/`). An explicit `--config <path>` is **never**
+auto-created: a missing explicit path is that same hard error. A path that
+exists but is not a regular file is also rejected. The workspace layer is
+optional: when `<workspace>/.ymh/config.jsonc` is absent it contributes nothing.
+
 The loader is strict: an unknown key or a bad value is an error, not a silent
 default. Example:
 
-```toml
-[llm]
-provider    = "openai-compatible"
-base_url    = "https://api.deepseek.com/v1"
-model       = "deepseek-flash"
-api_key_env = "DEEPSEEK_API_KEY"   # names the env var; the secret is never stored
-reasoning_effort = "low"
-
-[agent]
-max_steps = 100
-
-[permissions]
-read  = "allow"   # read_file, grep, glob
-write = "ask"     # write_file, edit_file
-shell = "ask"
-
-[logging]
-level = "info"
+```jsonc
+{
+  "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-flash",
+    "api_key_env": "DEEPSEEK_API_KEY",   // names the env var; the secret is never stored
+    "reasoning_effort": "low"
+  },
+  "agent": {
+    "max_steps": 100
+  },
+  "permissions": {
+    "read": "allow",   // read_file, grep, glob
+    "write": "ask",    // write_file, edit_file
+    "shell": "ask"
+  },
+  "logging": {
+    "level": "info"
+  }
+}
 ```
 
-`[llm]` may also be written as `[llm.default]`. Environment overrides include
+The `llm` section may also be written nested as `llm.default`. Environment
+overrides include
 `YMH_LLM_PROVIDER`, `YMH_LLM_MODEL`, `YMH_LLM_BASE_URL`, `YMH_API_KEY_ENV`,
 `YMH_REASONING_EFFORT`, `YMH_AGENT_MAX_STEPS`, and `YMH_LOG_LEVEL`.
 
 ### API key
 
 `DEEPSEEK_API_KEY` is read from the environment (the variable name is
-configurable via `[llm].api_key_env`). If you keep the key in
+configurable via `llm.api_key_env`). If you keep the key in
 `~/.apikey.deepseek` as `export DEEPSEEK_API_KEY=...`, source it first:
 
 ```sh
@@ -139,11 +155,14 @@ interactive TUI can answer `ask`; **headless `ymh run` has no approval channel,
 so an `ask` verdict resolves fail-closed to `deny`.** To let a headless run
 write files or run commands, opt in explicitly in the workspace config:
 
-```toml
-# <workspace>/.ymh/config.toml
-[permissions]
-write = "allow"
-shell = "allow"
+```jsonc
+// <workspace>/.ymh/config.jsonc
+{
+  "permissions": {
+    "write": "allow",
+    "shell": "allow"
+  }
+}
 ```
 
 ## Live tests (real DeepSeek API)
