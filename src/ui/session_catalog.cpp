@@ -94,7 +94,8 @@ WorkspaceHistory note_history(const WorkspaceRecord& record, bool live, std::str
 
 } // namespace
 
-WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live) {
+WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live,
+                                        bool include_unprompted) {
     std::error_code error;
 
     // §4.4 pre-flight, in pinned order. Step 0 runs before the DB existence
@@ -134,6 +135,13 @@ WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live
         config.boot_id   = BootId{"catalog-read"};
         const std::unique_ptr<SessionPersistence> store = SessionPersistence::openReadOnly(config);
         for (const SessionHeader& header : store->list()) {
+            // 23 §6.1/§6.2: the filter is applied here only when the caller (the
+            // `/sessions` catalog consumer) asks for it; the default keeps the
+            // `--resume` resolver able to find a hidden unprompted id.
+            if (!include_unprompted && header.kind == SessionKind::Root &&
+                store->isUnprompted(header.id)) {
+                continue;
+            }
             history.sessions.push_back(to_entry(header));
         }
         sort_sessions(history.sessions);
@@ -159,7 +167,9 @@ WorkspaceCatalogSource registry_catalog_source(WorkspaceRegistry& registry) {
         return registry.probeLiveness(id) == HostLiveness::Live;
     };
     source.read = [](const WorkspaceRecord& record, bool live) {
-        return read_workspace_history(record, live);
+        // 23 §6.1/23-D31: the `/sessions` catalog consumer hides unprompted root
+        // headers; every other caller keeps the unfiltered default.
+        return read_workspace_history(record, live, false);
     };
     return source;
 }

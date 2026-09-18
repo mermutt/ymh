@@ -116,6 +116,7 @@ bool command_loads_config(CliInvocation::Command command) {
         case CliInvocation::Command::Fork:
             return true;
         case CliInvocation::Command::Workspace:
+        case CliInvocation::Command::Session:
         case CliInvocation::Command::Config:
         case CliInvocation::Command::Version:
             return false;
@@ -628,6 +629,25 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     workspace_stop->add_flag("--force", workspace_stop_force,
                              "Stop even when the workspace has live owners (§4.6)");
 
+    CLI::App*   session = app.add_subcommand("session", "Session lifecycle commands");
+    CLI::App*   session_prune = session->add_subcommand("prune", "Prune unprompted root sessions");
+    bool        session_prune_empty  = false;
+    std::size_t session_prune_keep   = 0;
+    bool        session_prune_all    = false;
+    bool        session_prune_yes    = false;
+    bool        session_prune_force  = false;
+    bool        session_prune_json   = false;
+    std::string session_prune_older;
+    std::string session_prune_workspace;
+    session_prune->add_flag("--empty", session_prune_empty, "Select unprompted root sessions");
+    session_prune->add_option("--keep", session_prune_keep, "Keep the N most-recent sessions");
+    session_prune->add_flag("--all", session_prune_all, "Target every registered workspace");
+    session_prune->add_option("--workspace", session_prune_workspace, "Target one workspace");
+    session_prune->add_flag("--yes", session_prune_yes, "Apply (default: dry run)");
+    session_prune->add_flag("--force", session_prune_force, "Allow the active session");
+    session_prune->add_flag("--json", session_prune_json, "Machine-readable output");
+    session_prune->add_option("--older-than", session_prune_older, "Deferred in v1")->group("");
+
     std::string config_action;
     CLI::App*   config = app.add_subcommand("config", "Configuration commands");
     config->add_option("action", config_action, "path");
@@ -638,7 +658,7 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     } catch (const CLI::CallForAllHelp&) {
         throw CLI::ParseError(app.help("", CLI::AppFormatMode::All), 0);
     } catch (const CLI::CallForHelp&) {
-        throw CLI::ParseError(help_text(app, {run, list, show, replay, fork, workspace, config}), 0);
+        throw CLI::ParseError(help_text(app, {run, list, show, replay, fork, workspace, session, config}), 0);
     }
 
     if (invocation.version_requested) {
@@ -685,6 +705,21 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
         }
         return invocation;
     }
+    if (session->parsed()) {
+        invocation.command = CliInvocation::Command::Session;
+        invocation.session_empty = session_prune_empty;
+        invocation.session_keep_set = session_prune->count("--keep") > 0;
+        invocation.session_keep = session_prune_keep;
+        invocation.session_all = session_prune_all;
+        invocation.session_yes = session_prune_yes;
+        invocation.session_force = session_prune_force;
+        invocation.session_json = session_prune_json;
+        invocation.session_older_than = session_prune->count("--older-than") > 0;
+        if (!session_prune_workspace.empty()) {
+            invocation.workspace = session_prune_workspace;
+        }
+        return invocation;
+    }
     if (config->parsed()) {
         invocation.command = CliInvocation::Command::Config;
         if (!config_action.empty()) {
@@ -692,7 +727,6 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
         }
         return invocation;
     }
-
     invocation.command = CliInvocation::Command::Tui;
     return invocation;
 }
@@ -816,6 +850,26 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                                           out, err);
             }
             return run_workspace_command(invocation.workspace_args, out, err);
+
+        case CliInvocation::Command::Session: {
+            if (invocation.session_older_than) {
+                err << "session prune: --older-than is not supported in v1\n";
+                return 2;
+            }
+            PruneOptions prune;
+            prune.empty = invocation.session_empty;
+            if (invocation.session_keep_set) {
+                prune.keep = invocation.session_keep;
+            }
+            if (!invocation.workspace.empty()) {
+                prune.workspace = std::filesystem::path{invocation.workspace};
+            }
+            prune.all   = invocation.session_all;
+            prune.yes   = invocation.session_yes;
+            prune.force = invocation.session_force;
+            prune.json  = invocation.session_json;
+            return session_prune(prune, out, err);
+        }
 
         case CliInvocation::Command::Config:
             return run_config_command(invocation, out, err);
