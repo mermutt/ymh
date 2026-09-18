@@ -21,6 +21,15 @@ Priority: **P0** = do next (cheap, high user-visible value, or unblocks others);
 **P1** = valuable, needs design/decision or medium effort; **P2** = polish /
 optional. **GATE** = component gate applies (spec must be `verified` first).
 
+## Scope decisions
+
+- **DECISION (user, 2026-09-17): remote SSH/TCP transport is OUT of scope for
+  this project.** It is not deferred and not a candidate: it will not be planned
+  or built. The JSON-RPC protocol stays transport-agnostic, so this is a scope
+  decision, not a design blocker. The old "deferred" text lives in
+  `00-architecture.md` §47 Mode B, a historical superseded-by-errata record that
+  is deliberately not edited here.
+
 ---
 
 ## Summary
@@ -29,10 +38,10 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 |----|-------|-----|-------|----------|--------|------|-----------|
 | RB-01 | Message styling: drop role labels, highlight user input | 1 | **DONE** | P0 | S | Low | No |
 | RB-02 | Fold reasoning + tool output by default, Ctrl+O expand | 2 | **DONE** | P0 | M | Med | errata 17 (verified) |
-| RB-03 | Auto-name + rename sessions | 3 | PARTIAL | P1 | M | Med | `19-session-rename-errata.md` (gate r2) |
+| RB-03 | Auto-name + rename sessions | 3 | **DONE** | P1 | M | Med | `19-session-rename-errata.md` (verified + implemented) |
 | RB-04 | Supervisor-owned daemons (no unsupervised daemons) | 4 | **DONE** | P0 | L | High | **16 verified + implemented** |
-| RB-05 | `/skills` command | 5 | NEW | P1 | L | Med | `20-skills.md` (gate r2) |
-| RB-06 | `/context` visualizer (grid + MCP/tools) | 6 | PARTIAL | P1 | M | Low | `18-context-errata.md` (gate r2) |
+| RB-05 | `/skills` command | 5 | **DONE** | P1 | L | Med | `20-skills.md` (verified + implemented) |
+| RB-06 | `/context` visualizer (grid + MCP/tools) | 6 | **DONE** | P1 | M | Low | `18-context-errata.md` (verified + implemented) |
 | RB-07 | `/export` session to file (+ edit in `$EDITOR`) | 7 | **DONE** | P1 | S | Low | No (UI-local) |
 | RB-08 | `<Tab>` completes slash commands | 8 | **DONE** | P0 | S | Low | No |
 | RB-09 | Config in `~/.config/ymh/config.jsonc` (JSONC) | 9 | **DONE** | P1 | M | Med | `21-config-jsonc-errata.md` (verified + implemented) |
@@ -42,6 +51,9 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 | RB-13 | Live-only Ctrl-S switcher + `/sessions` disk catalog (workspace vs session) | — (reported confusion) | **DONE** | P0 | L | Med | `22-switcher-sessions-errata.md` (verified + implemented) |
 | RB-14 | Test isolation: pin `XDG_STATE_HOME` in a process-wide fixture | — (spec 22 §11.2) | NEW | P2 | S | Low | No (test infra) |
 | RB-15 | Guard the `session.create` reply path against an evicted workspace | — (spec 22 §11.7) | NEW | P2 | S | Low | No |
+| RB-16 | Slash-command completion list with highlighted selection | — (user, 2026-09-17) | NEW | P1 | S | Low | No (UI-local) |
+| RB-17 | Reasoning indicator: animated glyph + dimmed hint | — (user, 2026-09-17) | NEW | P1 | XS | Low | No (UI-local) |
+| RB-18 | Cursor flicker when the tmux pane is unfocused | — (live testing, 2026-09-17) | NEW | P1 | S | Med | No (UI-local) |
 
 **Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
 per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY
@@ -49,13 +61,15 @@ against real DeepSeek. RB-04 landed in 8 waves (`036e4e4e1`…`065e221d9`) per t
 verified spec `16-daemon-ownership.md`, also verified live with two supervisors.
 RB-07 landed in `38c8a6214` (gate-free UI-local item). **RB-13** landed per the
 verified spec `22-switcher-sessions-errata.md` (S1–S4: live-only Ctrl-S switcher
-+ `/sessions` disk catalog), also verified live.
++ `/sessions` disk catalog), also verified live. RB-09 is implemented (JSONC only;
+spec `21-config-jsonc-errata.md`, `9db17cd54`). RB-03 landed per the verified spec
+`19-session-rename-errata.md` (`162fa8641`). RB-05 landed per the verified spec
+`20-skills.md` (`6761e62ef`). RB-06 landed per the verified spec
+`18-context-errata.md` (`edd696c6e`).
 
-**In flight (design-first, gate not yet passed):** RB-06 → `18-context-errata.md`,
-RB-03 → `19-session-rename-errata.md`, RB-05 → `20-skills.md`. All three are in
-gate round 2 against an adversarial Oracle; **no implementation code may be
-written for them until they pass with zero open HIGH/MEDIUM.** RB-09 is
-implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
+**No item is currently in a design gate.** Every item with a spec gate has passed
+and shipped. The open items are RB-12 (UI-local, P1), RB-14 and RB-15 (test
+infra / guard, P2), and the new RB-16 to RB-18 below.
 
 ---
 
@@ -66,7 +80,8 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   Instead, slightly highlight the background of user input and draw a vertical
   bar on the far left of each user-input line. Assistant output stays on the
   normal background.
-- **Current state: PARTIAL.** Role labels are printed today:
+- **Current state: DONE** (errata `17-ui-transcript-errata.md`, `71dda4f16`).
+  Pre-implementation snapshot: role labels were printed today:
   - `src/ui/ui_render.cpp:132` — `paint(ftxui::text("you:"), ftxui::Color::Cyan, theme) | ftxui::bold`
   - `src/ui/ui_render.cpp:136-138` — `"assistant"` / `"assistant (streaming)"` in green+bold.
   - User block is `markdown.render(...)` on the normal background; the only
@@ -74,7 +89,7 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
     (`src/ui/ui_render.cpp:249`).
   - Styling is theme-gated via `paint()` (`src/ui/ui_render.cpp:19-24`) and
     `Theme::color` (`include/ymh/ui/theme.hpp`).
-- **What remains:** delete the two label rows; wrap the *user* entry body in a
+- **What shipped:** delete the two label rows; wrap the *user* entry body in a
   subtle background (FTXUI `bgcolor`) and prepend a left vertical bar per line
   (e.g. `│ ` gutter, or a `borderLeft`). Add a theme flag (e.g. `user_block`) so
   monochrome terminals degrade gracefully. Update the golden render test
@@ -84,7 +99,8 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
 ### RB-02 — Fold reasoning + tool output by default; Ctrl+O to expand
 - **Requirement (raw 2):** Fold all thinking / tool-use output by default.
   Provide Ctrl+O (and mouse click if easy) to expand.
-- **Current state: PARTIAL.**
+- **Current state: DONE** (errata `17-ui-transcript-errata.md`, `71dda4f16`).
+  Pre-implementation snapshot:
   - Ctrl+O already toggles **the last tool call only**:
     `src/ui/supervisor.cpp:725-727` → `toggle_last_tool()`
     (`src/ui/supervisor.cpp:517-525`, flips `tools.calls.back().expanded`).
@@ -98,7 +114,7 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
     but no reasoning content is ever surfaced.
   - **No mouse handling**: only `bool mouse = false;` in
     `include/ymh/ui/terminal_layer.hpp:16`; no event routing anywhere.
-- **What remains:** (a) capture reasoning chunks into the model (new
+- **What shipped:** (a) capture reasoning chunks into the model (new
   `ConversationEntry` role or `ToolCallView`-like reasoning view); (b) make
   collapsed tool/reasoning entries truly collapsed (single summary line, no
   body); (c) decide expansion scope — last entry (current) vs. per-entry
@@ -112,7 +128,8 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
 ### RB-03 — Auto-name + rename sessions
 - **Requirement (raw 3):** Rename sessions after they start to something
   meaningful and short.
-- **Current state: PARTIAL.** A `title` field already exists end-to-end:
+- **Current state: DONE** (spec `19-session-rename-errata.md`, `162fa8641`).
+  Pre-implementation snapshot: a `title` field already existed end-to-end:
   - `SessionHeader.title` (`include/ymh/session/session.hpp:49`), persisted
     (`src/session/session_persistence.cpp:41,298,719`), carried on the wire.
   - Heuristic auto-name exists for the **headless** path:
@@ -123,7 +140,7 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   - The title is rendered in the session bar (`src/ui/ui_render.cpp:219`), but
     there is **no rename event or wire method** (grep for
     `SessionRenamed`/`rename`/`set_title` finds none).
-- **What remains:** (a) TUI auto-naming — either LLM-derived (reuse the
+- **What shipped:** (a) TUI auto-naming — either LLM-derived (reuse the
   summarizer/compaction model) or heuristic (first user message, like headless);
   (b) a rename path: an additive session event (e.g. `SessionRenamed`) +
   wire method + a `/rename` command (or inline edit) + persistence update. The
@@ -139,7 +156,9 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   supervisor ends *that* supervisor (the other keeps managing the remaining
   daemons). Exiting the **last** supervisor must prompt that the remaining
   daemons will terminate.
-- **Current state: ARCH.** Today a `WorkspaceHost` daemon owns its cwd and
+- **Current state: DONE** (spec `16-daemon-ownership.md`, 8 waves
+  `036e4e4e1`…`065e221d9`). Pre-implementation snapshot: a `WorkspaceHost` daemon
+  owned its cwd and
   **survives TUI/supervisor exit** — the "unsupervised daemon" the user is
   rejecting. Code evidence:
   - Spawn is a **detached fork**: `ForkExecLauncher::spawn`
@@ -162,41 +181,43 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
     (`src/host/workspace_host.cpp:196-207`, `src/host/host_runtime.cpp:347-348`).
   Cross-supervisor *switch/continue* and last-supervisor terminate-with-prompt
   semantics do not exist.
-- **What remains:** the entire ownership/lifetime model: supervisor→daemon
+- **What shipped:** the entire ownership/lifetime model: supervisor→daemon
   ownership, multi-supervisor attach to shared daemons, cross-supervisor session
   visibility + switch, per-supervisor detach, and last-supervisor
-  terminate-with-confirmation. This is a **top-level architectural change** and
-  is being designed separately as **`docs/design/16-daemon-ownership.md`**
-  (in progress by another team member).
+  terminate-with-confirmation. This was a **top-level architectural change**,
+  designed separately as **`docs/design/16-daemon-ownership.md`**.
 - **Effort:** L (multi-day). **Risk:** High (process lifetime, registry
   ownership, transport, exit UX). **Deps:** blocks any daemon-lifecycle UI
-  (RB-11 aggregates, switcher). **Priority:** P0 *for design*; code is gated.
-- **GATE:** do **not** design here and do **not** write code until
-  `16-daemon-ownership.md` is `verified` in `DESIGN_STATUS.md`.
+  (RB-11 aggregates, switcher). **Priority:** P0; shipped.
+- **GATE:** satisfied — `16-daemon-ownership.md` is `verified` + implemented in
+  `DESIGN_STATUS.md`.
 
 ### RB-05 — `/skills` command
 - **Requirement (raw 5):** Develop a `/skills` command.
-- **Current state: NEW.** There is **no "skill" concept anywhere** in `src/` or
+- **Current state: DONE** (spec `20-skills.md`, `6761e62ef`). Pre-implementation
+  snapshot: there was **no "skill" concept anywhere** in `src/` or
   `include/` (grep returns nothing); the only mention is in
   `docs/design/00-architecture.md:4864`, describing the *dsh* reference design's
   plugin taxonomy — not an ymh feature. The slash-command registry exists
   (`include/ymh/ui/command_registry.hpp`, `src/ui/command_registry.cpp`) so a
   command can be registered cheaply, but there is no skill model, discovery,
   storage, invocation, or context injection.
-- **What remains:** define what a "skill" *is* for ymh (discoverable
+- **What shipped:** define what a "skill" *is* for ymh (discoverable
   prompt/spec bundles? directories with frontmatter? built-ins?), how skills are
   discovered (workspace `.ymh/skills/`, `~/.config/ymh/skills/`), how they are
   listed by `/skills`, how one is invoked, and how skill content enters the
   model context (interaction with RB-06 `/context`). This is a new subsystem.
 - **Effort:** L (3–5d). **Risk:** Med. **Deps:** RB-06 (context visibility),
   RB-08 (completion should include the new command). **Priority:** P1.
-- **GATE:** needs a new component spec (e.g. `17-skills.md`) verified before code.
+- **GATE:** satisfied — spec `20-skills.md` is `verified` + implemented
+  (`6761e62ef`).
 
 ### RB-06 — `/context` visualizer (color grid + MCP/tools the model sees)
 - **Requirement (raw 6):** Develop `/context` to visualize the context as a
   color grid, plus display the MCPs etc. that the model sees (similar to Claude
   Code).
-- **Current state: PARTIAL.** The *data* is largely available:
+- **Current state: DONE** (spec `18-context-errata.md`, `edd696c6e`).
+  Pre-implementation snapshot: the *data* was largely available:
   - Token usage already flows to the model: `TokenUsageUpdated`
     (`src/ui/ui_event_adapter.cpp:125`), `StatusModel` token fields
     (`include/ymh/ui/ui_model.hpp:158-166`), rendered in the status line
@@ -209,7 +230,7 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   - But there is **no `/context` command** and no assembled-context snapshot
     (system prompt + tool schemas + MCP tools + message list + per-segment
     token accounting) exposed to the UI.
-- **What remains:** expose an assembled-context snapshot (segments + token
+- **What shipped:** expose an assembled-context snapshot (segments + token
   estimates + tool/MCP inventory) to the supervisor; render a color grid and a
   list of MCP servers/tools. Likely an **additive errata to 10** (UI) and a
   read-only view over 06/13/15 internals.
@@ -232,7 +253,8 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
 
 ### RB-08 — `<Tab>` completes slash commands
 - **Requirement (raw 8):** Develop `<Tab>` to complete slash commands.
-- **Current state: PARTIAL.** The completion machinery exists but Tab is not
+- **Current state: DONE** (errata `17-ui-transcript-errata.md`, `71dda4f16`).
+  Pre-implementation snapshot: the completion machinery existed but Tab was not
   wired in the input:
   - `CommandRegistry::complete(prefix)` (`include/ymh/ui/command_registry.hpp:37`,
     `src/ui/command_registry.cpp:60-69`).
@@ -243,7 +265,7 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   - `Tab` is bound **only in the switcher** (`src/ui/supervisor.cpp:591-594`);
     `handle_input()` (`src/ui/supervisor.cpp:609-696`) has **no `Tab` case**, so
     Tab never inserts/completes a command.
-- **What remains:** handle `Event::Tab` in `handle_input`: when the draft is a
+- **What shipped:** handle `Event::Tab` in `handle_input`: when the draft is a
   bare `/prefix`, complete to the unique match (or longest common prefix), cycle
   through multiple matches, and insert a trailing space. Needs a common-prefix
   helper on the registry.
@@ -299,13 +321,14 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
 ### RB-10 — Current session name in top line, right-aligned
 - **Requirement (raw 10):** Display the name of the current session in the top
   line, on the right.
-- **Current state: NEW.** `render_header()` (`src/ui/ui_render.cpp:364-372`)
+- **Current state: DONE** (errata `17-ui-transcript-errata.md`, `71dda4f16`).
+  Pre-implementation snapshot: `render_header()` (`src/ui/ui_render.cpp:364-372`)
   renders `"ymh · <cwd>"` on the left followed by `ftxui::filler()` — the right
   side is intentionally empty. The header is placed by `build_ui()`
   (`src/ui/ui_render.cpp:397`). The session title *is* available
   (`SessionCell.title`, `include/ymh/ui/ui_model.hpp:203`; active session via
   `model.workspaces` / `model.sessions`).
-- **What remains:** look up the active session's title in `render_header` and
+- **What shipped:** look up the active session's title in `render_header` and
   render it after the filler (right-aligned), falling back to a short id when
   empty (mirror `src/ui/ui_render.cpp:219`).
 - **Effort:** XS (≤1h). **Risk:** Low. **Deps:** RB-03 makes titles meaningful;
@@ -314,8 +337,9 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
 ### RB-11 — Bottom line: counts only, not the full session list
 - **Requirement (raw 11):** Do not list all sessions in the bottom line. Just
   display the number of them, with how many are active/waiting.
-- **Current state: PARTIAL.** Both halves already exist, just not in the desired
-  form:
+- **Current state: DONE** (errata `17-ui-transcript-errata.md`, `71dda4f16`).
+  Pre-implementation snapshot: both halves already existed, just not in the
+  desired form:
   - The **full session list** is rendered by `render_session_bar()`
     (`src/ui/ui_render.cpp:212-236`), one `[title glyph]` cell per session,
     placed by `build_ui()` (`src/ui/ui_render.cpp:405`).
@@ -323,7 +347,7 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
     `AggregateStatus{activeCount, waitingCount}`
     (`include/ymh/ui/ui_model.hpp:257-262`), rendered as
     `"N active · M waiting"` in `render_status()` (`src/ui/ui_render.cpp:273-274`).
-- **What remains:** replace the per-session bar (`render_session_bar`) with a
+- **What shipped:** replace the per-session bar (`render_session_bar`) with a
   compact count summary (or fold the existing aggregate into that row) and keep
   full session navigation in the switcher overlay
   (`render_switcher`, `src/ui/ui_render.cpp:314-360`). Decide whether the
@@ -341,19 +365,32 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   permission dialog open consumed the `r` as a dialog key and left
   `ame repo overview` in the composer — which, once the dialog closed, was
   submitted as a chat message.
-- **Current state: NEW.** Observed live; not covered by any test. The permission
-  dialog binds `1/2/3/0/y/n/Esc` (`render_permission`), and unmatched printable
-  input is not consumed.
-- **What remains:** make every modal swallow unhandled printable input (and
-  optionally buffer it) instead of letting it reach the composer; clear or discard
-  any composer text that accumulated while a modal was open. Decide between
-  "discard" and "deliver to the composer after the modal closes" — the former is
-  less surprising. Needs a PTY test that types a command while a permission dialog
-  is open and asserts the composer is unaffected.
+- **Current state: DONE (2026-09-17).** Fixed in `SupervisorApp`
+  (`src/ui/supervisor.cpp`): the composer/input state is snapshotted when a modal
+  opens and restored when it closes, and printable input is dropped for a short
+  wall-clock window (`kModalTailWindow`, 100 ms) after the close so the tail of a
+  paste/burst whose resolving key closed the modal cannot reach the composer. The
+  window self-expires, so later deliberate typing is never swallowed. Covered by
+  the PTY test `UiSupervisorPty.ModalKeystrokesDoNotReachComposer`.
+- **What remains:** none for the reported defect. The guard covers the permission
+  dialog, the exit prompt, the switcher, and the context overlay.
 - **Effort:** S (≤0.5d). **Risk:** Low (input routing only). **Deps:** none.
   **Priority:** P1 (user-visible, but only when a modal is open).
 - **Note:** this is exactly the class of defect the hermetic suite structurally
   cannot catch — it needs a real terminal driving real keystrokes.
+- **Decision (2026-09-17, user-approved) — implemented:** typing a normal slash
+  command while the permission dialog was open could **silently answer** the
+  request when the string contained `n`/`y`/a digit (e.g. `/rename …` denied it
+  via the `n`). The permission dialog now resolves **only on `Enter`** against the
+  highlighted option: the bare-letter/number decision branches (`1`/`y`/`Y`,
+  `2`, `3`, `0`/`n`/`N`) were removed and every other key is swallowed by the
+  dialog (the RB-12 contract, unchanged). `Escape`/`Ctrl-C` still deny (Once) and
+  `ArrowUp`/`ArrowDown` still move the selection; the option labels dropped their
+  now-dead numeric prefixes and the footer reads
+  `↑/↓ select · Enter confirm · Esc cancel`. The **exit-confirm prompt's keys are
+  unchanged** (`y`/`n` confirm/cancel) — this decision is scoped to the permission
+  dialog only. Covered by the harness test
+  `SupervisorHarnessTest.RB12_PermissionDialogResolvesOnlyOnEnter`.
 
 ### RB-13 — Live-only Ctrl-S switcher + `/sessions` disk catalog
 - **Requirement (reported confusion):** the Ctrl-S switcher listed every
@@ -402,6 +439,60 @@ implemented (JSONC only; spec `21-config-jsonc-errata.md`, `9db17cd54`).
   that SW25 uses on the resume path to the `create_session` handler.
 - **Effort:** XS. **Risk:** Low. **Deps:** none. **Priority:** P2.
 
+### RB-16 — Slash-command completion list with a highlighted selection
+- **Requirement (user, 2026-09-17):** when the user types `/`, show a **list** of
+  the possible completions. Pressing `<tab>` types the selected completion after
+  the `/`. The **selected command in the list must be highlighted in a brighter
+  colour** than the rest.
+- **Current state: NEW (extends shipped RB-08 / spec 17).** Today there is only a
+  single completion hint line and Tab completes:
+  - hints: `refresh_hints()` (`src/ui/supervisor.cpp:467-480`) →
+    `command_hints` (`include/ymh/ui/ui_model.hpp:196`) →
+    `render_command_hints()` (`src/ui/ui_render.cpp:198-210`).
+  - Tab completion landed with RB-08 per `17-ui-transcript-errata.md`.
+  There is no multi-row candidate list and no selection highlight, so this is an
+  extension of the existing completion surface, not a new one.
+- **What remains:** render the full candidate list when the draft is a bare
+  `/prefix`; track a selected index and paint it in a brighter colour than the
+  unselected rows; `<tab>` inserts the selected completion after the `/`. The
+  selection-navigation interaction (e.g. repeated `<tab>` cycling vs. arrow keys)
+  must be decided during implementation and kept consistent with the existing key
+  handling (`handle_input()`, `src/ui/supervisor.cpp:609-696`).
+- **Effort:** S (≤0.5d). **Risk:** Low (render + input routing only). **Deps:**
+  RB-08 (shipped); candidates come from the existing `CommandRegistry`.
+  **Priority:** P1.
+- **GATE:** none. UI-local, reversible, user-visible; same class as
+  RB-01/RB-07/RB-08/RB-10/RB-11, which do not require a spec gate.
+
+### RB-17 — Reasoning indicator: animated glyph + dimmed hint
+- **Requirement (user, 2026-09-17):** replace the current wording
+  `reasoning (Ctrl+O to expand)` with `<sign> Thinking`, where `<sign>` is a
+  **single-character animation**, and render `ctrl+o to expand` in a **more
+  greyish / less visible colour** than the label.
+- **Current state: NEW (extends shipped RB-02 / spec 17).** Reasoning folding and
+  the `Ctrl+O` expand affordance shipped with RB-02 per
+  `17-ui-transcript-errata.md`; the indicator text is currently static.
+- **What remains:** swap the wording, drive `<sign>` from a single-character
+  animation, and dim the `ctrl+o to expand` hint. **Constraint:** the animation
+  must only tick while a reasoning block is actually streaming, so an idle TUI
+  burns no extra CPU (no free-running timer when nothing is streaming).
+- **Effort:** XS (≤1h). **Risk:** Low. **Deps:** RB-02 (shipped).
+  **Priority:** P1.
+- **GATE:** none. UI-local, reversible, user-visible; no spec gate.
+
+### RB-18 — Cursor flicker when the tmux pane is unfocused
+- **Requirement (live testing, 2026-09-17):** when ymh runs in tmux and the
+  cursor/focus is in **another pane**, ymh's cursor flickers in different
+  positions.
+- **Current state: NEW.** Observed live in tmux; not covered by any test.
+- **What remains:** reproduce live before fixing. Root cause unknown; candidates:
+  (a) no focus-in/out handling, (b) a cursor position being re-asserted every
+  render, (c) FTXUI cursor behaviour while the pane is unfocused. Reproduce under
+  tmux with a second pane focused, then fix only once the cause is confirmed.
+- **Effort:** S (≤0.5d, diagnosis-dominated). **Risk:** Med (root cause unknown;
+  may be FTXUI-internal). **Deps:** none. **Priority:** P1.
+- **GATE:** none. UI-local, reversible, user-visible; no spec gate.
+
 ---
 
 ## Recommended ordering
@@ -423,8 +514,7 @@ Phase C — **commands & config** (small-to-medium, some need a decision):
 
 Phase D — **new subsystem & architecture** (spec-gated):
 10. **RB-05** `/skills` (L; new spec)
-11. **RB-04** supervisor-owned daemons (L; spec 16 in progress) — **design runs in
-    parallel from the start**, code only after the gate.
+11. **RB-04** supervisor-owned daemons (L; spec 16 implemented).
 
 Rationale: A items are independent, reversible, and test-only risk. B reuses the
 `render_entry`/status plumbing established by A. C introduces wire/persistence
@@ -449,20 +539,19 @@ change.
 
 ## Needs a design spec (or explicit decision) *before code*
 
-1. **RB-04 — daemon ownership.** Top-level architectural change.
-   `docs/design/16-daemon-ownership.md` is in progress; mark code-gated until
-   `DESIGN_STATUS.md` shows it verified. **Do not design here.**
-2. **RB-05 — `/skills`.** New subsystem with no existing concept; needs a new
-   component spec (e.g. `17-skills.md`): skill model, discovery, storage,
-   invocation, context injection.
+1. **RB-04 — daemon ownership.** **Resolved** by `16-daemon-ownership.md`
+   (verified + implemented, 8 waves `036e4e4e1`…`065e221d9`); top-level
+   architectural change.
+2. **RB-05 — `/skills`.** **Resolved** by `20-skills.md` (verified; implemented
+   `6761e62ef`): skill model, discovery, storage, invocation, context injection.
 3. **RB-09 — JSONC config.** **Resolved** by `21-config-jsonc-errata.md`
    (verified Rev 5–8; JSONC only, TOML retired); implemented in `9db17cd54`.
-4. **RB-03 — session rename.** Additive but wire- and log-visible; needs an
-   errata to `01-session.md` + `05-transport.md` (new event + method) before code.
-5. **RB-02 — reasoning capture.** Additive errata to `10-supervisor-tui.md`
-   (new model fields + reasoning ingestion) before code.
-6. **RB-06 — `/context`.** Additive errata to `10-supervisor-tui.md` (assembled-
-   context snapshot interface) before code.
+4. **RB-03 — session rename.** **Resolved** by `19-session-rename-errata.md`
+   (verified + implemented `162fa8641`): additive event + wire method.
+5. **RB-02 — reasoning capture.** **Resolved** by `17-ui-transcript-errata.md`
+   (verified; shipped `71dda4f16`).
+6. **RB-06 — `/context`.** **Resolved** by `18-context-errata.md` (verified +
+   implemented `edd696c6e`): assembled-context snapshot interface.
 
 Items **RB-01, RB-07, RB-08, RB-10, RB-11** are UI-local, reversible, and do not
 require a spec gate.

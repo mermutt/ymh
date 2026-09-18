@@ -155,6 +155,8 @@ backs the hermetic suite. **Live tests** (real DeepSeek) are opt-in via
 ## Immediate next steps
 
 Milestone 2 is complete and green (supervisor + per-workspace daemons, registry,
-Unix-socket JSON-RPC). Next candidates: remote SSH/TCP transport (§47 Mode B),
-MCP/LSP/PTY (Phase 2, §51), and multi-workspace switcher / aggregate-flash
-polish. See `HANDOFF.md` §9.
+Unix-socket JSON-RPC). **Remote SSH/TCP transport is out of scope for this
+project** (DECISION, user, 2026-09-17): it is not deferred and not a candidate.
+Remaining candidates: multi-workspace switcher / aggregate-flash polish, and
+**LSP tools (§28) at the lowest priority** (not dropped). MCP and PTY (Phase 2)
+are implemented. See `HANDOFF.md` §9.
