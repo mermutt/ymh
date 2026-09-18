@@ -15,8 +15,12 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <system_error>
@@ -112,6 +116,9 @@ using SteadyClock = std::chrono::steady_clock;
 constexpr std::size_t kReadChunk = 64 * 1024;
 constexpr std::size_t kWriteChunk = 64 * 1024;
 constexpr auto        kReapPollInterval = std::chrono::milliseconds{50};
+// Bound on waiting for the loop to finish session teardown during service
+// destruction; on expiry the close is retried directly as a best effort.
+constexpr auto kFinishTimeout = std::chrono::seconds{5};
 
 std::vector<char*> to_raw(const std::vector<std::string>& strings) {
     std::vector<char*> raw;
@@ -247,6 +254,10 @@ public:
     void kill() override { requestTeardown(true); }
 
     PtySessionId id() const noexcept override { return id_; }
+
+    [[nodiscard]] bool closed() const noexcept {
+        return state_.load(std::memory_order_acquire) == PtyState::Closed;
+    }
     SessionId    session() const noexcept override { return session_; }
     int          pid() const noexcept override { return static_cast<int>(pid_); }
     PtyState     state() const noexcept override { return state_.load(std::memory_order_acquire); }
@@ -329,6 +340,7 @@ public:
     }
 
     void teardownOnLoop(bool force) {
+        const std::lock_guard<std::mutex> teardown(teardown_mutex_);
         if (state_.load(std::memory_order_acquire) == PtyState::Closed) {
             return;
         }
@@ -351,6 +363,7 @@ public:
     }
 
     void closeFromService() noexcept {
+        const std::lock_guard<std::mutex> teardown(teardown_mutex_);
         if (state_.load(std::memory_order_acquire) == PtyState::Closed) {
             return;
         }
@@ -801,6 +814,11 @@ private:
     std::mutex  reap_mutex_;
     bool        reaped_ = false;
 
+    // Serializes the two teardown entry points (`teardownOnLoop` on the loop
+    // thread and `closeFromService` on the caller's), so they cannot both touch
+    // the asio descriptors/timers.
+    std::mutex  teardown_mutex_;
+
     std::atomic<PtyState> state_{PtyState::Starting};
     std::atomic<bool>     master_drained_{false};
 
@@ -862,7 +880,13 @@ public:
          ToolConfig config)
         : loop_(loop), governor_(governor), events_(events), config_(config) {}
 
-    ~Impl() { closeAll(); }
+    // Invariant: no `LocalPtySession` may use the sink, the governor, or any
+    // other service/runtime-owned object once `~Impl` begins. `~Impl` finishes
+    // every session — state `Closed`, slot released, child reaped, descriptors
+    // closed — before it returns, and drains the handlers its closes cancel, so
+    // a session that a queued handler still holds is inert: it can no longer
+    // dereference anything owned by the service or the runtime.
+    ~Impl() { finishAllSessions(); }
 
     Task<std::unique_ptr<PtySession>> open(const PtyRequest& request,
                                            CancellationToken cancel) {
@@ -946,6 +970,7 @@ public:
             for (auto it = sessions_.begin(); it != sessions_.end();) {
                 if (it->second->session() == session) {
                     targets.push_back(it->second);
+                    closing_[it->first] = it->second;
                     it = sessions_.erase(it);
                 } else {
                     ++it;
@@ -959,9 +984,19 @@ public:
                 target->closeFromService();
             }
         }
+        pruneClosed();
     }
 
-    void closeAll() noexcept {
+    // Lock ordering (no path takes these in reverse, so no deadlock):
+    //   Impl::mutex_          — leaf; only around the sessions_/closing_ maps.
+    //   session teardown_mutex_ -> reap_mutex_ -> session mutex_.
+    // `finishAllSessions` holds no lock while it posts to the loop and waits, so
+    // the loop task acquiring those locks cannot deadlock against the caller.
+    // Closes every session (active and closing) and returns only once each is
+    // finished. `closeFromService` touches asio descriptors and timers, so it
+    // runs on the loop thread when one is running; the caller waits for that and
+    // then for the handlers the closes cancel, so no session can dispatch after.
+    void finishAllSessions() noexcept {
         std::vector<std::shared_ptr<LocalPtySession>> all;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -969,10 +1004,59 @@ public:
                 (void)id;
                 all.push_back(entry);
             }
+            for (auto& [id, entry] : closing_) {
+                (void)id;
+                all.push_back(entry);
+            }
             sessions_.clear();
+            closing_.clear();
         }
-        for (const std::shared_ptr<LocalPtySession>& session : all) {
-            session->closeFromService();
+        if (all.empty()) {
+            return;
+        }
+        if (loop_.stopped() || loop_.onLoopThread()) {
+            for (const std::shared_ptr<LocalPtySession>& session : all) {
+                session->closeFromService();
+            }
+            return;
+        }
+        auto              targets = std::make_shared<std::vector<std::shared_ptr<LocalPtySession>>>(
+            std::move(all));
+        auto              closed        = std::make_shared<std::promise<void>>();
+        std::future<void> closed_future = closed->get_future();
+        if (!loop_.post([targets, closed] {
+                for (const std::shared_ptr<LocalPtySession>& session : *targets) {
+                    session->closeFromService();
+                }
+                closed->set_value();
+            })) {
+            for (const std::shared_ptr<LocalPtySession>& session : *targets) {
+                session->closeFromService();
+            }
+            return;
+        }
+        if (closed_future.wait_for(kFinishTimeout) == std::future_status::timeout) {
+            for (const std::shared_ptr<LocalPtySession>& session : *targets) {
+                session->closeFromService();
+            }
+        }
+        auto              drained        = std::make_shared<std::promise<void>>();
+        std::future<void> drained_future = drained->get_future();
+        if (loop_.post([drained] { drained->set_value(); })) {
+            (void)drained_future.wait_for(kFinishTimeout);
+        }
+    }
+
+    void closeAll() noexcept { finishAllSessions(); }
+
+    void pruneClosed() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = closing_.begin(); it != closing_.end();) {
+            if (it->second->closed()) {
+                it = closing_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -984,6 +1068,10 @@ private:
 
     mutable std::mutex mutex_;
     std::map<std::uint64_t, std::shared_ptr<LocalPtySession>> sessions_;
+    // Sessions removed from `sessions_` by `closeSession` whose asynchronous
+    // teardown has not finished; `finishAllSessions` closes them synchronously
+    // so they cannot outlive the service.
+    std::map<std::uint64_t, std::shared_ptr<LocalPtySession>> closing_;
     std::uint64_t      next_id_ = 1;
 };
 
