@@ -566,3 +566,41 @@ TEST(SupervisorHarnessTest, RB12_PermissionDialogResolvesOnlyOnEnter) {
     EXPECT_TRUE(harness->model().dialog.open);
     EXPECT_FALSE(harness->last_dialog_resolution().has_value());
 }
+
+// User-reported (2026-09-17): the exit popup must open on Terminate and the
+// arrow keys must move the highlight. ↑/↓ were previously swallowed while only
+// ←/→/Tab toggled, so a user pressing ↓ saw nothing happen. `quit_requested()`
+// distinguishes the two dispatched outcomes: Terminate tears the daemons down,
+// Cancel does not.
+TEST(SupervisorHarnessTest, ExitConfirmArrowsMoveSelectionAndReturnDispatches) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const std::vector<WorkspaceId> orphaning = {WorkspaceId{"exit-ws"}};
+
+    // The real opener highlights Terminate (index 0) by default.
+    harness->open_exit_prompt(orphaning);
+    ASSERT_TRUE(harness->model().exitConfirm.open);
+    EXPECT_EQ(harness->model().exitConfirm.selected, 0);
+    EXPECT_FALSE(harness->quit_requested());
+
+    // ↓ moves the highlight to Cancel; Enter dispatches that selection (cancel).
+    EXPECT_TRUE(harness->dispatch_key("down"));
+    EXPECT_EQ(harness->model().exitConfirm.selected, 1) << "ArrowDown must move the selection";
+    EXPECT_TRUE(harness->dispatch_key("enter"));
+    EXPECT_FALSE(harness->model().exitConfirm.open);
+    EXPECT_FALSE(harness->quit_requested()) << "Enter must dispatch Cancel, not Terminate";
+
+    // ↑ moves the highlight off the default; ↓ then round-trips back to
+    // Terminate, and Enter then dispatches Terminate.
+    harness->open_exit_prompt(orphaning);
+    EXPECT_EQ(harness->model().exitConfirm.selected, 0);
+    EXPECT_TRUE(harness->dispatch_key("up"));
+    EXPECT_EQ(harness->model().exitConfirm.selected, 1) << "ArrowUp must move the selection";
+    EXPECT_TRUE(harness->dispatch_key("down"));
+    EXPECT_EQ(harness->model().exitConfirm.selected, 0);
+    EXPECT_TRUE(harness->dispatch_key("enter"));
+    EXPECT_FALSE(harness->model().exitConfirm.open);
+    EXPECT_TRUE(harness->quit_requested()) << "Enter must dispatch Terminate";
+}

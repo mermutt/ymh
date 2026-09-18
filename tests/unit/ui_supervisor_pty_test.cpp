@@ -283,6 +283,23 @@ public:
         return text_since(offset).find(needle) != std::string::npos;
     }
 
+    // Like `wait_for_since`, but matches the raw byte stream (ANSI escapes
+    // included), so a test can assert which row carries the inverted-SGR
+    // highlight (`\x1b[7m`) rather than only that the option text exists.
+    bool wait_for_raw_since(std::size_t offset, const std::string& needle,
+                            std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            read_available();
+            if (buffer_.find(needle, offset) != std::string::npos) {
+                return true;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        read_available();
+        return buffer_.find(needle, offset) != std::string::npos;
+    }
+
     bool wait_exit(std::chrono::milliseconds timeout) {
         if (pid_ <= 0) {
             return true;
@@ -403,7 +420,8 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ASSERT_TRUE(child.wait_for("alpha", 25s));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 10s))
         << "supervisor did not auto-create a session";
-    ASSERT_TRUE(child.wait_for("tui", 10s)) << "header did not show the session title";
+    // The create-time placeholder title must never surface in the header.
+    EXPECT_FALSE(child.wait_for("tui", 1s)) << "placeholder session title leaked into the header";
     ASSERT_TRUE(child.wait_for("active ·", 10s))
         << "bottom line did not show aggregate counts";
 
@@ -563,6 +581,75 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
         EXPECT_TRUE(registry->listSupervisors().empty())
             << "confirm must deregister the supervisor";
     }
+
+    guard.stop();
+}
+
+// User-reported (2026-09-17): ↑/↓ were swallowed in the exit popup (only
+// ←/→/Tab toggled), so a user pressing ↓ saw no highlight move. This drives the
+// real binary under a PTY and pins the inverted-SGR highlight row as it moves,
+// then confirms the default (Terminate) with Enter.
+TEST(UiSupervisorPty, ExitPromptArrowKeysMoveHighlight) {
+    ShortTempRoot root("ymh_pty_exit_arrows");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "exit-arrows-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "exit-arrows-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for("active ·", 10s)) << child.text();
+    ASSERT_FALSE(host_processes(&workspace_id.value).empty())
+        << "supervisor did not spawn its daemon";
+
+    const std::size_t prompt_mark = child.raw_size();
+    child.write("\x04");
+    ASSERT_TRUE(child.wait_for_since(prompt_mark, "Terminate and exit", 15s)) << child.text();
+    ASSERT_TRUE(child.wait_for_raw_since(prompt_mark, "\x1b[7m[ Terminate and exit ]", 5s))
+        << "the popup must open with Terminate highlighted";
+
+    const std::size_t down_mark = child.raw_size();
+    child.write("\x1b[B");
+    ASSERT_TRUE(child.wait_for_raw_since(down_mark, "\x1b[7m[ Cancel ]", 5s))
+        << "ArrowDown must move the highlight to Cancel";
+
+    const std::size_t up_mark = child.raw_size();
+    child.write("\x1b[A");
+    ASSERT_TRUE(child.wait_for_raw_since(up_mark, "\x1b[7m[ Terminate and exit ]", 5s))
+        << "ArrowUp must move the highlight back to Terminate";
+
+    child.write("\r");
+    EXPECT_TRUE(child.wait_exit(25s)) << child.text();
+
+    for (int attempt = 0; attempt < 400; ++attempt) {
+        if (host_processes(&workspace_id.value).empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+    EXPECT_TRUE(host_processes(&workspace_id.value).empty())
+        << "Enter on the Terminate default must tear the daemon down";
+    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
 
     guard.stop();
 }

@@ -372,13 +372,17 @@ struct PermissionDialogModel {
 
 // 16 §7.6 / §4.2: the last-supervisor exit confirmation. Counts and workspace
 // titles only; never a per-session list (C2). `selected` is 0=Terminate,
-// 1=Cancel and defaults to Cancel so a stray Enter cannot tear daemons down.
+// 1=Cancel. It defaults to Terminate (0) to match the intent that opened it:
+// this popup is only reachable through an explicit exit action (Ctrl-D /
+// `/exit`), so Enter confirming the exit is the natural outcome. Trade-off:
+// a stray Enter now tears daemons down instead of merely cancelling; Escape /
+// Ctrl-C / `n` remain the safe cancel paths.
 struct ExitConfirmState {
     bool                     open = false;
     std::vector<WorkspaceId> orphaning;
     int                      sessions = 0;
     int                      running = 0;
-    int                      selected = 1;
+    int                      selected = 0;
 };
 
 // 18 §4.2 (CX-04): the read-only `/context` overlay state. Purely
