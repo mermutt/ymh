@@ -524,6 +524,35 @@ TEST(SessionStoreDefaults, FakeStoreHeadSequenceAndBoundedReadAfter) {
     EXPECT_THROW(static_cast<void>(store.headSequence(SessionId{"missing"})), UnknownSession);
 }
 
+TEST(SessionStoreDefaults, SL5_SL_U4_FakeStoreIsUnpromptedHasDependentsAndEraseWithEvent) {
+    FakeStore          store;
+    const SessionHeader parent = make_header(make_temp_dir());
+    store.create(parent);
+    EXPECT_TRUE(store.isUnprompted(parent.id));
+    store.append(parent.id,
+                 record(1, parent.id, payload::SessionStarted{"test-model", "interactive", "t"}).event);
+    EXPECT_TRUE(store.isUnprompted(parent.id));
+    store.append(
+        parent.id,
+        record(2, parent.id, payload::UserMessage{MessageId{"m1"}, {text_block("hi")}}).event);
+    EXPECT_FALSE(store.isUnprompted(parent.id));
+
+    EXPECT_FALSE(store.hasDependents(parent.id));
+    SessionHeader child = make_header(make_temp_dir(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 0;
+    store.create(child);
+    EXPECT_TRUE(store.hasDependents(parent.id));
+    EXPECT_FALSE(store.hasDependents(child.id));
+
+    store.eraseWithEvent(child.id,
+                         record(3, child.id, payload::SessionEnded{payload::SessionEndReason::Deleted})
+                             .event);
+    EXPECT_FALSE(store.load(child.id).has_value());
+    EXPECT_FALSE(store.hasDependents(parent.id));
+    EXPECT_TRUE(store.load(parent.id).has_value());
+}
+
 TEST(SessionRename, PayloadJsonRoundTripAndOriginParsing) {
     const payload::SessionRenamed user{"fix the flaky test", payload::RenameOrigin::User};
     const nlohmann::json         json = user;

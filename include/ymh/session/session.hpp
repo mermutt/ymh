@@ -147,6 +147,38 @@ public:
         return sequences;
     }
 
+    // 23 §3.4: true iff the session's OWN log contains no `user/message`.
+    // Non-pure so the in-memory fakes keep compiling; the durable store
+    // overrides it with an `EXISTS` over the session's own events. The title is
+    // never consulted (SL8).
+    [[nodiscard]] virtual bool isUnprompted(SessionId id) const {
+        for (const EventRecord& record : read(id, 0)) {
+            if (record.event.type == EventType::UserMessage) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // 23 §5.3: true iff any sessions row has parent_session == id. Non-pure for
+    // the same reason as `isUnprompted`; the durable store overrides it with an
+    // indexed `EXISTS`.
+    [[nodiscard]] virtual bool hasDependents(SessionId id) const {
+        for (const SessionHeader& header : list()) {
+            if (header.parentSession.has_value() && header.parentSession->value == id.value) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 23 §5.4: append `event` and erase snapshots/leases/events/row in ONE
+    // lease-exempt transaction. Default (fakes): append + erase.
+    virtual void eraseWithEvent(SessionId id, Event event) {
+        append(id, std::move(event));
+        erase(id);
+    }
+
     virtual bool isLeaseHolder(SessionId id) const = 0;
 
     // 11-m2-errata §5.2 (D15): highest committed Sequence in the session's
