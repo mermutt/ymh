@@ -21,6 +21,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ymh/ui/session_catalog.hpp"
@@ -43,6 +44,8 @@ public:
                                std::string detail) = 0;
     virtual void apply_resume_success(const WorkspaceId& workspace,
                                       const SessionId& session) = 0;
+    virtual void apply_create_reply(const WorkspaceId& workspace, const SessionId& session,
+                                    std::string error) = 0;
 
     // The FTXUI loop's action pump; runs every action queued so far.
     virtual void drain_actions() = 0;
@@ -58,6 +61,19 @@ public:
     virtual void seed_pending_resume(const WorkspaceId& workspace, const SessionId& session) = 0;
     virtual void seed_ensure_in_flight(const WorkspaceId& workspace) = 0;
     virtual void seed_workspace(const WorkspaceModel& workspace) = 0;
+
+    // RB-12 addendum (2026-09-17): permission-dialog key semantics. Opens the
+    // dialog through the same model fields the adapter writes, then drives FTXUI
+    // events through the real handler so the swallow contract and the
+    // Enter-only resolution are exercised end to end. `key` is a single
+    // printable character or one of "up", "down", "enter", "escape", "ctrl-c".
+    virtual void open_permission_dialog(const SessionId& session,
+                                        const PermissionRequestId& request,
+                                        std::string tool, std::string summary) = 0;
+    virtual bool dispatch_key(const std::string& key) = 0;
+    [[nodiscard]] virtual std::optional<
+        std::pair<payload::PermissionDecisionKind, GrantScope>>
+    last_dialog_resolution() const = 0;
 
     // Observers (valid only while the harness lives).
     [[nodiscard]] virtual const UiModel& model() const = 0;

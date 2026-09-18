@@ -189,18 +189,30 @@ Element render_tool_entry(const ConversationEntry& entry, const ToolModel* tools
     return ftxui::vbox(std::move(rows));
 }
 
+// RB-17: single-character reasoning spinner. The frame index is supplied by the
+// model; a non-streaming block shows the static bullet so the animation is only
+// ever driven while text is actually arriving.
+constexpr std::array<const char*, 8> kReasoningSpinnerFrames = {
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧",
+};
+
+const char* reasoning_sign(const ConversationEntry& entry, std::size_t frame) {
+    if (!entry.streaming) {
+        return "•";
+    }
+    return kReasoningSpinnerFrames[frame % kReasoningSpinnerFrames.size()];
+}
+
 Element render_reasoning_entry(const ConversationEntry& entry, bool expand_all_folds,
                                const RenderContext& context) {
     const Theme& theme = context.theme;
-    std::string header = "reasoning";
-    if (expand_all_folds) {
-        header += entry.streaming ? " (expanded · streaming)" : " (expanded)";
-    } else {
-        header += entry.streaming ? " (streaming · Ctrl+O to expand)"
-                                  : " (Ctrl+O to expand)";
-    }
+    const std::string header =
+        std::string(reasoning_sign(entry, context.spinner_frame)) + " Thinking";
     Elements rows;
-    rows.push_back(paint(ftxui::text(header), ftxui::Color::Magenta, theme));
+    rows.push_back(ftxui::hbox({
+        paint(ftxui::text(header), ftxui::Color::Magenta, theme),
+        ftxui::text(expand_all_folds ? "  expanded" : "  ctrl+o to expand") | ftxui::dim,
+    }));
     if (expand_all_folds) {
         const MarkdownRenderer markdown;
         rows.push_back(markdown.render(MarkdownBlock{entry.text}, context));
@@ -288,10 +300,20 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
     if (active == nullptr || active->command_hints.empty()) {
         return ftxui::text("");
     }
+    const std::size_t count = active->command_hints.size();
+    const std::size_t selected =
+        active->command_hint_selected < count ? active->command_hint_selected : 0;
     Elements rows;
-    for (const CommandHint& hint : active->command_hints) {
+    rows.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const CommandHint& hint = active->command_hints[index];
+        const bool on = index == selected;
+        Element name = paint(ftxui::text("/" + hint.name),
+                             on ? theme.completion_selected : ftxui::Color::Green, theme) |
+                       ftxui::bold;
         rows.push_back(ftxui::hbox({
-            paint(ftxui::text("/" + hint.name), ftxui::Color::Green, theme) | ftxui::bold,
+            ftxui::text(on ? "> " : "  "),
+            std::move(name),
             ftxui::text("  " + hint.description) | ftxui::dim,
         }));
     }
@@ -360,10 +382,10 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
     }
     rows.push_back(ftxui::separator());
     const char* options[] = {
-        "1) Allow once",
-        "2) Allow for session",
-        "3) Always allow",
-        "0) Deny",
+        "Allow once",
+        "Allow for session",
+        "Always allow",
+        "Deny",
     };
     for (int index = 0; index < 4; ++index) {
         Element row = ftxui::text(options[index]);
@@ -372,7 +394,7 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
         }
         rows.push_back(row);
     }
-    rows.push_back(ftxui::text("y allow · n deny · Esc cancel") | ftxui::dim);
+    rows.push_back(ftxui::text("↑/↓ select · Enter confirm · Esc cancel") | ftxui::dim);
     (void)theme;
     return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) | ftxui::center;
 }
@@ -884,7 +906,8 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     Elements rows;
     rows.push_back(render_header(model, theme));
     rows.push_back(ftxui::separator());
-    rows.push_back(render_conversation(active, RenderContext{size.width, theme, false}) |
+    rows.push_back(render_conversation(
+                       active, RenderContext{size.width, theme, false, model.spinner.frame}) |
                    ftxui::flex);
     if (active != nullptr && !active->scroll.following) {
         rows.push_back(render_scroll_hint(active, theme));

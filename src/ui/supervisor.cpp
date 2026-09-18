@@ -47,9 +47,63 @@ namespace {
 
 constexpr std::chrono::milliseconds kFrameInterval{50};
 constexpr std::chrono::milliseconds kMaxFrameDelta{250};
+// RB-18: idle presence heartbeats are serviced by a non-repainting closure at
+// this cadence (well under the 5s owner heartbeat interval), so an idle TUI
+// never wakes the renderer.
+constexpr std::chrono::milliseconds kPresencePostInterval{1000};
+// RB-12/RB-18: a modal's resolving keystroke is consumed by the modal, but a
+// paste/burst continues after it. Printable input is suppressed for this long
+// after a modal closes. The tail of a burst rides in the *same* input batch as
+// the resolving key, so it is processed within microseconds of it; 25 ms is
+// ~1000x that same-batch margin, so it covers the tail with room to spare while
+// staying far below the ~100 ms a person needs before typing the next deliberate
+// key, so real input is never lost. The window is wall-clock based, so it
+// self-expires even when no repaint is scheduled (RB-18 removed the periodic
+// repaint).
+constexpr std::chrono::milliseconds kModalTailWindow{25};
 constexpr std::chrono::milliseconds kExitQueryMargin{500};
 constexpr std::chrono::milliseconds kOwnershipRetryInterval{100};
 constexpr int kContextScrollPage = 6;
+
+// RB-18: order-independent identity of one daemon-set scan. The scanner fires
+// every 2s; an unchanged set must not reach `on_scan` (which enqueues a UI
+// action and therefore forces a full repaint). Compared on the scanner thread
+// only.
+std::vector<std::string> live_scan_key(const std::vector<SupervisorWorkspace>& live) {
+    std::vector<std::string> key;
+    key.reserve(live.size());
+    for (const SupervisorWorkspace& workspace : live) {
+        key.push_back(workspace.id.value + "\n" + workspace.boot_id + "\n" +
+                      workspace.socket_path + "\n" + workspace.cwd + "\n" +
+                      workspace.title);
+    }
+    std::sort(key.begin(), key.end());
+    return key;
+}
+
+// RB-18: identity of the rendered catalog content, excluding the capture
+// timestamp/generation. The catalog worker refreshes every 15s; a snapshot whose
+// displayed content is unchanged must not reach the UI thread (and repaint) while
+// the History overlay is closed. Compared on the worker thread only.
+std::string catalog_key(const SessionCatalogSnapshot& snapshot) {
+    std::string key = snapshot.complete ? "1" : "0";
+    for (const WorkspaceHistory& workspace : snapshot.workspaces) {
+        key += "\nW" + workspace.id.value + "|" + workspace.title + "|" +
+               workspace.canonicalPath + "|" + (workspace.live ? "1" : "0") + "|" +
+               (workspace.note.has_value() ? *workspace.note : std::string{});
+        for (const SessionHistoryEntry& session : workspace.sessions) {
+            key += "\nS" + session.id.value + "|" + session.title + "|" + session.kind +
+                   "|" + session.model + "|" + std::to_string(session.createdAt) + "|" +
+                   std::to_string(session.updatedAt) + "|" +
+                   (session.parent.has_value() ? session.parent->value : std::string{}) +
+                   "|";
+            if (session.seedLength.has_value()) {
+                key += std::to_string(*session.seedLength);
+            }
+        }
+    }
+    return key;
+}
 
 // 22 §5.1 (S3): one coalesced lazy-spawn request for the ensure worker.
 struct EnsureRequest {
@@ -326,6 +380,7 @@ public:
             state->input.saved_draft.clear();
             state->input.completion.reset();
             state->command_hints.clear();
+            state->command_hint_selected = 0;
             model_.dirty.mark(workspace->activeSessionId, UiDirtyFlag::Input);
         }
         const WorkspaceId workspace_id = workspace->id;
@@ -367,6 +422,14 @@ private:
     // private spawn/catalog/eviction surface to make the deferred pinned tests
     // real; production never uses it.
     friend class SupervisorHarnessImpl;
+
+    // RB-12: the composer/input state captured when a modal opens.
+    struct ModalComposerSnapshot {
+        SessionId                session;
+        InputModel               input;
+        std::vector<CommandHint> command_hints;
+        std::size_t              command_hint_selected = 0;
+    };
 
     // 16 §4.2 (16-D9). The supervisor stays registered until the user confirms:
     // query the orphaning set read-only, then either exit (empty set), auto-
@@ -725,9 +788,17 @@ private:
             options_.scan_interval <= std::chrono::milliseconds::zero()) {
             return;
         }
+        auto last_scan = std::make_shared<std::vector<std::string>>();
         scanner_ = std::make_unique<DaemonSetScanner>(
             *options_.registry, options_.scan_interval,
-            [this](std::vector<SupervisorWorkspace> live) { on_scan(std::move(live)); });
+            [this, last_scan](std::vector<SupervisorWorkspace> live) {
+                std::vector<std::string> key = live_scan_key(live);
+                if (key == *last_scan) {
+                    return;
+                }
+                on_scan(std::move(live));
+                *last_scan = std::move(key);
+            });
         scanner_->start();
     }
 
@@ -738,12 +809,18 @@ private:
         if (options_.registry == nullptr) {
             return;
         }
+        auto last_key = std::make_shared<std::string>();
         catalog_ = std::make_unique<SessionCatalogReader>(
             *options_.registry,
-            [this](SessionCatalogSnapshot snapshot) {
+            [this, last_key](SessionCatalogSnapshot snapshot) {
+                std::string key = catalog_key(snapshot);
+                if (key == *last_key && !catalog_visible_.load()) {
+                    return;
+                }
                 enqueue([this, snapshot = std::move(snapshot)]() mutable {
                     on_catalog_snapshot(std::move(snapshot));
                 });
+                *last_key = std::move(key);
             },
             options_.catalog_refresh_interval);
         catalog_->start();
@@ -776,6 +853,7 @@ private:
         model_.switcher.source = SwitcherSource::History;
         model_.switcher.openHistory(model_);
         model_.mode = UiMode::Switcher;
+        catalog_visible_.store(true);
         model_.dirty.markAggregate();
         if (catalog_ != nullptr) {
             catalog_->refreshNow();
@@ -1173,31 +1251,50 @@ private:
                         connection_it->second->track(SessionId{session});
                     }
                 }
-                enqueue([this, workspace, session] {
-                    std::string queued;
-                    const auto pending_it = pending_creates_.find(workspace);
-                    if (pending_it != pending_creates_.end()) {
-                        queued = pending_it->second;
-                        pending_creates_.erase(pending_it);
-                    }
-                    if (session.empty()) {
-                        return;
-                    }
-                    SessionUiState& state =
-                        model_.ensureSessionIn(workspace, SessionId{session});
-                    if (state.status.model.empty()) {
-                        state.status.model = options_.config.agent.model;
-                    }
-                    model_.ensureCellIn(workspace, SessionId{session});
-                    activate_session(workspace, SessionId{session});
-                    if (!queued.empty()) {
-                        prompt(workspace, SessionId{session}, queued);
-                    }
-                    // 17 §6 (RB-10): re-list so the created session's title
-                    // ("tui") populates its cell via the pinned setCellTitle path.
-                    refresh_sessions(workspace);
+                enqueue([this, workspace, session, error = reply.error] {
+                    apply_create_reply(workspace, SessionId{session}, error);
                 });
             });
+    }
+
+    // RB-15 (22 §5.2/SW25 generalised): the `session.create` reply must never
+    // inject a workspace. A workspace evicted between the submit and its reply
+    // is reported through `surface_notice` and left unmodeled; a create failure
+    // is likewise surfaced there rather than being swallowed.
+    void apply_create_reply(const WorkspaceId& workspace, const SessionId& session,
+                            std::string error) {
+        std::string queued;
+        const auto pending_it = pending_creates_.find(workspace);
+        if (pending_it != pending_creates_.end()) {
+            queued = pending_it->second;
+            pending_creates_.erase(pending_it);
+        }
+        if (model_.workspaces.count(workspace) == 0) {
+            surface_notice(
+                workspace, session,
+                session.value.empty()
+                    ? "cannot create session: workspace is no longer open"
+                    : "session created in a workspace that is no longer open");
+            return;
+        }
+        if (session.value.empty()) {
+            surface_notice(workspace, session,
+                           error.empty() ? "cannot create session"
+                                         : "cannot create session: " + error);
+            return;
+        }
+        SessionUiState& state = model_.ensureSessionIn(workspace, session);
+        if (state.status.model.empty()) {
+            state.status.model = options_.config.agent.model;
+        }
+        model_.ensureCellIn(workspace, session);
+        activate_session(workspace, session);
+        if (!queued.empty()) {
+            prompt(workspace, session, queued);
+        }
+        // 17 §6 (RB-10): re-list so the created session's title ("tui") populates
+        // its cell via the pinned setCellTitle path.
+        refresh_sessions(workspace);
     }
 
     void prompt(const WorkspaceId& workspace, const SessionId& session, const std::string& text) {
@@ -1245,6 +1342,8 @@ private:
         last_tick_ = now;
         adapter_.onTick(delta);
         tick_presence();
+        animation_active_.store(model_.aggregate.flash.isFlashing() ||
+                                model_.has_streaming_reasoning());
     }
 
     SessionUiState* active() {
@@ -1253,6 +1352,70 @@ private:
             return nullptr;
         }
         return model_.session(workspace->activeSessionId);
+    }
+
+    // RB-12: true while an input-blocking modal owns the keyboard. The
+    // permission dialog and the exit prompt resolve on a bare keystroke; the
+    // switcher and the context overlay capture every key while they are up.
+    // Printable input must never reach the composer in any of these states.
+    [[nodiscard]] bool modal_owns_input() const {
+        return model_.exitConfirm.open || model_.dialog.open ||
+               (model_.mode == UiMode::Context && model_.context.open) ||
+               model_.mode == UiMode::Switcher;
+    }
+
+    // RB-12: composer snapshot taken when a modal opens, restored when it
+    // closes. Text typed before the modal opened survives; anything that
+    // reached the composer while the modal was up is discarded.
+    void capture_modal_composer() {
+        if (modal_composer_snapshot_.has_value()) {
+            return;
+        }
+        SessionUiState* state = active();
+        if (state == nullptr) {
+            return;
+        }
+        modal_composer_snapshot_ =
+            ModalComposerSnapshot{state->id, state->input, state->command_hints,
+                                  state->command_hint_selected};
+    }
+
+    void release_modal_composer() {
+        if (!modal_composer_snapshot_.has_value()) {
+            return;
+        }
+        ModalComposerSnapshot snapshot = std::move(*modal_composer_snapshot_);
+        modal_composer_snapshot_.reset();
+        // RB-12: the keystroke that closed the modal is consumed by the modal,
+        // but a paste/burst continues after it. Anchor a short wall-clock window
+        // at the close instant so the tail is dropped; because it expires by
+        // time (not by a render), it can never leave the composer deaf (RB-18).
+        modal_closed_at_ = std::chrono::steady_clock::now();
+        SessionUiState* state = model_.session(snapshot.session);
+        if (state == nullptr) {
+            return;
+        }
+        state->input = std::move(snapshot.input);
+        state->command_hints = std::move(snapshot.command_hints);
+        state->command_hint_selected = snapshot.command_hint_selected;
+        model_.dirty.mark(state->id, UiDirtyFlag::Input);
+    }
+
+    void sync_modal_composer() {
+        if (modal_owns_input()) {
+            capture_modal_composer();
+        } else {
+            release_modal_composer();
+        }
+    }
+
+    // RB-12/RB-18: true only during the short window after a modal closed in
+    // which the tail of the resolving burst may still arrive.
+    [[nodiscard]] bool modal_tail_suppression_active() const {
+        if (!modal_closed_at_.has_value()) {
+            return false;
+        }
+        return std::chrono::steady_clock::now() - *modal_closed_at_ < kModalTailWindow;
     }
 
     void new_session() {
@@ -1495,6 +1658,7 @@ private:
 
     void refresh_hints(SessionUiState& state) {
         state.command_hints.clear();
+        state.command_hint_selected = 0;
         const std::string& draft = state.input.draft;
         if (draft.empty() || draft.front() != '/') {
             return;
@@ -1508,51 +1672,53 @@ private:
         }
     }
 
-    // 17 §5 (RB-08): Tab completes a bare `/prefix`. A unique match terminates
-    // with a trailing space; a multi-match step stores the cycle and emits
-    // "/" + name with no trailing space so the next Tab keeps cycling. While a
-    // cycle is active for the current draft it takes precedence over the
-    // unique-match terminal case (otherwise the first stepped-to name, itself a
-    // complete command, would end the cycle — contradicting the pinned test
-    // plan "third Tab = names[1]").
-    bool complete_command(SessionUiState& state) {
+    // 17 §5 (RB-08) + RB-16: Tab completes a bare `/prefix` to the *selected*
+    // candidate. The candidate set is frozen into a `CompletionCycle` on the
+    // first Tab; each subsequent Tab types `names[index]` and advances the
+    // selection, so repeated Tab cycles through the candidates while the list
+    // highlight follows. TabReverse (Shift+Tab) types the selected candidate and
+    // moves the selection back. A unique match completes immediately with a
+    // trailing space (the pinned RB-08 terminal case).
+    bool complete_command(SessionUiState& state, bool reverse = false) {
         InputModel& input = state.input;
         const std::string& draft = input.draft;
         if (draft.empty() || draft.front() != '/' ||
             draft.find_first_of(" \t") != std::string::npos) {
             return false;
         }
+        CompletionCycle* cycle = nullptr;
         if (input.completion.has_value() && input.completion->draft == input.draft) {
-            CompletionCycle& cycle = *input.completion;
-            input.draft = "/" + cycle.names[cycle.index];
-            input.cursor = input.draft.size();
-            cycle.index = (cycle.index + 1) % cycle.names.size();
-            cycle.draft = input.draft;
-            set_command_hints(state, cycle.names);
-            return true;
+            cycle = &*input.completion;
+        } else {
+            const std::vector<const Command*> matches = registry_.complete(draft.substr(1));
+            if (matches.empty()) {
+                return false;
+            }
+            if (matches.size() == 1) {
+                input.draft = "/" + matches.front()->name + " ";
+                input.cursor = input.draft.size();
+                input.completion.reset();
+                state.command_hints.clear();
+                state.command_hint_selected = 0;
+                return true;
+            }
+            CompletionCycle fresh;
+            fresh.draft = input.draft;
+            fresh.names.reserve(matches.size());
+            for (const Command* command : matches) {
+                fresh.names.push_back(command->name);
+            }
+            input.completion = std::move(fresh);
+            cycle = &*input.completion;
         }
-        const std::vector<const Command*> matches = registry_.complete(draft.substr(1));
-        if (matches.empty()) {
-            return false;
-        }
-        if (matches.size() == 1) {
-            input.draft = "/" + matches.front()->name + " ";
-            input.cursor = input.draft.size();
-            input.completion.reset();
-            state.command_hints.clear();
-            return true;
-        }
-        input.draft = "/" + CommandRegistry::longest_common_prefix(matches);
+        const std::size_t count = cycle->names.size();
+        const std::size_t applied = cycle->index % count;
+        input.draft = "/" + cycle->names[applied];
         input.cursor = input.draft.size();
-        CompletionCycle cycle;
-        cycle.draft = input.draft;
-        cycle.names.reserve(matches.size());
-        state.command_hints.clear();
-        for (const Command* command : matches) {
-            cycle.names.push_back(command->name);
-            state.command_hints.push_back(CommandHint{command->name, command->description});
-        }
-        input.completion = std::move(cycle);
+        cycle->draft = input.draft;
+        cycle->index = reverse ? (applied + count - 1) % count : (applied + 1) % count;
+        state.command_hint_selected = cycle->index;
+        set_command_hints(state, cycle->names);
         return true;
     }
 
@@ -1641,23 +1807,17 @@ private:
             }
             return true;
         }
-        if (event.is_character()) {
-            const std::string character = event.character();
-            if (character == "1" || character == "y" || character == "Y") {
-                resolve_dialog(payload::PermissionDecisionKind::Allow, GrantScope::Once);
-            } else if (character == "2") {
-                resolve_dialog(payload::PermissionDecisionKind::Allow, GrantScope::Session);
-            } else if (character == "3") {
-                resolve_dialog(payload::PermissionDecisionKind::AllowAlways, GrantScope::Always);
-            } else if (character == "0" || character == "n" || character == "N") {
-                resolve_dialog(payload::PermissionDecisionKind::Deny, GrantScope::Once);
-            }
-        }
+        // Decision 2026-09-17 (RB-12): the dialog resolves only on `Return`
+        // against the highlighted option. Printable keys are deliberately
+        // swallowed (this method still returns true) so a slash command typed
+        // while the dialog is up can never silently allow or deny. See
+        // REQUIREMENTS_BACKLOG.md RB-12.
         return true;
     }
 
     void resolve_dialog(payload::PermissionDecisionKind decision, GrantScope scope) {
         const PermissionDialogModel dialog = model_.dialog;
+        last_dialog_resolution_ = std::make_pair(decision, scope);
         resolvePermission(dialog.session, dialog.request, decision, scope);
     }
 
@@ -1697,6 +1857,7 @@ private:
         if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
             model_.switcher.close();
             model_.mode = UiMode::Conversation;
+            catalog_visible_.store(false);
             return true;
         }
         if (event == ftxui::Event::ArrowDown || (event.is_character() && event.character() == "j")) {
@@ -1729,6 +1890,7 @@ private:
             }
             model_.switcher.close();
             model_.mode = UiMode::Conversation;
+            catalog_visible_.store(false);
             return true;
         }
         return true;
@@ -1744,6 +1906,9 @@ private:
             return false;
         }
         InputModel& input = state->input;
+        if (event.is_character() && modal_tail_suppression_active()) {
+            return true;
+        }
         if (event == ftxui::Event::Return) {
             const std::string text = input.draft;
             if (dispatch_command(text)) {
@@ -1753,6 +1918,7 @@ private:
                 input.saved_draft.clear();
                 input.completion.reset();
                 state->command_hints.clear();
+                state->command_hint_selected = 0;
                 model_.dirty.mark(state->id, UiDirtyFlag::Input | UiDirtyFlag::Conversation);
                 return true;
             }
@@ -1761,6 +1927,13 @@ private:
         }
         if (event == ftxui::Event::Tab) {
             if (complete_command(*state)) {
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
+            return false;
+        }
+        if (event == ftxui::Event::TabReverse) {
+            if (complete_command(*state, /*reverse=*/true)) {
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
@@ -1927,6 +2100,17 @@ private:
     }
 
     bool handle_event(ftxui::Event event) {
+        const bool handled = handle_event_inner(std::move(event));
+        // RB-12/RB-18: reconcile the composer snapshot *after* dispatch, so a
+        // modal that closed during this event releases its snapshot and records
+        // the true close instant immediately. Anchoring the burst-tail window
+        // here (rather than at the first event of a later input batch) keeps a
+        // delayed deliberate keystroke from being swallowed.
+        sync_modal_composer();
+        return handled;
+    }
+
+    bool handle_event_inner(ftxui::Event event) {
         if (event == ftxui::Event::Custom) {
             drain();
             return true;
@@ -1945,6 +2129,7 @@ private:
         }
         if (event == ftxui::Event::CtrlS || event == ftxui::Event::CtrlP) {
             model_.openSwitcher();
+            catalog_visible_.store(false);
             return true;
         }
         if (event == ftxui::Event::CtrlD) {
@@ -2005,13 +2190,29 @@ private:
             renderer, [this](ftxui::Event event) { return handle_event(std::move(event)); });
 
         quit_.store(false);
+        animation_active_.store(false);
         last_tick_ = std::chrono::steady_clock::now();
         std::thread timer([this] {
+            auto last_presence_post = std::chrono::steady_clock::now();
             while (!quit_.load()) {
                 std::this_thread::sleep_for(kFrameInterval);
-                if (screen_ != nullptr) {
-                    screen_->PostEvent(ftxui::Event::Custom);
+                if (screen_ == nullptr) {
+                    continue;
                 }
+                // RB-18: only an active animation may force a repaint. Posting
+                // Event::Custom invalidates FTXUI's frame and re-emits the whole
+                // screen (re-asserting the terminal cursor), so an idle TUI stays
+                // silent here and the cursor cannot flicker in an unfocused pane.
+                if (animation_active_.load()) {
+                    screen_->PostEvent(ftxui::Event::Custom);
+                    continue;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_presence_post < kPresencePostInterval) {
+                    continue;
+                }
+                last_presence_post = now;
+                screen_->Post(ftxui::Task{ftxui::Closure{[this] { tick_presence(); }}});
             }
         });
 
@@ -2051,11 +2252,30 @@ private:
     std::set<WorkspaceId>     ensure_in_flight_;
     std::map<WorkspaceId, SessionId> pending_resume_;
     std::atomic<bool> quit_{false};
+    // RB-17/RB-18: set on the UI thread after every `adapter_.onTick` and read by
+    // the frame timer. True only while the flash or the reasoning spinner is
+    // animating, so the timer posts a repaint only when the screen can change.
+    std::atomic<bool> animation_active_{false};
+    // RB-18: true while the `/sessions` History overlay is open. Read by the
+    // catalog worker so it keeps delivering snapshots (fresh relative ages) only
+    // while they are on screen; closed, unchanged snapshots are dropped.
+    std::atomic<bool> catalog_visible_{false};
     // 18 §4.3 (M9/C1): written on the UI thread (open/close) and read on the
     // pump thread (reply early-out), so it MUST be atomic. It guards no other
     // memory; relaxed ordering is provably sufficient (see context_request.hpp).
     std::atomic<std::uint64_t> context_generation_{0};
+    // RB-12/RB-18: composer snapshot while a modal is up, and the steady-clock
+    // instant the modal closed. Printable input is dropped only while
+    // `now - modal_closed_at_ < kModalTailWindow`, so the guard self-expires
+    // without a repaint and never swallows later deliberate typing.
+    std::optional<ModalComposerSnapshot>                 modal_composer_snapshot_;
+    std::optional<std::chrono::steady_clock::time_point> modal_closed_at_;
     std::chrono::steady_clock::time_point last_tick_ = std::chrono::steady_clock::now();
+
+    // RB-12 addendum (2026-09-17): test-only capture of the last permission
+    // dialog resolution, read back through `SupervisorHarnessImpl`. The only
+    // writer is `resolve_dialog`, so it stays empty on every other path.
+    std::optional<std::pair<payload::PermissionDecisionKind, GrantScope>> last_dialog_resolution_;
 };
 
 // 22 §10.1/§10.2: additive test-only seam. Production reaches `SupervisorApp`
@@ -2091,6 +2311,11 @@ public:
         app_.apply_resume_success(workspace, session);
     }
 
+    void apply_create_reply(const WorkspaceId& workspace, const SessionId& session,
+                            std::string error) override {
+        app_.apply_create_reply(workspace, session, std::move(error));
+    }
+
     void drain_actions() override { app_.drain(); }
 
     void start_catalog_with(WorkspaceCatalogSource source,
@@ -2122,6 +2347,42 @@ public:
 
     void seed_workspace(const WorkspaceModel& workspace) override {
         app_.model_.workspaces[workspace.id] = workspace;
+    }
+
+    void open_permission_dialog(const SessionId& session, const PermissionRequestId& request,
+                                std::string tool, std::string summary) override {
+        app_.last_dialog_resolution_.reset();
+        app_.model_.dialog.open    = true;
+        app_.model_.dialog.session = session;
+        app_.model_.dialog.request = request;
+        app_.model_.dialog.tool    = std::move(tool);
+        app_.model_.dialog.summary = std::move(summary);
+        app_.model_.dialog.selected = 0;
+        app_.model_.mode = UiMode::Dialog;
+    }
+
+    bool dispatch_key(const std::string& key) override {
+        if (key == "up") {
+            return app_.handle_event(ftxui::Event::ArrowUp);
+        }
+        if (key == "down") {
+            return app_.handle_event(ftxui::Event::ArrowDown);
+        }
+        if (key == "enter") {
+            return app_.handle_event(ftxui::Event::Return);
+        }
+        if (key == "escape") {
+            return app_.handle_event(ftxui::Event::Escape);
+        }
+        if (key == "ctrl-c") {
+            return app_.handle_event(ftxui::Event::CtrlC);
+        }
+        return app_.handle_event(ftxui::Event::Character(key));
+    }
+
+    [[nodiscard]] std::optional<std::pair<payload::PermissionDecisionKind, GrantScope>>
+    last_dialog_resolution() const override {
+        return app_.last_dialog_resolution_;
     }
 
     [[nodiscard]] const UiModel& model() const override { return app_.model_; }

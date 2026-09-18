@@ -80,7 +80,9 @@ TEST(UiLivePty, StreamsAssistantReply) {
         child.read_available();
         const std::string plain = child.plain();
         if (!answered_permission && plain.find("Permission required") != std::string::npos) {
-            child.write("y");
+            // RB-12 addendum: the dialog resolves only on Enter (default option
+            // 0 = Allow once); a bare letter no longer answers it.
+            child.write("\r");
             answered_permission = true;
         }
         // Count inside a single rendered frame, not the accumulated buffer: the

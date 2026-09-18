@@ -162,6 +162,7 @@ public:
         window.ws_row = 30;
         window.ws_col = 100;
         ::ioctl(master_, TIOCSWINSZ, &window);
+        rows_ = static_cast<int>(window.ws_row);
         const char* slave_name = ::ptsname(master_);
         if (slave_name == nullptr) {
             return false;
@@ -215,6 +216,45 @@ public:
     [[nodiscard]] std::string text() const { return strip_ansi(buffer_); }
 
     [[nodiscard]] std::size_t raw_size() const { return buffer_.size(); }
+
+    // The most recent complete screen FTXUI painted, styling removed. FTXUI
+    // repaints from home each frame: `\r` then (rows - 1) `ESC[1A` cursor-ups.
+    // Unlike the accumulated `text()` (which only ever grows), this shrinks when
+    // an overlay closes, so it is the only reliable way to assert a modal left
+    // the screen.
+    [[nodiscard]] std::string last_frame() const {
+        std::string marker = "\r";
+        for (int line = 1; line < rows_; ++line) {
+            marker += "\x1b[1A";
+        }
+        const std::size_t boundary = buffer_.rfind(marker);
+        if (boundary == std::string::npos) {
+            return strip_ansi(buffer_);
+        }
+        return strip_ansi(buffer_.substr(boundary + marker.size()));
+    }
+
+    // Waits until `needle` is gone from the current frame and stays gone across
+    // one confirmation poll. The confirmation is what makes this deterministic:
+    // the product drops printable input for a short wall-clock window after a
+    // modal closes (the tail of the burst that closed it), so a plain "absent
+    // now" check could return in the same instant the modal closed and race that
+    // window. Confirming across a 50 ms poll proves the window has elapsed.
+    bool wait_for_frame_absent(const std::string& needle, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        bool       absent = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            read_available();
+            const bool now_absent = last_frame().find(needle) == std::string::npos;
+            if (now_absent && absent) {
+                return true;
+            }
+            absent = now_absent;
+            std::this_thread::sleep_for(50ms);
+        }
+        read_available();
+        return absent && last_frame().find(needle) == std::string::npos;
+    }
 
     bool wait_for(const std::string& needle, std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -309,6 +349,7 @@ private:
 
     int master_{-1};
     pid_t pid_{-1};
+    int rows_{30};
     std::string buffer_;
 };
 
@@ -427,11 +468,17 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
 
     child.write("\x15");
     const std::size_t cycle_mark = child.raw_size();
-    child.write("/\t\t");
-    ASSERT_TRUE(child.wait_for_since(cycle_mark, "/new", 10s)) << child.text();
+    child.write("/\t");
+    ASSERT_TRUE(child.wait_for_since(cycle_mark, "/new_", 10s)) << child.text();
     const std::size_t step_mark = child.raw_size();
     child.write("\t");
-    ASSERT_TRUE(child.wait_for_since(step_mark, "/clear", 10s)) << child.text();
+    ASSERT_TRUE(child.wait_for_since(step_mark, "/clear_", 10s)) << child.text();
+    const std::size_t reverse_mark = child.raw_size();
+    child.write("\x1b[Z");
+    ASSERT_TRUE(child.wait_for_since(reverse_mark, "/model_", 10s)) << child.text();
+    const std::size_t forward_mark = child.raw_size();
+    child.write("\t");
+    ASSERT_TRUE(child.wait_for_since(forward_mark, "/clear_", 10s)) << child.text();
     child.write("\x15");
 
     const std::size_t recall_mark = child.raw_size();
@@ -517,6 +564,64 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
             << "confirm must deregister the supervisor";
     }
 
+    guard.stop();
+}
+
+// RB-12: a printable command typed while a modal owns the keyboard must not
+// split between the modal and the composer. The exit prompt binds `n`, so the
+// `/rename repo overview` burst cancels it mid-string; the tail must never land
+// in the composer, and the text present before the modal opened must survive.
+TEST(UiSupervisorPty, ModalKeystrokesDoNotReachComposer) {
+    ShortTempRoot root("ymh_pty_modal_focus");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "modal-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path        = state / "ymh" / "registry.db";
+    registry_config.lock_path      = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "modal-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("keep");
+    ASSERT_TRUE(child.wait_for("keep", 10s)) << child.text();
+
+    const std::size_t modal_mark = child.raw_size();
+    child.write("\x04");
+    ASSERT_TRUE(child.wait_for_since(modal_mark, "Terminate and exit", 15s)) << child.text();
+
+    const std::size_t burst_raw  = child.raw_size();
+    const std::size_t burst_text = child.text().size();
+    child.write("/rename repo overview");
+    ASSERT_TRUE(child.wait_for_since(burst_raw, "keep", 15s)) << child.text();
+
+    const std::string after = child.text().substr(burst_text);
+    EXPECT_EQ(after.find("repo overview"), std::string::npos)
+        << "modal tail leaked into the composer: " << after;
+    EXPECT_EQ(after.find("rename"), std::string::npos)
+        << "modal keystrokes leaked into the composer: " << after;
+    EXPECT_NE(after.find("keep"), std::string::npos)
+        << "pre-modal composer text was lost: " << after;
+
+    child.terminate();
     guard.stop();
 }
 
@@ -1051,7 +1156,8 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
         << "Live switcher showed a stopped workspace's stored session";
 
     child.write("\x1b");
-    std::this_thread::sleep_for(300ms);
+    ASSERT_TRUE(child.wait_for_frame_absent("Switcher", 10s))
+        << "switcher overlay did not close\n" << child.text();
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
 

@@ -210,6 +210,11 @@ TEST(UiRenderGolden, PermissionDialogOverlay) {
     const std::string rendered = render_to_ansi(model, TerminalSize{72, 24}, Theme{false});
     EXPECT_NE(rendered.find("Permission required"), std::string::npos);
     EXPECT_NE(rendered.find("shell"), std::string::npos);
+    // RB-12 addendum (2026-09-17): the dialog is Enter-only, so the footer must
+    // describe selection + Enter and the dead letter/number key hints must go.
+    EXPECT_NE(rendered.find("↑/↓ select · Enter confirm · Esc cancel"), std::string::npos);
+    EXPECT_EQ(rendered.find("y allow · n deny"), std::string::npos);
+    EXPECT_EQ(rendered.find("1) Allow once"), std::string::npos);
 }
 
 TEST(UiRenderGolden, LayoutModes) {
@@ -385,7 +390,8 @@ TEST(UiRenderGolden, ReasoningFoldSummaryAndExpandAll) {
     const std::string collapsed =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     SCOPED_TRACE(collapsed);
-    EXPECT_NE(collapsed.find("reasoning (Ctrl+O to expand)"), std::string::npos);
+    EXPECT_NE(collapsed.find("• Thinking"), std::string::npos);
+    EXPECT_NE(collapsed.find("ctrl+o to expand"), std::string::npos);
     EXPECT_EQ(collapsed.find("deep thought"), std::string::npos);
     EXPECT_NE(collapsed.find("the answer"), std::string::npos);
 
@@ -393,7 +399,8 @@ TEST(UiRenderGolden, ReasoningFoldSummaryAndExpandAll) {
     const std::string expanded =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     SCOPED_TRACE(expanded);
-    EXPECT_NE(expanded.find("reasoning (expanded)"), std::string::npos);
+    EXPECT_NE(expanded.find("• Thinking"), std::string::npos);
+    EXPECT_NE(expanded.find("expanded"), std::string::npos);
     EXPECT_NE(expanded.find("deep thought"), std::string::npos);
 }
 
@@ -409,16 +416,125 @@ TEST(UiRenderGolden, ReasoningStreamingSummaryStrings) {
     const std::string collapsed =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     SCOPED_TRACE(collapsed);
-    EXPECT_NE(collapsed.find("reasoning (streaming · Ctrl+O to expand)"),
-              std::string::npos);
+    EXPECT_NE(collapsed.find("⠋ Thinking"), std::string::npos);
+    EXPECT_NE(collapsed.find("ctrl+o to expand"), std::string::npos);
     EXPECT_EQ(collapsed.find("partial"), std::string::npos);
 
     state->expand_all_folds = true;
     const std::string expanded =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     SCOPED_TRACE(expanded);
-    EXPECT_NE(expanded.find("reasoning (expanded · streaming)"), std::string::npos);
+    EXPECT_NE(expanded.find("⠋ Thinking"), std::string::npos);
+    EXPECT_NE(expanded.find("expanded"), std::string::npos);
     EXPECT_NE(expanded.find("partial"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ReasoningSpinnerFrameFromModel) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->conversation.entries.clear();
+    state->conversation.by_message.clear();
+    state->conversation.by_reasoning_message.clear();
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "partial", true}});
+    model.spinner.frame = 3;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("⠸ Thinking"), std::string::npos);
+
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "done", std::nullopt}});
+    const std::string finished =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(finished);
+    EXPECT_NE(finished.find("• Thinking"), std::string::npos);
+    EXPECT_EQ(finished.find("⠸ Thinking"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ReasoningSpinnerOnlyAdvancesWhileStreaming) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    EXPECT_FALSE(model.has_streaming_reasoning());
+    EXPECT_FALSE(model.advance_reasoning_spinner(std::chrono::milliseconds{1000}));
+    EXPECT_EQ(model.spinner.frame, 0u);
+
+    state->conversation.entries.clear();
+    state->conversation.by_message.clear();
+    state->conversation.by_reasoning_message.clear();
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "partial", true}});
+    ASSERT_TRUE(model.has_streaming_reasoning());
+    EXPECT_TRUE(model.advance_reasoning_spinner(std::chrono::milliseconds{120}));
+    EXPECT_EQ(model.spinner.frame, 1u);
+
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "done", std::nullopt}});
+    EXPECT_FALSE(model.has_streaming_reasoning());
+    EXPECT_FALSE(model.advance_reasoning_spinner(std::chrono::milliseconds{1000}));
+    EXPECT_EQ(model.spinner.frame, 1u);
+}
+
+TEST(UiRenderGolden, ReasoningExpandHintIsDimmed) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->conversation.entries.clear();
+    state->conversation.by_message.clear();
+    state->conversation.by_reasoning_message.clear();
+    model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "partial", true}});
+
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    const std::size_t hint = raw.find("ctrl+o to expand");
+    ASSERT_NE(hint, std::string::npos);
+    const std::size_t start = hint > 24 ? hint - 24 : 0;
+    const std::string window = raw.substr(start, hint - start);
+    EXPECT_NE(window.find("\x1b[2m"), std::string::npos) << window;
+}
+
+TEST(UiRenderGolden, SlashCommandCompletionSelectionHighlighted) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->command_hints = {CommandHint{"help", "list slash commands"},
+                            CommandHint{"new", "create and activate a new session"},
+                            CommandHint{"model", "show or set the model"}};
+    state->command_hint_selected = 1;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("> /new"), std::string::npos);
+    EXPECT_NE(rendered.find("  /help"), std::string::npos);
+    EXPECT_NE(rendered.find("  /model"), std::string::npos);
+    EXPECT_EQ(rendered.find("> /help"), std::string::npos);
+}
+
+TEST(UiRenderGolden, SlashCommandSelectionUsesThemeAccent) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->command_hints = {CommandHint{"help", "list slash commands"},
+                            CommandHint{"new", "create and activate a new session"}};
+
+    const auto accent_precedes = [](const std::string& raw, const std::string& token) {
+        const std::size_t pos = raw.find(token);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        const std::size_t start = pos > 24 ? pos - 24 : 0;
+        return raw.substr(start, pos - start).find("\x1b[96m") != std::string::npos;
+    };
+
+    state->command_hint_selected = 0;
+    const std::string first = render_to_ansi(model, TerminalSize{72, 24}, Theme{true});
+    EXPECT_TRUE(accent_precedes(first, "/help"));
+    EXPECT_FALSE(accent_precedes(first, "/new"));
+
+    state->command_hint_selected = 1;
+    const std::string second = render_to_ansi(model, TerminalSize{72, 24}, Theme{true});
+    EXPECT_TRUE(accent_precedes(second, "/new"));
+    EXPECT_FALSE(accent_precedes(second, "/help"));
 }
 
 TEST(UiRenderGolden, HeaderShowsSessionTitleRightAligned) {

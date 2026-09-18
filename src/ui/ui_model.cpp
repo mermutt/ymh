@@ -1123,4 +1123,32 @@ void SwitcherOverlayModel::toggleExpand() {
     cursor.session.reset();
 }
 
+bool UiModel::has_streaming_reasoning() const {
+    for (const auto& [id, state] : sessions) {
+        (void)id;
+        for (const ConversationEntry& entry : state.conversation.entries) {
+            if (entry.role == ConversationRole::Reasoning && entry.streaming) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool UiModel::advance_reasoning_spinner(std::chrono::milliseconds delta) {
+    constexpr std::chrono::milliseconds kFrameStep{120};
+    if (!has_streaming_reasoning()) {
+        spinner.elapsed = std::chrono::milliseconds::zero();
+        return false;
+    }
+    spinner.elapsed += delta;
+    bool changed = false;
+    while (spinner.elapsed >= kFrameStep) {
+        spinner.elapsed -= kFrameStep;
+        ++spinner.frame;
+        changed = true;
+    }
+    return changed;
+}
+
 } // namespace ymh::ui
