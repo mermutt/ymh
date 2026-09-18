@@ -54,6 +54,9 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 | RB-16 | Slash-command completion list with highlighted selection | — (user, 2026-09-17) | NEW | P1 | S | Low | No (UI-local) |
 | RB-17 | Reasoning indicator: animated glyph + dimmed hint | — (user, 2026-09-17) | NEW | P1 | XS | Low | No (UI-local) |
 | RB-18 | Cursor flicker when the tmux pane is unfocused | — (live testing, 2026-09-17) | NEW | P1 | S | Med | No (UI-local) |
+| RB-19 | Unprompted-session cleanup on exit + `ymh session prune` | — (user, 2026-09-18) | NEW | P0 | M–L | Med | **`23-session-lifecycle-errata.md` (written; not verified)** |
+| RB-20 | Hide placeholder titles (`tui`/`headless`/`main`) in the header | — (user, 2026-09-18) | NEW | P2 | XS | Low | No (UI-local, gate-free) |
+| RB-21 | Session/agent lifetime & teardown hardening (**independent of spec 23**) | — (spec 23 §13.1; audit) | NEW | P1 | M–L | High | No (independent; likely needs its own spec before code) |
 
 **Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
 per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY
@@ -69,7 +72,10 @@ spec `21-config-jsonc-errata.md`, `9db17cd54`). RB-03 landed per the verified sp
 
 **No item is currently in a design gate.** Every item with a spec gate has passed
 and shipped. The open items are RB-12 (UI-local, P1), RB-14 and RB-15 (test
-infra / guard, P2), and the new RB-16 to RB-18 below.
+infra / guard, P2), the new RB-16 to RB-18 below, and **RB-19** (P0) whose spec
+`23-session-lifecycle-errata.md` is written but **not yet verified** — per
+`AGENTS.md` it must pass an independent Oracle gate before any code. RB-20 is a
+gate-free UI-local item recorded in that spec's §8.
 
 ---
 
@@ -492,6 +498,116 @@ infra / guard, P2), and the new RB-16 to RB-18 below.
 - **Effort:** S (≤0.5d, diagnosis-dominated). **Risk:** Med (root cause unknown;
   may be FTXUI-internal). **Deps:** none. **Priority:** P1.
 - **GATE:** none. UI-local, reversible, user-visible; no spec gate.
+
+### RB-19 — Unprompted-session cleanup on exit + `ymh session prune`
+- **Requirement (user, 2026-09-18; rescoped by the user):** (D1′) A session that
+  was never prompted must not survive the user's exit — it is cleaned up/deleted
+  from history. **The session creation path is not changed** (`session.create`
+  and the TUI eager creates stay as shipped). (D2) A real `ymh session prune`
+  command so the user can clean up old sessions themselves (repeatable;
+  `--empty` only in v1, `--older-than` deferred).
+- **Current state: NEW.** Verified against `src/`:
+  - A session row is created at `session.create`, not at the first prompt:
+    `SessionManager::createSession` (`src/session/session_manager.cpp:47-71`)
+    calls `store_->create(header)` (INSERT + lease) then appends `SessionStarted`.
+    **Retained unchanged.**
+  - The TUI eagerly auto-creates on startup and idle input:
+    `SupervisorApp::refresh_sessions`' reply handler
+    (`src/ui/supervisor.cpp:1215`), `new_session` (`/new`, `:1425`), and
+    `handle_input` (`:1905`) call `create_session(workspace, "")`; the lazy path
+    in `submit()` (`:388`) is dead. **Retained unchanged; cleanup-on-exit makes
+    them self-healing.**
+  - Empty is identifiable as `EXISTS(SELECT 1 FROM events WHERE session_id=? AND
+    type='user/message')`; the title is **not** a predicate (spec 19 auto-names
+    before the first `UserMessage`).
+  - No list path filters empties (`HostRuntime::listSessions`,
+    `read_workspace_history`, `session_list`).
+  - `session.delete` exists but is API-only; `WorkspaceRegistry::archiveSession`
+    / the `archived` column have no callers. No CLI/TUI delete or prune.
+  - **Subagent-kind defect (pre-ship blocker):** `createSession` hardcodes
+    `kind = Root` (`:58`) and `SubagentRunner::run` routes through
+    `AgentRegistry::create` (`src/agent/subagent.cpp:18`), so every subagent row
+    is `kind='root'` / `parent_session=NULL`; the root-only cleanup/prune filter
+    would select them and `hasDependents` cannot protect them.
+  - Observed: the repo workspace's `sessions.db` had 21 sessions, 11 empty.
+- **What remains (Rev 7 scope):** implement spec `23-session-lifecycle-errata.md`:
+  D1′ cleanup-on-exit scoped to the sessions *this supervisor created*, run before
+  spec-16 teardown, via `session.delete{only_if_empty:true, force:true}`
+  (best-effort; prune is the backstop); D2 `ymh session prune --empty` with
+  `--keep`, dry-run by default, candidates read from disk and deletes routed
+  through the daemon (live) or the manager + junction removal (stopped);
+  normative `session.delete.only_if_empty`/`force`; D3 the subagent-kind fix;
+  D4 the `user/message` filter on `session.list`/`/sessions`/`ymh list`; D5 the
+  fresh-store-guarded orphan-junction sweep; no schema change. `--older-than` is
+  deferred.
+- **Effort:** M–L. **Risk:** Med (cleanup-on-exit + a new destructive CLI).
+  **Deps:** none. **Priority:** P0.
+- **GATE:** **yes** — `23-session-lifecycle-errata.md` must pass an independent
+  Oracle gate (zero open HIGH/MEDIUM) before any code. The Rev 6 pivot was
+  withdrawn (non-convergent); Rev 7 is the rescoped rewrite.
+
+### RB-20 — Hide placeholder titles (`tui`/`headless`/`main`) in the header
+- **Requirement (user, 2026-09-18):** the placeholder titles used by the TUI
+  (`tui`), the dead `run_tui` path (`main`), and the headless first-line title
+  should not be shown in the session header.
+- **Current state: PARTIAL.** `render_header` (`src/ui/ui_render.cpp`) already
+  suppresses a placeholder via `is_placeholder_title` (spec 19 RN6), and the
+  headless title is the task's first line, not the literal `"headless"`. The
+  remaining work is an audit of the other title surfaces (switcher leaf,
+  `/sessions`, status bar).
+- **What remains:** a UI-local audit/fix of the remaining title surfaces.
+  Recorded as out-of-scope in `23-session-lifecycle-errata.md` §7; do not design
+  it there.
+- **Effort:** XS. **Risk:** Low. **Deps:** none. **Priority:** P2.
+- **GATE:** none. UI-local, gate-free.
+
+### RB-21 — Session/agent lifetime & teardown hardening (independent of spec 23)
+- **Requirement (audit, 2026-09-18):** repair the pre-existing session/agent
+  lifetime and daemon-teardown defects. **This item is independent of spec
+  `23-session-lifecycle-errata.md`**: it was surfaced while reviewing the Rev 2–5
+  draft design, but spec 23 (Rev 7) does **not** pursue the creation-gate design
+  and does **not** fix or depend on any of these. Nothing in spec 23 may be
+  treated as load-bearing on them; conversely, this item must not be blocked by
+  spec 23.
+- **Current state: NEW (defects verified in the shipped tree).**
+  1. **`AgentLoop::dispose()` does not join the in-flight turn body.**
+     `AgentLoop::dispose()` (`src/agent/agent_loop.cpp:227-242`) sets `disposed_`,
+     cancels, clears `inbox_`, sets `running_ = false`, but never waits for the
+     in-flight `runTurn` body to return. `AgentRegistry::dispose`
+     (`src/agent/agent_registry.cpp:147-160`) then calls
+     `services_.sessions->closeSession(sessionId)`, erasing the
+     `std::unique_ptr<Session>` from `SessionManager::sessions_` and freeing it,
+     while a `TurnExecutor` worker may still be inside `Session::append` — a
+     **latent use-after-free** today, independent of any spec.
+  2. **Daemon teardown detaches workers past `shutdown_grace`.**
+     `TurnExecutor::drain` (`include/ymh/agent/turn_executor.hpp:118-143`)
+     detaches a still-running worker when the grace deadline passes
+     (`:138-140`); `WorkspaceHost::Impl::coordinator`
+     (`src/host/workspace_host.cpp:610-663`) then destroys
+     `host_runtime_`/`runtime_` (`:693`, `:698`), which the detached body may
+     still reference through captured `this`.
+  3. **`hasPendingWork()` is blind to the `TurnExecutor` queue.** A prompt queued
+     in the `TurnExecutor` but not yet picked up by the agent is not counted, so a
+     close/delete can drop a just-submitted prompt (spec 23 §5.4's mid-turn guard
+     inherits this gap).
+  4. **`HostRuntime::handleCommittedEvent` re-reads the store.** It re-reads
+     `runtime_.store().readAfter(...)` (`src/host/host_runtime.cpp:350-358`)
+     instead of forwarding the bus event; for an event whose row was erased in the
+     same transaction (the administrative delete's `SessionEnded`) the re-read is
+     empty and the event is dropped, so `01 I16` / `05 §7.4` observation is not
+     satisfied at the transport boundary.
+- **What remains:** an independent audit and (likely) its own spec before code.
+  The fix must decide the ownership model (reference-counted vs. quiescence
+  barrier), the teardown contract (join vs. park), the `hasPendingWork`/
+  `TurnExecutor` capacity predicate, and the terminal-event forwarding path. Any
+  fix must re-audit every worker-side `this` capture (permission resolver,
+  forwarding callbacks) as well as the agent/session ownership model.
+- **Recorded in:** `23-session-lifecycle-errata.md` §13.1 (out-of-scope and
+  explicitly not load-bearing for RB-19/spec 23).
+- **Effort:** M–L. **Risk:** High (concurrency/lifetime). **Deps:** none.
+  **Priority:** P1.
+- **GATE:** none imposed here; because it is an architectural change, it likely
+  needs its own verified spec before code (`AGENTS.md`).
 
 ---
 
