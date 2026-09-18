@@ -71,6 +71,8 @@ add_executable(ymh_tests
     unit/skills_tool_test.cpp
     unit/skills_wiring_test.cpp
     unit/skills_rpc_test.cpp
+    unit/global_test_env_test.cpp
+    support/global_test_env.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp
     integration_pty_test.cpp
