@@ -316,7 +316,16 @@ public:
         // 22 §5.1 (SW24, H2): stop+join the spawn worker before any member
         // teardown. The worker checks `stop_requested()` before `enqueue`, so it
         // never touches `this` after the stop request.
-        ensure_worker_.request_stop();
+        //
+        // `request_stop()` must run under `ensure_mutex_`: the worker evaluates
+        // its wait predicate (`stop_requested() || !ensure_requests_.empty()`)
+        // while holding that mutex, so mutating `stop_requested()` outside it
+        // races the predicate check. A notify that lands after the check but
+        // before the block is lost and never re-sent, hanging `join()` forever.
+        {
+            std::lock_guard lock(ensure_mutex_);
+            ensure_worker_.request_stop();
+        }
         ensure_cv_.notify_all();
         if (ensure_worker_.joinable()) {
             ensure_worker_.join();
