@@ -604,3 +604,28 @@ TEST(SupervisorHarnessTest, ExitConfirmArrowsMoveSelectionAndReturnDispatches) {
     EXPECT_FALSE(harness->model().exitConfirm.open);
     EXPECT_TRUE(harness->quit_requested()) << "Enter must dispatch Terminate";
 }
+
+// SW-U20 (22 §5.1, SW24/H2): the destructor's stop must wake a parked ensure
+// worker. Mutating the wait predicate (`stop_requested()`) and notifying without
+// `ensure_mutex_` let a wakeup land between the worker's predicate check and its
+// block; the lost wakeup was never re-sent, so `join()` hung forever. The queue
+// stays empty so the destructor's stop is the only possible wakeup, and the
+// construct/destroy loop retries the narrow race enough times to hit it.
+TEST(SupervisorHarnessTest, SW_U20_StopWakesParkedEnsureWorker) {
+    constexpr int kIterations = 20000;
+    const auto    start      = std::chrono::steady_clock::now();
+    for (int i = 0; i < kIterations; ++i) {
+        SupervisorRunOptions options;
+        options.identity = harness_identity();
+        std::unique_ptr<SupervisorHarness> harness =
+            make_supervisor_harness(std::move(options));
+        ASSERT_TRUE(harness->worker_joinable());
+        // An empty queue leaves the worker parked in `ensure_cv_.wait`; the
+        // destructor's stop is the sole wakeup.
+        harness.reset();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    // A lost wakeup hangs in `join()` (caught by the ctest timeout); a correct
+    // mutex-serialized stop wakes every parked worker promptly.
+    EXPECT_LT(elapsed, 30s) << "destructor join did not wake the parked ensure worker";
+}
