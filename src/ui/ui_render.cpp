@@ -15,6 +15,7 @@
 #include <ftxui/screen/pixel.hpp>
 #include <ftxui/screen/screen.hpp>
 
+#include "ymh/session/session.hpp"
 #include "ymh/ui/render/diff_renderer.hpp"
 #include "ymh/ui/render/markdown_renderer.hpp"
 #include "ymh/ui/render/render_context.hpp"
@@ -146,6 +147,22 @@ const char* ownership_mark_name(OwnershipMark mark) {
 
 std::string short_id(const SessionId& id) {
     return id.value.size() > 8 ? id.value.substr(0, 8) : id.value;
+}
+
+// src/cli/cli.cpp creates the `ymh run` automation session with this title.
+// 19 §4.2 (RN6) deliberately excludes it from `is_placeholder_title` (auto-rename
+// must not treat it as unnamed), but the UI must not show it as a name either.
+constexpr std::string_view kAutomationSessionTitle = "headless";
+
+bool is_display_placeholder_title(std::string_view title) {
+    return is_placeholder_title(title) || title == kAutomationSessionTitle;
+}
+
+// 19 §4.2 (RN6): a placeholder title means the session has never been auto-named
+// or manually renamed. Rows that identify a session show its short id instead of
+// presenting the placeholder as if it were a name.
+std::string session_row_title(const std::string& title, const SessionId& id) {
+    return is_display_placeholder_title(title) ? short_id(id) : title;
 }
 
 bool looks_like_diff(const std::string& text) {
@@ -431,7 +448,9 @@ Element render_exit_confirm(const UiModel& model, const Theme& theme) {
         }
         rows.push_back(row);
     }
-    rows.push_back(ftxui::text("y terminate · n cancel · Esc cancel") | ftxui::dim);
+    rows.push_back(ftxui::text("↑/↓ select · Enter confirm · y terminate · n cancel · "
+                               "Esc cancel") |
+                   ftxui::dim);
     (void)theme;
     return ftxui::window(ftxui::text("Exiting"), ftxui::vbox(std::move(rows))) | ftxui::center;
 }
@@ -464,7 +483,7 @@ std::string history_note_leaf(const std::string& note) {
 }
 
 std::string history_session_leaf(const SessionNode& session, const UiModel& model) {
-    std::string body = session.title.empty() ? short_id(session.id) : session.title;
+    std::string body = session_row_title(session.title, session.id);
     if (!session.kind.empty()) {
         body += " · " + session.kind;
     }
@@ -534,8 +553,7 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
             if (session.fromDisk) {
                 leaf_element = ftxui::text("    [" + history_session_leaf(session, model) + "]");
             } else {
-                const std::string leaf_title =
-                    session.title.empty() ? short_id(session.id) : session.title;
+                const std::string leaf_title = session_row_title(session.title, session.id);
                 std::string leaf = "    [" + leaf_title + " " + state_glyph(session.state);
                 if (session.attention) {
                     leaf += "!";
@@ -584,13 +602,14 @@ Element render_header(const UiModel& model, const Theme& theme) {
         const SessionId& active_id = workspace->second.activeSessionId;
         if (!active_id.value.empty()) {
             for (const SessionCell& cell : workspace->second.sessions) {
-                if (cell.id == active_id && !cell.title.empty()) {
-                    session_title = cell.title;
+                if (cell.id == active_id) {
+                    // 19 §4.2 (RN6): an unnamed session renders no title at
+                    // all; the right-hand slot stays empty.
+                    if (!is_display_placeholder_title(cell.title)) {
+                        session_title = cell.title;
+                    }
                     break;
                 }
-            }
-            if (session_title.empty()) {
-                session_title = short_id(active_id);
             }
         }
     }

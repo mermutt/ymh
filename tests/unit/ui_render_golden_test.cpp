@@ -155,7 +155,7 @@ UiModel build_model() {
 }
 
 const char* kGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
-│ymh · /work                                                   golden-s│
+│ymh · /work                                                           │
 ├┬─────────────────────────────────────────────────────────────────────┤
 ││ hello there                                                         │
 │Hello world                                                           │
@@ -551,15 +551,43 @@ TEST(UiRenderGolden, HeaderShowsSessionTitleRightAligned) {
     EXPECT_EQ(header.substr(at), "golden-title│");
 }
 
-TEST(UiRenderGolden, HeaderFallsBackToShortIdWhenTitleEmpty) {
-    const UiModel model = build_model();
+TEST(UiRenderGolden, HeaderHidesPlaceholderTitle) {
+    const auto header_of = [](const UiModel& model) {
+        const std::string rendered =
+            normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+        const std::size_t first = rendered.find('\n');
+        const std::size_t second = rendered.find('\n', first + 1);
+        return rendered.substr(first + 1, second - first - 1);
+    };
+
+    // An active session with no cell/title at all renders an empty right slot
+    // rather than the short id.
+    const std::string no_title = header_of(build_model());
+    SCOPED_TRACE(no_title);
+    EXPECT_EQ(no_title.find("golden-s"), std::string::npos);
+
+    // Every create-time placeholder must be suppressed in the header.
+    for (const char* placeholder : {"tui", "headless", "main"}) {
+        UiModel model = build_model();
+        model.setCellTitle(model.activeWorkspaceId, kSession, placeholder);
+        const std::string header = header_of(model);
+        SCOPED_TRACE(placeholder);
+        SCOPED_TRACE(header);
+        EXPECT_EQ(header.find(placeholder), std::string::npos);
+    }
+}
+
+TEST(UiRenderGolden, SwitcherShowsShortIdForPlaceholderTitle) {
+    UiModel model = build_model();
+    model.workspaces[model.activeWorkspaceId].title = "alpha";
+    model.setCellTitle(model.activeWorkspaceId, kSession, "tui");
+    model.openSwitcher();
+
     const std::string rendered =
-        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
-    const std::size_t first = rendered.find('\n');
-    const std::size_t second = rendered.find('\n', first + 1);
-    const std::string header = rendered.substr(first + 1, second - first - 1);
-    SCOPED_TRACE(header);
-    EXPECT_NE(header.find("golden-s│"), std::string::npos);
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered.find("tui"), std::string::npos);
+    EXPECT_NE(rendered.find("[golden-s "), std::string::npos);
 }
 
 TEST(UiRenderGolden, BottomLineCountsOnlyNoSessionList) {
@@ -610,7 +638,8 @@ TEST(UiRenderGolden, UserBlockBackgroundGatedByTheme) {
     EXPECT_NE(no_block.find("│"), std::string::npos);
 }
 
-UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int running) {
+UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int running,
+                          std::optional<int> selected = std::nullopt) {
     UiModel model;
     model.activeWorkspaceId = WorkspaceId{"workspace"};
     WorkspaceModel workspace;
@@ -647,6 +676,9 @@ UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int 
     model.exitConfirm.orphaning = std::move(orphaning);
     model.exitConfirm.sessions = sessions;
     model.exitConfirm.running = running;
+    if (selected.has_value()) {
+        model.exitConfirm.selected = *selected;
+    }
     model.mode = UiMode::ExitConfirm;
     return model;
 }
@@ -661,8 +693,8 @@ TEST(UiRenderGolden, ExitConfirmPromptZeroOneTwoDaemons) {
             orphaning.push_back(WorkspaceId{"workspace-beta"});
         }
         const UiModel model = exit_prompt_model(std::move(orphaning), count, 0);
-        const std::string rendered =
-            normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+        const std::string raw = render_to_ansi(model, TerminalSize{90, 24}, Theme{false});
+        const std::string rendered = normalize(raw);
         SCOPED_TRACE(rendered);
         EXPECT_NE(rendered.find("Exiting will terminate " + std::to_string(count)),
                   std::string::npos);
@@ -671,6 +703,13 @@ TEST(UiRenderGolden, ExitConfirmPromptZeroOneTwoDaemons) {
         EXPECT_NE(rendered.find(std::to_string(count) + " session"), std::string::npos);
         EXPECT_NE(rendered.find("Terminate and exit"), std::string::npos);
         EXPECT_NE(rendered.find("Cancel"), std::string::npos);
+        EXPECT_NE(rendered.find("↑/↓ select · Enter confirm · y terminate · n cancel · "
+                                "Esc cancel"),
+                  std::string::npos)
+            << "the footer must advertise the keys that actually work";
+        EXPECT_NE(raw.find("\x1b[7m[ Terminate and exit ]"), std::string::npos)
+            << "the popup must open with Terminate highlighted";
+        EXPECT_EQ(raw.find("\x1b[7m[ Cancel ]"), std::string::npos);
         EXPECT_EQ(rendered.find("other-session"), std::string::npos)
             << "the prompt must not render a per-session list";
         EXPECT_EQ(rendered.find("beta-session"), std::string::npos)
@@ -682,6 +721,27 @@ TEST(UiRenderGolden, ExitConfirmPromptZeroOneTwoDaemons) {
             EXPECT_NE(rendered.find("beta"), std::string::npos);
         }
     }
+}
+
+// User-reported (2026-09-17): the highlight tracks `selected` (0 = Terminate,
+// 1 = Cancel). The inverted SGR (`\x1b[7m`) immediately precedes the highlighted
+// option, so this pins which row is highlighted, not merely that both exist.
+TEST(UiRenderGolden, ExitConfirmHighlightFollowsSelection) {
+    const std::string terminate_highlight = "\x1b[7m[ Terminate and exit ]";
+    const std::string cancel_highlight = "\x1b[7m[ Cancel ]";
+
+    const UiModel defaulted = exit_prompt_model({WorkspaceId{"workspace"}}, 1, 0);
+    const std::string default_raw =
+        render_to_ansi(defaulted, TerminalSize{90, 24}, Theme{false});
+    EXPECT_NE(default_raw.find(terminate_highlight), std::string::npos);
+    EXPECT_EQ(default_raw.find(cancel_highlight), std::string::npos);
+
+    const UiModel cancelled = exit_prompt_model({WorkspaceId{"workspace"}}, 1, 0, 1);
+    const std::string cancelled_raw =
+        render_to_ansi(cancelled, TerminalSize{90, 24}, Theme{false});
+    EXPECT_NE(cancelled_raw.find(cancel_highlight), std::string::npos)
+        << "selected=1 must highlight Cancel";
+    EXPECT_EQ(cancelled_raw.find(terminate_highlight), std::string::npos);
 }
 
 // SW-G1 (22 §3.1/§3.3): the Live switcher renders only [owned]/[stopping];
@@ -1014,6 +1074,23 @@ TEST(UiRenderGolden, HistoryOverlayGroupsAndLeaves) {
     EXPECT_NE(rendered.find("stored sessions"), std::string::npos);
     EXPECT_NE(rendered.find("captured 5s ago"), std::string::npos);
     EXPECT_NE(rendered.find("partial"), std::string::npos);
+}
+
+// SW-G2 variant: a stored session whose title is still a creation placeholder
+// is listed by its short id, never by the placeholder text.
+TEST(UiRenderGolden, HistoryOverlayShowsShortIdForPlaceholderTitle) {
+    UiModel model = history_model();
+    model.catalog.workspaces[1].sessions.clear();
+    model.catalog.workspaces[1].sessions.push_back(
+        history_session("cafebabe-1234", "tui", 3000, "root", "model-b"));
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered.find("tui ·"), std::string::npos);
+    EXPECT_NE(rendered.find("cafebabe · root"), std::string::npos);
 }
 
 // SW-G3 (22 §4.2/§4.3): before the first snapshot the History overlay shows the

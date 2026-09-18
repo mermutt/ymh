@@ -551,7 +551,7 @@ private:
         model_.exitConfirm.orphaning = orphaning;
         model_.exitConfirm.sessions = count_sessions(orphaning);
         model_.exitConfirm.running = count_running(orphaning);
-        model_.exitConfirm.selected = 1;
+        model_.exitConfirm.selected = 0;
         model_.mode = UiMode::ExitConfirm;
         model_.dirty.markAggregate();
     }
@@ -671,6 +671,7 @@ private:
             return true;
         }
         if (event == ftxui::Event::ArrowLeft || event == ftxui::Event::ArrowRight ||
+            event == ftxui::Event::ArrowUp || event == ftxui::Event::ArrowDown ||
             event == ftxui::Event::Tab) {
             model_.exitConfirm.selected = model_.exitConfirm.selected == 0 ? 1 : 0;
             return true;
@@ -2384,6 +2385,12 @@ public:
     last_dialog_resolution() const override {
         return app_.last_dialog_resolution_;
     }
+
+    void open_exit_prompt(const std::vector<WorkspaceId>& orphaning) override {
+        app_.open_exit_prompt(orphaning);
+    }
+
+    [[nodiscard]] bool quit_requested() const override { return app_.quit_.load(); }
 
     [[nodiscard]] const UiModel& model() const override { return app_.model_; }
     [[nodiscard]] const std::set<WorkspaceId>& ensure_in_flight() const override {

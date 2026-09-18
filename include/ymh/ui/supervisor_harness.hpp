@@ -75,6 +75,12 @@ public:
         std::pair<payload::PermissionDecisionKind, GrantScope>>
     last_dialog_resolution() const = 0;
 
+    // Exit-confirm key semantics. `open_exit_prompt` drives the real production
+    // opener (so the default highlight is exercised, not re-seeded); `dispatch_key`
+    // then sends ↑/↓/Enter through the real handler.
+    virtual void open_exit_prompt(const std::vector<WorkspaceId>& orphaning) = 0;
+    [[nodiscard]] virtual bool quit_requested() const = 0;
+
     // Observers (valid only while the harness lives).
     [[nodiscard]] virtual const UiModel& model() const = 0;
     [[nodiscard]] virtual const std::set<WorkspaceId>& ensure_in_flight() const = 0;
