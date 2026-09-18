@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -14,6 +16,8 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/subagent.hpp"
 #include "ymh/llm/fake_llm.hpp"
+#include "ymh/registry/registry.hpp"
+#include "ymh/session/session_persistence.hpp"
 
 namespace {
 
@@ -109,6 +113,63 @@ SessionOptions workspace_options(const TempWorkspace& workspace) {
     options.title         = "test";
     return options;
 }
+
+// A durable twin of `AgentEnv`: same wiring, but the session store is a real
+// `SessionPersistence`, so a spawned subagent's row can be read back from
+// SQLite (23-D53 durable assertion). `AgentEnv` itself is memory-backed.
+struct DurableAgentEnv {
+    DurableAgentEnv(const std::string& prefix, std::unique_ptr<LLMProvider> provider)
+        : workspace(prefix),
+          store(SessionPersistence::open(persistence_config(workspace.path()))),
+          sessions(*store, bus),
+          env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
+          provider(std::move(provider)),
+          policy(allow_all_permission_config()),
+          assembler(tools, ""),
+          pool(4),
+          registry(make_agent_services(sessions, governor, tools, policy, nullptr, assembler, env,
+                                       logger, sink, *this->provider, pool, estimator,
+                                       AgentServices::PermissionResolver{}, nullptr, nullptr),
+                   AgentConfig{}) {}
+
+    Agent& createAgent() {
+        const std::expected<AgentId, AgentError> created = registry.create(workspace_options(workspace));
+        if (!created.has_value()) {
+            throw std::runtime_error("create failed: " + created.error().detail);
+        }
+        return registry.get(*created);
+    }
+
+    Session& sessionOf(const Agent& agent) { return sessions.session(agent.session()); }
+
+    static PersistenceConfig persistence_config(const std::filesystem::path& root) {
+        PersistenceConfig config;
+        config.db_path   = root / ".ymh" / "sessions.db";
+        config.lock_path = root / ".ymh" / "sessions.lock";
+        config.boot_id   = BootId{"durable-subagent-test"};
+        return config;
+    }
+
+    TempWorkspace                       workspace;
+    EventBus                            bus;
+    std::unique_ptr<SessionPersistence> store;
+    SessionManager                      sessions;
+    LocalEnvironment                    env;
+    ResourceGovernor                    governor;
+    OutputRing                          ring{1u << 20};
+    RingOutputSink                      sink{ring};
+    NullLogger                          logger;
+    ToolRegistry                        tools;
+    RegistrationKeeper                  keeper{tools};
+    std::unique_ptr<LLMProvider>        provider;
+    RulePermissionPolicy                policy;
+    std::unique_ptr<PermissionGate>     gate;
+    SessionContextAssembler             assembler;
+    DefaultTokenEstimator               estimator;
+    LLMPool                             pool;
+    std::unique_ptr<ContextCompactor>   context_compactor;
+    AgentRegistry                       registry;
+};
 
 TEST(AgentRegistry, CreateIsIdleAndStartsNoTurn) {
     AgentEnv env("registry_create", std::make_unique<FakeLLM>(script_of({text_step("never")})));
@@ -221,6 +282,105 @@ TEST(AgentRegistry, SubagentSpawnAndFanInRecordEdges) {    AgentEnv env("registr
     EXPECT_EQ(count_type(events, EventType::SubagentSpawned), 1u);
     EXPECT_EQ(count_type(events, EventType::SubagentFanIn), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 0u);
+}
+
+// 23-D53 / SL-U10 + SL-U11: a spawned subagent's durable row is
+// kind='subagent' with parent_session set to the spawning session, while a
+// default SessionOptions still creates a root with no parent.
+TEST(AgentRegistry, SL_U10_U11_SubagentKindAndParentArePersisted) {
+    AgentEnv env("registry_subagent_kind",
+                 std::make_unique<FakeLLM>(script_of({text_step("child done")})));
+    Agent&         parent   = env.createAgent();
+    const SessionId parentId = parent.session();
+
+    const std::optional<SessionHeader> parentHeader = env.store.load(parentId);
+    ASSERT_TRUE(parentHeader.has_value());
+    EXPECT_EQ(parentHeader->kind, SessionKind::Root);
+    EXPECT_FALSE(parentHeader->parentSession.has_value());
+
+    SubagentRunner runner(env.registry, env.sessions, env.sessionOf(parent),
+                          workspace_options(env.workspace));
+    std::string    summary;
+    ASSERT_EQ(runner.run("do the task", summary), payload::SubagentOutcome::Completed);
+
+    std::optional<SessionId> childId;
+    for (const EventRecord& record : env.sessionOf(parent).events()) {
+        if (record.event.type == EventType::SubagentSpawned) {
+            childId = record.event.payload.get<payload::SubagentSpawned>().subagent;
+        }
+    }
+    ASSERT_TRUE(childId.has_value());
+
+    const std::optional<SessionHeader> childHeader = env.store.load(*childId);
+    ASSERT_TRUE(childHeader.has_value());
+    EXPECT_EQ(childHeader->kind, SessionKind::Subagent);
+    ASSERT_TRUE(childHeader->parentSession.has_value());
+    EXPECT_EQ(*childHeader->parentSession, parentId);
+
+    // A default-constructed SessionOptions remains a root (no regression).
+    const SessionId defaultRoot = env.sessions.createSession(workspace_options(env.workspace));
+    const std::optional<SessionHeader> rootHeader = env.store.load(defaultRoot);
+    ASSERT_TRUE(rootHeader.has_value());
+    EXPECT_EQ(rootHeader->kind, SessionKind::Root);
+    EXPECT_FALSE(rootHeader->parentSession.has_value());
+}
+
+// 23-D53 / SL-U11 (durable): a SubagentRunner child's SQLite row is
+// kind='subagent' with parent_session set, it owns events, and it creates NO
+// registry junction (subagents are routed parent-side, not workspace sessions).
+TEST(AgentRegistry, SL_U11_SubagentDurableRowKindParentAndZeroJunctions) {
+    DurableAgentEnv env("registry_subagent_durable",
+                        std::make_unique<FakeLLM>(script_of({text_step("child done")})));
+    Agent&          parent   = env.createAgent();
+    const SessionId parentId = parent.session();
+
+    SubagentRunner runner(env.registry, env.sessions, env.sessionOf(parent),
+                          workspace_options(env.workspace));
+    std::string    summary;
+    ASSERT_EQ(runner.run("do the task", summary), payload::SubagentOutcome::Completed);
+
+    std::optional<SessionId> childId;
+    for (const EventRecord& record : env.sessionOf(parent).events()) {
+        if (record.event.type == EventType::SubagentSpawned) {
+            childId = record.event.payload.get<payload::SubagentSpawned>().subagent;
+        }
+    }
+    ASSERT_TRUE(childId.has_value());
+
+    const std::optional<SessionHeader> child = env.store->load(*childId);
+    ASSERT_TRUE(child.has_value());
+    EXPECT_EQ(child->kind, SessionKind::Subagent);
+    ASSERT_TRUE(child->parentSession.has_value());
+    EXPECT_EQ(*child->parentSession, parentId);
+    EXPECT_GT(env.store->read(*childId).size(), 0u);
+
+    EXPECT_NE(env.store->leaseState(parentId), LeaseState::Absent);
+    EXPECT_NE(env.store->leaseState(*childId), LeaseState::Absent);
+
+    // Zero junctions for the subagent (and for the parent, which the runner
+    // never registers either).
+    const std::filesystem::path state = env.workspace.path() / "state";
+    RegistryConfig              registry_config;
+    registry_config.db_path         = state / "registry.db";
+    registry_config.lock_path       = state / "registry.lock";
+    registry_config.workspace_roots = {state / "none"};
+    registry_config.bootstrap_depth = 4;
+    const std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+    const WorkspaceRecord record = registry->registerWorkspace(env.workspace.path(), "durable");
+    EXPECT_TRUE(registry->listSessions(record.id).empty());
+    EXPECT_FALSE(registry->findSession(record.id, *childId).has_value());
+}
+
+// 23-D53 / schema CHECK (src/session/session_persistence.cpp:50): a subagent
+// without a parent violates the kind/parent matrix and must be rejected before
+// it can reach the store.
+TEST(AgentRegistry, SL_U10_SubagentWithoutParentIsRejected) {
+    AgentEnv env("registry_subagent_no_parent",
+                 std::make_unique<FakeLLM>(script_of({text_step("never")})));
+    SessionOptions options = workspace_options(env.workspace);
+    options.kind           = SessionKind::Subagent;
+
+    EXPECT_THROW((void)env.sessions.createSession(options), std::invalid_argument);
 }
 
 TEST(AgentRegistry, ActivationIsAllowedOnlyWhenIdleOrBlocked) {

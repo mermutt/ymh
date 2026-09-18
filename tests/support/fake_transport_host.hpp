@@ -31,6 +31,8 @@ public:
 
     std::vector<std::string> calls;
     std::optional<nlohmann::json> last_message;
+    std::optional<bool>           last_delete_only_if_empty;
+    std::optional<bool>           last_delete_force;
     std::optional<nlohmann::json> context_result;
     std::optional<std::string> last_reason;
     std::optional<protocol::ShutdownReason> last_shutdown_reason;
@@ -172,8 +174,10 @@ public:
         require_session(id);
     }
 
-    void deleteSession(const SessionId& id) override {
+    void deleteSession(const SessionId& id, bool only_if_empty, bool force) override {
         calls.push_back("session.delete");
+        last_delete_only_if_empty = only_if_empty;
+        last_delete_force         = force;
         require_session(id);
         logs_.erase(id.value);
         titles_.erase(id.value);

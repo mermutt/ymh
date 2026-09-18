@@ -442,7 +442,25 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
                 throw RpcException(code_value(RpcCode::InvalidParams),
                                    "session.delete requires confirm: true");
             }
-            host_.deleteSession(session);
+            bool only_if_empty = false;
+            bool force         = false;
+            if (const auto it = object_params(request.params).find("only_if_empty");
+                it != request.params.end()) {
+                if (!it->is_boolean()) {
+                    throw RpcException(code_value(RpcCode::InvalidParams),
+                                       "only_if_empty must be a boolean");
+                }
+                only_if_empty = it->get<bool>();
+            }
+            if (const auto it = object_params(request.params).find("force");
+                it != request.params.end()) {
+                if (!it->is_boolean()) {
+                    throw RpcException(code_value(RpcCode::InvalidParams),
+                                       "force must be a boolean");
+                }
+                force = it->get<bool>();
+            }
+            host_.deleteSession(session, only_if_empty, force);
             respond(conn, request.id, nlohmann::json::object());
             onSessionClosed(session, "session_closed");
         } else if (method_name == method::kAgentPrompt || method_name == method::kAgentFollowup ||

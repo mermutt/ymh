@@ -663,17 +663,63 @@ void HostRuntime::closeSession(const SessionId& id) {
     });
 }
 
-void HostRuntime::deleteSession(const SessionId& id) {
+void HostRuntime::deleteSession(const SessionId& id, bool only_if_empty, bool force) {
     translate([&]() {
+        const bool mid_turn = [&] {
+            if (runtime_.agents().hasPendingWork(id)) {
+                return true;
+            }
+            Agent* agent = runtime_.agents().find(id);
+            if (agent == nullptr) {
+                return false;
+            }
+            switch (agent->state()) {
+                case AgentState::Thinking:
+                case AgentState::CallingTool:
+                case AgentState::WaitingForPermission:
+                case AgentState::WaitingForInput:
+                case AgentState::Cancelling:
+                    return true;
+                case AgentState::Idle:
+                case AgentState::Error:
+                    return false;
+            }
+            return false;
+        }();
+        if (mid_turn) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "turn in progress"});
+        }
+
+        if (!force && active_session_.has_value() && active_session_->value == id.value) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "active session"});
+        }
+
+        if (only_if_empty && !runtime_.store().isUnprompted(id)) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "session is not empty"});
+        }
+
+        if (runtime_.store().hasDependents(id)) {
+            throw DependentSessionError("session has dependent children: " + id.value);
+        }
+
         runtime_.environment().pty().closeSession(id);
         if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
             runtime_.agents().dispose(agent->id());
         }
-        runtime_.sessions().deleteSession(id);
+
         try {
             registry_.removeSession(identity_.workspace, id);
         } catch (const RegistryError& error) {
             throw_mapped(map_registry_error(error));
+        }
+
+        runtime_.sessions().deleteSession(id, only_if_empty);
+
+        if (active_session_.has_value() && active_session_->value == id.value) {
+            active_session_.reset();
         }
     });
 }
