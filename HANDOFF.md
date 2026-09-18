@@ -99,7 +99,11 @@ These were flagged as unresolved during the design pass and must be decided/clos
    migrates a legacy central store once. A process scan is not a discovery
    source.
 3. **`SessionHeader` finalization** — **RESOLVED** (§9.2/§9.10): fields are `id`, `cwd`, `createdAt`, `updatedAt`, `title`, `model`, `serverProfile`, `kind` (root|fork|subagent), `parentSession?`, `seedLength?`, `metadata?`. No boot nonce in the header (liveness lives in the lease / host registration). `ordinal`/`archived` stay in the registry junction.
-4. **Remote/SSH transport (TCP)**: deferred. Decide when §47 Mode B (local TUI + remote daemons) is in scope; the JSON-RPC protocol is transport-agnostic, so this is a scheduling decision, not a design blocker.
+4. **Remote/SSH transport (TCP)**: **out of scope for this project** (DECISION,
+   user, 2026-09-17). It is not deferred and not planned; it will not be built.
+   The JSON-RPC protocol stays transport-agnostic, so this is a scope decision,
+   not a design blocker. The old "deferred" text lives in `00-architecture.md`
+   §47 Mode B, a historical superseded-by-errata record.
 5. **Deferred dsh-items** (accepted for v1): no offline session cache (live host required); host-level events merged into the mux; no hot plugin reload (dynamic libs deferred).
 
 Close these by editing `00-architecture.md`, then re-run the verification gate (§7) on the whole top-level doc.
@@ -193,14 +197,16 @@ verified plus `11-m2-errata.md` (frozen M2 interfaces) and `12-m1-drift-errata.m
 Milestone 2 delivers the supervisor TUI + per-workspace `WorkspaceHost` daemons,
 the shared `registry.db`, and JSON-RPC over a length-prefixed Unix socket.
 `ymh` (no args) attaches to / spawns the cwd daemon; `ymh --host …` is the daemon
-entry. Next candidates: remote SSH/TCP transport (§47 Mode B), MCP/LSP/PTY
-(Phase 2, §51), and multi-workspace UI polish.
+entry. **Remote SSH/TCP transport (§47 Mode B) is out of scope for this project**
+(DECISION, user, 2026-09-17): it is not deferred and not a candidate.
 
 **Phase-2 features are now implemented too** (specs `13`–`15`, all Oracle-verified
 and marked `verified` in `DESIGN_STATUS.md`): context compaction (`13`), the PTY
 capability behind the execution-environment seam (`14`), and the MCP adapter into
-the shared tool registry (`15`). Remaining candidates: LSP tools (§28), remote
-SSH/TCP transport (§47 Mode B), worktrees, and multi-workspace UI polish.
+the shared tool registry (`15`). Remaining candidates: worktrees and
+multi-workspace UI polish, plus **LSP tools (§28) at the lowest priority** (not
+dropped); remote SSH/TCP transport (§47 Mode B) is out of scope (DECISION, user,
+2026-09-17).
 
 **Spec `16-daemon-ownership.md` is implemented** (8 waves). It changes daemon
 lifetime from "supervisor-independent" to **supervisor-owned**: the last

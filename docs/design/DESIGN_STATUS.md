@@ -38,7 +38,7 @@ coded after it is marked **verified** here.
 | 1 | Naming: `txtcoder` vs legacy `ymh` | **resolved** | `ymh` is final (binary, state, workspace dir, source tree, namespace); `txtcoder` retired |
 | 2 | Registry bootstrap discovery (§9.10) | **resolved** | registry + `flock` primary; exact-match process scan is best-effort fallback only |
 | 3 | `SessionHeader` final field list | **resolved** | §9.2/§9.10: no boot nonce in header; `ordinal`/`archived` stay in registry junction |
-| 4 | Remote/SSH TCP transport | deferred | scheduling decision, not a blocker |
+| 4 | Remote/SSH TCP transport | **out of scope** | DECISION (user, 2026-09-17): not deferred, not planned, will not be built; JSON-RPC stays transport-agnostic |
 | 5 | Deferred dsh items | accepted | no offline cache; host events merged into mux; no hot reload |
 
 ## Operating requirements (2026-09-14)
