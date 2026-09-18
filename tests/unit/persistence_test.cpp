@@ -156,6 +156,48 @@ Event make_rename(const SessionId& session, const std::string& title,
     return encode(typed);
 }
 
+// 23 §3.4/§5.2: the own-log predicate's only positive witness.
+Event make_user_message(const SessionId& session, std::string text) {
+    TypedEvent<payload::UserMessage> typed;
+    typed.id         = make_event_id();
+    typed.session_id = session;
+    typed.timestamp  = std::chrono::system_clock::now();
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = std::move(text);
+    typed.payload = payload::UserMessage{MessageId{"m-" + session.value}, {block}};
+    return encode(typed);
+}
+
+// 23 §5.4: the terminal event `eraseWithEvent` appends before erasing.
+Event make_session_ended(const SessionId& session) {
+    TypedEvent<payload::SessionEnded> typed;
+    typed.id         = make_event_id();
+    typed.session_id = session;
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload::SessionEnded{payload::SessionEndReason::Deleted};
+    return encode(typed);
+}
+
+// 23 §5.4 gate: a persistence assertion counts rows AND leases AND events AND
+// snapshots, never rows alone.
+struct RowCounts {
+    std::int64_t sessions  = -1;
+    std::int64_t leases    = -1;
+    std::int64_t events    = -1;
+    std::int64_t snapshots = -1;
+};
+
+RowCounts count_rows(const std::filesystem::path& db_path, const SessionId& id) {
+    RawDb raw(db_path, true);
+    return RowCounts{
+        raw.query_int("SELECT COUNT(*) FROM sessions WHERE id='" + id.value + "'"),
+        raw.query_int("SELECT COUNT(*) FROM session_leases WHERE session_id='" + id.value + "'"),
+        raw.query_int("SELECT COUNT(*) FROM events WHERE session_id='" + id.value + "'"),
+        raw.query_int("SELECT COUNT(*) FROM session_snapshots WHERE session_id='" + id.value + "'"),
+    };
+}
+
 TEST(Persistence, OpenAppliesSchemaAndPragmas) {
     TempWorkspace workspace;
     auto          store = SessionPersistence::open(workspace.config());
@@ -487,6 +529,146 @@ TEST(Persistence, EraseRefusesDependentsThenRemoves) {
     EXPECT_NO_THROW(store->erase(parent.id));
     EXPECT_FALSE(store->load(parent.id).has_value());
     EXPECT_FALSE(store->load(child.id).has_value());
+}
+
+// 23 §3.4: unprompted is own-log `user/message` absence; the title is never
+// consulted (SL8).
+TEST(SessionStoreSeam, SL5_SL8_IsUnpromptedOwnLogAndTitleIndependent) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+
+    EXPECT_TRUE(store->isUnprompted(header.id));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    EXPECT_TRUE(store->isUnprompted(header.id));
+    store->append(header.id, make_rename(header.id, "a real title"));
+    EXPECT_TRUE(store->isUnprompted(header.id));
+    store->append(header.id, make_user_message(header.id, "hi"));
+    EXPECT_FALSE(store->isUnprompted(header.id));
+}
+
+// 23 §3.4: the query is over OWN events, so a fork's parent prefix cannot mark
+// the fork as prompted.
+TEST(SessionStoreSeam, SL5_IsUnpromptedIgnoresForkParentPrefix) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_user_message(parent.id, "parent prompt"));
+    ASSERT_FALSE(store->isUnprompted(parent.id));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 2;
+    store->create(child);
+
+    EXPECT_TRUE(store->isUnprompted(child.id));
+    store->append(child.id, make_event(child.id, std::chrono::system_clock::now()));
+    EXPECT_TRUE(store->isUnprompted(child.id));
+    store->append(child.id, make_user_message(child.id, "child prompt"));
+    EXPECT_FALSE(store->isUnprompted(child.id));
+}
+
+// 23 §5.3: hasDependents is true for the parent only, and clears once the
+// dependent is gone.
+TEST(SessionStoreSeam, SL_U4_HasDependentsParentOnly) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    const SessionHeader other  = store->create(make_header(workspace.root()));
+    EXPECT_FALSE(store->hasDependents(parent.id));
+    EXPECT_FALSE(store->hasDependents(other.id));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 0;
+    store->create(child);
+
+    EXPECT_TRUE(store->hasDependents(parent.id));
+    EXPECT_FALSE(store->hasDependents(child.id));
+    EXPECT_FALSE(store->hasDependents(other.id));
+
+    store->erase(child.id);
+    EXPECT_FALSE(store->hasDependents(parent.id));
+}
+
+// 23 §5.4: eraseWithEvent removes the row, the lease, the events, and the
+// snapshot in one transaction.
+TEST(SessionStoreSeam, SL11_EraseWithEventRemovesAllRowsLeasesAndEvents) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    store->checkpoint(header.id);
+
+    const RowCounts before = count_rows(workspace.db_path(), header.id);
+    ASSERT_EQ(before.sessions, 1);
+    ASSERT_EQ(before.leases, 1);
+    ASSERT_EQ(before.events, 1);
+    ASSERT_EQ(before.snapshots, 1);
+
+    store->eraseWithEvent(header.id, make_session_ended(header.id));
+    EXPECT_FALSE(store->load(header.id).has_value());
+
+    const RowCounts after = count_rows(workspace.db_path(), header.id);
+    EXPECT_EQ(after.sessions, 0);
+    EXPECT_EQ(after.leases, 0);
+    EXPECT_EQ(after.events, 0);
+    EXPECT_EQ(after.snapshots, 0);
+}
+
+// 23 §5.4: the erase is lease-exempt -- it succeeds for a non-holder, while a
+// plain append is refused.
+TEST(SessionStoreSeam, SL11_EraseWithEventIsLeaseExempt) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+    ASSERT_TRUE(store->releaseLease(header.id));
+    ASSERT_FALSE(store->isLeaseHolder(header.id));
+    EXPECT_THROW(store->append(header.id, make_event(header.id, std::chrono::system_clock::now())),
+                 LeaseLost);
+
+    EXPECT_NO_THROW(store->eraseWithEvent(header.id, make_session_ended(header.id)));
+    EXPECT_FALSE(store->load(header.id).has_value());
+    const RowCounts after = count_rows(workspace.db_path(), header.id);
+    EXPECT_EQ(after.sessions, 0);
+    EXPECT_EQ(after.leases, 0);
+    EXPECT_EQ(after.events, 0);
+    EXPECT_EQ(after.snapshots, 0);
+}
+
+// 23 §5.4: a dependent parent is refused and the whole transaction (including
+// the appended terminal event) rolls back -- parent rows/leases/events intact.
+TEST(SessionStoreSeam, SL_U4_SL11_EraseWithEventRefusesDependentsAndRollsBack) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    store->append(parent.id, make_event(parent.id, std::chrono::system_clock::now()));
+    store->append(parent.id, make_rename(parent.id, "keep me"));
+    store->checkpoint(parent.id);
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 0;
+    store->create(child);
+
+    const RowCounts before = count_rows(workspace.db_path(), parent.id);
+    ASSERT_EQ(before.sessions, 1);
+    ASSERT_EQ(before.leases, 1);
+    ASSERT_EQ(before.events, 2);
+    ASSERT_EQ(before.snapshots, 1);
+
+    EXPECT_THROW(store->eraseWithEvent(parent.id, make_session_ended(parent.id)),
+                 DependentSessionError);
+
+    const RowCounts after = count_rows(workspace.db_path(), parent.id);
+    EXPECT_EQ(after.sessions, 1);
+    EXPECT_EQ(after.leases, 1);
+    EXPECT_EQ(after.events, 2);
+    EXPECT_EQ(after.snapshots, 1);
+    EXPECT_TRUE(store->load(parent.id).has_value());
+    EXPECT_TRUE(store->hasDependents(parent.id));
 }
 
 TEST(Persistence, SnapshotCheckpointLifecycle) {

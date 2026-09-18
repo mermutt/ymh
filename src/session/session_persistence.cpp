@@ -309,6 +309,15 @@ public:
         return header;
     }
 
+    // 23 §5.3: the extracted dependent-children probe shared by `erase`,
+    // `eraseWithEvent`, and `hasDependents`. Caller holds `mutex`; no
+    // transaction of its own so it composes into the erase transaction.
+    [[nodiscard]] bool has_dependents_locked(const SessionId& id) const {
+        Statement statement{db, "SELECT 1 FROM sessions WHERE parent_session = ? LIMIT 1"};
+        statement.bindText(1, id.value);
+        return statement.step() == SQLITE_ROW;
+    }
+
     [[nodiscard]] EventRange read_events_after_locked(const SessionId& id, Sequence after,
                                                       std::size_t limit) const {
         if (limit == 0) {
@@ -774,13 +783,74 @@ void SessionPersistence::erase(SessionId id) {
     }
     exec_sql(impl_->db, "BEGIN IMMEDIATE");
     try {
+        if (impl_->has_dependents_locked(id)) {
+            throw DependentSessionError("session has dependent children: " + id.value);
+        }
         {
-            Statement dependents{
-                impl_->db, "SELECT 1 FROM sessions WHERE parent_session = ? LIMIT 1"};
-            dependents.bindText(1, id.value);
-            if (dependents.step() == SQLITE_ROW) {
-                throw DependentSessionError("session has dependent children: " + id.value);
-            }
+            Statement snapshots{impl_->db, "DELETE FROM session_snapshots WHERE session_id = ?"};
+            snapshots.bindText(1, id.value);
+            snapshots.step();
+        }
+        {
+            Statement leases{impl_->db, "DELETE FROM session_leases WHERE session_id = ?"};
+            leases.bindText(1, id.value);
+            leases.step();
+        }
+        {
+            Statement events{impl_->db, "DELETE FROM events WHERE session_id = ?"};
+            events.bindText(1, id.value);
+            events.step();
+        }
+        {
+            Statement sessions{impl_->db, "DELETE FROM sessions WHERE id = ?"};
+            sessions.bindText(1, id.value);
+            sessions.step();
+        }
+        exec_sql(impl_->db, "COMMIT");
+    } catch (...) {
+        sqlite3_exec(impl_->db, "ROLLBACK", nullptr, nullptr, nullptr);
+        throw;
+    }
+}
+
+bool SessionPersistence::isUnprompted(SessionId id) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    Statement statement{
+        impl_->db,
+        "SELECT 1 FROM events WHERE session_id = ? AND type = 'user/message' LIMIT 1"};
+    statement.bindText(1, id.value);
+    return statement.step() != SQLITE_ROW;
+}
+
+bool SessionPersistence::hasDependents(SessionId id) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->has_dependents_locked(id);
+}
+
+void SessionPersistence::eraseWithEvent(SessionId id, Event event) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->writable) {
+        throw StoreOpenError("store is read-only");
+    }
+    exec_sql(impl_->db, "BEGIN IMMEDIATE");
+    try {
+        if (impl_->has_dependents_locked(id)) {
+            throw DependentSessionError("session has dependent children: " + id.value);
+        }
+        if (event.payload.dump().size() > impl_->config.max_payload_bytes) {
+            throw PayloadTooLarge("event payload exceeds the configured cap");
+        }
+        {
+            Statement insert{
+                impl_->db,
+                "INSERT INTO events(session_id, event_id, timestamp, type, payload) VALUES (?, ?, "
+                "?, ?, ?)"};
+            insert.bindText(1, id.value);
+            insert.bindText(2, event.id.value);
+            insert.bindInt64(3, to_epoch_ms(event.timestamp));
+            insert.bindText(4, wire_type(event));
+            insert.bindText(5, event.payload.dump());
+            insert.step();
         }
         {
             Statement snapshots{impl_->db, "DELETE FROM session_snapshots WHERE session_id = ?"};

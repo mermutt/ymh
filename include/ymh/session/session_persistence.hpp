@@ -86,6 +86,10 @@ public:
     Sequence   append(SessionId id, Event event) override;
     bool       isLeaseHolder(SessionId id) const override;
 
+    [[nodiscard]] bool isUnprompted(SessionId id) const override;
+    [[nodiscard]] bool hasDependents(SessionId id) const override;
+    void               eraseWithEvent(SessionId id, Event event) override;
+
     [[nodiscard]] Sequence   headSequence(SessionId id) const override;
     [[nodiscard]] EventRange readAfter(SessionId id, Sequence after,
                                        std::size_t limit) const override;
