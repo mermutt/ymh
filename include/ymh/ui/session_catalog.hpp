@@ -67,7 +67,14 @@ struct SessionCatalogSnapshot {
 // (worker) and by the CLI `--resume` resolver (S4). It performs the §4.4
 // pre-flight classification and the pinned catch order, and NEVER throws: any
 // failure becomes a `WorkspaceHistory::note` (SW10).
-[[nodiscard]] WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live);
+//
+// 23 §6.2 (23-D31): `include_unprompted` defaults to **true**, so the shared
+// helper stays unfiltered for the `--resume` resolver (`src/cli/cli.cpp:380`).
+// Only the `/sessions` catalog consumer passes `false` to hide unprompted root
+// headers; explicit-id surfaces (`--resume`/`show`/`replay`/`fork`) are
+// unaffected.
+[[nodiscard]] WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live,
+                                                      bool include_unprompted = true);
 
 // The reader's data source. Wave C uses the registry-backed source built by
 // `registry_catalog_source`; tests inject a fake for deterministic cadence and

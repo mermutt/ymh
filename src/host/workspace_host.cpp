@@ -341,6 +341,7 @@ private:
     std::filesystem::path canonical_root_;
     std::filesystem::path saved_cwd_;
     bool                  chdir_done_ = false;
+    bool                  db_preexisted_ = false;
 
     HostBootId   boot_id_;
     HostClaim    claim_;
@@ -481,6 +482,10 @@ HostExitCode WorkspaceHost::Impl::startup() {
 
     executor_ = std::make_unique<AsioExecutor>(io_);
 
+    db_preexisted_ =
+        std::filesystem::exists(canonical_root_ / ".ymh" / "sessions.db", error) && !error;
+    error.clear();
+
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config                = config_.config;
     runtime_options.root                  = canonical_root_;
@@ -588,6 +593,24 @@ HostExitCode WorkspaceHost::Impl::startup() {
     } catch (const std::exception& claim_error) {
         std::fprintf(stderr, "ymh --host: claimHost failed: %s\n", claim_error.what());
         return HostExitCode::RegistryFailed;
+    }
+
+    // 23 §7 (SL-I19/SL-I20): repair a junction whose session erase committed but
+    // whose junction removal was lost to a crash. Runs only in this flock-held
+    // startup window (between claimHost and Serving) and only when sessions.db
+    // pre-existed the writable open -- a freshly created empty DB would
+    // otherwise classify every junction as an orphan.
+    if (db_preexisted_ && runtime_->persistence() != nullptr) {
+        for (const WorkspaceSessionRecord& junction : registry_->listSessions(config_.workspace)) {
+            if (!runtime_->persistence()->load(junction.sessionId).has_value()) {
+                try {
+                    registry_->removeSession(config_.workspace, junction.sessionId);
+                } catch (const std::exception& sweep_error) {
+                    std::fprintf(stderr, "ymh --host: orphan sweep failed: %s\n",
+                                 sweep_error.what());
+                }
+            }
+        }
     }
 
     armSignals();

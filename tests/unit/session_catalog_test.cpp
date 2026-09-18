@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -174,6 +175,45 @@ void create_valid_db(const std::filesystem::path& root, std::vector<SessionHeade
     remove_sidecars(root);
 }
 
+void append_user_message(const std::unique_ptr<SessionPersistence>& store, const SessionId& id) {
+    TypedEvent<payload::UserMessage> typed;
+    typed.id         = make_event_id();
+    typed.session_id = id;
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload::UserMessage{MessageId{"m-" + id.value}, {}};
+    store->append(id, encode(typed));
+}
+
+void create_valid_db_with_prompts(const std::filesystem::path& root,
+                                  std::vector<SessionHeader> headers,
+                                  const std::vector<SessionId>& prompted) {
+    const std::unique_ptr<SessionPersistence> store = SessionPersistence::open(config_for(root));
+    for (SessionHeader& header : headers) {
+        const SessionId id = header.id;
+        store->create(std::move(header));
+        if (std::find(prompted.begin(), prompted.end(), id) != prompted.end()) {
+            append_user_message(store, id);
+        }
+    }
+    remove_sidecars(root);
+}
+
+bool has_session(const WorkspaceHistory& history, const SessionId& id) {
+    return std::any_of(history.sessions.begin(), history.sessions.end(),
+                       [&id](const SessionHistoryEntry& entry) { return entry.id == id; });
+}
+
+RegistryConfig catalog_registry_config(const std::filesystem::path& dir) {
+    RegistryConfig config;
+    config.db_path             = dir / "registry.db";
+    config.lock_path           = dir / "registry.lock";
+    config.lock_retry_budget   = std::chrono::milliseconds{80};
+    config.lock_retry_interval = std::chrono::milliseconds{5};
+    config.workspace_roots     = {dir / "no-such-root"};
+    config.bootstrap_depth     = 4;
+    return config;
+}
+
 void write_text_file(const std::filesystem::path& path, const std::string& content) {
     std::filesystem::create_directories(path.parent_path());
     std::ofstream file(path, std::ios::binary);
@@ -306,6 +346,66 @@ TEST(SessionCatalogRead, SW_U4_TiesBreakByIdAscending) {
     ASSERT_EQ(history.sessions.size(), 2u);
     EXPECT_EQ(history.sessions[0].id.value, low_id);
     EXPECT_LT(history.sessions[0].id.value, history.sessions[1].id.value);
+}
+
+TEST(SessionCatalogRead, SL_I3_CatalogConsumerHidesUnpromptedRootWhileDirectReadReturnsIt) {
+    TempDir workspace("ymh_catalog_sli3");
+    SessionHeader prompted   = make_header(workspace.path(), 100, 3000, "prompted", "model-a");
+    SessionHeader unprompted = make_header(workspace.path(), 100, 2000, "unprompted", "model-b");
+    const SessionId prompted_id   = prompted.id;
+    const SessionId unprompted_id = unprompted.id;
+    create_valid_db_with_prompts(workspace.path(),
+                                 {std::move(prompted), std::move(unprompted)}, {prompted_id});
+
+    const WorkspaceRecord direct_record = record_for(workspace.path(), "ws");
+    const WorkspaceHistory direct = read_workspace_history(direct_record, false);
+
+    ASSERT_FALSE(direct.note.has_value());
+    ASSERT_EQ(direct.sessions.size(), 2u);
+    EXPECT_TRUE(has_session(direct, prompted_id));
+    EXPECT_TRUE(has_session(direct, unprompted_id))
+        << "the shared helper default must stay unfiltered so --resume resolves a hidden id";
+
+    const std::filesystem::path state = workspace.path() / "state";
+    const std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(catalog_registry_config(state));
+    const WorkspaceRecord registered = registry->registerWorkspace(workspace.path(), "ws");
+    const WorkspaceCatalogSource source = registry_catalog_source(*registry);
+
+    const WorkspaceHistory catalog = source.read(registered, false);
+
+    ASSERT_FALSE(catalog.note.has_value());
+    ASSERT_EQ(catalog.sessions.size(), 1u);
+    EXPECT_TRUE(has_session(catalog, prompted_id));
+    EXPECT_FALSE(has_session(catalog, unprompted_id));
+}
+
+TEST(SessionCatalogRead, SL_I3_CatalogKeepsForkAndSubagentEvenWhenUnprompted) {
+    TempDir workspace("ymh_catalog_sli3_kinds");
+    SessionHeader root = make_header(workspace.path(), 100, 1000, "root", "m");
+    SessionHeader fork = make_header(workspace.path(), 100, 2000, "fork", "m");
+    fork.kind          = SessionKind::Fork;
+    fork.parentSession = root.id;
+    fork.seedLength    = 0;
+    SessionHeader subagent = make_header(workspace.path(), 100, 3000, "subagent", "m");
+    subagent.kind          = SessionKind::Subagent;
+    subagent.parentSession = root.id;
+    const SessionId fork_id     = fork.id;
+    const SessionId subagent_id = subagent.id;
+    create_valid_db(workspace.path(), {std::move(root), std::move(fork), std::move(subagent)});
+
+    const std::filesystem::path state = workspace.path() / "state";
+    const std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(catalog_registry_config(state));
+    const WorkspaceRecord registered = registry->registerWorkspace(workspace.path(), "ws");
+    const WorkspaceCatalogSource source = registry_catalog_source(*registry);
+
+    const WorkspaceHistory catalog = source.read(registered, false);
+
+    ASSERT_FALSE(catalog.note.has_value());
+    ASSERT_EQ(catalog.sessions.size(), 2u);
+    EXPECT_TRUE(has_session(catalog, fork_id));
+    EXPECT_TRUE(has_session(catalog, subagent_id));
 }
 
 TEST(SessionCatalogRead, SW_U4_WorkspaceMissing) {
@@ -623,7 +723,9 @@ TEST(SessionCatalogIntegration, SW_I4_DegradationWithoutCrashKeepsOtherGroups) {
     const std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
 
     TempDir good("ymh_catalog_good");
-    create_valid_db(good.path(), {make_header(good.path(), 100, 5000, "hello", "model-x")});
+    SessionHeader good_header = make_header(good.path(), 100, 5000, "hello", "model-x");
+    const SessionId good_id   = good_header.id;
+    create_valid_db_with_prompts(good.path(), {std::move(good_header)}, {good_id});
     registry->registerWorkspace(good.path(), "good");
 
     TempDir garbage("ymh_catalog_bad");

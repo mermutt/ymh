@@ -27,6 +27,7 @@ struct CliInvocation {
         Replay,
         Fork,
         Workspace,
+        Session,
         Config,
         Version,
     };
@@ -48,6 +49,16 @@ struct CliInvocation {
     bool        workspace_force = false;   // `workspace stop --force` (§4.6)
     std::vector<std::string> workspace_args;
     std::vector<std::string> config_args;
+
+    // 23 §5.1: `ymh session prune` options.
+    bool        session_empty = false;
+    bool        session_keep_set = false;
+    std::size_t session_keep = 0;
+    bool        session_all = false;
+    bool        session_yes = false;
+    bool        session_force = false;
+    bool        session_json = false;
+    bool        session_older_than = false;  // 23 §5.1: rejected in v1 (exit 2)
 };
 
 // Throws `CLI::ParseError` on a malformed command line.
