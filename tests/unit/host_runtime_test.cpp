@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include <asio.hpp>
 #include <nlohmann/json.hpp>
 #include <unistd.h>
 
@@ -25,7 +26,10 @@
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
+#include "ymh/execution/asio_executor.hpp"
+#include "ymh/execution/pty.hpp"
 #include "ymh/host/host_runtime.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/llm/fake_llm.hpp"
@@ -129,6 +133,36 @@ RpcFailure expect_rpc(Fn&& fn) {
     return RpcFailure{};
 }
 
+class IoLoop {
+public:
+    void start() {
+        executor = std::make_unique<AsioExecutor>(io);
+        work = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
+            asio::make_work_guard(io));
+        thread = std::thread([this] { io.run(); });
+        executor->bindRunnerThread(thread.get_id());
+    }
+
+    ~IoLoop() {
+        if (work != nullptr) {
+            work->reset();
+        }
+        io.stop();
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    IoLoop() = default;
+    IoLoop(const IoLoop&) = delete;
+    IoLoop& operator=(const IoLoop&) = delete;
+
+    asio::io_context                                                          io;
+    std::unique_ptr<AsioExecutor>                                             executor;
+    std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> work;
+    std::thread                                                               thread;
+};
+
 class Bridge {
 public:
     struct Peer {
@@ -137,7 +171,8 @@ public:
         std::string              drop_reason;
     };
 
-    explicit Bridge(const std::string& prefix, FakeScript script = FakeScript{})
+    explicit Bridge(const std::string& prefix, FakeScript script = FakeScript{},
+                    bool with_pty = false)
         : workspace_(prefix), registry_dir_("host_runtime_registry_" + prefix) {
         root_ = std::filesystem::canonical(workspace_.path());
 
@@ -164,6 +199,10 @@ public:
             [script](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
             return std::make_unique<FakeLLM>(script);
         };
+        if (with_pty) {
+            io_.start();
+            options.executor = io_.executor.get();
+        }
         std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
             make_workspace_runtime(std::move(options));
         if (!created.has_value()) {
@@ -320,6 +359,7 @@ private:
     BootId                                   boot_id_;
     HostBootId                               host_boot_id_;
     HostIdentity                             identity_;
+    IoLoop                                   io_;
     std::unique_ptr<WorkspaceRuntime>        runtime_;
     std::unique_ptr<FakePermissionTransport> permission_transport_;
     std::unique_ptr<PermissionBroker>        broker_;
@@ -451,6 +491,127 @@ TEST_F(HostRuntimeTest, CreateResumeForkDeleteWriteJunction) {
     bridge.host().deleteSession(forked.session);
     EXPECT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(), 1u);
     EXPECT_FALSE(bridge.host().sessionExists(forked.session));
+}
+
+// 23-D55 / SL-I22: all guards precede all side effects. A delete refused by the
+// dependent-children precheck must leave the PTY open, the agent resident, and
+// the row + junction intact.
+TEST_F(HostRuntimeTest, SL_I22_DependentDeleteRefusalLeavesNoSideEffects) {
+    Bridge bridge("hr_dep_refuse", FakeScript{}, /*with_pty=*/true);
+    const protocol::SessionCreated parent =
+        bridge.host().createSession(nlohmann::json::object());
+
+    SessionOptions child_options;
+    child_options.cwd           = bridge.root();
+    child_options.serverProfile = "interactive";
+    child_options.model         = "fake-model";
+    child_options.kind          = SessionKind::Subagent;
+    child_options.parentSession = parent.session;
+    const SessionId child = bridge.runtime().sessions().createSession(child_options);
+    ASSERT_TRUE(bridge.runtime().store().hasDependents(parent.session));
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array(
+        {nlohmann::json{{"kind", "text"}, {"text", "hi"}}});
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(parent.session, message);
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    ASSERT_NE(bridge.runtime().agents().find(parent.session), nullptr);
+
+    PtyRequest request;
+    request.executable = "/bin/sh";
+    request.argv       = {"/bin/sh", "-c", "sleep 30"};
+    request.cwd        = bridge.root();
+    request.session    = parent.session;
+    (void)bridge.runtime().environment().pty().open(request, CancellationToken{}).get();
+    ASSERT_FALSE(bridge.runtime().environment().pty().list(parent.session).empty());
+
+    const std::size_t junctions_before =
+        bridge.registry().listSessions(bridge.identity().workspace).size();
+
+    const RpcFailure refused =
+        expect_rpc([&] { bridge.host().deleteSession(parent.session); });
+    EXPECT_EQ(refused.code, protocol::code_value(protocol::AppCode::DependentSession));
+    EXPECT_EQ(refused.kind, "DependentSession");
+
+    EXPECT_FALSE(bridge.runtime().environment().pty().list(parent.session).empty());
+    EXPECT_NE(bridge.runtime().agents().find(parent.session), nullptr);
+    EXPECT_TRUE(bridge.runtime().store().load(parent.session).has_value());
+    EXPECT_TRUE(bridge.runtime().store().load(child).has_value());
+    EXPECT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(),
+              junctions_before);
+}
+
+// 23-D20 / SL-I23: deleting the session named by active_session_ resets it.
+TEST_F(HostRuntimeTest, SL_I23_DeleteResetsActiveSession) {
+    Bridge bridge("hr_delete_active");
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+    bridge.host().activateSession(created.session);
+    ASSERT_TRUE(bridge.host().hostStatus().active_session.has_value());
+
+    bridge.host().deleteSession(created.session, false, /*force=*/true);
+    EXPECT_FALSE(bridge.host().hostStatus().active_session.has_value());
+    EXPECT_FALSE(bridge.host().sessionExists(created.session));
+}
+
+// 23-D19 / SL-I24: the manager delete is lease-exempt and works on a
+// non-resident durable session.
+TEST_F(HostRuntimeTest, SL_I24_ManagerDeleteIsLeaseExemptForNonResidentSession) {
+    Bridge bridge("hr_delete_nonresident");
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+    bridge.runtime().sessions().closeSession(created.session);
+    ASSERT_THROW(bridge.runtime().sessions().session(created.session), UnknownSession);
+
+    EXPECT_NO_THROW(bridge.runtime().sessions().deleteSession(created.session, false));
+    EXPECT_FALSE(bridge.runtime().store().load(created.session).has_value());
+}
+
+// 23-D19 / SL-I25: the delete publishes exactly one fully-stamped
+// SessionEnded{Deleted} after the commit.
+TEST_F(HostRuntimeTest, SL_I25_ManagerDeletePublishesSessionEnded) {
+    Bridge bridge("hr_delete_publish");
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+
+    std::vector<Event> seen;
+    Subscription       subscription = bridge.runtime().bus().subscribe(
+        [&seen](const Event& event) { seen.push_back(event); });
+
+    bridge.runtime().sessions().deleteSession(created.session, false);
+
+    std::size_t ended = 0;
+    for (const Event& event : seen) {
+        if (event.type != EventType::SessionEnded) {
+            continue;
+        }
+        ++ended;
+        EXPECT_EQ(event.session_id.value, created.session.value);
+        EXPECT_EQ(event.payload.get<payload::SessionEnded>().reason,
+                  payload::SessionEndReason::Deleted);
+        EXPECT_FALSE(event.id.value.empty());
+    }
+    EXPECT_EQ(ended, 1u);
+}
+
+// 23-D55 / SL-I26: the success path closes the session PTY, after the guards.
+TEST_F(HostRuntimeTest, SL_I26_DeleteClosesPtyOnSuccess) {
+    Bridge bridge("hr_delete_pty", FakeScript{}, /*with_pty=*/true);
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+
+    PtyRequest request;
+    request.executable = "/bin/sh";
+    request.argv       = {"/bin/sh", "-c", "sleep 30"};
+    request.cwd        = bridge.root();
+    request.session    = created.session;
+    (void)bridge.runtime().environment().pty().open(request, CancellationToken{}).get();
+    ASSERT_FALSE(bridge.runtime().environment().pty().list(created.session).empty());
+
+    bridge.host().deleteSession(created.session);
+    EXPECT_TRUE(bridge.runtime().environment().pty().list(created.session).empty());
 }
 
 TEST_F(HostRuntimeTest, ListSessionsUsesJunctionOrderAndFlagsStoreOnly) {

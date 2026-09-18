@@ -416,6 +416,61 @@ TEST(TransportServer, DeleteRequiresConfirm) {
     EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InvalidParams));
 }
 
+// 23-A1: `only_if_empty` and `force` are optional booleans, default false, and
+// are passed through to the host.
+TEST(TransportServer, SL_A1_DeleteParsesOnlyIfEmptyAndForce) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionDelete,
+                                         nlohmann::json{{"session", session.value},
+                                                        {"confirm", true},
+                                                        {"only_if_empty", true},
+                                                        {"force", true}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_TRUE(frames[0].contains("result"));
+    ASSERT_TRUE(harness.host.last_delete_only_if_empty.has_value());
+    EXPECT_TRUE(*harness.host.last_delete_only_if_empty);
+    ASSERT_TRUE(harness.host.last_delete_force.has_value());
+    EXPECT_TRUE(*harness.host.last_delete_force);
+}
+
+TEST(TransportServer, SL_A1_DeleteDefaultsOnlyIfEmptyAndForceToFalse) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionDelete,
+                                         nlohmann::json{{"session", session.value},
+                                                        {"confirm", true}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_TRUE(frames[0].contains("result"));
+    ASSERT_TRUE(harness.host.last_delete_only_if_empty.has_value());
+    EXPECT_FALSE(*harness.host.last_delete_only_if_empty);
+    ASSERT_TRUE(harness.host.last_delete_force.has_value());
+    EXPECT_FALSE(*harness.host.last_delete_force);
+}
+
+TEST(TransportServer, SL_A1_DeleteRejectsNonBooleanOnlyIfEmpty) {
+    Harness harness;
+    Peer* peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionDelete,
+                                         nlohmann::json{{"session", session.value},
+                                                        {"confirm", true},
+                                                        {"only_if_empty", "yes"}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InvalidParams));
+}
+
 TEST(TransportServer, PermissionDecideUnknownRequest) {
     Harness harness;
     Peer* peer = harness.open();

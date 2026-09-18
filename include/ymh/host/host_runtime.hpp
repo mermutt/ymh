@@ -159,7 +159,8 @@ public:
                                          std::int64_t seed_length) override;
     protocol::SessionRenamedResult renameSession(const nlohmann::json& params) override;
     void                     closeSession(const SessionId& id) override;
-    void                     deleteSession(const SessionId& id) override;
+    void                     deleteSession(const SessionId& id, bool only_if_empty = false,
+                                            bool force = false) override;
     void                     activateSession(const SessionId& id) override;
     void                     suspendSession(const SessionId& id) override;
     void                     compactSession(const SessionId& id) override;

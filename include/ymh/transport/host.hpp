@@ -91,7 +91,7 @@ public:
     virtual SessionCreated forkSession(const SessionId& id, std::int64_t seed_length) = 0;
     virtual SessionRenamedResult renameSession(const nlohmann::json& params) = 0;
     virtual void closeSession(const SessionId& id) = 0;
-    virtual void deleteSession(const SessionId& id) = 0;
+    virtual void deleteSession(const SessionId& id, bool only_if_empty, bool force) = 0;
     virtual void activateSession(const SessionId& id) = 0;
     virtual void suspendSession(const SessionId& id) = 0;
     virtual void compactSession(const SessionId& id) = 0;

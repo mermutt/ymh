@@ -26,10 +26,12 @@ namespace ymh {
 class Agent;
 
 struct SessionOptions {
-    std::filesystem::path cwd;
-    std::string           serverProfile;
-    std::string           model;
-    std::string           title;
+    std::filesystem::path    cwd;
+    std::string              serverProfile;
+    std::string              model;
+    std::string              title;
+    SessionKind              kind          = SessionKind::Root;
+    std::optional<SessionId> parentSession = std::nullopt;
 };
 
 class SessionManager {
@@ -59,7 +61,7 @@ public:
     std::optional<Sequence> maybeAutoName(const SessionId& id, std::string_view firstUserText);
 
     void closeSession(const SessionId& id);
-    void deleteSession(const SessionId& id);
+    void deleteSession(const SessionId& id, bool only_if_empty = false);
 
     [[nodiscard]] std::vector<SessionId> list() const;
 

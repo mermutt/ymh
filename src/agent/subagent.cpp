@@ -15,6 +15,9 @@ SubagentRunner::SubagentRunner(AgentRegistry& registry,
 payload::SubagentOutcome SubagentRunner::run(const std::string& task, std::string& summary) {
     summary.clear();
 
+    options_.kind          = SessionKind::Subagent;
+    options_.parentSession = parent_.id();
+
     const std::expected<AgentId, AgentError> created = registry_.create(options_);
     if (!created.has_value()) {
         summary = created.error().detail;

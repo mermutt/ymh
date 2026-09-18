@@ -55,7 +55,8 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
     header.title         = options.title;
     header.model         = options.model;
     header.serverProfile = options.serverProfile;
-    header.kind          = SessionKind::Root;
+    header.kind          = options.kind;
+    header.parentSession = options.parentSession;
     validateHeader(header);
 
     store_->create(header);
@@ -135,20 +136,24 @@ void SessionManager::closeSession(const SessionId& id) {
     sessions_.erase(id.value);
 }
 
-void SessionManager::deleteSession(const SessionId& id) {
-    if (const auto it = sessions_.find(id.value); it != sessions_.end()) {
-        Session& session = *it->second;
-        session.append(payload::SessionEnded{payload::SessionEndReason::Deleted});
-        sessions_.erase(it);
-    } else {
-        const auto header = store_->load(id);
-        if (!header.has_value()) {
-            throw UnknownSession("unknown session: " + id.value);
-        }
-        Session session = Session::resume(*header, *store_, *bus_);
-        session.append(payload::SessionEnded{payload::SessionEndReason::Deleted});
+void SessionManager::deleteSession(const SessionId& id, bool only_if_empty) {
+    if (!store_->load(id).has_value()) {
+        throw UnknownSession("unknown session: " + id.value);
     }
-    store_->erase(id);
+    if (only_if_empty && !store_->isUnprompted(id)) {
+        throw std::invalid_argument("session is not empty: " + id.value);
+    }
+
+    TypedEvent<payload::SessionEnded> typed;
+    typed.id         = make_event_id();
+    typed.session_id = id;
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload::SessionEnded{payload::SessionEndReason::Deleted};
+    Event ended      = encode(typed);
+
+    store_->eraseWithEvent(id, ended);
+    sessions_.erase(id.value);
+    bus_->publish(ended);
 }
 
 std::vector<SessionId> SessionManager::list() const {
