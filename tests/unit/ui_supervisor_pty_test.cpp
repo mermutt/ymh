@@ -113,6 +113,50 @@ std::vector<pid_t> host_processes(const std::string* workspace_id = nullptr) {
     return pids;
 }
 
+// Scopes the "no leaked daemon" assertion to a test's own temp root: a daemon
+// whose `--root` is the root or any workspace beneath it. A daemon belonging to
+// another workspace (e.g. the user's live ymh) is deliberately not matched, so
+// the suite stays honest while such a daemon runs.
+bool is_host_process_under_root(pid_t pid, const std::string& canonical_root) {
+    const std::vector<std::string> args       = proc_args(pid);
+    bool                           host       = false;
+    bool                           root_under = false;
+    const std::string              prefix     = canonical_root + "/";
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        if (args[index] == "--host") {
+            host = true;
+        }
+        if (args[index] == "--root" && index + 1 < args.size()) {
+            const std::string& value = args[index + 1];
+            if (value == canonical_root || value.starts_with(prefix)) {
+                root_under = true;
+            }
+        }
+    }
+    return host && root_under;
+}
+
+std::vector<pid_t> host_processes_under_root(const std::filesystem::path& root) {
+    std::error_code            error;
+    const std::filesystem::path canonical = std::filesystem::canonical(root, error);
+    const std::string           expected  = (error ? root : canonical).string();
+    std::vector<pid_t>          pids;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator("/proc", error)) {
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || name.size() > 9 ||
+            !std::all_of(name.begin(), name.end(),
+                         [](unsigned char character) { return std::isdigit(character) != 0; })) {
+            continue;
+        }
+        const pid_t pid = static_cast<pid_t>(std::stoi(name));
+        if (is_host_process_under_root(pid, expected)) {
+            pids.push_back(pid);
+        }
+    }
+    return pids;
+}
+
 class HostDaemonGuard {
 public:
     explicit HostDaemonGuard(std::string workspace_id) : workspace_id_(std::move(workspace_id)) {}
@@ -439,7 +483,7 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
 
     EXPECT_FALSE(beta.running());
     EXPECT_TRUE(host_processes(&alpha_id.value).empty()) << "alpha daemon leaked";
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
@@ -506,7 +550,7 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     child.terminate();
     guard.stop();
 
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
@@ -574,7 +618,7 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
     }
     EXPECT_TRUE(host_processes(&workspace_id.value).empty())
         << "confirm must tear the daemon down";
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
     {
         std::unique_ptr<WorkspaceRegistry> registry =
             WorkspaceRegistry::openReadOnly(registry_config);
@@ -649,7 +693,7 @@ TEST(UiSupervisorPty, ExitPromptArrowKeysMoveHighlight) {
     }
     EXPECT_TRUE(host_processes(&workspace_id.value).empty())
         << "Enter on the Terminate default must tear the daemon down";
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 
     guard.stop();
 }
@@ -814,7 +858,7 @@ TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
     }
     EXPECT_TRUE(host_processes(&workspace_id.value).empty())
         << "confirm must tear the daemon down";
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
     {
         std::unique_ptr<WorkspaceRegistry> registry =
             WorkspaceRegistry::openReadOnly(registry_config);
@@ -886,7 +930,7 @@ TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
     child.terminate();
     guard.stop();
 
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 TEST(UiSupervisorPty, SkillsEmptyState) {
@@ -930,7 +974,7 @@ TEST(UiSupervisorPty, SkillsEmptyState) {
     child.terminate();
     guard.stop();
 
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 void write_compaction_window(const std::filesystem::path& workspace, std::int64_t window) {
@@ -985,7 +1029,7 @@ TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
     child.terminate();
     guard.stop();
 
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 TEST(UiSupervisorPty, ContextOverlayShowsNote) {
@@ -1026,7 +1070,7 @@ TEST(UiSupervisorPty, ContextOverlayShowsNote) {
     child.terminate();
     guard.stop();
 
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
@@ -1072,7 +1116,7 @@ TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
     child.terminate();
     guard.stop();
 
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
@@ -1126,7 +1170,7 @@ TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
 
     child.terminate();
     guard.stop();
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 // 22 §10.4: a stored session on disk, written before any daemon exists. Returns
@@ -1230,7 +1274,10 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
         alpha_id = registry->registerWorkspace(alpha, "alpha").id;
         registry->registerWorkspace(beta, "beta");
     }
-    write_stored_session(beta, "beta-stored", "");
+    // A prompted root is required for `/sessions` to list it under spec 23 §6.1
+    // (the catalog hides unprompted roots); the Live switcher still hides the
+    // stopped workspace's session regardless.
+    write_stored_session(beta, "beta-stored", "zzswp4markerzz");
 
     HostDaemonGuard alpha_guard(alpha_id.value);
     PtyChild        child;
@@ -1250,7 +1297,7 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
 
     child.terminate();
     alpha_guard.stop();
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 // SW-P1 (22 §10.4): selecting a stored session in a stopped workspace from
@@ -1299,7 +1346,7 @@ TEST(UiSupervisorPty, SwP1_SessionsSelectionSpawnsAndResumes) {
     child.terminate();
     alpha_guard.stop();
     beta_guard.stop();
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 // SW-P2 (22 §10.4): `ymh --resume <id>` resumes the session in its own
@@ -1340,7 +1387,49 @@ TEST(UiSupervisorPty, SwP2_ResumeFlagResumesStoredSession) {
     child.terminate();
     alpha_guard.stop();
     beta_guard.stop();
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// SL-I4 (23 §6.2): a hidden unprompted root — absent from `/sessions` and
+// `ymh list` because the enumeration filter hides it — still resolves through
+// `resolve_session_workspace` for `--resume <id>` and resumes.
+TEST(UiSupervisorPty, SL_I4_ResumeFlagResolvesHiddenUnpromptedRoot) {
+    ShortTempRoot root("ymh_pty_sli4");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    // An empty marker means no `user/message`: an unprompted root, hidden from
+    // enumeration but still resolvable by explicit id.
+    const SessionId session = write_stored_session(beta, "beta-hidden", "");
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    HostDaemonGuard beta_guard(beta_id);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state),
+                            {"--resume", session.value}));
+    ASSERT_TRUE(child.wait_for("beta-hidden", 30s))
+        << "hidden unprompted root did not resolve for --resume: " << child.text();
+    EXPECT_TRUE(wait_for_host(beta_id, 20s)) << "beta daemon was not spawned for --resume";
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 // SW-F6 (22 §6.2): an unknown `--resume` id exits 1 without starting the TUI.
@@ -1372,7 +1461,7 @@ TEST(UiSupervisorPty, SwP2_UnknownResumeIdExitsOne) {
     EXPECT_TRUE(status->exited);
     EXPECT_EQ(status->code, 1);
     EXPECT_NE(read_text_file(root.path() / "err.log").find("unknown session"), std::string::npos);
-    EXPECT_TRUE(host_processes().empty()) << "leaked ymh --host daemon(s)";
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
 } // namespace

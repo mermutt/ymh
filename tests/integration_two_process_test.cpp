@@ -112,10 +112,10 @@ private:
 
 // `/proc/<pid>/cmdline` is a NUL-separated argv blob, so it is parsed rather
 // than grepped; a `ymh --host` daemon is recognised by `--host`.
-bool is_host_process(pid_t pid, const std::string* workspace_id) {
+std::vector<std::string> proc_args(pid_t pid) {
     std::ifstream input("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
     if (!input) {
-        return false;
+        return {};
     }
     const std::string blob((std::istreambuf_iterator<char>(input)),
                            std::istreambuf_iterator<char>());
@@ -132,6 +132,11 @@ bool is_host_process(pid_t pid, const std::string* workspace_id) {
     if (!current.empty()) {
         args.push_back(std::move(current));
     }
+    return args;
+}
+
+bool is_host_process(pid_t pid, const std::string* workspace_id) {
+    const std::vector<std::string> args = proc_args(pid);
     bool host            = false;
     bool workspace_match = workspace_id == nullptr;
     for (std::size_t index = 0; index < args.size(); ++index) {
@@ -167,6 +172,46 @@ std::vector<pid_t> host_processes(const std::string* workspace_id) {
 
 std::size_t count_hosts(const std::string& workspace_id) {
     return host_processes(&workspace_id).size();
+}
+
+bool is_host_process_under_root(pid_t pid, const std::string& canonical_root) {
+    const std::vector<std::string> args       = proc_args(pid);
+    bool                           host       = false;
+    bool                           root_under = false;
+    const std::string              prefix     = canonical_root + "/";
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        if (args[index] == "--host") {
+            host = true;
+        }
+        if (args[index] == "--root" && index + 1 < args.size()) {
+            const std::string& value = args[index + 1];
+            if (value == canonical_root || value.starts_with(prefix)) {
+                root_under = true;
+            }
+        }
+    }
+    return host && root_under;
+}
+
+std::vector<pid_t> host_processes_under_root(const std::filesystem::path& root) {
+    std::error_code            error;
+    const std::filesystem::path canonical = std::filesystem::canonical(root, error);
+    const std::string           expected  = (error ? root : canonical).string();
+    std::vector<pid_t>          pids;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator("/proc", error)) {
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || name.size() > 9 ||
+            !std::all_of(name.begin(), name.end(),
+                         [](unsigned char character) { return std::isdigit(character) != 0; })) {
+            continue;
+        }
+        const pid_t pid = static_cast<pid_t>(std::stoi(name));
+        if (is_host_process_under_root(pid, expected)) {
+            pids.push_back(pid);
+        }
+    }
+    return pids;
 }
 
 class DaemonGuard {
@@ -1288,7 +1333,7 @@ TEST_F(TwoProcess, NoOrphanedDaemonsAfterSuite) {
     }
     EXPECT_EQ(count_hosts(workspace_id), 0u);
 
-    const std::vector<pid_t> orphans = host_processes(nullptr);
+    const std::vector<pid_t> orphans = host_processes_under_root(root.path());
     EXPECT_TRUE(orphans.empty()) << "orphaned ymh --host daemons: " << orphans.size();
 }
 
