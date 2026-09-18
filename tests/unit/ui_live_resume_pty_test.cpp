@@ -121,7 +121,9 @@ TEST(UiLiveResumePty, ResumesStoredSessionAndAnswersFollowUp) {
         child.read_available();
         const std::string plain = child.plain();
         if (!answered_permission && plain.find("Permission required") != std::string::npos) {
-            child.write("y");
+            // RB-12 addendum: Enter confirms the default option (Allow once);
+            // bare letters no longer answer the dialog.
+            child.write("\r");
             answered_permission = true;
         }
         const std::string frame = child.last_frame();

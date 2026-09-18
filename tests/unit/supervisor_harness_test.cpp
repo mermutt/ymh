@@ -358,6 +358,43 @@ TEST(SupervisorHarnessTest, SW_U18_ResumeSuccessNeverInjectsWorkspace) {
     EXPECT_EQ(modeled_it->second.activeSessionId, session);
 }
 
+// RB-15 (22 §5.2/SW25 generalised): the `session.create` reply never injects a
+// workspace. A workspace evicted between the submit and its reply is surfaced
+// through the notice ring and left unmodeled; a modeled workspace still
+// activates the created session.
+TEST(SupervisorHarnessTest, RB15_CreateReplyNeverInjectsWorkspace) {
+    ShortTempRoot root("ymh_rb15");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity  = harness_identity();
+
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    const WorkspaceId evicted{"ws-evicted"};
+    const SessionId   session{"session-1"};
+    const std::size_t before = harness->model().workspaces.size();
+
+    harness->apply_create_reply(evicted, session, std::string{});
+    EXPECT_EQ(harness->model().workspaces.count(evicted), 0u)
+        << "session.create reply injected a phantom workspace";
+    EXPECT_EQ(harness->model().workspaces.size(), before)
+        << "session.create reply changed the modeled workspace set";
+    EXPECT_EQ(harness->model().sessions.count(session), 0u);
+    EXPECT_FALSE(harness->model().notices.empty())
+        << "an evicted session.create was not surfaced through the notice ring";
+
+    const WorkspaceId modeled{"ws-modeled"};
+    harness->seed_workspace(workspace_model(modeled));
+    harness->apply_create_reply(modeled, session, std::string{});
+    EXPECT_EQ(harness->model().workspaces.count(modeled), 1u);
+    ASSERT_TRUE(harness->model().session(session) != nullptr);
+    const auto modeled_it = harness->model().workspaces.find(modeled);
+    ASSERT_NE(modeled_it, harness->model().workspaces.end());
+    EXPECT_EQ(modeled_it->second.activeSessionId, session);
+}
+
 // SW-F5 (22 §5.3/§12): `lifecycle == nullptr` surfaces the pinned
 // `"cannot start workspace"` notice and never queues a spawn.
 TEST(SupervisorHarnessTest, SW_F5_LifecycleUnavailableNotice) {
@@ -451,4 +488,81 @@ TEST(SupervisorHarnessTest, SW_F2_ResumeTransportFailureNotice) {
     });
     EXPECT_EQ(notice, "resume failed: no supervisor connection");
     EXPECT_TRUE(harness->pending_resume().empty());
+}
+
+// RB-12 addendum (2026-09-17): the permission dialog resolves only on Enter
+// against the highlighted option. A bare printable key (previously `y`/`n`/
+// digits) must be swallowed and must not resolve — the accident was a slash
+// command containing `n` silently denying the request.
+TEST(SupervisorHarnessTest, RB12_PermissionDialogResolvesOnlyOnEnter) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const SessionId           session{"perm-session"};
+    const PermissionRequestId request{"perm-1"};
+
+    const auto reopen = [&] {
+        harness->open_permission_dialog(session, request, "shell", "rm -rf build");
+        ASSERT_TRUE(harness->model().dialog.open);
+        ASSERT_EQ(harness->model().dialog.selected, 0);
+        ASSERT_FALSE(harness->last_dialog_resolution().has_value());
+    };
+
+    reopen();
+    for (const std::string key : {"n", "N", "y", "Y", "1", "2", "3", "0", "x", "/"}) {
+        EXPECT_TRUE(harness->dispatch_key(key)) << "key must be swallowed: " << key;
+        EXPECT_TRUE(harness->model().dialog.open) << "key resolved the dialog: " << key;
+        EXPECT_EQ(harness->model().dialog.selected, 0) << "key moved selection: " << key;
+        EXPECT_FALSE(harness->last_dialog_resolution().has_value())
+            << "key produced a decision: " << key;
+    }
+
+    // Escape and Ctrl-C still deny (Once), unchanged by this decision.
+    reopen();
+    EXPECT_TRUE(harness->dispatch_key("escape"));
+    ASSERT_TRUE(harness->last_dialog_resolution().has_value());
+    EXPECT_EQ(harness->last_dialog_resolution()->first, payload::PermissionDecisionKind::Deny);
+    EXPECT_EQ(harness->last_dialog_resolution()->second, GrantScope::Once);
+    EXPECT_FALSE(harness->model().dialog.open);
+
+    reopen();
+    EXPECT_TRUE(harness->dispatch_key("ctrl-c"));
+    ASSERT_TRUE(harness->last_dialog_resolution().has_value());
+    EXPECT_EQ(harness->last_dialog_resolution()->first, payload::PermissionDecisionKind::Deny);
+    EXPECT_FALSE(harness->model().dialog.open);
+
+    // Enter resolves the highlighted option; arrows select each of the four.
+    struct Expected {
+        int                             downs;
+        payload::PermissionDecisionKind decision;
+        GrantScope                      scope;
+    };
+    const Expected cases[] = {
+        {0, payload::PermissionDecisionKind::Allow, GrantScope::Once},
+        {1, payload::PermissionDecisionKind::Allow, GrantScope::Session},
+        {2, payload::PermissionDecisionKind::AllowAlways, GrantScope::Always},
+        {3, payload::PermissionDecisionKind::Deny, GrantScope::Once},
+    };
+    for (const Expected& expected : cases) {
+        reopen();
+        for (int step = 0; step < expected.downs; ++step) {
+            EXPECT_TRUE(harness->dispatch_key("down"));
+        }
+        EXPECT_EQ(harness->model().dialog.selected, expected.downs);
+        EXPECT_FALSE(harness->last_dialog_resolution().has_value());
+        EXPECT_TRUE(harness->dispatch_key("enter"));
+        EXPECT_FALSE(harness->model().dialog.open);
+        ASSERT_TRUE(harness->last_dialog_resolution().has_value());
+        EXPECT_EQ(harness->last_dialog_resolution()->first, expected.decision);
+        EXPECT_EQ(harness->last_dialog_resolution()->second, expected.scope);
+    }
+
+    // ArrowUp wraps, and a printable key after reopening still does not resolve.
+    reopen();
+    EXPECT_TRUE(harness->dispatch_key("up"));
+    EXPECT_EQ(harness->model().dialog.selected, 3);
+    EXPECT_TRUE(harness->dispatch_key("n"));
+    EXPECT_TRUE(harness->model().dialog.open);
+    EXPECT_FALSE(harness->last_dialog_resolution().has_value());
 }

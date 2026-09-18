@@ -127,7 +127,9 @@ bool drive_live_turn(PtyChild& tui, const std::string& needle, std::chrono::seco
         tui.read_available();
         const std::string plain = tui.plain();
         if (!answered && plain.find("Permission required") != std::string::npos) {
-            tui.write("y");
+            // RB-12 addendum: Enter confirms the default option (Allow once);
+            // bare letters no longer answer the permission dialog.
+            tui.write("\r");
             answered = true;
         }
         if (plain.find(needle) != std::string::npos) {

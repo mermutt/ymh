@@ -3,6 +3,7 @@
 // Pure presentation model (10-supervisor-tui.md §4). No FTXUI, no core object
 // pointers: `SessionUiState` holds a `SessionId` only (D1, §4.3).
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -211,6 +212,10 @@ struct SessionUiState {
     SubagentModel      subagents;
     ConversationScroll scroll;
     std::vector<CommandHint> command_hints;
+    // RB-16: index into `command_hints` of the entry the next <tab> types. The
+    // renderer paints it brighter; it is reset to 0 whenever the hint set is
+    // rebuilt and advanced by `complete_command`.
+    std::size_t command_hint_selected = 0;
     // 17 §4 (RB-02): global expand-all / collapse-all for foldable entries.
     bool expand_all_folds = false;
 
@@ -405,6 +410,14 @@ struct SessionCatalogModel {
     std::int64_t                  nowMs = 0;
 };
 
+// RB-17: the reasoning spinner clock. `frame` is advanced only while a
+// reasoning block streams; the renderer maps it modulo its frame table, so the
+// model stays free of presentation constants.
+struct ReasoningSpinnerState {
+    std::uint32_t             frame = 0;
+    std::chrono::milliseconds elapsed{};
+};
+
 struct UiModel {
     std::map<WorkspaceId, WorkspaceModel> workspaces;
     WorkspaceId                           activeWorkspaceId;
@@ -415,6 +428,7 @@ struct UiModel {
     ExitConfirmState                      exitConfirm;
     ContextOverlayModel                   context;
     SessionCatalogModel                   catalog;
+    ReasoningSpinnerState                 spinner;
     UiMode                                mode = UiMode::Conversation;
     bool                                  shouldExit = false;
     std::string                           mcp_status;
@@ -458,6 +472,14 @@ struct UiModel {
 
     void apply(const UiEvent& event);
     void apply(const WorkspaceEvent& event);
+
+    // RB-17: true iff any session holds a streaming Reasoning entry. The spinner
+    // clock and the supervisor's repaint timer must tick only in this state.
+    [[nodiscard]] bool has_streaming_reasoning() const;
+    // Advances the spinner clock by `delta` while reasoning streams; returns true
+    // iff the frame changed. With no streaming reasoning the clock is reset and
+    // the frame is left untouched, so an idle TUI never animates.
+    bool advance_reasoning_spinner(std::chrono::milliseconds delta);
 };
 
 [[nodiscard]] bool is_active_state(AgentState state) noexcept;
