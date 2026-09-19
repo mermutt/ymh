@@ -1,6 +1,6 @@
 # 26 — dsh Alignment, Part 2: Target Design, Migration, Open Questions
 
-Status: **draft for review — Rev 7**.
+Status: **verified — Rev 7** (GATE PASS: 0 HIGH / 0 MEDIUM / 5 LOW; design only, no implementation).
 Companion to `26-dsh-alignment.md` (§1 purpose, §2 dsh mechanics, §3 gap
 analysis, §7 revision log). This file contains §4 (target design), §5 (migration
 plan and test strategy), §6 (open questions), and the Appendix.
