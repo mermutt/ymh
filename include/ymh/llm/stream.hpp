@@ -53,6 +53,8 @@ enum class LLMErrorCode : std::uint8_t {
     UnsupportedModel,
     ProviderInternal,
     Cancelled,
+    InvalidPreparedCall,
+    NoProviderRoute,
 };
 
 // Provider failure value carried on the terminal `StreamError` and on
@@ -83,6 +85,8 @@ struct LLMError {
         case LLMErrorCode::UnsupportedModel:      return "unsupported_model";
         case LLMErrorCode::ProviderInternal:      return "provider_internal";
         case LLMErrorCode::Cancelled:             return "cancelled";
+        case LLMErrorCode::InvalidPreparedCall:   return "invalid_prepared_call";
+        case LLMErrorCode::NoProviderRoute:       return "no_provider_route";
     }
     return "unknown";
 }

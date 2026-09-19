@@ -77,6 +77,11 @@ public:
 
     // Enumerable models, if the provider can list them; empty => unknown.
     virtual std::vector<ModelInfo> models() const { return {}; }
+
+    // The provider's configured retry/backoff policy (08 §3.7; 28 §3.1
+    // MEDIUM-1). Non-pure so test doubles need not override;
+    // OpenAICompatibleProvider returns its stored LLMProviderConfig::retry.
+    [[nodiscard]] virtual RetryPolicy retry_policy() const { return {}; }
 };
 
 // Layered model-resolution inputs, first non-empty wins (08 §5.2). The caller

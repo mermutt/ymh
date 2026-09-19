@@ -265,7 +265,18 @@ void to_json(nlohmann::json& json, const SessionEnvelope& envelope) {
 
 void from_json(const nlohmann::json& json, SessionEnvelope& envelope) {
     envelope.session.value = json.at("session").get<std::string>();
-    envelope.event = json.at("event").get<Event>();
+    // 29-D5 / 29 §3.3 Axis B: the wire axis is tolerant. An unknown event type
+    // is skipped (event left default) so the receiver can advance its cursor
+    // instead of throwing; a known type decodes normally (and stays loud on
+    // malformed payloads).
+    const std::optional<Event> event = try_decode_event(json.at("event"));
+    if (event.has_value()) {
+        envelope.event         = *event;
+        envelope.event_skipped = false;
+    } else {
+        envelope.event         = Event{};
+        envelope.event_skipped = true;
+    }
 }
 
 void to_json(nlohmann::json& json, const StreamFrom& from) {

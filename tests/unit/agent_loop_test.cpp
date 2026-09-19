@@ -193,6 +193,63 @@ public:
     }
 };
 
+class RecordingProvider final : public LLMProvider {
+public:
+    explicit RecordingProvider(FakeScript script) : fake_(std::move(script)) {}
+
+    ProviderId id() const override { return "recording"; }
+    ProviderCapabilities capabilities() const override { return fake_.capabilities(); }
+
+    Task<LLMResponse> stream(const LLMRequest& request, StreamSink sink,
+                             CancellationToken cancel) override {
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+        return fake_.stream(request, std::move(sink), cancel);
+    }
+
+    std::size_t count() const {
+        std::lock_guard lock(mutex_);
+        return requests_.size();
+    }
+
+    LLMRequest at(std::size_t index) const {
+        std::lock_guard lock(mutex_);
+        return requests_.at(index);
+    }
+
+private:
+    mutable std::mutex      mutex_;
+    std::vector<LLMRequest> requests_;
+    FakeLLM                 fake_;
+};
+
+TEST(AgentLoop, CompactionReattemptUsesDistinctFrozenRequests) {
+    FakeResponseStep overflow;
+    LLMError         error;
+    error.code     = LLMErrorCode::ContextLengthExceeded;
+    overflow.error = error;
+
+    auto provider = std::make_unique<RecordingProvider>(
+        script_of({overflow, text_step("recovered")}));
+    RecordingProvider* recorder = provider.get();
+
+    CountingCompactor compactor;
+    AgentEnv env("agent_distinct_requests", std::move(provider), AgentConfig{},
+                 allow_all_permission_config(), {}, false, 4, &compactor);
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    ASSERT_EQ(recorder->count(), 2u);
+    const auto canonical = [](const LLMRequest& request) {
+        return FrozenRequest::freeze(request, LlmCallConfig{}).canonical_json();
+    };
+    EXPECT_NE(canonical(recorder->at(0)), canonical(recorder->at(1)))
+        << "the compaction re-attempt must build a new request, not re-dispatch";
+}
+
 TEST(AgentLoop, FullTurnCoalescesAndEndsOnce) {
     FakeResponseStep step = text_step("Hello world");
     step.usage            = Usage{10, 3, 0, 0};
@@ -265,6 +322,23 @@ TEST(AgentLoop, ToolCallLoopWithBuiltins) {
     EXPECT_EQ(messages[2].role, Role::Tool);
     EXPECT_EQ(messages[2].content.at(0).text, "file-body");
     EXPECT_EQ(messages[3].role, Role::Assistant);
+}
+
+TEST(AgentLoop, OneProviderCallPerStep) {
+    auto provider = std::make_unique<RecordingProvider>(
+        script_of({tool_step("read_file", {{"path", "hello.txt"}}), text_step("done")}));
+    RecordingProvider* recorder = provider.get();
+
+    AgentEnv env("agent_one_call_per_step", std::move(provider), AgentConfig{},
+                 allow_all_permission_config(), {}, true);
+    env.workspace.write("hello.txt", "file-body");
+
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("read it")), InboxResult::Accepted);
+
+    // Two steps (tool call, then final answer): one provider stream each.
+    EXPECT_EQ(recorder->count(), 2u);
 }
 
 TEST(AgentLoop, CancelMidStreamYieldsOneTurnCancelled) {

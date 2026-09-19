@@ -16,6 +16,7 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/llm/llm_call_config.hpp"
 #include "ymh/session/ids.hpp"
 
 namespace ymh {
@@ -212,6 +213,25 @@ struct PlanMode {
     bool active = false;
 };
 
+// ---- LLM request header (28 §5.2, 29 §3.2) ---------------------------------
+
+// A changed snapshot, not a per-dispatch record: logged at a request-series
+// start and whenever config/prompt/tools/purpose change (26-D2, L21). It is
+// projection-invisible (28 §4.2): `deriveMessages` ignores it.
+struct LlmRequestHeader {
+    TurnId                     turn = 0;
+    StepId                     step = 0;
+    SessionId                  session_id;
+    std::optional<CallPurpose> purpose;
+    LlmCallConfig              config;
+    std::string                system_prompt_digest;
+    std::optional<std::string> system_prompt;
+    std::vector<std::string>   tool_names;
+    std::vector<std::string>   tool_schema_digests;
+    std::string                template_digest;
+    bool                       starts_series = true;
+};
+
 } // namespace payload
 
 // ---------------------------------------------------------------------------
@@ -302,6 +322,10 @@ template <>
 struct SessionEventMap<EventType::PlanMode> {
     using type = payload::PlanMode;
 };
+template <>
+struct SessionEventMap<EventType::LlmRequestHeader> {
+    using type = payload::LlmRequestHeader;
+};
 
 // Payload type -> EventType (01 §4.4).
 template <>
@@ -388,6 +412,10 @@ template <>
 struct EventTraits<payload::PlanMode> {
     static constexpr EventType type = EventType::PlanMode;
 };
+template <>
+struct EventTraits<payload::LlmRequestHeader> {
+    static constexpr EventType type = EventType::LlmRequestHeader;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -451,5 +479,7 @@ void to_json(nlohmann::json& json, const SessionRenamed& value);
 void from_json(const nlohmann::json& json, SessionRenamed& value);
 void to_json(nlohmann::json& json, const PlanMode& value);
 void from_json(const nlohmann::json& json, PlanMode& value);
+void to_json(nlohmann::json& json, const LlmRequestHeader& value);
+void from_json(const nlohmann::json& json, LlmRequestHeader& value);
 
 } // namespace ymh::payload

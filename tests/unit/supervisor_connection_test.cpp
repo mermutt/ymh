@@ -128,6 +128,24 @@ public:
             protocol::Notification{std::string(protocol::notify::kEventStream), std::move(body)}));
     }
 
+    void push_unknown_stream(const SessionId& session, const std::string& type,
+                             const std::string& cursor) {
+        nlohmann::json body;
+        body["subscription"] = 1;
+        body["replay"]       = false;
+        body["cursor"]       = cursor;
+        body["envelope"]     = nlohmann::json{
+            {"session", session.value},
+            {"event",
+             nlohmann::json{{"id", "e-" + cursor},
+                            {"session_id", session.value},
+                            {"timestamp", 0},
+                            {"type", type},
+                            {"payload", nlohmann::json::object()}}}};
+        broadcast(protocol::encode(
+            protocol::Notification{std::string(protocol::notify::kEventStream), std::move(body)}));
+    }
+
     void push_permission(const protocol::PermissionRequest& request) {
         nlohmann::json body;
         protocol::to_json(body, request);
@@ -414,6 +432,44 @@ TEST(SupervisorConnection, ReconnectReSubscribesFromCursor) {
     }
     EXPECT_TRUE(saw_cursor_resume) << "reconnect must resume from the last cursor";
     EXPECT_EQ(server.hello_count(), 2);
+
+    connection.stop();
+}
+
+TEST(SupervisorConnection, UnknownWireEventTypeIsSkippedAndCursorAdvances) {
+    test::ShortTempRoot root("ymh_sup");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected collected;
+
+    SupervisorConnection connection(config_for(socket_path), sink_for(collected));
+    connection.track(kSession);
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Attached, 3s));
+
+    server.push_unknown_stream(kSession, "future/unknown_event", "c9:s:9");
+
+    ASSERT_TRUE(connection.waitUntil(
+        [&connection] {
+            const auto cursor = connection.cursor(kSession);
+            return cursor.has_value() && cursor->value == "c9:s:9";
+        },
+        3s));
+    EXPECT_TRUE(collected.envelopes.empty());
+
+    server.drop_client();
+    ASSERT_TRUE(connection.waitUntil([&connection] { return connection.attachCount() >= 2; }, 4s));
+
+    bool resumed_from_skipped_cursor = false;
+    for (const protocol::SubscribeParams& params : server.subscribes()) {
+        if (params.from.kind == protocol::StreamFrom::Kind::Cursor &&
+            params.from.cursor.has_value() && params.from.cursor->value == "c9:s:9") {
+            resumed_from_skipped_cursor = true;
+        }
+    }
+    EXPECT_TRUE(resumed_from_skipped_cursor)
+        << "the skipped event must not be replayed on reconnect";
 
     connection.stop();
 }

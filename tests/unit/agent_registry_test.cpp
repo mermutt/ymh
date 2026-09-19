@@ -48,6 +48,7 @@ public:
             return Task<LLMResponse>{cancelled};
         }
         sink(TextDelta{"hello"});
+        sink(Finished{FinishReason::Stop, std::nullopt});
         LLMResponse response;
         response.outcome = StreamOutcome::Completed;
         response.finish  = FinishReason::Stop;
@@ -126,11 +127,13 @@ struct DurableAgentEnv {
           sessions(*store, bus),
           env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
           provider(std::move(provider)),
+          runtime(),
+          adapter_handle(register_test_adapter(runtime, this->provider)),
           policy(allow_all_permission_config()),
           assembler(tools, ""),
           pool(4),
           registry(make_agent_services(sessions, governor, tools, policy, nullptr, assembler, env,
-                                       logger, sink, *this->provider, pool, estimator,
+                                       logger, sink, runtime, pool, estimator,
                                        AgentServices::PermissionResolver{}, nullptr, nullptr),
                    AgentConfig{}) {}
 
@@ -165,7 +168,9 @@ struct DurableAgentEnv {
     NullLogger                          logger;
     ToolRegistry                        tools;
     RegistrationKeeper                  keeper{tools};
-    std::unique_ptr<LLMProvider>        provider;
+    std::shared_ptr<LLMProvider>        provider;
+    LlmRuntime                          runtime;
+    std::optional<AdapterHandle>        adapter_handle;
     RulePermissionPolicy                policy;
     std::unique_ptr<PermissionGate>     gate;
     SessionContextAssembler             assembler;
@@ -185,6 +190,24 @@ TEST(AgentRegistry, CreateIsIdleAndStartsNoTurn) {
     EXPECT_FALSE(agent.hasPendingWork());
     EXPECT_EQ(count_type(env.sessionOf(agent)->events(), EventType::TurnStarted), 0u);
     EXPECT_EQ(env.registry.activeCount(), 0u);
+}
+
+TEST(AgentRegistry, ConstructsNoAdapterItself) {
+    AgentEnv env("registry_no_adapter",
+                 std::make_unique<FakeLLM>(script_of({text_step("never")})));
+    LlmRuntime     clean;
+    AgentServices services = make_agent_services(
+        env.sessions, env.governor, env.tools, env.policy, nullptr, env.assembler, env.env,
+        env.logger, env.sink, clean, env.pool, env.estimator, AgentServices::PermissionResolver{},
+        nullptr);
+
+    AgentRegistry registry(services, AgentConfig{});
+    EXPECT_TRUE(clean.list_providers().empty());
+
+    // A null runtime is equally accepted; the registry still creates no adapter.
+    services.runtime = nullptr;
+    AgentRegistry null_registry(services, AgentConfig{});
+    EXPECT_TRUE(clean.list_providers().empty());
 }
 
 TEST(AgentRegistry, ResumeIsIdleAndDoesNotAutoContinue) {

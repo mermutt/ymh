@@ -173,9 +173,11 @@ SkillCatalogConfig to_skill_catalog_config(const Config& config) {
 
 AgentConfig to_agent_config(const Config& config) {
     AgentConfig agent;
+    agent.provider    = config.llm.provider;
     agent.model       = effective_model(config);
     agent.max_steps   = config.agent.max_steps;
     agent.sandbox     = SandboxMode::Workspace;
+    agent.persist_prompt_text = config.session.persist_prompt_text;
     agent.system_prompt =
         config.agent.system_prompt.empty() ? default_system_prompt() : config.agent.system_prompt;
     agent.plan_section =
@@ -191,6 +193,7 @@ AgentConfig to_agent_config(const Config& config) {
 CompactionPolicy to_compaction_policy(const Config& config) {
     const CompactionSettings& settings = config.agent.compaction;
     CompactionPolicy          policy;
+    policy.provider                = config.llm.provider;
     policy.threshold_tokens        = settings.threshold_tokens;
     policy.threshold_ratio         = settings.threshold_ratio;
     policy.context_window_tokens   = settings.context_window_tokens;

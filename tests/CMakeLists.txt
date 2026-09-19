@@ -5,6 +5,7 @@ add_executable(ymh_tests
     unit/session_test.cpp
     unit/persistence_test.cpp
     unit/llm_types_test.cpp
+    unit/llm_runtime_test.cpp
     unit/tool_call_assembler_test.cpp
     unit/sse_parser_test.cpp
     unit/fake_llm_test.cpp

@@ -60,7 +60,7 @@ TEST_F(WorkspaceRuntimeTest, WiresStoreBusToolsLeaseAndRegistry) {
     EXPECT_TRUE(runtime.tools().contains(ToolName{"shell"}));
     EXPECT_TRUE(runtime.tools().contains(ToolName{"git_status"}));
     EXPECT_TRUE(runtime.tools().contains(ToolName{"git_diff"}));
-    EXPECT_NE(runtime.provider(), nullptr);
+    EXPECT_TRUE(runtime.has_provider());
     EXPECT_EQ(runtime.pool().capacity(), runtime.governor().caps().max_llm_concurrency);
     EXPECT_EQ(runtime.agents().activeCount(), 0u);
     EXPECT_TRUE(runtime.sessions().list().empty());

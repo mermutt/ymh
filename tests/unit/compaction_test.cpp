@@ -156,10 +156,10 @@ TEST(CompactionPlanTest, SelectsTurnTerminalBoundary) {
     fixture.append_turn(2, "u2", "a2");
     fixture.append_turn(3, "u3", "a3");
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const CompactionPlan plan = compactor.plan(*fixture.session, fixture.session->deriveMessages());
     ASSERT_TRUE(plan.valid);
@@ -180,10 +180,10 @@ TEST(CompactionPlanTest, KeepRecentTurnsZeroSummarizesEverything) {
     CompactionPolicy policy = base_policy();
     policy.keep_recent_turns = 0;
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionPlan plan = compactor.plan(*fixture.session, fixture.session->deriveMessages());
     ASSERT_TRUE(plan.valid);
@@ -201,10 +201,10 @@ TEST(CompactionPlanTest, NotNeededBelowMinPrefix) {
     policy.keep_recent_turns = 2;
     policy.min_prefix_messages = 4;
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionPlan plan = compactor.plan(*fixture.session, fixture.session->deriveMessages());
     EXPECT_FALSE(plan.valid);
@@ -220,10 +220,10 @@ TEST(CompactionPlanTest, NotNeededWhenBoundaryDoesNotAdvance) {
     prior.summary  = "prior";
     fixture.session->append(prior);
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const CompactionPlan plan = compactor.plan(*fixture.session, fixture.session->deriveMessages());
     EXPECT_FALSE(plan.valid);
@@ -240,10 +240,10 @@ TEST(CompactionPlanTest, IgnoresOpenTrailingTurn) {
     open.content.push_back(text_block("open"));
     fixture.session->append(open);
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const CompactionPlan plan = compactor.plan(*fixture.session, fixture.session->deriveMessages());
     ASSERT_TRUE(plan.valid);
@@ -264,10 +264,10 @@ TEST(ContextCompactorTest, DisabledPolicyIsNotNeeded) {
     CompactionPolicy policy = base_policy();
     policy.enabled = false;
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
@@ -285,10 +285,10 @@ TEST(ContextCompactorTest, ProducesPayloadWithEstimateAndClock) {
     FakeResponseStep summary_step = text_step("SUMMARY");
     summary_step.usage            = Usage{11, 5, 0, 0};
 
-    FakeLLM            provider(FakeScript{{summary_step}});
+    ProviderRuntime    provider(FakeScript{{summary_step}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const std::vector<Message> messages = fixture.session->deriveMessages();
     const CompactionResult     result =
@@ -321,10 +321,10 @@ TEST(ContextCompactorTest, TruncatesSummaryAtTokenBound) {
     CompactionPolicy policy = base_policy();
     policy.max_summary_tokens = 5;
 
-    FakeLLM            provider(FakeScript{{text_step("abcdefghij")}});
+    ProviderRuntime    provider(FakeScript{{text_step("abcdefghij")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
@@ -344,10 +344,10 @@ TEST(ContextCompactorTest, OversizedSummaryBytesFails) {
     policy.max_summary_tokens = 1'024;
     policy.max_summary_bytes  = 4;
 
-    FakeLLM            provider(FakeScript{{text_step("long summary")}});
+    ProviderRuntime    provider(FakeScript{{text_step("long summary")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
@@ -365,11 +365,11 @@ TEST(ContextCompactorTest, ReducesBoundaryOnceOnSummarizerOverflow) {
     CompactionPolicy policy = base_policy();
     policy.keep_recent_turns = 1;
 
-    FakeLLM provider(FakeScript{{error_step(LLMErrorCode::ContextLengthExceeded),
+    ProviderRuntime provider(FakeScript{{error_step(LLMErrorCode::ContextLengthExceeded),
                                  text_step("REDUCED")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
@@ -387,11 +387,11 @@ TEST(ContextCompactorTest, SummarizerOverflowWithoutReductionFails) {
     fixture.append_turn(2, "u2", "a2");
     fixture.append_turn(3, "u3", "a3");
 
-    FakeLLM provider(FakeScript{{error_step(LLMErrorCode::ContextLengthExceeded),
+    ProviderRuntime provider(FakeScript{{error_step(LLMErrorCode::ContextLengthExceeded),
                                  error_step(LLMErrorCode::ContextLengthExceeded)}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
@@ -405,15 +405,36 @@ TEST(ContextCompactorTest, SummarizerTerminalFailureFails) {
     fixture.append_turn(2, "u2", "a2");
     fixture.append_turn(3, "u3", "a3");
 
-    FakeLLM provider(FakeScript{{error_step(LLMErrorCode::ServerError)}});
+    ProviderRuntime provider(FakeScript{{error_step(LLMErrorCode::ServerError)}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
     EXPECT_EQ(result.outcome, CompactionOutcome::Failed);
     EXPECT_EQ(result.error.code, CompactionError::Code::SummarizerFailed);
+}
+
+TEST(ContextCompactorTest, NoProviderRouteMapsToNoProviderRoute) {
+    SessionFixture fixture;
+    fixture.append_turn(1, "u1", "a1");
+    fixture.append_turn(2, "u2", "a2");
+    fixture.append_turn(3, "u3", "a3");
+
+    ProviderRuntime provider(FakeScript{{text_step("never")}});
+    LLMPool         pool(1);
+    DefaultTokenEstimator estimator;
+
+    CompactionPolicy policy = base_policy();
+    policy.provider         = "missing";
+
+    ContextCompactor compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
+
+    const CompactionResult result =
+        compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
+    EXPECT_EQ(result.outcome, CompactionOutcome::Failed);
+    EXPECT_EQ(result.error.code, CompactionError::Code::NoProviderRoute);
 }
 
 TEST(ContextCompactorTest, CancelledTokenReturnsCancelled) {
@@ -422,10 +443,10 @@ TEST(ContextCompactorTest, CancelledTokenReturnsCancelled) {
     fixture.append_turn(2, "u2", "a2");
     fixture.append_turn(3, "u3", "a3");
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     CancellationSource source;
     source.cancel();
@@ -444,10 +465,10 @@ TEST(ContextCompactorTest, SummarizerModelOverrideIsRecorded) {
     CompactionPolicy policy = base_policy();
     policy.summarizer_model = "cheap-model";
 
-    FakeLLM            provider(FakeScript{{text_step("S")}});
+    ProviderRuntime    provider(FakeScript{{text_step("S")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, policy, fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, policy, fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
@@ -466,10 +487,10 @@ TEST(CompactionReplayTest, FoldIsDeterministicAndNeverReSummarizes) {
     fixture.append_turn(2, "u2", "a2");
     fixture.append_turn(3, "u3", "a3");
 
-    FakeLLM            provider(FakeScript{{text_step("DURABLE-SUMMARY")}});
+    ProviderRuntime    provider(FakeScript{{text_step("DURABLE-SUMMARY")}});
     LLMPool            pool(1);
     DefaultTokenEstimator estimator;
-    ContextCompactor   compactor(provider, pool, estimator, base_policy(), fixed_clock);
+    ContextCompactor   compactor(provider.runtime(), pool, estimator, base_policy(), fixed_clock);
 
     const CompactionResult result =
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});

@@ -188,6 +188,19 @@ int main() {}
     EXPECT_EQ(markdown, expected);
 }
 
+TEST(SessionExport, LlmRequestHeaderProducesNoRow) {
+    const std::string baseline = render_session_markdown(make_header(), make_events());
+
+    EventRange events = make_events();
+    payload::LlmRequestHeader header;
+    header.turn       = 1;
+    header.step       = 1;
+    header.session_id = SessionId{"s1"};
+    events.push_back(record(99, 1700000009000, EventType::LlmRequestHeader, header));
+
+    EXPECT_EQ(render_session_markdown(make_header(), events), baseline);
+}
+
 TEST(SessionExport, RegistryDispatchesExport) {
     const CommandRegistry registry = CommandRegistry::builtin();
     const Command*        command  = registry.find("export");

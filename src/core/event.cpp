@@ -15,7 +15,7 @@ struct WireEntry {
     std::string_view name;
 };
 
-constexpr std::array<WireEntry, 22> kWireNames{{
+constexpr std::array<WireEntry, 23> kWireNames{{
     {SessionStarted, "session/start"},
     {SessionEnded, "session/end"},
     {TurnStarted, "turn/start"},
@@ -37,6 +37,7 @@ constexpr std::array<WireEntry, 22> kWireNames{{
     {SubagentFanIn, "subagent/fan_in"},
     {SessionRenamed, "session/renamed"},
     {PlanMode, "plan/mode"},
+    {LlmRequestHeader, "llm/request_header"},
     {McpServerStatusChanged, "mcp/server_status_changed"},
 }};
 
@@ -98,6 +99,16 @@ void from_json(const nlohmann::json& json, Event& event) {
         throw std::runtime_error{"unknown event type: " + wire};
     }
     event.type = *type;
+}
+
+std::optional<Event> try_decode_event(const nlohmann::json& json) {
+    const std::string wire = json.at("type").get<std::string>();
+    if (!parse_event_type(wire).has_value()) {
+        return std::nullopt;
+    }
+    Event event;
+    from_json(json, event);
+    return event;
 }
 
 } // namespace ymh

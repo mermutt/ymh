@@ -10,7 +10,6 @@
 
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/resource_governor.hpp"
-#include "ymh/llm/llm_provider.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/tools/tool.hpp"
 #include "ymh/tools/tool_context.hpp"
@@ -24,6 +23,19 @@ ContentBlock text_block(ContentBlockKind kind, std::string text) {
     block.kind = kind;
     block.text = std::move(text);
     return block;
+}
+
+std::string assembled_system_prompt(const LLMRequest& request) {
+    if (request.messages.empty() || request.messages.front().role != Role::System) {
+        return {};
+    }
+    std::string text;
+    for (const ContentBlock& block : request.messages.front().content) {
+        if (block.kind == ContentBlockKind::Text) {
+            text += block.text;
+        }
+    }
+    return text;
 }
 
 ContentBlock tool_use_block(const ToolCallAssembled& call) {
@@ -73,7 +85,20 @@ AgentLoop::AgentLoop(AgentId id, std::shared_ptr<Session> session, AgentServices
       session_owner_(std::move(session)),
       session_(*session_owner_),
       services_(std::move(services)),
-      config_(std::move(config)) {}
+      config_(std::move(config)) {
+    const EventRange events = session_.events();
+    for (auto it = events.rbegin(); it != events.rend(); ++it) {
+        if (it->event.type != EventType::LlmRequestHeader) {
+            continue;
+        }
+        const auto& header     = it->event.payload.get<payload::LlmRequestHeader>();
+        held_config_           = header.config;
+        held_purpose_          = header.purpose;
+        held_prompt_digest_    = header.system_prompt_digest;
+        held_tool_digests_     = header.tool_schema_digests;
+        break;
+    }
+}
 
 AgentLoop::~AgentLoop() = default;
 
@@ -407,7 +432,8 @@ CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages,
     return CompactionOutcome::NotNeeded;
 }
 
-LLMRequest AgentLoop::buildRequest(const std::vector<Message>& messages) const {
+FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
+                                      TurnId turn, StepId step) {
     LLMRequest request;
     request.model    = config_.model;
     request.messages = messages;
@@ -415,7 +441,65 @@ LLMRequest AgentLoop::buildRequest(const std::vector<Message>& messages) const {
         request.tools = services_.context->tools();
     }
     request.parameters = config_.parameters;
-    return request;
+    request.session_id = session_.id();
+
+    LlmCallConfig config;
+    config.provider         = config_.provider;
+    config.model            = config_.model;
+    config.reasoning_effort = config_.parameters.reasoning_effort;
+    config.temperature      = config_.parameters.temperature;
+    config.max_tokens       = config_.parameters.max_output_tokens;
+    config.stop             = config_.parameters.stop;
+    config.top_p            = config_.parameters.top_p;
+    config.seed             = config_.parameters.seed;
+    config.tool_choice      = config_.parameters.tool_choice;
+
+    FrozenRequest     frozen          = FrozenRequest::freeze(std::move(request), config);
+    const std::string template_digest = frozen.template_digest();
+    const std::string system_text     = assembled_system_prompt(frozen.get());
+    const std::string prompt_digest   = sha256_hex(system_text);
+
+    std::vector<std::string> tool_digests;
+    tool_digests.reserve(frozen.get().tools.size());
+    for (const ToolSchema& schema : frozen.get().tools) {
+        tool_digests.push_back(tool_schema_digest(schema));
+    }
+
+    const bool config_changed =
+        !held_config_.has_value() || !call_config_equals(config, *held_config_);
+    const bool purpose_changed = held_purpose_ != frozen.get().purpose;
+    const bool prompt_changed =
+        !held_prompt_digest_.has_value() || prompt_digest != *held_prompt_digest_;
+    const bool tools_changed =
+        !held_tool_digests_.has_value() || tool_digests != *held_tool_digests_;
+
+    if (config_changed || purpose_changed || prompt_changed || tools_changed) {
+        payload::LlmRequestHeader header;
+        header.turn       = turn;
+        header.step       = step;
+        header.session_id = frozen.get().session_id;
+        header.purpose    = frozen.get().purpose;
+        header.config     = config;
+
+        header.system_prompt_digest = prompt_digest;
+        if (config_.persist_prompt_text) {
+            header.system_prompt = system_text;
+        }
+        for (const ToolSchema& schema : frozen.get().tools) {
+            header.tool_names.push_back(schema.name.value);
+        }
+        header.tool_schema_digests = tool_digests;
+        header.template_digest     = template_digest;
+        // 28 §5.1 / A21: a purpose-only change is not a KV-cache boundary.
+        header.starts_series = config_changed || prompt_changed || tools_changed;
+        session_.append(header);
+    }
+
+    held_config_        = config;
+    held_purpose_       = frozen.get().purpose;
+    held_prompt_digest_ = prompt_digest;
+    held_tool_digests_  = tool_digests;
+    return frozen;
 }
 
 void AgentLoop::drainFoldedItems() {
@@ -739,7 +823,8 @@ void AgentLoop::runTurn() {
             }
         }
 
-        LLMRequest request = buildRequest(messages);
+        std::optional<FrozenRequest> request;
+        request.emplace(buildRequest(messages, turn, step));
 
         const MessageId messageId = make_event_id().value;
         ChunkCoalescer  coalescer(session_, messageId, config_.max_chunk_batch,
@@ -763,7 +848,7 @@ void AgentLoop::runTurn() {
 
         LLMResponse response;
         bool        slotCancelled = false;
-        if (services_.provider == nullptr) {
+        if (services_.runtime == nullptr) {
             appendTurnFailed(turn, AgentErrorCode::ProviderFailed, "no provider configured");
             return;
         }
@@ -778,10 +863,25 @@ void AgentLoop::runTurn() {
                 }
             }
             try {
-                response = services_.provider->stream(request, sink, turnToken).get();
+                PreparedCall call =
+                    services_.runtime->prepare_call(request->config(), turnToken).get();
+                response = call.stream(std::move(*request), sink, turnToken).get();
+            } catch (const NoProviderRouteError& error) {
+                response              = LLMResponse{};
+                response.outcome      = StreamOutcome::Failed;
+                response.finish       = FinishReason::Error;
+                response.error.code   = LLMErrorCode::NoProviderRoute;
+                response.error.detail = error.detail;
+            } catch (const PreparedCallError& error) {
+                response              = LLMResponse{};
+                response.outcome      = StreamOutcome::Failed;
+                response.finish       = FinishReason::Error;
+                response.error.code   = LLMErrorCode::InvalidPreparedCall;
+                response.error.detail = error.detail;
             } catch (const std::exception& error) {
                 response              = LLMResponse{};
                 response.outcome      = StreamOutcome::Failed;
+                response.finish       = FinishReason::Error;
                 response.error.code   = LLMErrorCode::ProviderInternal;
                 response.error.detail = error.what();
             }
@@ -806,7 +906,7 @@ void AgentLoop::runTurn() {
                 appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
                 return;
             }
-            request = buildRequest(messages);
+            request.emplace(buildRequest(messages, turn, step));
         }
         if (slotCancelled) {
             response         = LLMResponse{};

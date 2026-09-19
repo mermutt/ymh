@@ -118,6 +118,7 @@ public:
             return Task<LLMResponse>{cancelled};
         }
         sink(TextDelta{"hello"});
+        sink(Finished{FinishReason::Stop, std::nullopt});
         LLMResponse response;
         response.outcome = StreamOutcome::Completed;
         response.finish  = FinishReason::Stop;
@@ -162,6 +163,7 @@ public:
             return Task<LLMResponse>{cancelled};
         }
         sink(TextDelta{"hello"});
+        sink(Finished{FinishReason::Stop, std::nullopt});
         LLMResponse response;
         response.outcome = StreamOutcome::Completed;
         response.finish  = FinishReason::Stop;

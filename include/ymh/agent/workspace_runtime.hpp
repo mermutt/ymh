@@ -146,7 +146,7 @@ public:
     [[nodiscard]] PermissionGate&       gate() noexcept;
     [[nodiscard]] SkillCatalog&         skills() noexcept;
     [[nodiscard]] const SkillCatalog&   skills() const noexcept;
-    [[nodiscard]] LLMProvider*          provider() noexcept;
+    [[nodiscard]] bool                  has_provider() const noexcept;
     [[nodiscard]] LLMPool&              pool() noexcept;
     [[nodiscard]] ContextAssembler&     context() noexcept;
 

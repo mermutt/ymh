@@ -92,6 +92,9 @@ struct ContextMessage {
 };
 
 struct AgentConfig {
+    // 28-D9 / 31-D7: the provider id source for `LlmCallConfig::provider`,
+    // populated from `config.llm.provider`. Empty => the runtime default route.
+    ProviderId               provider;
     ModelId                  model;
     GenerationParameters     parameters;
     std::size_t              max_steps = 100;
@@ -102,6 +105,7 @@ struct AgentConfig {
     SandboxMode              sandbox = SandboxMode::Workspace;
     std::string              system_prompt;
     std::string              plan_section;
+    bool                     persist_prompt_text = false;
 };
 
 class Agent {
