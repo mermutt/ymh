@@ -90,7 +90,7 @@ free numbers. The actual allocation is:
 | 30 | `30-architecture-cascade-errata.md` | Wave-0 A0 — this file |
 
 **Consequence (pinned).** The four Wave-3+ specs that spec 26 §5 named as
-`27`/`28`/`29`/`30` must be **renumbered to 35+** when their errata are written (31–34 are now taken):
+`27`/`28`/`29`/`30` must be **renumbered to 36+** when their errata are written (31–35 are now taken):
 the prompt-registry spec (reserved `27-system-prompt.md`), the output-retention
 spec (reserved `28-output-retention.md`), the presets spec (reserved
 `29-agent-presets.md`), and the goals/jobs/commands spec (reserved
@@ -307,7 +307,7 @@ Nothing is coded until its owning spec is verified.
 
 `26 §5:1377-1380` pins that Wave 1's request header carries the **current**
 `AgentConfig::system_prompt`, so the prompt-registry spec (reserved
-`27-system-prompt.md`, renumbered `31+` per §2) is **not** a Wave-1 dependency.
+`27-system-prompt.md`, renumbered `36+` per §2) is **not** a Wave-1 dependency.
 Freezing the prompt registry before Wave 1 would buy zero Wave-1 risk reduction.
 This errata adopts that rule: **the prompt-registry spec must not be moved into
 Stage A.**
@@ -317,11 +317,11 @@ Stage A.**
 | Wave | Specs verified before its code |
 |---|---|
 | 1 | `21` errata — the new `session.persist_prompt_text` key (D23); the Stage-A A1 `01` errata already pins the D24 wire-vocabulary rule; no `05` change |
-| 2 | `01` assistant-stream payloads; the `08` assembler/replay errata — now `34-assembler-replay-errata.md` (Rev 2, verified), with the `StreamEvent` codec in `33-stream-event-codec-errata.md` (verified) |
-| 3 | the prompt-registry spec (reserved `27-system-prompt.md`, renumbered `31+`); `01` provenance payloads; `17`/`21` errata |
-| 4 | the output-retention spec (reserved `28-output-retention.md`, renumbered `31+`); `06`/`07`/`13` errata |
-| 5 | the presets spec (reserved `29-agent-presets.md`, renumbered `31+`); `23` errata; `01` preset event |
-| 6 | the goals/jobs/commands spec (reserved `30-goals-jobs-commands.md`, renumbered `31+`); `01` goal/job/command events |
+| 2 | `01` assistant-stream payloads; the `08` assembler/replay errata — now `34-assembler-replay-errata.md` (Rev 3, verified), with the `StreamEvent` codec in `33-stream-event-codec-errata.md` (verified) |
+| 3 | the prompt-registry spec (reserved `27-system-prompt.md`, renumbered `36+`); `01` provenance payloads; `17`/`21` errata |
+| 4 | the output-retention spec (reserved `28-output-retention.md`, renumbered `36+`); `06`/`07`/`13` errata |
+| 5 | the presets spec (reserved `29-agent-presets.md`, renumbered `36+`); `23` errata; `01` preset event |
+| 6 | the goals/jobs/commands spec (reserved `30-goals-jobs-commands.md`, renumbered `36+`); `01` goal/job/command events |
 | any | `10`/`11`/`20`/`22` errata only where that wave changes them |
 
 **Two-gate rule preserved.** Stage B defers the *verification date*, not the
@@ -422,7 +422,7 @@ To keep the top-level gate's invariants intact, the following are explicitly
   affected `00` sections keep their text and are read through §3/§7.
 - **AC-I6 — Numbering is authoritative.** `27`/`28`/`29`/`30` are the
   session-locking / LLM-service-boundary / event-family / architecture-cascade
-  errata; the Wave-3+ specs renumber to `31+`.
+  errata; the Wave-3+ specs renumber to `36+`.
 
 ## 9. Failure modes
 
@@ -444,7 +444,7 @@ To keep the top-level gate's invariants intact, the following are explicitly
 - **AC-F6 — Unrecorded downgrade acceptance.** The one-way door is passed without
   the user's sign-off. Guard: P3 makes the acceptance a Wave-0 gate obligation.
 - **AC-F7 — Stale numbering.** The Wave-3+ specs are still called `27`–`30`.
-  Guard: §2 renumbers them to `31+` and supersedes the reservation.
+  Guard: §2 renumbers them to `36+` and supersedes the reservation.
 
 ## 10. Test plan
 
@@ -483,4 +483,4 @@ code tests. The gate checks:
   prompt-registry spec); the three migration prerequisites (user scope,
   prompt-logging policy, no-downgrade acceptance); and the numbering
   supersession (`27`/`28`/`29`/`30` are the four errata; Wave-3+ specs renumber
-  to `31+`). Amends `00-architecture.md` by reference only.
+  to `36+`). Amends `00-architecture.md` by reference only.

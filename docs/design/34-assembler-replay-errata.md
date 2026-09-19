@@ -27,8 +27,9 @@ Depends on: docs/design/26-dsh-alignment-part2.md (Rev 7, GATE PASS) §4.3.4,
             docs/design/28-llm-service-boundary-errata.md (Rev 3, GATE PASS)
             §4.1–§4.4, §5.3, §12;
             docs/design/29-event-family-errata.md (GATE PASS) §3.2, §4.2;
-            docs/design/30-architecture-cascade-errata.md (Rev 2, pending
-            re-gate) §5.3;
+            docs/design/30-architecture-cascade-errata.md (Rev 2, independent
+            review PASS — the top-level gate is blocked only on the user's
+            §6 P3 no-downgrade sign-off) §5.3;
             docs/design/31-agent-loop-errata.md (Rev 2, GATE PASS) §3.2, §5.2;
             docs/design/08-llm-provider.md (verified) §2–§5, §10–§11
 Scope: (1) the block-assembly algorithm; (2) `TimedStreamEvent.at`'s epoch,
