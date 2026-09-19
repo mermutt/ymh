@@ -166,8 +166,10 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         agent_id = *created;
     }
 
-    Agent& agent   = registry.get(agent_id);
-    result.session = agent.session();
+    // X1: named owning local held for the whole function; every agent use below
+    // goes through it (AL2).
+    std::shared_ptr<AgentLoop> agent = registry.getShared(agent_id);
+    result.session                   = agent->session();
 
     try {
         if (!runtime->acquireLease(result.session)) {
@@ -235,13 +237,13 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
 
     std::atomic<bool> finished{false};
     std::thread worker([&]() {
-        agent.send(user_message(options.task));
+        agent->send(user_message(options.task));
         finished.store(true);
     });
 
     while (!finished.load()) {
         if (options.cancel_poll && options.cancel_poll()) {
-            agent.cancel();
+            agent->cancel();
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

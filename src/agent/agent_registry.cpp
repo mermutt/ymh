@@ -1,8 +1,8 @@
 #include "ymh/agent/agent_registry.hpp"
 
 #include <exception>
-#include <stdexcept>
-#include <string>
+#include <memory>
+#include <mutex>
 #include <utility>
 
 #include "ymh/execution/resource_governor.hpp"
@@ -53,10 +53,6 @@ AgentRegistry::AgentRegistry(AgentServices services, AgentConfig config)
         poolStorage_ = std::make_unique<LLMPool>(concurrency);
         pool_        = poolStorage_.get();
     }
-
-    if (services_.sessions != nullptr) {
-        services_.sessions->setAgentLookup([this](const SessionId& id) { return find(id); });
-    }
 }
 
 AgentRegistry::AgentRegistry(SessionManager& sessions,
@@ -88,8 +84,11 @@ std::expected<AgentId, AgentError> AgentRegistry::create(const SessionOptions& o
 }
 
 std::expected<AgentId, AgentError> AgentRegistry::resume(const SessionId& id) {
-    if (const auto it = bySession_.find(id.value); it != bySession_.end()) {
-        return it->second;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (const auto it = bySession_.find(id.value); it != bySession_.end()) {
+            return it->second;
+        }
     }
     if (services_.sessions == nullptr) {
         return std::unexpected(AgentError{AgentErrorCode::Internal, "no session manager"});
@@ -114,8 +113,12 @@ std::expected<AgentId, AgentError> AgentRegistry::registerAgent(const SessionId&
 
     const AgentId agentId{make_event_id().value};
     try {
-        Session& session = services_.sessions->session(sessionId);
-        auto agent = std::make_unique<AgentLoop>(agentId, session, std::move(services), config_);
+        // Resolve the owning session handle before taking mutex_ (lock order:
+        // SessionManager::mutex_ then AgentRegistry::mutex_, never held upward).
+        std::shared_ptr<Session> session = services_.sessions->sessionPtr(sessionId);
+        std::shared_ptr<AgentLoop> agent =
+            std::make_shared<AgentLoop>(agentId, std::move(session), std::move(services), config_);
+        std::lock_guard<std::mutex> lock(mutex_);
         bySession_[sessionId.value] = agentId;
         agents_[agentId.value]      = std::move(agent);
     } catch (const std::exception& error) {
@@ -124,15 +127,8 @@ std::expected<AgentId, AgentError> AgentRegistry::registerAgent(const SessionId&
     return agentId;
 }
 
-Agent& AgentRegistry::get(AgentId id) {
-    const auto it = agents_.find(id.value);
-    if (it == agents_.end()) {
-        throw std::out_of_range("unknown agent: " + id.value);
-    }
-    return *it->second;
-}
-
-Agent* AgentRegistry::find(SessionId id) noexcept {
+std::shared_ptr<AgentLoop> AgentRegistry::findShared(SessionId id) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto session = bySession_.find(id.value);
     if (session == bySession_.end()) {
         return nullptr;
@@ -141,25 +137,78 @@ Agent* AgentRegistry::find(SessionId id) noexcept {
     if (agent == agents_.end()) {
         return nullptr;
     }
-    return agent->second.get();
+    return agent->second;
+}
+
+std::shared_ptr<AgentLoop> AgentRegistry::getShared(AgentId id) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = agents_.find(id.value);
+    if (it == agents_.end()) {
+        return nullptr;
+    }
+    return it->second;
 }
 
 void AgentRegistry::dispose(AgentId id) {
-    const auto it = agents_.find(id.value);
-    if (it == agents_.end()) {
-        return;
+    // Snapshot the strong ref under mutex_, release, then call dispose()/
+    // closeSession() outside it, then re-lock to erase (24-D18/R5).
+    std::shared_ptr<AgentLoop> agent;
+    SessionId                  sessionId;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = agents_.find(id.value);
+        if (it == agents_.end()) {
+            return;
+        }
+        agent     = it->second;
+        sessionId = agent->session();
     }
-    const SessionId sessionId = it->second->session();
-    it->second->dispose();
+
+    agent->dispose();
     if (services_.sessions != nullptr) {
         services_.sessions->closeSession(sessionId);
     }
+
+    std::lock_guard<std::mutex> lock(mutex_);
     bySession_.erase(sessionId.value);
-    agents_.erase(it);
+    agents_.erase(id.value);
     leases_.erase(sessionId.value);
 }
 
+void AgentRegistry::finalizeAll() {
+    // Snapshot the owning handles under mutex_, then release it before any
+    // dispose()/closeSession() call (24-D18). Erasing while iterating the map
+    // directly would invalidate the iterator, so the snapshot is the contract.
+    std::vector<std::shared_ptr<AgentLoop>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot.reserve(agents_.size());
+        for (const auto& entry : agents_) {
+            snapshot.push_back(entry.second);
+        }
+    }
+
+    for (const std::shared_ptr<AgentLoop>& agent : snapshot) {
+        // dispose() cancels an in-flight turn (its cancel path flushes the
+        // pending chunk batch and appends exactly one terminal event) and parks
+        // the agent without waiting (AL25). The local shared_ptr keeps the agent
+        // — and, via its session_owner_, the Session — alive across the call.
+        agent->dispose();
+        if (services_.sessions != nullptr) {
+            services_.sessions->closeSession(agent->session());
+        }
+    }
+
+    // Re-lock to erase. The erased shared_ptrs are destroyed after mutex_ is
+    // released because the snapshot still holds them.
+    std::lock_guard<std::mutex> lock(mutex_);
+    agents_.clear();
+    bySession_.clear();
+    leases_.clear();
+}
+
 std::vector<AgentId> AgentRegistry::list() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<AgentId> ids;
     ids.reserve(agents_.size());
     for (const auto& entry : agents_) {
@@ -169,6 +218,7 @@ std::vector<AgentId> AgentRegistry::list() const {
 }
 
 std::size_t AgentRegistry::activeCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::size_t count = 0;
     for (const auto& entry : agents_) {
         if (entry.second->status() == AgentStatus::Running) {
@@ -179,52 +229,46 @@ std::size_t AgentRegistry::activeCount() const {
 }
 
 void AgentRegistry::activateSession(const SessionId& id) {
-    const auto session = bySession_.find(id.value);
-    if (session == bySession_.end()) {
+    // R1: copy the strong ref under mutex_, release, call activate() outside.
+    std::shared_ptr<AgentLoop> agent = findShared(id);
+    if (agent == nullptr || !activationAllowed(agent->state())) {
         return;
     }
-    const auto agent = agents_.find(session->second.value);
-    if (agent == agents_.end()) {
-        return;
-    }
-    if (!activationAllowed(agent->second->state())) {
-        return;
-    }
-    agent->second->activate();
+    agent->activate();
 }
 
 bool AgentRegistry::hasPendingWork(const SessionId& id) const noexcept {
-    const auto session = bySession_.find(id.value);
-    if (session == bySession_.end()) {
-        return false;
+    // R4: copy the strong ref under mutex_, release, call the predicate outside.
+    std::shared_ptr<AgentLoop> agent;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto session = bySession_.find(id.value);
+        if (session == bySession_.end()) {
+            return false;
+        }
+        const auto it = agents_.find(session->second.value);
+        if (it == agents_.end()) {
+            return false;
+        }
+        agent = it->second;
     }
-    const auto agent = agents_.find(session->second.value);
-    if (agent == agents_.end()) {
-        return false;
-    }
-    return agent->second->hasPendingWork();
+    return agent->hasPendingWork();
 }
 
 std::expected<CompactionOutcome, AgentError> AgentRegistry::requestCompaction(const SessionId& id) {
-    const auto session = bySession_.find(id.value);
-    if (session == bySession_.end()) {
+    // R3: hold the strong ref for the whole (potentially long) call.
+    std::shared_ptr<AgentLoop> agent = findShared(id);
+    if (agent == nullptr) {
         return std::unexpected(AgentError{AgentErrorCode::UnknownSession, "unknown session"});
     }
-    const auto agent = agents_.find(session->second.value);
-    if (agent == agents_.end()) {
-        return std::unexpected(AgentError{AgentErrorCode::UnknownSession, "unknown session"});
-    }
-    return agent->second->requestCompaction();
+    return agent->requestCompaction();
 }
 
 void AgentRegistry::suspendSession(const SessionId& id) {
-    const auto session = bySession_.find(id.value);
-    if (session == bySession_.end()) {
-        return;
-    }
-    const auto agent = agents_.find(session->second.value);
-    if (agent != agents_.end()) {
-        agent->second->suspend();
+    // R2: this runs directly on the io thread; hold the strong ref across it.
+    std::shared_ptr<AgentLoop> agent = findShared(id);
+    if (agent != nullptr) {
+        agent->suspend();
     }
 }
 

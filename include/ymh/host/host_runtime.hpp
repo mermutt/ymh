@@ -18,11 +18,11 @@
 //     (errata §11.2) is therefore a construction cycle. Wave 3's daemon uses
 //     the two-phase variant; tests and simple wiring use the pinned ctor.
 //
-// Event marshalling (errata §2.2 E2 / §4): HostRuntime owns exactly ONE global
-// `EventBus` forwarding subscriber. The subscriber derives each committed
-// event's store `Sequence` (the bus carries `Event`, not `EventRecord`),
-// filters live-only events, and hands the `EventRecord` to the injected
-// `EventForwarder`. The daemon wires that forwarder to
+// Event marshalling (errata §2.2 E2 / §4): HostRuntime owns a live `EventBus`
+// subscription for the live-only MCP status branch and a committed-record
+// subscription (24-D6). The committed channel carries the store `Sequence`, so
+// the forwarder forwards the record directly and never re-reads the store
+// (AL16/AL17). The daemon wires that forwarder to
 // `TransportServer::post([server, r]{ server->onEventCommitted(r); })`, so the
 // `ProtocolServer` fan-out always runs on the transport io thread (M-F1).
 
@@ -161,6 +161,11 @@ public:
     void                     closeSession(const SessionId& id) override;
     void                     deleteSession(const SessionId& id, bool only_if_empty = false,
                                             bool force = false) override;
+    // 24-D4/AL6: the single queue-aware pending predicate for the daemon. True
+    // iff the agent has a queued trigger / in-flight turn OR the executor has a
+    // queued or active body for the session. `deleteSession` refuses while this
+    // holds (AL7).
+    [[nodiscard]] bool hasPendingWork(const SessionId& id) const;
     void                     activateSession(const SessionId& id) override;
     void                     suspendSession(const SessionId& id) override;
     void                     compactSession(const SessionId& id) override;
@@ -212,7 +217,7 @@ private:
     }
 
     void wireServer();
-    void handleCommittedEvent(const Event& event);
+    void handleCommittedRecord(const EventRecord& record);
     void ensureAgent(const SessionId& id);
     void acquireLeaseOrThrow(const SessionId& id);
     void releaseLeaseIfDurable(const SessionId& id);
@@ -231,7 +236,8 @@ private:
     std::function<void(ymh::ShutdownReason)> shutdown_hook_;
     OwnerSnapshotSource                    owner_snapshot_source_;
 
-    Subscription forward_subscription_;
+    Subscription committed_subscription_;
+    Subscription live_subscription_;
     bool         forwarding_ = false;
 
     std::mutex                                 forward_mutex_;

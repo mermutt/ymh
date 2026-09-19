@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <optional>
@@ -267,7 +266,8 @@ HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
 
 HostRuntime::~HostRuntime() {
     broker_.set_subscriber_count({});
-    forward_subscription_.unsubscribe();
+    committed_subscription_.unsubscribe();
+    live_subscription_.unsubscribe();
 }
 
 void HostRuntime::attachServer(protocol::ProtocolServer& server) {
@@ -291,8 +291,16 @@ void HostRuntime::startForwarding() {
         return;
     }
     forwarding_ = true;
-    forward_subscription_ = runtime_.bus().subscribe(
-        [this](const Event& event) { handleCommittedEvent(event); });
+    // 24-D6/24-D12: the live channel keeps only the live-only MCP status
+    // branch; the committed channel carries the `EventRecord` (with its store
+    // `Sequence`) so the forwarder never re-reads the store (AL16/AL17).
+    live_subscription_ = runtime_.bus().subscribe([this](const Event& event) {
+        if (event.type == EventType::McpServerStatusChanged && server_ != nullptr) {
+            server_->onMcpServerStatus(mcp_status_detail(event));
+        }
+    });
+    committed_subscription_ = runtime_.bus().subscribeCommitted(
+        [this](const EventRecord& record) { handleCommittedRecord(record); });
 }
 
 void HostRuntime::setShutdownHook(std::function<void(ymh::ShutdownReason)> hook) {
@@ -335,28 +343,15 @@ std::size_t HostRuntime::subscriberCount(const SessionId& session) const {
     return found == subscriber_counts_.end() ? 0 : found->second;
 }
 
-void HostRuntime::handleCommittedEvent(const Event& event) {
-    if (event.type == EventType::McpServerStatusChanged) {
-        if (server_ != nullptr) {
-            server_->onMcpServerStatus(mcp_status_detail(event));
-        }
-        return;
-    }
-    const SessionId session = event.session_id;
-    EventRecord record;
+void HostRuntime::handleCommittedRecord(const EventRecord& record) {
+    const SessionId session = record.event.session_id;
     {
         std::lock_guard<std::mutex> lock(forward_mutex_);
-        const Sequence after = last_forwarded_[session.value];
-        EventRange tail;
-        try {
-            tail = runtime_.store().readAfter(session, after, 1);
-        } catch (const std::exception&) {
-            return;
+        const auto it = last_forwarded_.find(session.value);
+        const Sequence last = (it == last_forwarded_.end()) ? 0 : it->second;
+        if (record.seq <= last) {
+            return;                          // duplicate / out-of-order guard
         }
-        if (tail.empty() || tail.front().event.id.value != event.id.value) {
-            return;
-        }
-        record = tail.front();
         last_forwarded_[session.value] = record.seq;
     }
     if (forwarder_) {
@@ -367,7 +362,9 @@ void HostRuntime::handleCommittedEvent(const Event& event) {
 }
 
 void HostRuntime::ensureAgent(const SessionId& id) {
-    if (runtime_.agents().find(id) != nullptr) {
+    // H1: the owning handle is held across the check; a temporary shared_ptr is
+    // enough here because no raw pointer is dereferenced.
+    if (runtime_.agents().findShared(id) != nullptr) {
         return;
     }
     std::expected<AgentId, AgentError> resumed = runtime_.agents().resume(id);
@@ -572,7 +569,15 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
         if (!created.has_value()) {
             throw_mapped(map_agent_error(created.error()));
         }
-        const SessionId session = runtime_.agents().get(*created).session();
+        // H8/S4: hold the owning agent handle while reading its session id.
+        // A concurrent finalizeAll can erase the map entry between create() and
+        // this lookup, so getShared may legitimately return null (24-D14/AL31).
+        std::shared_ptr<AgentLoop> createdAgent = runtime_.agents().getShared(*created);
+        if (createdAgent == nullptr) {
+            throw_mapped(map_agent_error(
+                AgentError{AgentErrorCode::AgentDisposed, "agent disposed during create"}));
+        }
+        const SessionId session = createdAgent->session();
         acquireLeaseOrThrow(session);
         try {
             registry_.addSession(identity_.workspace, session);
@@ -609,6 +614,9 @@ protocol::SessionRenamedResult HostRuntime::renameSession(const nlohmann::json& 
             throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
                                    "InvalidParams"});
         }
+        // S2: hold an owning session handle across the manager call so the
+        // Session cannot be erased under it.
+        std::shared_ptr<Session> renamed = runtime_.sessions().sessionPtr(id);
         (void)runtime_.sessions().renameSession(id, normalized);
         return protocol::SessionRenamedResult{id, std::move(normalized)};
     });
@@ -632,6 +640,8 @@ protocol::SessionCreated HostRuntime::forkSession(const SessionId& id,
             throw_mapped(WireError{protocol::code_value(protocol::AppCode::InvalidForkBoundary),
                                    "InvalidForkBoundary"});
         }
+        // S3: hold an owning parent handle across the manager call.
+        std::shared_ptr<Session> parent = runtime_.sessions().sessionPtr(id);
         const SessionId child =
             runtime_.sessions().forkSession(id, static_cast<std::size_t>(seed_length));
         acquireLeaseOrThrow(child);
@@ -652,24 +662,30 @@ protocol::SessionCreated HostRuntime::forkSession(const SessionId& id,
     });
 }
 
-void HostRuntime::closeSession(const SessionId& id) {
-    translate([&]() {
-        runtime_.environment().pty().closeSession(id);
-        if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
-            runtime_.agents().dispose(agent->id());
-        } else {
-            runtime_.sessions().closeSession(id);
-        }
-    });
+void HostRuntime::closeSession(const SessionId&) {
+    // 24-D10/AL23 (§7.2.2 H2): detach-only. `session.close` ends observation,
+    // and `ProtocolServer` ends the calling client's subscription. The daemon
+    // owns the turn, so close must NOT cancel/dispose the agent, close the PTY,
+    // or erase the resident session. The shipped cancel-on-close was the bug.
+}
+
+bool HostRuntime::hasPendingWork(const SessionId& id) const {
+    // 24-D4/AL6: the queue-aware OR. A prompt is pending in two places — the
+    // agent inbox/turn (visible to `AgentRegistry::hasPendingWork`) and the
+    // executor queue/active slot (invisible before this predicate). The OR
+    // belongs here because `HostRuntime` owns both; putting it inside
+    // `AgentRegistry` would be a layering inversion (§5.1).
+    return runtime_.agents().hasPendingWork(id) || turns_.inFlight(id) > 0;
 }
 
 void HostRuntime::deleteSession(const SessionId& id, bool only_if_empty, bool force) {
     translate([&]() {
         const bool mid_turn = [&] {
-            if (runtime_.agents().hasPendingWork(id)) {
+            if (hasPendingWork(id)) {
                 return true;
             }
-            Agent* agent = runtime_.agents().find(id);
+            // H3: hold the owning handle across the state switch.
+            std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
             if (agent == nullptr) {
                 return false;
             }
@@ -706,7 +722,8 @@ void HostRuntime::deleteSession(const SessionId& id, bool only_if_empty, bool fo
         }
 
         runtime_.environment().pty().closeSession(id);
-        if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
+        // H4: hold the owning handle across the dispose call.
+        if (std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id); agent != nullptr) {
             runtime_.agents().dispose(agent->id());
         }
 
@@ -731,7 +748,7 @@ void HostRuntime::activateSession(const SessionId& id) {
                                    "UnknownSession"});
         }
         ensureAgent(id);
-        if (!turns_.submit([this, id]() { runtime_.agents().activateSession(id); })) {
+        if (!turns_.submit(id, [this, id]() { runtime_.agents().activateSession(id); })) {
             throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InternalError),
                                    "InboxFull"});
         }
@@ -759,7 +776,7 @@ void HostRuntime::compactSession(const SessionId& id) {
                                    "UnknownSession"});
         }
         ensureAgent(id);
-        if (!turns_.submit([this, id]() {
+        if (!turns_.submit(id, [this, id]() {
                 (void)runtime_.agents().requestCompaction(id);
             })) {
             throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InternalError),
@@ -784,14 +801,18 @@ void HostRuntime::agentPrompt(const SessionId& id, const nlohmann::json& message
         // user's prompt: a LeaseLost/StoreError means only that the cosmetic
         // name was not written (the transaction rolled back), so swallow it and
         // log at Warn. Any other exception is a genuine bug and propagates.
+        // S1: hold an owning session handle across the manager call.
+        std::shared_ptr<Session> named = runtime_.sessions().sessionPtr(id);
         try {
             static_cast<void>(runtime_.sessions().maybeAutoName(id, first_text_of(parsed)));
         } catch (const StoreError& error) {
             category_logger(LogCategory::Session)
                 .warn(std::string{"auto-name skipped: "} + error.what());
         }
-        if (!turns_.submit([this, id, parsed]() {
-                if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
+        if (!turns_.submit(id, [this, id, parsed]() {
+                // W3: resolve the owning handle at body start and hold it.
+                std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
+                if (agent != nullptr) {
                     agent->send(parsed);
                 }
             })) {
@@ -809,8 +830,9 @@ void HostRuntime::agentFollowup(const SessionId& id, const nlohmann::json& messa
         }
         ensureAgent(id);
         const Message parsed = message_from_json(message);
-        if (!turns_.submit([this, id, parsed]() {
-                if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
+        if (!turns_.submit(id, [this, id, parsed]() {
+                std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
+                if (agent != nullptr) {
                     agent->followup(parsed);
                 }
             })) {
@@ -828,8 +850,9 @@ void HostRuntime::agentSteer(const SessionId& id, const nlohmann::json& message)
         }
         ensureAgent(id);
         const Message parsed = message_from_json(message);
-        if (!turns_.submit([this, id, parsed]() {
-                if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
+        if (!turns_.submit(id, [this, id, parsed]() {
+                std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
+                if (agent != nullptr) {
                     agent->steer(parsed);
                 }
             })) {
@@ -847,8 +870,9 @@ void HostRuntime::agentInject(const SessionId& id, const nlohmann::json& context
         }
         ensureAgent(id);
         const ContextMessage parsed = context_from_json(context);
-        if (!turns_.submit([this, id, parsed]() {
-                if (Agent* agent = runtime_.agents().find(id); agent != nullptr) {
+        if (!turns_.submit(id, [this, id, parsed]() {
+                std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
+                if (agent != nullptr) {
                     agent->inject(parsed);
                 }
             })) {
@@ -866,7 +890,7 @@ bool HostRuntime::agentCancel(const SessionId& id,
             throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
                                    "UnknownSession"});
         }
-        Agent* agent = runtime_.agents().find(id);
+        std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
         if (agent == nullptr) {
             return false;
         }
@@ -878,7 +902,7 @@ bool HostRuntime::agentCancel(const SessionId& id,
 
 std::string HostRuntime::agentStatus(const SessionId& id) {
     return translate([&]() -> std::string {
-        Agent* agent = runtime_.agents().find(id);
+        std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
         if (agent == nullptr) {
             if (!sessionExists(id)) {
                 throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),

@@ -7,11 +7,14 @@
 // close every turn with exactly one terminal event (A2). No UI type appears
 // here (A17).
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <expected>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -65,7 +68,11 @@ struct AgentServices {
 
 class AgentLoop final : public Agent {
 public:
-    AgentLoop(AgentId id, Session& session, AgentServices services, AgentConfig config);
+    // 24-D1: the loop co-owns its session through `session_owner_` for its whole
+    // life, so the session cannot be freed while a turn body reaches it via
+    // `session_` (AL1).
+    AgentLoop(AgentId id, std::shared_ptr<Session> session, AgentServices services,
+              AgentConfig config);
     ~AgentLoop() override;
 
     AgentLoop(const AgentLoop&) = delete;
@@ -117,6 +124,8 @@ private:
 
     [[nodiscard]] bool        turnInFlight() const noexcept;
     [[nodiscard]] bool        hasTurnTrigger() const noexcept;
+    // 24-D7/AL15: caller must hold `control_mutex_`.
+    [[nodiscard]] bool        hasTurnTriggerLocked() const noexcept;
     InboxResult               enqueue(InboxItem item);
     void                      runTurn();
     void                      runMaintenanceTurn(TurnId turn);
@@ -129,20 +138,22 @@ private:
     bool                      executeToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
     void                      flushIdleCallbacks();
 
-    AgentId        id_;
-    Session&       session_;
-    AgentServices  services_;
-    AgentConfig    config_;
+    AgentId                  id_;
+    std::shared_ptr<Session> session_owner_;  // declared before session_ (AL1)
+    Session&                 session_;
+    AgentServices            services_;
+    AgentConfig              config_;
 
-    std::deque<InboxItem>                inbox_;
-    AgentState                           state_ = AgentState::Idle;
-    bool                                 disposed_ = false;
-    bool                                 running_ = false;
-    bool                                 pending_maintenance_failure_ = false;
-    std::size_t                          compactions_this_turn_ = 0;
-    CancellationSource                   turn_cancel_;
-    std::string                          cancel_reason_;
-    std::vector<std::function<void()>>   idle_callbacks_;
+    std::deque<InboxItem>               inbox_;              // control_mutex_
+    std::vector<std::function<void()>>  idle_callbacks_;     // control_mutex_
+    std::string                         cancel_reason_;      // control_mutex_
+    bool                                pending_maintenance_failure_ = false;  // control_mutex_
+    mutable std::mutex                  control_mutex_;      // leaf: no blocking op inside
+    std::atomic<bool>                   disposed_{false};
+    std::atomic<bool>                   running_{false};
+    std::atomic<AgentState>             state_{AgentState::Idle};
+    std::size_t                         compactions_this_turn_ = 0;  // worker-only
+    CancellationSource                  turn_cancel_;
 };
 
 } // namespace ymh

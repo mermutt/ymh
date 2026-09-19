@@ -165,6 +165,8 @@ struct PermissionBroker::State {
     std::vector<std::shared_ptr<Pending>> pending;
     std::uint64_t                         next_id = 1;
     SubscriberCount                       subscriber_count;
+    bool                                  shutting_down = false;
+    std::string                           shutdown_reason = "shutdown";
 };
 
 std::future<PermissionOutcome> PermissionBroker::State::resolve(const PermissionRequest& request,
@@ -188,6 +190,9 @@ std::future<PermissionOutcome> PermissionBroker::State::resolve(const Permission
     std::string id;
     {
         std::lock_guard<std::mutex> lock(mutex);
+        if (shutting_down) {
+            return ready_outcome({payload::PermissionDecisionKind::Deny, shutdown_reason});
+        }
         id = "perm-" + std::to_string(next_id++);
         entry->core = request;
         entry->wire = make_wire(request, id, config);
@@ -243,19 +248,24 @@ PermissionBroker::PermissionBroker(PermissionPolicy& policy,
                                    ClockReader now)
     : state_(std::make_shared<State>(policy, transport, std::move(config), std::move(now))) {}
 
-PermissionBroker::~PermissionBroker() {
+PermissionBroker::~PermissionBroker() { denyAll("shutdown"); }
+
+void PermissionBroker::denyAll(std::string reason) {
+    std::shared_ptr<State> state = state_;
     std::vector<std::shared_ptr<Pending>> remaining;
     {
-        std::lock_guard<std::mutex> lock(state_->mutex);
-        remaining.reserve(state_->pending.size());
-        for (auto& request : state_->pending) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->shutting_down   = true;
+        state->shutdown_reason = reason;
+        remaining.reserve(state->pending.size());
+        for (auto& request : state->pending) {
             request->resolved = true;
             remaining.push_back(request);
         }
-        state_->pending.clear();
+        state->pending.clear();
     }
     for (auto& request : remaining) {
-        request->promise.set_value({payload::PermissionDecisionKind::Deny, "shutdown"});
+        request->promise.set_value({payload::PermissionDecisionKind::Deny, reason});
     }
 }
 

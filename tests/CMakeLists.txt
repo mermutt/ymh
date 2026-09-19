@@ -71,6 +71,7 @@ add_executable(ymh_tests
     unit/skills_tool_test.cpp
     unit/skills_wiring_test.cpp
     unit/skills_rpc_test.cpp
+    unit/no_raw_map_handle_test.cpp
     unit/global_test_env_test.cpp
     support/global_test_env.cpp
     integration_child_process_test.cpp
@@ -94,6 +95,7 @@ target_include_directories(ymh_tests
 target_compile_definitions(ymh_tests PRIVATE
     YMH_TEST_BINARY="$<TARGET_FILE:ymh>"
     YMH_FAKE_MCP_SERVER="$<TARGET_FILE:fake_mcp_server>"
+    YMH_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(ymh_tests

@@ -45,7 +45,8 @@ TEST(UiDriver, RendersScriptedTranscript) {
     AgentEnv env("ui_driver", std::make_unique<FakeLLM>(two_step_script()),
                  AgentConfig{}, allow_all_permission_config(), {}, true);
     env.workspace.write("hello.txt", "file-body");
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     UiModel model;
     model.activeWorkspaceId = WorkspaceId{"workspace"};

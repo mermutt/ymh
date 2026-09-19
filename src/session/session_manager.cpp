@@ -4,14 +4,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
-
-#include "ymh/session/errors.hpp"
 
 namespace ymh {
 namespace {
@@ -38,7 +37,13 @@ SessionManager::SessionManager(SessionStore& store, EventBus& bus)
     : store_(&store), bus_(&bus) {}
 
 Session& SessionManager::loadInto(const SessionHeader& header) {
-    auto session = std::make_unique<Session>(Session::resume(header, *store_, *bus_));
+    // Requires mutex_. 24-D13: one resident Session per id. Returning the
+    // resident object unchanged (rather than replacing it) keeps the strong
+    // session_owner_ an AgentLoop may already hold pointed at the same object.
+    if (const auto it = sessions_.find(header.id.value); it != sessions_.end()) {
+        return *it->second;
+    }
+    auto session = std::make_shared<Session>(Session::resume(header, *store_, *bus_));
     Session& reference = *session;
     sessions_[header.id.value] = std::move(session);
     return reference;
@@ -61,13 +66,13 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
 
     store_->create(header);
 
-    auto session = std::make_unique<Session>(Session::resume(header, *store_, *bus_));
-    session->append(payload::SessionStarted{
+    std::lock_guard<std::mutex> lock(mutex_);
+    Session& session = loadInto(header);
+    session.append(payload::SessionStarted{
         .model         = header.model,
         .serverProfile = header.serverProfile,
         .title         = header.title,
     });
-    sessions_[header.id.value] = std::move(session);
     return header.id;
 }
 
@@ -76,11 +81,14 @@ SessionId SessionManager::resumeSession(const SessionId& id) {
     if (!header.has_value()) {
         throw UnknownSession("unknown session: " + id.value);
     }
+    std::lock_guard<std::mutex> lock(mutex_);
     loadInto(*header);
     return id;
 }
 
 SessionId SessionManager::forkSession(const SessionId& parent, std::size_t seedLength) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     Session* parentSession = nullptr;
     if (const auto it = sessions_.find(parent.value); it != sessions_.end()) {
         parentSession = it->second.get();
@@ -94,7 +102,7 @@ SessionId SessionManager::forkSession(const SessionId& parent, std::size_t seedL
 
     Session child = Session::fork(*parentSession, seedLength, *store_, *bus_);
     const SessionId childId = child.id();
-    sessions_[childId.value] = std::make_unique<Session>(std::move(child));
+    sessions_[childId.value] = std::make_shared<Session>(std::move(child));
     return childId;
 }
 
@@ -103,13 +111,16 @@ SessionId SessionManager::replaySession(const SessionId& id) {
     if (!header.has_value()) {
         throw UnknownSession("unknown session: " + id.value);
     }
+    std::lock_guard<std::mutex> lock(mutex_);
     loadInto(*header);
     return id;
 }
 
 Sequence SessionManager::renameSession(const SessionId& id, std::string title) {
     const std::string normalized = normalize_title(title);
-    if (const auto it = sessions_.find(id.value); it == sessions_.end()) {
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sessions_.find(id.value) == sessions_.end()) {
         const auto header = store_->load(id);
         if (!header.has_value()) {
             throw UnknownSession("unknown session: " + id.value);
@@ -122,6 +133,7 @@ Sequence SessionManager::renameSession(const SessionId& id, std::string title) {
 
 std::optional<Sequence> SessionManager::maybeAutoName(const SessionId& id,
                                                       std::string_view firstUserText) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (sessions_.find(id.value) == sessions_.end()) {
         const auto header = store_->load(id);
         if (!header.has_value()) {
@@ -132,8 +144,29 @@ std::optional<Sequence> SessionManager::maybeAutoName(const SessionId& id,
     return session(id).appendAutoRename(firstUserText);
 }
 
+std::shared_ptr<Session> SessionManager::sessionPtr(const SessionId& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = sessions_.find(id.value);
+    if (it == sessions_.end()) {
+        throw UnknownSession("session is not loaded: " + id.value);
+    }
+    return it->second;
+}
+
 void SessionManager::closeSession(const SessionId& id) {
-    sessions_.erase(id.value);
+    // Park: erase the manager's owning reference. The erased `shared_ptr` is
+    // moved out under the lock so ~Session (if this was the last reference)
+    // runs after mutex_ is released.
+    std::shared_ptr<Session> erased;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = sessions_.find(id.value);
+        if (it == sessions_.end()) {
+            return;
+        }
+        erased = std::move(it->second);
+        sessions_.erase(it);
+    }
 }
 
 void SessionManager::deleteSession(const SessionId& id, bool only_if_empty) {
@@ -151,9 +184,23 @@ void SessionManager::deleteSession(const SessionId& id, bool only_if_empty) {
     typed.payload    = payload::SessionEnded{payload::SessionEndReason::Deleted};
     Event ended      = encode(typed);
 
-    store_->eraseWithEvent(id, ended);
-    sessions_.erase(id.value);
-    bus_->publish(ended);
+    const Sequence seq = store_->eraseWithEvent(id, ended);
+
+    // mutex_ is held across the erase + publish so a concurrent resumeSession
+    // cannot resurrect a deleted session (24-D11). The erased owning handle is
+    // moved out so ~Session runs after the lock is released. 24-D6: publish the
+    // terminal event as a committed record carrying the store sequence, so the
+    // forwarder sees it even though the row was erased in the same transaction.
+    std::shared_ptr<Session> erased;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = sessions_.find(id.value);
+        if (it != sessions_.end()) {
+            erased = std::move(it->second);
+            sessions_.erase(it);
+        }
+        bus_->publishCommitted(EventRecord{seq, ended});
+    }
 }
 
 std::vector<SessionId> SessionManager::list() const {
@@ -165,27 +212,13 @@ std::vector<SessionId> SessionManager::list() const {
 }
 
 Session& SessionManager::session(const SessionId& id) {
+    // Private: the caller holds mutex_ or a strong sessionPtr, so this raw map
+    // lookup cannot race a concurrent erase.
     const auto it = sessions_.find(id.value);
     if (it == sessions_.end()) {
         throw UnknownSession("session is not loaded: " + id.value);
     }
     return *it->second;
-}
-
-void SessionManager::setAgentLookup(AgentLookup lookup) {
-    agent_lookup_ = std::move(lookup);
-}
-
-Agent* SessionManager::findAgent(const SessionId& id) const {
-    return agent_lookup_ ? agent_lookup_(id) : nullptr;
-}
-
-Agent& SessionManager::agent(const SessionId& id) const {
-    Agent* found = findAgent(id);
-    if (found == nullptr) {
-        throw UnknownSession("no agent registered for session: " + id.value);
-    }
-    return *found;
 }
 
 } // namespace ymh

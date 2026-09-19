@@ -324,4 +324,72 @@ TEST(PermissionGate, DeniedCallIsNeverExecuted) {
     EXPECT_EQ(executions, 0);
 }
 
+// AL-U20/AL34/AL-F24: the decision hook captures `std::weak_ptr<Session>`, so
+// `emit_decision`'s copied hook appends while the session lives and is a no-op
+// (never a dangling `[this]` dereference) after it dies.
+TEST(PermissionGate, AL_U20_WeakSessionCaptureDoesNotDangle) {
+    PermissionConfig config;
+    config.rules.push_back(rule("read_file", "", PolicyVerdict::Allow, PolicyRule::Layer::Global));
+    RulePermissionPolicy policy(config);
+    PermissionGate      gate(policy, config);
+    ymh::test::TempWorkspace workspace("gate_weak");
+
+    auto store = std::make_shared<ymh::test::MemorySessionStore>();
+    EventBus bus;
+    SessionHeader header;
+    header.id            = make_session_id();
+    header.cwd           = workspace.path();
+    header.model         = "test-model";
+    header.serverProfile = "interactive";
+    store->create(header);
+    auto session = std::make_shared<Session>(header, *store, bus);
+
+    std::weak_ptr<Session> weak = session;
+    gate.set_decision_hook([weak](const payload::PermissionDecision& recorded) {
+        if (auto live = weak.lock()) {
+            live->append(recorded);
+        }
+    });
+
+    (void)gate.resolve(request_for(workspace.path(), "read_file"), {});
+    EXPECT_EQ(session->events().size(), 1u);
+
+    session.reset();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_NO_THROW((void)gate.resolve(request_for(workspace.path(), "read_file"), {}));
+}
+
+// AL-U21/AL34: concurrent hook set/clear and `emit_decision` are synchronized
+// by the gate's leaf `hook_mutex_` (run under TSan).
+TEST(PermissionGate, AL_U21_ConcurrentHookSetClearAndEmitAreRaceFree) {
+    PermissionConfig config;
+    config.rules.push_back(rule("read_file", "", PolicyVerdict::Allow, PolicyRule::Layer::Global));
+    RulePermissionPolicy policy(config);
+    PermissionGate      gate(policy, config);
+    ymh::test::TempWorkspace workspace("gate_tsan");
+    const PermissionRequest  request = request_for(workspace.path(), "read_file");
+
+    std::atomic<bool> stop{false};
+    std::thread       setter([&] {
+        while (!stop.load()) {
+            gate.set_decision_hook([](const payload::PermissionDecision&) {});
+            gate.set_decision_hook({});
+        }
+    });
+    std::thread attention([&] {
+        while (!stop.load()) {
+            gate.set_attention_hook([](const PermissionRequestId&, const PermissionRequest&) {});
+            gate.set_attention_hook({});
+        }
+    });
+
+    for (int i = 0; i < 200; ++i) {
+        (void)gate.resolve(request, {});
+    }
+
+    stop.store(true);
+    setter.join();
+    attention.join();
+}
+
 } // namespace

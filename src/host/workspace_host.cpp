@@ -36,7 +36,6 @@
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event.hpp"
-#include "ymh/core/logging.hpp"
 #include "ymh/execution/asio_executor.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/host/host_launcher.hpp"
@@ -636,15 +635,37 @@ HostExitCode WorkspaceHost::Impl::coordinator() {
         host_runtime_->setState(protocol::HostState::Draining);
     }
 
+    // 24-D3 §4 (amends 16 §4.3): finalize before join. Flush client outbound
+    // queues, then cancel every in-flight turn + park + close each resident
+    // session, then deny pending permissions so no worker is left blocked on
+    // the broker. Only then join (AL13): a worker waiting on a permission
+    // future must be woken first or the join deadlocks.
     if (protocol_ != nullptr) {
         protocol_->waitForDrain(config_.shutdown_grace);
     }
-    if (turns_ != nullptr) {
-        turns_->drain(config_.shutdown_grace);
+    if (runtime_ != nullptr) {
+        runtime_->agents().finalizeAll();
+    }
+    if (broker_ != nullptr) {
+        broker_->denyAll("shutdown");
     }
 
+    if (turns_ != nullptr) {
+        const TurnExecutor::DrainResult result = turns_->drain(config_.shutdown_grace);
+        if (result == TurnExecutor::DrainResult::TimedOut) {
+            // AL11: a worker could not be joined within the grace. Destructors
+            // must not run over live worker state; best-effort socket unlink
+            // then hard-exit, matching 16 §5.1's watchdog.
+            unlinkSocketIfOwned();
+            std::_Exit(static_cast<int>(HostExitCode::Internal));
+        }
+    }
+
+    // Quiesced: the ordered teardown below is now destructor-safe. Children
+    // (PTY sessions, MCP servers) are torn down before the transport socket
+    // stops so none outlives it (24-D9/AL28).
     if (runtime_ != nullptr) {
-        runtime_->environment().pty().closeAll();
+        runtime_->shutdownChildren(config_.shutdown_grace);
     }
 
     // 16 §4.3 step 7 (N2-L3/N3-M1): stop and UNCONDITIONALLY join the watchdog
@@ -715,6 +736,12 @@ void WorkspaceHost::Impl::cleanupStartupFailure() {
     protocol_.reset();
     host_runtime_.reset();
     broker_.reset();
+    // 24-D3/AL10: ~TurnExecutor hard-exits on a non-quiesced state, so every
+    // teardown path must drain first. Startup never submitted a body, so this
+    // joins the idle workers immediately.
+    if (turns_ != nullptr) {
+        (void)turns_->drain(config_.shutdown_grace);
+    }
     turns_.reset();
     permission_adapter_.reset();
     registry_.reset();

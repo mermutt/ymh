@@ -37,9 +37,11 @@ ContentBlock tool_use_block(const ToolCallAssembled& call) {
 
 } // namespace
 
-AgentLoop::AgentLoop(AgentId id, Session& session, AgentServices services, AgentConfig config)
+AgentLoop::AgentLoop(AgentId id, std::shared_ptr<Session> session, AgentServices services,
+                     AgentConfig config)
     : id_(std::move(id)),
-      session_(session),
+      session_owner_(std::move(session)),
+      session_(*session_owner_),
       services_(std::move(services)),
       config_(std::move(config)) {}
 
@@ -80,7 +82,7 @@ bool AgentLoop::disposed() const noexcept {
     return disposed_;
 }
 
-bool AgentLoop::hasTurnTrigger() const noexcept {
+bool AgentLoop::hasTurnTriggerLocked() const noexcept {
     for (const InboxItem& item : inbox_) {
         if (item.kind == InboxKind::Send || item.kind == InboxKind::FollowUp ||
             item.kind == InboxKind::Steer || item.kind == InboxKind::Compact) {
@@ -91,6 +93,11 @@ bool AgentLoop::hasTurnTrigger() const noexcept {
         }
     }
     return pending_maintenance_failure_;
+}
+
+bool AgentLoop::hasTurnTrigger() const noexcept {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    return hasTurnTriggerLocked();
 }
 
 bool AgentLoop::hasPendingWork() const noexcept {
@@ -130,16 +137,19 @@ InboxResult AgentLoop::inject(ContextMessage context) {
 }
 
 InboxResult AgentLoop::enqueue(InboxItem item) {
-    if (disposed_) {
-        return InboxResult::AgentDisposed;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (disposed_) {
+            return InboxResult::AgentDisposed;
+        }
+        if (inbox_.size() >= config_.max_inbox) {
+            return InboxResult::InboxFull;
+        }
+        if (state_ == AgentState::Error) {
+            state_ = AgentState::Idle;
+        }
+        inbox_.push_back(std::move(item));
     }
-    if (inbox_.size() >= config_.max_inbox) {
-        return InboxResult::InboxFull;
-    }
-    if (state_ == AgentState::Error) {
-        state_ = AgentState::Idle;
-    }
-    inbox_.push_back(std::move(item));
     if (!running_) {
         activate();
     }
@@ -147,13 +157,23 @@ InboxResult AgentLoop::enqueue(InboxItem item) {
 }
 
 void AgentLoop::activate() {
-    if (disposed_ || running_) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (disposed_ || running_) {
+            return;
+        }
+        running_ = true;
     }
-    running_ = true;
     while (!disposed_ && hasTurnTrigger()) {
-        if (pending_maintenance_failure_) {
-            pending_maintenance_failure_ = false;
+        bool maintenance = false;
+        {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            maintenance = pending_maintenance_failure_;
+            if (maintenance) {
+                pending_maintenance_failure_ = false;
+            }
+        }
+        if (maintenance) {
             const TurnId turn = session_.nextTurnId();
             session_.append(payload::TurnStarted{turn, payload::TurnOrigin::Maintenance});
             appendTurnFailed(turn, AgentErrorCode::InboxFull,
@@ -176,6 +196,7 @@ void AgentLoop::cancel() {
     if (disposed_ || !turnInFlight() || state_ == AgentState::Cancelling) {
         return;
     }
+    std::lock_guard<std::mutex> lock(control_mutex_);
     cancel_reason_ = "user";
     state_        = AgentState::Cancelling;
     turn_cancel_.cancel();
@@ -185,6 +206,7 @@ void AgentLoop::suspend() {
     if (disposed_ || !turnInFlight() || state_ == AgentState::Cancelling) {
         return;
     }
+    std::lock_guard<std::mutex> lock(control_mutex_);
     cancel_reason_ = "superseded";
     state_        = AgentState::Cancelling;
     turn_cancel_.cancel();
@@ -194,11 +216,21 @@ std::expected<CompactionOutcome, AgentError> AgentLoop::requestCompaction() {
     if (disposed_) {
         return std::unexpected(AgentError{AgentErrorCode::AgentDisposed, "agent disposed"});
     }
-    if (inbox_.size() >= config_.max_inbox) {
-        pending_maintenance_failure_ = true;
+    bool inbox_full = false;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        inbox_full = inbox_.size() >= config_.max_inbox;
+        if (inbox_full) {
+            pending_maintenance_failure_ = true;
+        }
+    }
+    if (inbox_full) {
         if (!running_) {
-            if (state_ == AgentState::Error) {
-                state_ = AgentState::Idle;
+            {
+                std::lock_guard<std::mutex> lock(control_mutex_);
+                if (state_ == AgentState::Error) {
+                    state_ = AgentState::Idle;
+                }
             }
             activate();
         }
@@ -214,10 +246,16 @@ std::expected<CompactionOutcome, AgentError> AgentLoop::requestCompaction() {
     if (queued == InboxResult::AgentDisposed) {
         return std::unexpected(AgentError{AgentErrorCode::AgentDisposed, "agent disposed"});
     }
-    pending_maintenance_failure_ = true;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        pending_maintenance_failure_ = true;
+    }
     if (!running_) {
-        if (state_ == AgentState::Error) {
-            state_ = AgentState::Idle;
+        {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            if (state_ == AgentState::Error) {
+                state_ = AgentState::Idle;
+            }
         }
         activate();
     }
@@ -225,17 +263,19 @@ std::expected<CompactionOutcome, AgentError> AgentLoop::requestCompaction() {
 }
 
 void AgentLoop::dispose() {
-    if (disposed_) {
+    if (disposed_.exchange(true)) {
         return;
     }
-    disposed_ = true;
-    if (turnInFlight()) {
-        cancel_reason_ = "user";
-        state_        = AgentState::Cancelling;
-        turn_cancel_.cancel();
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (turnInFlight()) {
+            cancel_reason_ = "user";
+            state_        = AgentState::Cancelling;
+            turn_cancel_.cancel();
+        }
+        inbox_.clear();
+        pending_maintenance_failure_ = false;
     }
-    inbox_.clear();
-    pending_maintenance_failure_ = false;
     state_   = AgentState::Idle;
     running_ = false;
     flushIdleCallbacks();
@@ -245,19 +285,30 @@ void AgentLoop::whenIdle(std::function<void()> callback) {
     if (!callback) {
         return;
     }
-    if (!running_ && !hasPendingWork()) {
-        callback();
-        return;
+    bool run_now = false;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (!running_ && !hasTurnTriggerLocked() && !turnInFlight()) {
+            run_now = true;
+        } else {
+            idle_callbacks_.push_back(std::move(callback));
+        }
     }
-    idle_callbacks_.push_back(std::move(callback));
+    if (run_now) {
+        callback();
+    }
 }
 
 void AgentLoop::flushIdleCallbacks() {
-    if (running_ || hasPendingWork()) {
-        return;
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (running_ || hasTurnTriggerLocked() || turnInFlight()) {
+            return;
+        }
+        callbacks = std::move(idle_callbacks_);
+        idle_callbacks_.clear();
     }
-    std::vector<std::function<void()>> callbacks = std::move(idle_callbacks_);
-    idle_callbacks_.clear();
     for (auto& callback : callbacks) {
         callback();
     }
@@ -297,9 +348,14 @@ void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string m
 }
 
 CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages, TurnId turn) {
+    CancellationToken turnToken;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        turnToken = turn_cancel_.token();
+    }
     if (services_.context_compactor != nullptr) {
         CompactionResult result =
-            services_.context_compactor->compact(session_, messages, turn_cancel_.token());
+            services_.context_compactor->compact(session_, messages, turnToken);
         if (result.outcome == CompactionOutcome::Compacted && result.compaction.has_value()) {
             session_.append(*result.compaction);
             ++compactions_this_turn_;
@@ -311,7 +367,7 @@ CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages,
     }
     if (services_.compactor != nullptr) {
         std::optional<payload::ContextCompaction> compaction =
-            services_.compactor->run(session_, messages, turn_cancel_.token());
+            services_.compactor->run(session_, messages, turnToken);
         if (compaction.has_value()) {
             session_.append(*compaction);
             ++compactions_this_turn_;
@@ -333,21 +389,37 @@ LLMRequest AgentLoop::buildRequest(const std::vector<Message>& messages) const {
 }
 
 void AgentLoop::drainFoldedItems() {
-    while (!inbox_.empty()) {
-        InboxItem& item = inbox_.front();
+    std::vector<InboxItem> folded;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        while (!inbox_.empty()) {
+            InboxItem& item = inbox_.front();
+            if (item.kind == InboxKind::Steer) {
+                folded.push_back(std::move(item));
+                inbox_.pop_front();
+            } else if (item.kind == InboxKind::Inject && !item.context.startsTurn) {
+                folded.push_back(std::move(item));
+                inbox_.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+    for (InboxItem& item : folded) {
         if (item.kind == InboxKind::Steer) {
             appendUserMessage(item.message);
-            inbox_.pop_front();
-        } else if (item.kind == InboxKind::Inject && !item.context.startsTurn) {
-            appendContextInjected(item.context);
-            inbox_.pop_front();
         } else {
-            break;
+            appendContextInjected(item.context);
         }
     }
 }
 
 bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn, StepId step) {
+    CancellationToken turnToken;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        turnToken = turn_cancel_.token();
+    }
     payload::ToolCall call;
     call.id          = assembled.id;
     call.turn        = turn;
@@ -378,10 +450,19 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
     std::string                     reason;
 
     if (services_.gate != nullptr) {
+        std::weak_ptr<Session> weak = session_owner_;
         services_.gate->set_decision_hook(
-            [this](const payload::PermissionDecision& recorded) { session_.append(recorded); });
+            [weak](const payload::PermissionDecision& recorded) {
+                if (auto session = weak.lock()) {
+                    session->append(recorded);
+                }
+            });
+        struct HookClear {
+            PermissionGate* gate;
+            ~HookClear() { gate->set_decision_hook({}); }
+        } clear{services_.gate};
         state_ = AgentState::WaitingForPermission;
-        const PermissionOutcome outcome = services_.gate->resolve(request, turn_cancel_.token());
+        const PermissionOutcome outcome = services_.gate->resolve(request, turnToken);
         decision = outcome.decision;
         reason   = outcome.reason;
         state_   = AgentState::CallingTool;
@@ -397,7 +478,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
             state_ = AgentState::WaitingForPermission;
             if (services_.permission_resolver) {
                 const PermissionOutcome outcome =
-                    services_.permission_resolver(request, turn_cancel_.token());
+                    services_.permission_resolver(request, turnToken);
                 decision = outcome.decision;
                 reason   = outcome.reason;
             } else {
@@ -446,7 +527,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
     }
 
     StaticPermissionHandle handle(decision);
-    ToolContext context(*services_.execution, session_, *services_.logger, turn_cancel_.token(),
+    ToolContext context(*services_.execution, session_, *services_.logger, turnToken,
                         *services_.governor, *services_.output, handle, call.id, turn, step);
     try {
         result = services_.tools->execute(call, context).get();
@@ -463,8 +544,11 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
 
 void AgentLoop::runMaintenanceTurn(TurnId turn) {
     session_.append(payload::TurnStarted{turn, payload::TurnOrigin::Maintenance});
-    turn_cancel_ = CancellationSource{};
-    cancel_reason_ = "user";
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        turn_cancel_   = CancellationSource{};
+        cancel_reason_ = "user";
+    }
     compactions_this_turn_ = 0;
 
     const StepId step = session_.nextStepId();
@@ -485,7 +569,11 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
 
     const CompactionOutcome outcome = runCompaction(messages, turn);
     if (outcome == CompactionOutcome::Cancelled) {
-        const std::string reason = cancel_reason_.empty() ? std::string{"user"} : cancel_reason_;
+        std::string reason;
+        {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            reason = cancel_reason_.empty() ? std::string{"user"} : cancel_reason_;
+        }
         session_.append(payload::TurnCancelled{turn, reason});
         state_ = AgentState::Idle;
         return;
@@ -500,17 +588,16 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
 }
 
 void AgentLoop::runTurn() {
-    while (!inbox_.empty() && inbox_.front().kind == InboxKind::Inject &&
-           !inbox_.front().context.startsTurn) {
-        appendContextInjected(inbox_.front().context);
+    drainFoldedItems();
+    InboxItem trigger;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (inbox_.empty()) {
+            return;
+        }
+        trigger = std::move(inbox_.front());
         inbox_.pop_front();
     }
-    if (inbox_.empty()) {
-        return;
-    }
-
-    InboxItem trigger = std::move(inbox_.front());
-    inbox_.pop_front();
 
     const TurnId turn = session_.nextTurnId();
     if (trigger.kind == InboxKind::Compact) {
@@ -524,8 +611,13 @@ void AgentLoop::runTurn() {
     }
     session_.append(payload::TurnStarted{turn, trigger.origin});
 
-    turn_cancel_ = CancellationSource{};
-    cancel_reason_ = "user";
+    CancellationToken turnToken;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        turn_cancel_   = CancellationSource{};
+        cancel_reason_ = "user";
+        turnToken      = turn_cancel_.token();
+    }
     compactions_this_turn_ = 0;
 
     const auto compaction_available = [&]() -> bool {
@@ -610,14 +702,14 @@ void AgentLoop::runTurn() {
         for (int attempt = 0; attempt < 2; ++attempt) {
             if (services_.pool != nullptr) {
                 std::optional<LLMPool::Slot> slot =
-                    services_.pool->acquire(turn_cancel_.token()).get();
+                    services_.pool->acquire(turnToken).get();
                 if (!slot.has_value()) {
                     slotCancelled = true;
                     break;
                 }
             }
             try {
-                response = services_.provider->stream(request, sink, turn_cancel_.token()).get();
+                response = services_.provider->stream(request, sink, turnToken).get();
             } catch (const std::exception& error) {
                 response              = LLMResponse{};
                 response.outcome      = StreamOutcome::Failed;
@@ -682,7 +774,11 @@ void AgentLoop::runTurn() {
         assistant.usage = usage;
         session_.append(assistant);
 
-        const std::string cancelReason = cancel_reason_.empty() ? std::string{"user"} : cancel_reason_;
+        std::string cancelReason;
+        {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            cancelReason = cancel_reason_.empty() ? std::string{"user"} : cancel_reason_;
+        }
 
         if (response.outcome == StreamOutcome::Cancelled) {
             session_.append(payload::TurnCancelled{turn, cancelReason});
@@ -709,7 +805,7 @@ void AgentLoop::runTurn() {
 
         state_ = AgentState::CallingTool;
         for (const ToolCallAssembled& call : response.tool_calls) {
-            if (turn_cancel_.cancelled()) {
+            if (turnToken.cancelled()) {
                 break;
             }
             executeToolCall(call, turn, step);
@@ -720,7 +816,7 @@ void AgentLoop::runTurn() {
         }
         session_.append(payload::StepEnded{turn, step});
 
-        if (turn_cancel_.cancelled()) {
+        if (turnToken.cancelled()) {
             session_.append(payload::TurnCancelled{turn, cancelReason});
             state_ = AgentState::Idle;
             return;

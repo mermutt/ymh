@@ -429,4 +429,47 @@ TEST(PermissionBroker, DestructorResolvesPendingFailClosed) {
     EXPECT_EQ(future.get().decision, payload::PermissionDecisionKind::Deny);
 }
 
+// AL-I6/AL13/AL-F6: `denyAll` is the coordinator's wake-before-join seam. It
+// resolves every pending Ask with the given reason and is idempotent; the old
+// broker could only do this in its destructor, after the join had deadlocked.
+TEST(PermissionBroker, DenyAllResolvesEveryPendingRequest) {
+    Fixture                        fixture;
+    std::future<PermissionOutcome> first  = fixture.broker.resolve(ask_request("s1"), {});
+    std::future<PermissionOutcome> second = fixture.broker.resolve(ask_request("s2"), {});
+    ASSERT_EQ(first.wait_for(0ms), std::future_status::timeout);
+    ASSERT_EQ(second.wait_for(0ms), std::future_status::timeout);
+    ASSERT_EQ(fixture.broker.pendingCount(), 2u);
+
+    fixture.broker.denyAll("shutdown");
+
+    ASSERT_EQ(first.wait_for(0ms), std::future_status::ready);
+    ASSERT_EQ(second.wait_for(0ms), std::future_status::ready);
+    const PermissionOutcome one = first.get();
+    const PermissionOutcome two = second.get();
+    EXPECT_EQ(one.decision, payload::PermissionDecisionKind::Deny);
+    EXPECT_EQ(one.reason, "shutdown");
+    EXPECT_EQ(two.decision, payload::PermissionDecisionKind::Deny);
+    EXPECT_EQ(two.reason, "shutdown");
+    EXPECT_EQ(fixture.broker.pendingCount(), 0u);
+
+    fixture.broker.denyAll("shutdown");
+    EXPECT_EQ(fixture.broker.pendingCount(), 0u);
+}
+
+// AL-F6/24-D16: the deny latch is persistent, so a worker that reaches
+// `resolve` after `denyAll` cleared the pending set is denied immediately
+// instead of pushing a Pending that could only expire to TimedOut.
+TEST(PermissionBroker, ResolveAfterDenyAllIsDeniedByPersistentLatch) {
+    Fixture fixture;
+    fixture.broker.denyAll("shutdown");
+
+    std::future<PermissionOutcome> future = fixture.broker.resolve(ask_request(), {});
+    ASSERT_EQ(future.wait_for(0ms), std::future_status::ready);
+    const PermissionOutcome outcome = future.get();
+    EXPECT_EQ(outcome.decision, payload::PermissionDecisionKind::Deny);
+    EXPECT_EQ(outcome.reason, "shutdown");
+    EXPECT_EQ(fixture.broker.pendingCount(), 0u);
+    EXPECT_EQ(fixture.transport.broadcastCount(), 0u);
+}
+
 } // namespace

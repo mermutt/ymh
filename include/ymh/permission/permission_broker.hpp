@@ -91,6 +91,13 @@ public:
 
     [[nodiscard]] std::size_t pendingCount() const noexcept;
 
+    // 24-D3/AL13: resolve every still-pending Ask with `Deny{reason}` and mark
+    // it resolved. The coordinator calls this on the coordinator thread BEFORE
+    // `TurnExecutor::drain`, so a worker blocked in `resolve` -> `future.get()`
+    // is woken rather than deadlocking the join. Idempotent. `~PermissionBroker`
+    // delegates here with "shutdown" (its historical backstop behavior).
+    void denyAll(std::string reason);
+
     void set_subscriber_count(SubscriberCount count);
 
 private:

@@ -521,12 +521,14 @@ TEST(CompactionLoopTest, ThresholdPathCompactsAndAttributesUsage) {
     AgentEnv env("compaction_threshold", std::make_unique<FakeLLM>(script), AgentConfig{},
                  allow_all_permission_config(), {}, false, 4, nullptr, false, policy);
 
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     ASSERT_EQ(agent.send(user_message("one")), InboxResult::Accepted);
     ASSERT_EQ(agent.send(user_message("two")), InboxResult::Accepted);
     ASSERT_EQ(agent.send(user_message("three")), InboxResult::Accepted);
 
-    Session&         session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const EventRange events  = session.events();
     EXPECT_EQ(count_type(events, EventType::ContextCompaction), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 3u);
@@ -567,12 +569,14 @@ TEST(CompactionLoopTest, ManualCompactionRunsMaintenanceTurn) {
     AgentEnv env("compaction_manual", std::make_unique<FakeLLM>(script), AgentConfig{},
                  allow_all_permission_config(), {}, false, 4, nullptr, false, policy);
 
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     ASSERT_EQ(agent.send(user_message("one")), InboxResult::Accepted);
     ASSERT_EQ(agent.send(user_message("two")), InboxResult::Accepted);
     ASSERT_EQ(agent.send(user_message("three")), InboxResult::Accepted);
 
-    Session&         session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const SessionId  id      = session.id();
     const EventRange before  = session.events();
     EXPECT_EQ(count_type(before, EventType::ContextCompaction), 0u);
@@ -618,9 +622,11 @@ TEST(CompactionLoopTest, ManualCompactionWithNothingToCompactEndsTurn) {
 
     AgentEnv env("compaction_none", std::make_unique<FakeLLM>(FakeScript{}), AgentConfig{},
                  allow_all_permission_config(), {}, false, 4, nullptr, false, policy);
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
-    Session&        session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const std::expected<CompactionOutcome, AgentError> queued =
         env.registry.requestCompaction(session.id());
     ASSERT_TRUE(queued.has_value());
@@ -642,7 +648,8 @@ TEST(CompactionLoopTest, FullInboxRejectionEmitsDeferredFailureTurn) {
 
     AgentEnv env("compaction_inbox_full", std::make_unique<FakeLLM>(FakeScript{}), AgentConfig{},
                  allow_all_permission_config(), {}, false, 4, nullptr, false, policy);
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     ContextMessage inject;
     inject.role       = Role::System;
@@ -653,7 +660,8 @@ TEST(CompactionLoopTest, FullInboxRejectionEmitsDeferredFailureTurn) {
     }
     EXPECT_FALSE(agent.hasPendingWork());
 
-    Session& session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const std::expected<CompactionOutcome, AgentError> rejected =
         env.registry.requestCompaction(session.id());
     ASSERT_FALSE(rejected.has_value());
@@ -678,8 +686,10 @@ TEST(CompactionLoopTest, RequestAfterDisposeAppendsNothing) {
 
     AgentEnv env("compaction_disposed", std::make_unique<FakeLLM>(FakeScript{}), AgentConfig{},
                  allow_all_permission_config(), {}, false, 4, nullptr, false, policy);
-    Agent& agent = env.createAgent();
-    Session& session = env.sessionOf(agent);
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const std::size_t before = session.events().size();
 
     agent.dispose();

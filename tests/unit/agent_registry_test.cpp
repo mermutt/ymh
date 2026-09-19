@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include "ymh/agent/subagent.hpp"
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/registry/registry.hpp"
+#include "ymh/session/errors.hpp"
 #include "ymh/session/session_persistence.hpp"
 
 namespace {
@@ -132,15 +134,17 @@ struct DurableAgentEnv {
                                        AgentServices::PermissionResolver{}, nullptr, nullptr),
                    AgentConfig{}) {}
 
-    Agent& createAgent() {
+    std::shared_ptr<AgentLoop> createAgent() {
         const std::expected<AgentId, AgentError> created = registry.create(workspace_options(workspace));
         if (!created.has_value()) {
             throw std::runtime_error("create failed: " + created.error().detail);
         }
-        return registry.get(*created);
+        return registry.getShared(*created);
     }
 
-    Session& sessionOf(const Agent& agent) { return sessions.session(agent.session()); }
+    std::shared_ptr<Session> sessionOf(const Agent& agent) {
+        return sessions.sessionPtr(agent.session());
+    }
 
     static PersistenceConfig persistence_config(const std::filesystem::path& root) {
         PersistenceConfig config;
@@ -173,37 +177,41 @@ struct DurableAgentEnv {
 
 TEST(AgentRegistry, CreateIsIdleAndStartsNoTurn) {
     AgentEnv env("registry_create", std::make_unique<FakeLLM>(script_of({text_step("never")})));
-    Agent&   agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     EXPECT_EQ(agent.state(), AgentState::Idle);
     EXPECT_EQ(agent.status(), AgentStatus::Idle);
     EXPECT_FALSE(agent.hasPendingWork());
-    EXPECT_EQ(count_type(env.sessionOf(agent).events(), EventType::TurnStarted), 0u);
+    EXPECT_EQ(count_type(env.sessionOf(agent)->events(), EventType::TurnStarted), 0u);
     EXPECT_EQ(env.registry.activeCount(), 0u);
 }
 
 TEST(AgentRegistry, ResumeIsIdleAndDoesNotAutoContinue) {
     AgentEnv env("registry_resume", std::make_unique<FakeLLM>(script_of({text_step("first")})));
-    Agent&   agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     const SessionId sessionId = agent.session();
     const AgentId   agentId   = agent.id();
     ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
-    const std::size_t before = env.sessionOf(agent).events().size();
+    const std::size_t before = env.sessionOf(agent)->events().size();
 
     env.registry.dispose(agentId);
     const std::expected<AgentId, AgentError> resumed = env.registry.resume(sessionId);
     ASSERT_TRUE(resumed.has_value());
 
-    Agent& resumedAgent = env.registry.get(*resumed);
+    auto   resumed_owner = env.registry.getShared(*resumed);
+    Agent& resumedAgent  = *resumed_owner;
     EXPECT_EQ(resumedAgent.state(), AgentState::Idle);
     EXPECT_FALSE(resumedAgent.hasPendingWork());
-    EXPECT_EQ(env.sessions.session(sessionId).events().size(), before);
+    EXPECT_EQ(env.sessions.sessionPtr(sessionId)->events().size(), before);
 }
 
 TEST(AgentRegistry, ResumeIsIdempotent) {
     AgentEnv env("registry_idem", std::make_unique<FakeLLM>(script_of({text_step("x")})));
-    Agent&   agent     = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     const SessionId sessionId = agent.session();
 
     const std::expected<AgentId, AgentError> first  = env.registry.resume(sessionId);
@@ -225,7 +233,8 @@ TEST(AgentRegistry, OpenTurnAtResumeIsNotAutoContinued) {
     AgentEnv env("registry_open_turn", std::make_unique<FakeLLM>(script_of({text_step("never")})));
 
     const SessionId sessionId = env.sessions.createSession(workspace_options(env.workspace));
-    Session&        session   = env.sessions.session(sessionId);
+    auto            session_owner = env.sessions.sessionPtr(sessionId);
+    Session&        session       = *session_owner;
     session.append(payload::TurnStarted{1, payload::TurnOrigin::User});
     session.append(payload::StepStarted{1, 1});
     session.append(payload::UserMessage{"u1", {}});
@@ -234,51 +243,43 @@ TEST(AgentRegistry, OpenTurnAtResumeIsNotAutoContinued) {
 
     const std::expected<AgentId, AgentError> resumed = env.registry.resume(sessionId);
     ASSERT_TRUE(resumed.has_value());
-    Agent& resumedAgent = env.registry.get(*resumed);
+    auto   resumed_owner = env.registry.getShared(*resumed);
+    Agent& resumedAgent  = *resumed_owner;
     EXPECT_EQ(resumedAgent.state(), AgentState::Idle);
-    EXPECT_EQ(env.sessions.session(sessionId).events().size(), before);
-}
-
-TEST(AgentRegistry, SessionManagerAgentDelegatesToRegistry) {
-    AgentEnv env("registry_delegate", std::make_unique<FakeLLM>(script_of({text_step("x")})));
-    Agent&   agent     = env.createAgent();
-    const SessionId sessionId = agent.session();
-
-    EXPECT_EQ(env.sessions.findAgent(sessionId), &agent);
-    EXPECT_EQ(&env.sessions.agent(sessionId), &agent);
-
-    env.registry.dispose(agent.id());
-    EXPECT_EQ(env.sessions.findAgent(sessionId), nullptr);
-    EXPECT_THROW(env.sessions.agent(sessionId), UnknownSession);
+    EXPECT_EQ(env.sessions.sessionPtr(sessionId)->events().size(), before);
 }
 
 TEST(AgentRegistry, ActivateSessionIsIdempotentAndNeverFocusGated) {
     AgentEnv env("registry_activate", std::make_unique<FakeLLM>(script_of({text_step("x")})));
-    Agent&   first  = env.createAgent();
-    Agent&   second = env.createAgent();
+    auto first_owner = env.createAgent();
+    Agent& first = *first_owner;
+    auto second_owner = env.createAgent();
+    Agent& second = *second_owner;
 
     env.registry.activateSession(first.session());
     env.registry.activateSession(first.session());
     env.registry.activateSession(second.session());
     env.registry.activateSession(SessionId{"missing"});
 
-    EXPECT_EQ(count_type(env.sessionOf(first).events(), EventType::TurnStarted), 0u);
-    EXPECT_EQ(count_type(env.sessionOf(second).events(), EventType::TurnStarted), 0u);
+    EXPECT_EQ(count_type(env.sessionOf(first)->events(), EventType::TurnStarted), 0u);
+    EXPECT_EQ(count_type(env.sessionOf(second)->events(), EventType::TurnStarted), 0u);
     EXPECT_EQ(env.registry.activeCount(), 0u);
     EXPECT_EQ(first.state(), AgentState::Idle);
     EXPECT_EQ(second.state(), AgentState::Idle);
 }
 
 TEST(AgentRegistry, SubagentSpawnAndFanInRecordEdges) {    AgentEnv env("registry_subagent", std::make_unique<FakeLLM>(script_of({text_step("child done")})));
-    Agent&   parent = env.createAgent();
+    auto parent_owner = env.createAgent();
+    Agent& parent = *parent_owner;
 
-    SubagentRunner runner(env.registry, env.sessions, env.sessionOf(parent),
+    auto parent_session = env.sessionOf(parent);
+    SubagentRunner runner(env.registry, env.sessions, *parent_session,
                           workspace_options(env.workspace));
     std::string    summary;
     const payload::SubagentOutcome outcome = runner.run("do the task", summary);
 
     EXPECT_EQ(outcome, payload::SubagentOutcome::Completed);
-    const EventRange events = env.sessionOf(parent).events();
+    const EventRange events = env.sessionOf(parent)->events();
     EXPECT_EQ(count_type(events, EventType::SubagentSpawned), 1u);
     EXPECT_EQ(count_type(events, EventType::SubagentFanIn), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 0u);
@@ -290,7 +291,8 @@ TEST(AgentRegistry, SubagentSpawnAndFanInRecordEdges) {    AgentEnv env("registr
 TEST(AgentRegistry, SL_U10_U11_SubagentKindAndParentArePersisted) {
     AgentEnv env("registry_subagent_kind",
                  std::make_unique<FakeLLM>(script_of({text_step("child done")})));
-    Agent&         parent   = env.createAgent();
+    auto parent_owner = env.createAgent();
+    Agent& parent = *parent_owner;
     const SessionId parentId = parent.session();
 
     const std::optional<SessionHeader> parentHeader = env.store.load(parentId);
@@ -298,13 +300,14 @@ TEST(AgentRegistry, SL_U10_U11_SubagentKindAndParentArePersisted) {
     EXPECT_EQ(parentHeader->kind, SessionKind::Root);
     EXPECT_FALSE(parentHeader->parentSession.has_value());
 
-    SubagentRunner runner(env.registry, env.sessions, env.sessionOf(parent),
+    auto parent_session = env.sessionOf(parent);
+    SubagentRunner runner(env.registry, env.sessions, *parent_session,
                           workspace_options(env.workspace));
     std::string    summary;
     ASSERT_EQ(runner.run("do the task", summary), payload::SubagentOutcome::Completed);
 
     std::optional<SessionId> childId;
-    for (const EventRecord& record : env.sessionOf(parent).events()) {
+    for (const EventRecord& record : env.sessionOf(parent)->events()) {
         if (record.event.type == EventType::SubagentSpawned) {
             childId = record.event.payload.get<payload::SubagentSpawned>().subagent;
         }
@@ -331,16 +334,18 @@ TEST(AgentRegistry, SL_U10_U11_SubagentKindAndParentArePersisted) {
 TEST(AgentRegistry, SL_U11_SubagentDurableRowKindParentAndZeroJunctions) {
     DurableAgentEnv env("registry_subagent_durable",
                         std::make_unique<FakeLLM>(script_of({text_step("child done")})));
-    Agent&          parent   = env.createAgent();
+    auto parent_owner = env.createAgent();
+    Agent& parent = *parent_owner;
     const SessionId parentId = parent.session();
 
-    SubagentRunner runner(env.registry, env.sessions, env.sessionOf(parent),
+    auto parent_session = env.sessionOf(parent);
+    SubagentRunner runner(env.registry, env.sessions, *parent_session,
                           workspace_options(env.workspace));
     std::string    summary;
     ASSERT_EQ(runner.run("do the task", summary), payload::SubagentOutcome::Completed);
 
     std::optional<SessionId> childId;
-    for (const EventRecord& record : env.sessionOf(parent).events()) {
+    for (const EventRecord& record : env.sessionOf(parent)->events()) {
         if (record.event.type == EventType::SubagentSpawned) {
             childId = record.event.payload.get<payload::SubagentSpawned>().subagent;
         }
@@ -398,7 +403,8 @@ TEST(AgentRegistry, ActivateSessionDoesNotCancelAnInFlightTurn) {
     auto         owner = std::make_unique<BlockingLLM>();
     BlockingLLM* provider = owner.get();
     AgentEnv     env("registry_no_cancel", std::move(owner));
-    Agent&       agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     const SessionId sessionId = agent.session();
 
     std::thread turn([&agent] { (void)agent.send(user_message("hi")); });
@@ -415,13 +421,131 @@ TEST(AgentRegistry, ActivateSessionDoesNotCancelAnInFlightTurn) {
     turn.join();
 
     EXPECT_EQ(agent.state(), AgentState::Idle);
-    EXPECT_EQ(count_type(env.sessionOf(agent).events(), EventType::TurnEnded), 1u);
+    EXPECT_EQ(count_type(env.sessionOf(agent)->events(), EventType::TurnEnded), 1u);
     EXPECT_FALSE(env.registry.hasPendingWork(sessionId));
 }
 
 TEST(AgentRegistry, HasPendingWorkIsFalseForUnknownSession) {
     AgentEnv env("registry_pending_unknown", std::make_unique<FakeLLM>(script_of({text_step("x")})));
     EXPECT_FALSE(env.registry.hasPendingWork(SessionId{"missing"}));
+}
+
+// AL-U19/AL-U13/AL-F22: findShared yields a strong handle that survives
+// finalizeAll erasing the map entry; the held agent (and, through its
+// session_owner_, its Session) stays alive until the caller drops it.
+TEST(AgentRegistry, AL_U19_HeldHandleSurvivesFinalizeAll) {
+    AgentEnv env("registry_finalize_hold",
+                 std::make_unique<FakeLLM>(script_of({text_step("x")})));
+    std::shared_ptr<AgentLoop> held = env.createAgent();
+    ASSERT_NE(held, nullptr);
+    const SessionId         session      = held->session();
+    std::shared_ptr<Session> held_session = env.sessionOf(*held);
+    ASSERT_NE(held_session, nullptr);
+    std::weak_ptr<AgentLoop> weak_agent   = held;
+    std::weak_ptr<Session>   weak_session = held_session;
+
+    env.registry.finalizeAll();
+
+    EXPECT_EQ(env.registry.findShared(session), nullptr);
+    EXPECT_EQ(env.registry.getShared(held->id()), nullptr);
+    EXPECT_TRUE(held->disposed());
+    EXPECT_FALSE(weak_agent.expired());
+    EXPECT_FALSE(weak_session.expired());
+    EXPECT_THROW((void)env.sessions.sessionPtr(session), UnknownSession);
+
+    held.reset();
+    held_session.reset();
+    EXPECT_TRUE(weak_agent.expired());
+    EXPECT_TRUE(weak_session.expired());
+}
+
+// AL15/24-D7: finalizeAll() runs on the coordinator thread while a worker is
+// live. The pinned control_mutex_/atomics must make the concurrent inbox
+// mutation, state reads, whenIdle registration, and turn_cancel_ access
+// race-free. The provider is parked deterministically, so the teardown and the
+// contender overlap by construction rather than by chance.
+TEST(AgentRegistry, FinalizeAllRacesLiveWorkerWithoutCorruption) {
+    auto         owner = std::make_unique<BlockingLLM>();
+    BlockingLLM* provider = owner.get();
+    AgentEnv     env("registry_finalize_race", std::move(owner));
+    std::shared_ptr<AgentLoop> agent = env.createAgent();
+    ASSERT_NE(agent, nullptr);
+
+    std::thread worker([&agent] { (void)agent->send(user_message("hi")); });
+    ASSERT_TRUE(provider->waitEntered());
+
+    std::thread contender([&agent] {
+        for (int i = 0; i < 2000; ++i) {
+            (void)agent->send(user_message("x"));
+            (void)agent->hasPendingWork();
+            (void)agent->state();
+            agent->whenIdle([] {});
+        }
+    });
+
+    env.registry.finalizeAll();
+    contender.join();
+    provider->release();
+    worker.join();
+
+    EXPECT_TRUE(agent->disposed());
+    EXPECT_EQ(env.registry.findShared(agent->session()), nullptr);
+}
+
+// AL-U15/AL27/AL-F18: concurrent create/dispose/reads from N threads must not
+// race the registry maps (run under TSan). `create` is serialized by the test
+// because the memory store seam is not itself thread-safe; the registry maps
+// still see create concurrent with dispose and with the read paths.
+TEST(AgentRegistry, AL_U15_ConcurrentCreateDisposeAndReadsAreRaceFree) {
+    AgentEnv env("registry_concurrent", std::make_unique<FakeLLM>(script_of({text_step("x")})));
+
+    std::atomic<bool>  stop{false};
+    std::atomic<int>   created{0};
+    std::mutex         create_mutex;
+    std::vector<std::thread> threads;
+
+    for (int index = 0; index < 3; ++index) {
+        threads.emplace_back([&] {
+            while (!stop.load()) {
+                std::expected<AgentId, AgentError> made;
+                {
+                    std::lock_guard<std::mutex> lock(create_mutex);
+                    SessionOptions              options;
+                    options.cwd           = env.workspace.path();
+                    options.serverProfile = "interactive";
+                    options.model         = "fake-model";
+                    options.title         = "concurrent";
+                    made                  = env.registry.create(options);
+                }
+                if (!made.has_value()) {
+                    continue;
+                }
+                ++created;
+                const std::shared_ptr<AgentLoop> agent = env.registry.getShared(*made);
+                if (agent != nullptr) {
+                    (void)env.registry.hasPendingWork(agent->session());
+                    (void)env.registry.findShared(agent->session());
+                }
+                env.registry.dispose(*made);
+            }
+        });
+    }
+    threads.emplace_back([&] {
+        while (!stop.load()) {
+            (void)env.registry.list();
+            (void)env.registry.activeCount();
+            (void)env.registry.findShared(SessionId{"missing"});
+        }
+    });
+
+    std::this_thread::sleep_for(300ms);
+    stop.store(true);
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+
+    EXPECT_GT(created.load(), 0);
+    EXPECT_TRUE(env.registry.list().empty());
 }
 
 } // namespace

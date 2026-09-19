@@ -1,0 +1,76 @@
+name: ci
+
+# Spec 24 §11 (mandatory memory-safety rule): every close/delete-during-turn,
+# detach-during-turn, and daemon-shutdown-with-live-turn test must run under
+# AddressSanitizer AND ThreadSanitizer in at least one CI configuration. The
+# `asan` and `tsan` jobs below run exactly that test set. The full suite is NOT
+# run under sanitizers: the fork/PTY/MCP/two-process integration suites have
+# pre-existing TSan noise unrelated to RB-21 (recorded in spec 24 §13.1), and
+# the spec's rule scopes to the lifetime tests. `build-test` is the ordinary
+# full-suite Debug gate. Live LLM tests are opt-in and stay skipped here.
+
+on:
+  push:
+  pull_request:
+
+env:
+  LIFETIME_TESTS: '*AL_U1_*:*AL_U3_*:*AL_U5_*:*AL_U6_*:*AL_U7_*:*AL_U8_*:*AL_U9_*:*AL_U10_*:*AL_U11_*:*AL_U12_*:*AL_U14_*:*AL_U15_*:*AL_U16_*:*AL_U17_*:*AL_U18_*:*AL_U19_*:*AL_U20_*:*AL_U21_*:*AL_U22_*:*AL_S1_*:*AL_I2_*:*AL_I3_*:*AL_I6_*:*AL_I7_*:*AL_I9_*:*AL_I10_*:*AL_I12_*:*AL_I13_*:*AL_I15_*:AgentLifetimeGuard.*:PermissionGate.*'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ pkg-config \
+            libsqlite3-dev nlohmann-json3-dev libspdlog-dev libfmt-dev \
+            libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+  asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ pkg-config \
+            libsqlite3-dev nlohmann-json3-dev libspdlog-dev libfmt-dev \
+            libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev
+      - name: Configure (ASan)
+        run: cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DYMH_ASAN=ON
+      - name: Build (ASan)
+        run: cmake --build build-asan -j
+      - name: Test (ASan)
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+        run: ./build-asan/tests/ymh_tests --gtest_filter="$LIFETIME_TESTS"
+
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake g++ pkg-config \
+            libsqlite3-dev nlohmann-json3-dev libspdlog-dev libfmt-dev \
+            libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev
+      - name: Configure (TSan)
+        run: cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DYMH_TSAN=ON
+      - name: Build (TSan)
+        run: cmake --build build-tsan -j
+      - name: Test (TSan)
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ./build-tsan/tests/ymh_tests --gtest_filter="$LIFETIME_TESTS"

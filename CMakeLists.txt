@@ -32,11 +32,30 @@ include(CompilerWarnings)
 
 option(YMH_BUILD_TESTS "Build the ymh test suite" ON)
 
-# 14 §13.4: build the whole suite with ThreadSanitizer to exercise the PTY I/O
-# path (`cmake -DYMH_TSAN=ON`). Off by default so the normal build is unchanged.
+# 14 §13.4 / 24 §11 (memory-safety rule): the whole suite must be built and run
+# under both AddressSanitizer and ThreadSanitizer in CI. Off by default so the
+# normal build is unchanged. The two are mutually exclusive (they cannot share
+# a link line).
+#
+# `-O0` (not `-O1`) is deliberate: at `-O1` GCC 16 emits optimization-dependent
+# `-Wmaybe-uninitialized` false positives from libstdc++ `std::regex`
+# (`src/execution/filesystem.cpp`) and nlohmann `json::items()`
+# (`src/mcp/schema_translation.cpp`). Warnings stay errors; only the
+# optimization level that manufactures the false positives is avoided.
+#
+#   cmake -S . -B build-asan -G Ninja -DYMH_ASAN=ON  -DCMAKE_BUILD_TYPE=Debug
+#   cmake -S . -B build-tsan -G Ninja -DYMH_TSAN=ON  -DCMAKE_BUILD_TYPE=Debug
+option(YMH_ASAN "Build with AddressSanitizer" OFF)
 option(YMH_TSAN "Build with ThreadSanitizer" OFF)
+if(YMH_ASAN AND YMH_TSAN)
+    message(FATAL_ERROR "YMH_ASAN and YMH_TSAN are mutually exclusive")
+endif()
+if(YMH_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g -O0)
+    add_link_options(-fsanitize=address)
+endif()
 if(YMH_TSAN)
-    add_compile_options(-fsanitize=thread -g -O1)
+    add_compile_options(-fsanitize=thread -g -O0)
     add_link_options(-fsanitize=thread)
 endif()
 
@@ -625,7 +644,6 @@ add_library(ymh_ui STATIC
     src/ui/command_registry.cpp
     src/ui/session_export.cpp
     src/ui/terminal_layer.cpp
-    src/ui/ui_application.cpp
     src/ui/supervisor_connection.cpp
     src/ui/supervisor_presence.cpp
     src/ui/session_catalog.cpp

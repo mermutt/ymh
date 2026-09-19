@@ -827,11 +827,12 @@ bool SessionPersistence::hasDependents(SessionId id) const {
     return impl_->has_dependents_locked(id);
 }
 
-void SessionPersistence::eraseWithEvent(SessionId id, Event event) {
+Sequence SessionPersistence::eraseWithEvent(SessionId id, Event event) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (!impl_->writable) {
         throw StoreOpenError("store is read-only");
     }
+    Sequence assigned = 0;
     exec_sql(impl_->db, "BEGIN IMMEDIATE");
     try {
         if (impl_->has_dependents_locked(id)) {
@@ -851,6 +852,7 @@ void SessionPersistence::eraseWithEvent(SessionId id, Event event) {
             insert.bindText(4, wire_type(event));
             insert.bindText(5, event.payload.dump());
             insert.step();
+            assigned = static_cast<Sequence>(sqlite3_last_insert_rowid(impl_->db));
         }
         {
             Statement snapshots{impl_->db, "DELETE FROM session_snapshots WHERE session_id = ?"};
@@ -877,6 +879,7 @@ void SessionPersistence::eraseWithEvent(SessionId id, Event event) {
         sqlite3_exec(impl_->db, "ROLLBACK", nullptr, nullptr, nullptr);
         throw;
     }
+    return assigned;
 }
 
 EventRange SessionPersistence::read(SessionId id, Sequence after) const {

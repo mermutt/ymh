@@ -78,9 +78,9 @@ inline constexpr std::size_t kAutoTitleBytes       = 60;
 inline constexpr std::size_t kMaxSessionTitleBytes = 120;
 
 // 19 §4.2: a title the daemon may auto-replace. `"tui"` is the live supervisor
-// placeholder (src/ui/supervisor.cpp); `"main"` is the dead `run_tui`
-// placeholder (src/ui/ui_application.cpp, spec 17 §1); `""` is the fork
-// default (src/session/session.cpp).
+// placeholder (src/ui/supervisor.cpp); `""` is the fork default
+// (src/session/session.cpp). Stored sessions may still carry a legacy `"main"`
+// placeholder; no live path mints one.
 [[nodiscard]] bool is_placeholder_title(std::string_view title) noexcept;
 
 // 19 §4.2: pure. Returns the normalized auto-title, or nullopt when the prompt
@@ -173,10 +173,13 @@ public:
     }
 
     // 23 §5.4: append `event` and erase snapshots/leases/events/row in ONE
-    // lease-exempt transaction. Default (fakes): append + erase.
-    virtual void eraseWithEvent(SessionId id, Event event) {
-        append(id, std::move(event));
+    // lease-exempt transaction. Default (fakes): append + erase. 24-D6: returns
+    // the store-assigned terminal `Sequence` so the delete's `SessionEnded` can
+    // be forwarded as a committed record even though its row is erased.
+    virtual Sequence eraseWithEvent(SessionId id, Event event) {
+        const Sequence seq = append(id, std::move(event));
         erase(id);
+        return seq;
     }
 
     virtual bool isLeaseHolder(SessionId id) const = 0;

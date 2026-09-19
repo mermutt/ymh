@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -37,12 +39,14 @@ std::filesystem::path make_temp_dir() {
 class FakeStore final : public SessionStore {
 public:
     SessionHeader create(SessionHeader header) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         headers_[header.id.value] = header;
         logs_[header.id.value]    = {};
         return header;
     }
 
     std::optional<SessionHeader> load(SessionId id) const override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = headers_.find(id.value);
         if (it == headers_.end()) {
             return std::nullopt;
@@ -51,6 +55,7 @@ public:
     }
 
     std::vector<SessionHeader> list() const override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::vector<SessionHeader> result;
         for (const auto& [key, header] : headers_) {
             result.push_back(header);
@@ -58,9 +63,13 @@ public:
         return result;
     }
 
-    void erase(SessionId id) override { headers_.erase(id.value); }
+    void erase(SessionId id) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        headers_.erase(id.value);
+    }
 
     EventRange read(SessionId id, Sequence after = 0) const override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         EventRange result;
         for (const EventRecord& record : resolve(id)) {
             if (record.seq > after) {
@@ -71,6 +80,7 @@ public:
     }
 
     EventRange readRange(SessionId id, Sequence from, Sequence to) const override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         EventRange result;
         for (const EventRecord& record : resolve(id)) {
             if (record.seq >= from && record.seq <= to) {
@@ -81,6 +91,7 @@ public:
     }
 
     Sequence append(SessionId id, Event event) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!lease) {
             throw LeaseLost("fake store is not the lease holder");
         }
@@ -89,7 +100,10 @@ public:
         return seq;
     }
 
-    bool isLeaseHolder(SessionId) const override { return lease; }
+    bool isLeaseHolder(SessionId) const override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        return lease;
+    }
 
     bool lease = true;
 
@@ -111,6 +125,7 @@ private:
         return result;
     }
 
+    mutable std::recursive_mutex                   mutex_;
     std::unordered_map<std::string, SessionHeader> headers_;
     std::unordered_map<std::string, EventRange>    logs_;
     Sequence                                       global_ = 0;
@@ -414,6 +429,37 @@ TEST(Session, PersistBeforePublish) {
     EXPECT_EQ(session.events().size(), 1u);
 }
 
+// AL-U9/AL16: every durable append publishes an `EventRecord` on the committed
+// channel whose `seq` equals the store-assigned sequence; a live `emit` does
+// not reach the committed channel.
+TEST(Session, AL_U9_AppendPublishesCommittedRecordWithStoreSequence) {
+    const auto   cwd = make_temp_dir();
+    FakeStore    store;
+    EventBus     bus;
+    SessionHeader header = make_header(cwd);
+    store.create(header);
+    Session session(header, store, bus);
+
+    std::vector<EventRecord> committed;
+    auto subscription = bus.subscribeCommitted(
+        [&committed](const EventRecord& record) { committed.push_back(record); });
+
+    const Sequence first = session.append(payload::SessionStarted{"m", "interactive", "t"});
+    ASSERT_EQ(committed.size(), 1u);
+    EXPECT_EQ(committed[0].seq, first);
+    EXPECT_EQ(committed[0].event.type, EventType::SessionStarted);
+
+    const std::vector<Event> batch = {
+        record(1, header.id, payload::TurnStarted{1, payload::TurnOrigin::User}).event};
+    const std::vector<Sequence> sequences = session.appendBatch(batch);
+    ASSERT_EQ(committed.size(), 2u);
+    EXPECT_EQ(committed[1].seq, sequences.front());
+    EXPECT_EQ(committed[1].event.type, EventType::TurnStarted);
+
+    session.emit(record(9, header.id, payload::TurnCancelled{1, "x"}).event);
+    EXPECT_EQ(committed.size(), 2u);
+}
+
 TEST(Session, NonHolderAppendThrowsLeaseLost) {
     const auto   cwd = make_temp_dir();
     FakeStore    store;
@@ -459,7 +505,8 @@ TEST(SessionManager, CreateResumeForkReplay) {
     options.title         = "session";
 
     const SessionId root = manager.createSession(options);
-    Session&        rootSession = manager.session(root);
+    auto rootSession_owner = manager.sessionPtr(root);
+    Session& rootSession = *rootSession_owner;
     EXPECT_EQ(rootSession.kind(), SessionKind::Root);
     ASSERT_EQ(rootSession.events().size(), 1u);
 
@@ -467,7 +514,8 @@ TEST(SessionManager, CreateResumeForkReplay) {
     rootSession.append(payload::TurnEnded{1});
 
     const SessionId forked = manager.forkSession(root, 2);
-    Session&        forkSession = manager.session(forked);
+    auto forkSession_owner = manager.sessionPtr(forked);
+    Session& forkSession = *forkSession_owner;
     EXPECT_EQ(forkSession.kind(), SessionKind::Fork);
     ASSERT_EQ(forkSession.events().size(), 3u);
     EXPECT_EQ(forkSession.events()[0].seq, rootSession.events()[0].seq);
@@ -481,6 +529,59 @@ TEST(SessionManager, CreateResumeForkReplay) {
     EXPECT_EQ(replayed.value, forked.value);
     EXPECT_THROW(manager.replaySession(SessionId{"00000000-0000-4000-8000-000000000000"}),
                  UnknownSession);
+}
+
+// AL-U1/AL1: `sessionPtr` keeps a Session alive after `closeSession` erases the
+// manager's reference; the object is freed only when the last strong reference
+// drops.
+TEST(SessionManager, AL_U1_SessionPtrKeepsSessionAliveAfterClose) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+
+    const SessionId          id   = manager.createSession(options);
+    std::shared_ptr<Session> held = manager.sessionPtr(id);
+    std::weak_ptr<Session>   weak = held;
+
+    manager.closeSession(id);
+    EXPECT_THROW(static_cast<void>(manager.sessionPtr(id)), UnknownSession);
+    EXPECT_FALSE(weak.expired());
+
+    held.reset();
+    EXPECT_TRUE(weak.expired());
+}
+
+// AL-U18/AL24/AL-F17/AL-F21: `resumeSession`/`loadInto` never replace a
+// resident Session. A second resume returns the same object (pointer identity),
+// so a supervisor that detaches and reattaches cannot create two appenders for
+// one id.
+TEST(SessionManager, AL_U18_ResumeSessionKeepsResidentSessionIdentity) {
+    FakeStore      store;
+    EventBus       bus;
+    SessionManager manager(store, bus);
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "resident";
+
+    const SessionId          id    = manager.createSession(options);
+    std::shared_ptr<Session> first = manager.sessionPtr(id);
+    std::weak_ptr<Session>   weak  = first;
+
+    const SessionId resumed = manager.resumeSession(id);
+    EXPECT_EQ(resumed.value, id.value);
+    std::shared_ptr<Session> second = manager.sessionPtr(id);
+
+    EXPECT_EQ(first.get(), second.get());
+    EXPECT_FALSE(weak.expired());
+
+    first->append(payload::TurnStarted{1, payload::TurnOrigin::User});
+    EXPECT_EQ(second->events().size(), 2u);
 }
 
 TEST(SessionManager, DeleteEmitsSessionEnded) {
@@ -498,7 +599,7 @@ TEST(SessionManager, DeleteEmitsSessionEnded) {
     manager.deleteSession(id);
 
     EXPECT_FALSE(store.load(id).has_value());
-    EXPECT_THROW(manager.session(id), UnknownSession);
+    EXPECT_THROW(static_cast<void>(manager.sessionPtr(id)), UnknownSession);
 }
 
 TEST(SessionStoreDefaults, FakeStoreHeadSequenceAndBoundedReadAfter) {
@@ -688,10 +789,10 @@ TEST(SessionManagerRename, AppendsUserRenameAndUpdatesHeader) {
 
     const Sequence sequence = manager.renameSession(id, "  my  title  ");
     EXPECT_GT(sequence, 0);
-    EXPECT_EQ(manager.session(id).header().title, "my  title");
+    EXPECT_EQ(manager.sessionPtr(id)->header().title, "my  title");
 
     std::size_t renames = 0;
-    for (const EventRecord& record : manager.session(id).ownEvents()) {
+    for (const EventRecord& record : manager.sessionPtr(id)->ownEvents()) {
         if (record.event.type != EventType::SessionRenamed) {
             continue;
         }
@@ -718,7 +819,7 @@ TEST(SessionManagerRename, UnknownIdAndBadTitle) {
     EXPECT_THROW(manager.renameSession(id, "   "), std::invalid_argument);
 
     std::size_t renames = 0;
-    for (const EventRecord& record : manager.session(id).ownEvents()) {
+    for (const EventRecord& record : manager.sessionPtr(id)->ownEvents()) {
         if (record.event.type == EventType::SessionRenamed) {
             ++renames;
         }
@@ -739,14 +840,14 @@ TEST(SessionManagerAutoName, FiresOnceWithDerivedTitle) {
 
     const std::optional<Sequence> first = manager.maybeAutoName(id, "fix the flaky PTY test");
     ASSERT_TRUE(first.has_value());
-    EXPECT_EQ(manager.session(id).header().title, "fix the flaky PTY test");
+    EXPECT_EQ(manager.sessionPtr(id)->header().title, "fix the flaky PTY test");
 
     const std::optional<Sequence> second = manager.maybeAutoName(id, "second prompt");
     EXPECT_FALSE(second.has_value());
-    EXPECT_EQ(manager.session(id).header().title, "fix the flaky PTY test");
+    EXPECT_EQ(manager.sessionPtr(id)->header().title, "fix the flaky PTY test");
 
     std::size_t renames = 0;
-    for (const EventRecord& record : manager.session(id).ownEvents()) {
+    for (const EventRecord& record : manager.sessionPtr(id)->ownEvents()) {
         if (record.event.type != EventType::SessionRenamed) {
             continue;
         }
@@ -771,10 +872,10 @@ TEST(SessionManagerAutoName, ManualRenameIsNeverOverwritten) {
     manager.renameSession(id, "manual name");
     const std::optional<Sequence> suppressed = manager.maybeAutoName(id, "first prompt");
     EXPECT_FALSE(suppressed.has_value());
-    EXPECT_EQ(manager.session(id).header().title, "manual name");
+    EXPECT_EQ(manager.sessionPtr(id)->header().title, "manual name");
 
     std::size_t renames = 0;
-    for (const EventRecord& record : manager.session(id).ownEvents()) {
+    for (const EventRecord& record : manager.sessionPtr(id)->ownEvents()) {
         if (record.event.type != EventType::SessionRenamed) {
             continue;
         }

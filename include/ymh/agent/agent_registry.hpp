@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <expected>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,9 +41,28 @@ public:
     std::expected<AgentId, AgentError> create(const SessionOptions& options);
     std::expected<AgentId, AgentError> resume(const SessionId& id);
 
-    Agent&                get(AgentId id);
-    Agent*                find(SessionId id) noexcept;
+    // 24-D14/24-D17: the only handle-producing accessors. Each locks mutex_
+    // only long enough to copy the shared_ptr; the returned strong reference
+    // keeps the agent alive after mutex_ is released and after dispose erases
+    // the map entry (AL2/AL30/AL31/AL35). There is no raw Agent*/Agent& accessor.
+    [[nodiscard]] std::shared_ptr<AgentLoop> findShared(SessionId id) noexcept;
+    [[nodiscard]] std::shared_ptr<AgentLoop> getShared(AgentId id) noexcept;
+
     void                  dispose(AgentId id);
+
+    // 24-D10/24-D15/AL25/AL33: last-supervisor teardown. Cancels each in-flight
+    // turn (its cancel path flushes the chunk batch and appends exactly one
+    // terminal event) then parks each agent, calls
+    // `SessionManager::closeSession(id)` (the explicit last-exit close), and
+    // erases the maps. Never waits; the coordinator's drain joins afterwards.
+    // Snapshot-release-erase contract (24-D18): snapshot the `shared_ptr`s under
+    // `mutex_`, RELEASE, call `dispose()`/`closeSession()` on each snapshot
+    // entry, then re-lock to erase; `mutex_` is never held across those calls
+    // and no iterator is held across them. A concurrent caller that took
+    // `findShared` keeps its agent (and, via the agent's `session_owner_`, its
+    // `Session`) alive until it returns (AL31).
+    void finalizeAll();
+
     std::vector<AgentId>  list() const;
     std::size_t           activeCount() const;
 
@@ -78,8 +98,12 @@ private:
     LLMPool*                     pool_ = nullptr;
     AgentServices                services_;
     AgentConfig                  config_;
+    // mutex_ is a map-only lock (24-D18): held exactly while agents_/
+    // bySession_/leases_ are read or mutated, never across a call into
+    // AgentLoop/Session/SessionManager (AL27/AL36).
+    mutable std::mutex                                            mutex_;
     std::unordered_map<std::string, AgentId>                      bySession_;
-    std::unordered_map<std::string, std::unique_ptr<AgentLoop>>   agents_;
+    std::unordered_map<std::string, std::shared_ptr<AgentLoop>>   agents_;
     std::unordered_map<std::string, std::unique_ptr<SessionHandle>> leases_;
 };
 

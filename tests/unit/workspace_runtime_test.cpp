@@ -72,10 +72,10 @@ TEST_F(WorkspaceRuntimeTest, WiresStoreBusToolsLeaseAndRegistry) {
     session_options.title         = "runtime test";
     const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
     ASSERT_TRUE(created.has_value()) << created.error().detail;
-    const SessionId session = runtime.agents().get(*created).session();
+    const SessionId session = runtime.agents().getShared(*created)->session();
 
     EXPECT_EQ(runtime.agents().list().size(), 1u);
-    ASSERT_NE(runtime.agents().find(session), nullptr);
+    ASSERT_NE(runtime.agents().findShared(session), nullptr);
     EXPECT_EQ(runtime.sessions().list().size(), 1u);
     EXPECT_FALSE(runtime.store().read(session).empty());
 
@@ -90,7 +90,7 @@ TEST_F(WorkspaceRuntimeTest, WiresStoreBusToolsLeaseAndRegistry) {
     });
 
     const std::size_t before = runtime.store().read(session).size();
-    runtime.sessions().session(session).append(payload::TurnStarted{1, payload::TurnOrigin::User});
+    runtime.sessions().sessionPtr(session)->append(payload::TurnStarted{1, payload::TurnOrigin::User});
     EXPECT_EQ(runtime.store().read(session).size(), before + 1);
     EXPECT_EQ(published.load(), 1);
     subscription.unsubscribe();
@@ -146,7 +146,7 @@ TEST_F(WorkspaceRuntimeTest, StoreFactorySeamSkipsRealDatabase) {
     session_options.model         = "fake-model";
     const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
     ASSERT_TRUE(created.has_value()) << created.error().detail;
-    const SessionId session = runtime.agents().get(*created).session();
+    const SessionId session = runtime.agents().getShared(*created)->session();
     EXPECT_FALSE(runtime.store().read(session).empty());
 }
 
@@ -169,7 +169,7 @@ TEST_F(WorkspaceRuntimeTest, LeaseOpsAreNoOpsWithoutDurableStore) {
     session_options.model         = "fake-model";
     const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
     ASSERT_TRUE(created.has_value()) << created.error().detail;
-    const SessionId session = runtime.agents().get(*created).session();
+    const SessionId session = runtime.agents().getShared(*created)->session();
 
     EXPECT_TRUE(runtime.acquireLease(session));
     EXPECT_NO_THROW(runtime.renewLeases());
