@@ -105,32 +105,33 @@ public:
 };
 
 TEST(CallConfigEquals, IsFieldWiseAndStopOrderSensitive) {
-    LlmCallConfig left  = config_for("openai-compatible");
-    LlmCallConfig right = config_for("openai-compatible");
-    EXPECT_TRUE(call_config_equals(left, right));
+    const LlmCallConfig base = config_for("openai-compatible");
+    EXPECT_TRUE(call_config_equals(base, base));
 
-    right.model = "other";
-    EXPECT_FALSE(call_config_equals(left, right));
+    const auto field_is_compared = [&](auto set_value) {
+        LlmCallConfig left  = base;
+        LlmCallConfig right = base;
+        set_value(left);
+        EXPECT_FALSE(call_config_equals(left, right)) << "field not compared";
+        set_value(right);
+        EXPECT_TRUE(call_config_equals(left, right)) << "equal fields reported unequal";
+    };
 
-    right          = config_for("openai-compatible");
-    right.stop     = {"a", "b"};
-    left.stop      = {"b", "a"};
-    EXPECT_FALSE(call_config_equals(left, right));
+    field_is_compared([](LlmCallConfig& config) { config.provider = "other"; });
+    field_is_compared([](LlmCallConfig& config) { config.model = "other"; });
+    field_is_compared([](LlmCallConfig& config) { config.reasoning_effort = "high"; });
+    field_is_compared([](LlmCallConfig& config) { config.temperature = 0.25; });
+    field_is_compared([](LlmCallConfig& config) { config.max_tokens = 512; });
+    field_is_compared([](LlmCallConfig& config) { config.stop = {"a"}; });
+    field_is_compared([](LlmCallConfig& config) { config.top_p = 0.5; });
+    field_is_compared([](LlmCallConfig& config) { config.seed = 7; });
+    field_is_compared([](LlmCallConfig& config) { config.tool_choice = "none"; });
 
-    left      = config_for("openai-compatible");
-    left.top_p = 0.5;
-    right      = config_for("openai-compatible");
-    EXPECT_FALSE(call_config_equals(left, right));
-
-    left       = config_for("openai-compatible");
-    left.seed  = 7;
-    right      = config_for("openai-compatible");
-    EXPECT_FALSE(call_config_equals(left, right));
-
-    left             = config_for("openai-compatible");
-    left.tool_choice = "none";
-    right            = config_for("openai-compatible");
-    EXPECT_FALSE(call_config_equals(left, right));
+    LlmCallConfig ordered_left  = base;
+    LlmCallConfig ordered_right = base;
+    ordered_left.stop  = {"a", "b"};
+    ordered_right.stop = {"b", "a"};
+    EXPECT_FALSE(call_config_equals(ordered_left, ordered_right));
 }
 
 TEST(FrozenRequest, CanonicalSerializationIsDeterministic) {

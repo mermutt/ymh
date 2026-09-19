@@ -10,6 +10,7 @@
 
 #include "support/test_env.hpp"
 #include "ymh/cli/headless.hpp"
+#include "ymh/cli/stream_receiver.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -223,6 +224,42 @@ TEST_F(HeadlessTest, BusyWorkspaceReportsActionableError) {
     EXPECT_NE(err.str().find("workspace is busy"), std::string::npos) << err.str();
     EXPECT_NE(err.str().find("sessions.lock"), std::string::npos) << err.str();
     holder->close();
+}
+
+TEST(StreamReceiver, UnknownWireTypeIsSkippedWithoutDispatch) {
+    nlohmann::json envelope_json = {
+        {"session", "s"},
+        {"event",
+         {{"id", "e1"},
+          {"session_id", "s"},
+          {"timestamp", 0},
+          {"type", "future/unknown_event"},
+          {"payload", nlohmann::json::object()}}},
+    };
+    protocol::SessionEnvelope envelope;
+    protocol::from_json(envelope_json, envelope);
+    ASSERT_TRUE(envelope.event_skipped);
+
+    protocol::StreamNotification stream;
+    stream.envelope = envelope;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(handle_stream_notification(stream, out, err), StreamDisposition::Skipped);
+    EXPECT_TRUE(out.str().empty());
+    EXPECT_TRUE(err.str().empty());
+}
+
+TEST(StreamReceiver, KnownEventTypesDispatch) {
+    protocol::StreamNotification stream;
+    stream.envelope.session = SessionId{"s"};
+    stream.envelope.event.type = EventType::TurnEnded;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(handle_stream_notification(stream, out, err), StreamDisposition::TurnFinished);
+    EXPECT_EQ(out.str(), "\n");
+    EXPECT_TRUE(err.str().empty());
 }
 
 } // namespace

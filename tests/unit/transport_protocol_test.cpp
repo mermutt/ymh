@@ -116,6 +116,20 @@ TEST(TransportProtocol, SessionEnvelopeCarriesCoreEventOnly) {
     EXPECT_EQ(parsed.event.type, EventType::TurnStarted);
 }
 
+TEST(TransportProtocol, KnownEventTypeWithMalformedPayloadStaysLoud) {
+    const nlohmann::json body = {
+        {"session", "s1"},
+        {"event",
+         {{"session_id", "s1"},
+          {"timestamp", 0},
+          {"type", "turn/start"},
+          {"payload", nlohmann::json::object()}}},
+    };
+
+    protocol::SessionEnvelope envelope;
+    EXPECT_THROW(static_cast<void>(protocol::from_json(body, envelope)), std::exception);
+}
+
 TEST(TransportProtocol, StreamNotificationCarriesPostEventCursor) {
     protocol::StreamNotification notification;
     notification.subscription = protocol::SubscriptionId{9};
