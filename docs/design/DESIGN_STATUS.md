@@ -43,7 +43,7 @@ coded after it is marked **verified** here.
 
 | 28 | `28-llm-service-boundary-errata.md` | yes | **verified (Rev 2)** | Independent gates: Rev 0/1 FAIL (0 HIGH / 2 MEDIUM / 4 LOW) → **Rev 2 GATE PASS (0 HIGH / 0 MEDIUM / 1 LOW)**. Rev 2 fixed: `PreparedCall::retry_policy()` now sourced from a pinned `LLMProvider::retry_policy()` accessor; `canonical_template()`'s `system_prompt` basis pinned to the frozen request's `Role::System` message text (reconciling the plan-mode divergence). Its THREE recorded ownership gaps are confirmed REAL: the `06` errata (a Wave-1 blocker), the retry-executor wave, and the `13` errata | 890 lines; the Wave-0 A2 LLM service-boundary freeze (28-D1..D8) |
 
-## Open top-level items (`HANDOFF.md` §5)
+| 32 | `32-compaction-errata.md` | yes | **written — pending review** | not yet gated | 502 lines; the Wave-1-prerequisite `13` compaction errata: the `ContextCompactor` ctor re-seam (`LLMProvider&` → `LlmRuntime&`, member `provider_` → `runtime_`) with its callers pinned (`workspace_runtime.cpp:170-172`, the test env, `compaction_test.cpp`); the `ContextCompaction` payload additions (D13) superseding spec 13 §4.1's "does not add fields" — classified BREAKING in spec text but ADDITIVE on the wire (all optional/defaulted; `from_json` ignores unknown keys); the D12 tool-result pruner + the D13 trigger taxonomy; the pruner reconciled with spec 07's `clamp_tool_result` as orthogonal (a durable byte cap vs a projected code-point transform); and the Wave-1/Wave-4 split made coherent. Adds C20–C26, C-F18–C-F23, the ledger A6/A7, and 32-D1–32-D7. **Spec 13 should be re-gated together with this errata** |
 
 | # | Item | Status | Resolution |
 |---|---|---|---|
