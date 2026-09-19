@@ -49,14 +49,14 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 | RB-11 | Bottom line: counts only, not the full session list | 11 | **DONE** | P0 | XS | Low | No |
 | RB-12 | Modal input focus: keystrokes must not split between dialog and composer | — (live testing) | NEW | P1 | S | Low | No |
 | RB-13 | Live-only Ctrl-S switcher + `/sessions` disk catalog (workspace vs session) | — (reported confusion) | **DONE** | P0 | L | Med | `22-switcher-sessions-errata.md` (verified + implemented) |
-| RB-14 | Test isolation: pin `XDG_STATE_HOME` in a process-wide fixture | — (spec 22 §11.2) | NEW | P2 | S | Low | No (test infra) |
+| RB-14 | Test isolation: pin `XDG_STATE_HOME` in a process-wide fixture | — (spec 22 §11.2) | **DONE** (`5d438f48b`) | P2 | S | Low | No (test infra) |
 | RB-15 | Guard the `session.create` reply path against an evicted workspace | — (spec 22 §11.7) | NEW | P2 | S | Low | No |
-| RB-16 | Slash-command completion list with highlighted selection | — (user, 2026-09-17) | NEW | P1 | S | Low | No (UI-local) |
+| RB-16 | Slash-command completion list with highlighted selection | — (user, 2026-09-17) | **DONE** (spec 25 D8/D9) | P1 | S | Low | No (UI-local) |
 | RB-17 | Reasoning indicator: animated glyph + dimmed hint | — (user, 2026-09-17) | NEW | P1 | XS | Low | No (UI-local) |
 | RB-18 | Cursor flicker when the tmux pane is unfocused | — (live testing, 2026-09-17) | NEW | P1 | S | Med | No (UI-local) |
 | RB-19 | Unprompted-session cleanup on exit + `ymh session prune` | — (user, 2026-09-18) | NEW | P0 | M–L | Med | **`23-session-lifecycle-errata.md` (written; not verified)** |
-| RB-20 | Hide placeholder titles (`tui`/`headless`/`main`) in the header | — (user, 2026-09-18) | NEW | P2 | XS | Low | No (UI-local, gate-free) |
-| RB-21 | Session/agent lifetime & teardown hardening (**independent of spec 23**) | — (spec 23 §13.1; audit) | **SPEC'D** | P1 | M–L | High | **`24-agent-lifetime-errata.md` — verified (independent adversarial gate: 5 rounds → PASS, 0 open HIGH/MEDIUM, 3 LOW documentation-only; Oracle unavailable, see the spec's status note). NOT yet implemented.** |
+| RB-20 | Hide placeholder titles (`tui`/`headless`/`main`) in the header | — (user, 2026-09-18) | **DONE** (`44f15ba91`) | P2 | XS | Low | No (UI-local, gate-free) |
+| RB-21 | Session/agent lifetime & teardown hardening (**independent of spec 23**) | — (spec 23 §13.1; audit) | **DONE** (`570ce9955`) | P1 | M–L | High | **`24-agent-lifetime-errata.md` — verified (independent adversarial gate: 5 rounds → PASS, 0 open HIGH/MEDIUM, 3 LOW documentation-only; Oracle unavailable, see the spec's status note). NOT yet implemented.** |
 
 **Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
 per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY

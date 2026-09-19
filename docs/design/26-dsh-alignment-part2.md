@@ -1,6 +1,6 @@
 # 26 — dsh Alignment, Part 2: Target Design, Migration, Open Questions
 
-Status: **draft for review — Rev 3**.
+Status: **draft for review — Rev 6**.
 Companion to `26-dsh-alignment.md` (§1 purpose, §2 dsh mechanics, §3 gap
 analysis, §7 revision log). This file contains §4 (target design), §5 (migration
 plan and test strategy), §6 (open questions), and the Appendix.
@@ -25,15 +25,29 @@ These hold for every decision below.
   extends the already-verified `00 §9.1` and `01` event-sourcing invariant.)
 - **26-I2 — Requests are frozen and reconstructable from the log plus the
   running code's registries, under a pinned canonical serialization.** A
-  dispatched request is immutable by type. "Reconstructable" is defined
-  precisely, not as raw-byte equality: replaying the logged message events plus
-  the last `LlmRequestHeader` through `buildRequest()` — which re-derives the
-  tool schemas from the live `ToolRegistry` — must produce a `FrozenRequest`
-  whose `canonical_json()` SHA-256 equals the header's `request_digest`. The
-  header carries the **full rendered system prompt** and the tool **names** in
-  canonical order plus a per-tool **schema digest**; the schema bodies are
-  re-derived from code and verified against those digests. This is dsh's own
-  contract — the summarizer request is "reconstructable from log + code"
+  dispatched request is immutable by type. "Reconstructable" is defined over two
+  pinned forms, because a request's *template* is series-stable while its
+  *messages* grow every step:
+  - `canonical_template()` is the request-invariant part: `schema_version`,
+    `envelope` (`session_id` + optional `purpose`), `config`, the full rendered
+    `system_prompt`, and the canonical tool schemas. `template_digest()` is its
+    lowercase SHA-256 hex. The rendered prompt is **always** an input to the
+    digest; its *text* is persisted in the header only under the explicit
+    `logging.log_prompts` opt-in (`26-I11`), and the default durable record is
+    `system_prompt_digest`.
+  - `canonical_json()` is `canonical_template()` plus the ordered `messages` of
+    one concrete dispatch.
+
+  Replay rebuilds the template from the last `LlmRequestHeader` through
+  `buildRequest()` — re-deriving the tool schemas from the live `ToolRegistry` —
+  and asserts `rebuild.template_digest() == header.template_digest`; it
+  reconstructs the messages for the attempt from the logged message events. The
+  header is therefore a **changed-snapshot** record (dsh's `callConfigEquals`
+  model, `dsh-llm/lib/types/call-config.d.ts:1-23`), not a per-request digest: it
+  carries the **full rendered system prompt**, the tool **names** in canonical
+  order, and a per-tool **schema digest**, and the schema bodies are re-derived
+  from code and verified against those digests. This is dsh's own contract — the
+  summarizer request is "reconstructable from log + code"
   (`dsh-compaction/lib/types/types.d.ts:49-51`) — and it is deliberately weaker
   than "reconstructable from pinned data alone": a replay against a changed tool
   registry fails the digest and is reported as a registry mismatch, never
@@ -58,7 +72,9 @@ These hold for every decision below.
   an MCP server connecting) starts a new request series and is logged.
 - **26-I7 — Fail loud over silent degradation.** Unknown prompt variables,
   duplicate section names, `>1 complete`, duplicate adapters, `maxDepth` without
-  a depth-capable provider, and selecting a reserved-but-unimplemented
+  a depth-capable provider, a `ContextFormed` whose `form` requires a field it
+  does not have (Snapshot without `sections`, Notice without `summary`), and
+  selecting a reserved-but-unimplemented
   presentation mode all fail at load/assembly. (Matches dsh's "Fail loud, no
   silent degradation", `/tmp/opencode/dsh-collab.md:1802-1804`.)
 - **26-I8 — Authorization by ownership, not secrecy.** Jobs, goals, and
@@ -69,6 +85,33 @@ These hold for every decision below.
   its shadow-price event.
 - **26-I10 — UI is a consumer.** No prompt/LLM/collaboration type may appear in
   the UI layer, and no UI type may enter these seams (`00 §4.1`, `06 A17`).
+- **26-I11 — Prompt text is durable only under explicit consent.** The session
+  event log is the authoritative trace, but the rendered system prompt embeds
+  `AGENTS.md`, the skill catalog, and possibly file content, so it is subject to
+  the shipped no-prompt-logging policy (`include/ymh/llm/redaction.hpp:4-6`;
+  `include/ymh/config/config.hpp:84-86`). The `llm/request_header` event always
+  carries `system_prompt_digest` (SHA-256 hex of the rendered prompt); the full
+  `system_prompt` text is written **only** when `logging.log_prompts` is
+  explicitly enabled — the same opt-in that gates prompt bodies in the logging
+  subsystem. Absent the opt-in, replay re-derives the prompt from the live
+  registries and verifies it against the digest, and never fabricates it.
+- **26-I12 — The event vocabulary is decoupled from the wire envelope version.**
+  A durable event type that crosses the daemon↔supervisor socket is **not** an
+  envelope-shape change, so the first wave that emits a new type does **not** bump
+  `kProtocolVersion` (`include/ymh/transport/protocol.hpp:153`, stays `1`). The
+  receiver tolerates an unknown event `type` on the wire by **skipping** that
+  `SessionEnvelope` (it does not call `on_envelope`, and it still advances the
+  per-session cursor to the notification's `cursor`) instead of failing the
+  connection. The loud forward-fence lives **only** on the durable/on-disk decode
+  (`src/session/session_persistence.cpp:228-232` `CorruptionError`; `01` S3), never
+  on the wire. A `kProtocolVersion` bump is reserved for a change to the
+  **envelope** shape (`SessionEnvelope` = `{session, event}`, `05` T5) or the
+  handshake semantics. This is what makes the spec-24 outliving-daemon case work:
+  a non-last supervisor's daemon outlives it (`24` §1.3.3/`AL23`/`AL25`), so a
+  **new** supervisor regularly attaches to an **old** daemon process; holding the
+  version at `1` keeps the handshake matching and the new supervisor understands
+  every type the old daemon can emit, whereas a bump would reject the attach with
+  `UnsupportedProtocol` (`src/transport/protocol_server.cpp:285-293`).
 
 ### 4.2 Decision register
 
@@ -80,15 +123,15 @@ called it additive.
 
 | ID | Decision | Add./Brk. | Owning spec | Wave |
 |---|---|---|---|---|
-| 26-D1 | Introduce a provider-neutral `LlmRuntime` service above `LLMProvider`; the loop no longer holds a raw provider. | Add. | 08 | 1 |
-| 26-D2 | Introduce `LlmCallConfig` + `call_config_equals`; log a durable **request-header** event before each dispatch; the loop builds requests from the logged header. **Does not persist `RequestId`** (spec 08: "Never persisted", `llm_request.hpp:28-30`); correlation uses the header event's own seq. | Add. | 01, 08 | 1 |
-| 26-D3 | Freeze the request envelope before dispatch; add `session_id` and an optional `purpose` (`Compaction`/`SessionTitle`; absent = ordinary conversation); `prepare_call` binds one adapter generation; pin `FrozenRequest::canonical_json()`. | Add. | 08 | 1 |
+| 26-D1 | Introduce a provider-neutral `LlmRuntime` service above `LLMProvider`; the loop no longer holds a raw provider. | **Brk. (06, 08)** — replaces the pinned `AgentServices`/provider seam, not an addition beside it | 06, 08 | 1 |
+| 26-D2 | Introduce `LlmCallConfig` + `call_config_equals`; log a durable **request-header** event as a *changed snapshot* — at each request-series start and whenever `config`, the rendered prompt, the tool catalog (names or schemas), or `purpose` changes (not on every dispatch); the loop builds requests from the logged header. **Does not persist `RequestId`** (spec 08: "Never persisted", `llm_request.hpp:28-30`); retries correlate by `retryId` + `(turn, step)` and the header is found positionally (last header before the attempt), so no self-referential sequence field is stored. Always carries `system_prompt_digest`; persists the full prompt text only under the explicit `logging.log_prompts` opt-in (D23, `26-I11`). | Add. | 01, 08, 21 | 1 |
+| 26-D3 | Freeze the request envelope before dispatch; add `session_id` and an optional `purpose` (`Compaction`/`SessionTitle`; absent = ordinary conversation) to `LLMRequest`, and log both in the request header so the template digest's `envelope` is reconstructable; `prepare_call` binds one adapter generation; pin `FrozenRequest::canonical_template()`/`canonical_json()`. | Add. | 08 | 1 |
 | 26-D4 | Introduce the ordered **prompt registry**: `PromptSection`, `PromptContext`, `PromptAssembly`, `assemble()`, `render_prompt()`, and the canonical `SECTION_ORDERS`/`CONTEXT_ORDERS` tables (verbatim). | New | new `27-system-prompt.md` | 3 |
 | 26-D5 | Introduce **persona** as sections 0/10200 with `complete` mode; default persona mirrors dsh's shipped text. | Add. | 27 | 3 |
 | 26-D6 | Introduce the **workspace-instructions loader** (`AGENTS.md`/`CLAUDE.md`, `.git` root, required `maxBytes`, `<system-reminder>` framing, durable user-role message). | New | 27 | 3 |
 | 26-D7 | Introduce **runtime-context snapshots** (sourced user-role, supersession header) distinct from sections; `ContextInjected.role` default changes from `System` to `User` for snapshots. | Brk. (default/payload) | 27, 01 | 3 |
 | 26-D8 | Make one canonical **`BlockAssembler`** for text/reasoning/tool-call blocks, with `interrupted_blocks()` and terminal `finish` default. | Add. | 08 | 2 |
-| 26-D9 | Embed the **compact assistant stream** and a `ReplayEnvelope` in `assistant/message`; retain non-message attempts as `assistant/attempt`. Legacy `AssistantChunk` becomes read-only (never appended by new binaries, never migrated). | Brk. (assistant payload + new event) | 01, 08 | 2 |
+| 26-D9 | Embed the **compact assistant stream** and a `ReplayEnvelope` in `assistant/message`; retain non-message attempts as `assistant/attempt`. Legacy durable `AssistantChunk` rows become read-only (never appended to the log by new binaries, never migrated). New binaries still **publish** `AssistantChunk` as a **live-only** stream event (like `McpServerStatusChanged`, `core/event.hpp:72-74`) so live rendering keeps its deltas; see the §4.3.9.2 consumer matrix. | Brk. (assistant payload + event durability split) | 01, 08 | 2 |
 | 26-D10 | Replace serial tool execution with a **bounded-parallel scheduler** (exclusive barriers + rolling pool, default 10) and synthetic error results on abort. | Add. | 06 | 4 |
 | 26-D11 | Introduce the **retention library** (`Deque`, `ChunkedList`, `ItemRetainer`/`TextRetainer`, `RetentionNotice`) and route tool output through it; `ToolResult` gains omission metadata. | Brk. (spec 07 `ToolResult`/clamp contract) | 07, new `28-output-retention.md` | 4 |
 | 26-D12 | Introduce the **tool-result pruner** (8192/4096/1024 **code points**, `PRUNE_MARKER`) with a `context/prune` shadow-price event. | Add. | 13, 01 | 4 |
@@ -102,6 +145,8 @@ called it additive.
 | 26-D20 | Add the **log-only command surface** (`command/run`/`command/done`, agent-scoped shadowing). | Add. | 30, 01 | 6 |
 | 26-D21 | Add **repeat-tool reminders** (thresholds `[3,5,8]`) and formalize step steering. | Add. | 06 | 4 |
 | 26-D22 | **Deferred:** PTC `run_code` presentation + generated SDK. Not implemented; the `Ptc`/`Both` enum values exist only to fail loud. | New (deferred) | new `27` | — |
+| 26-D23 | **Prompt-text persistence policy:** the `llm/request_header` event always carries `system_prompt_digest`; the full rendered `system_prompt` text is stored **only** when `logging.log_prompts` is explicitly enabled. Reconciles the header with the shipped no-prompt-logging policy; reconstruction re-derives the prompt and verifies the digest when the text is absent (`26-I11`). | Add. | 01, 08, 21 | 1 |
+| 26-D24 | **Event-vocabulary decoupling (no version bump):** keep `kProtocolVersion` at `1`; the wire receiver skips an unknown event `type` (cursor still advances) instead of failing the connection, while the on-disk/replay decode keeps its loud `CorruptionError` fence. A `kProtocolVersion` bump is reserved for an envelope-shape or handshake change, not for a new event type (`26-I12`). | Add. (`01` wire-vocabulary rule) | 01 | 1 |
 
 ### 4.3 Interface sketches (C++23)
 
@@ -158,10 +203,17 @@ public:
     [[nodiscard]] const LlmCallConfig& config() const noexcept;
 
     // Pinned canonical serialization (contract in §4.3.2): deterministic JSON,
-    // sorted object keys, messages in order, canonical tool schemas, config.
-    // Stable across runs, platforms, and builds. This is what replay compares.
-    [[nodiscard]] std::string canonical_json() const;
-    [[nodiscard]] std::string digest() const;   // lowercase SHA-256 hex of canonical_json()
+    // sorted object keys, canonical tool schemas, config. Stable across runs,
+    // platforms, and builds.
+    // The TEMPLATE is the request-invariant part (schema_version, envelope,
+    // config, system prompt, tools); its digest is what the logged header
+    // carries, because the header is a changed snapshot and is not re-logged
+    // per dispatch. The full JSON adds the ordered `messages` of one dispatch
+    // and is what the determinism half of the harness compares.
+    [[nodiscard]] std::string canonical_template() const;
+    [[nodiscard]] std::string template_digest() const;  // SHA-256 hex of canonical_template()
+    [[nodiscard]] std::string canonical_json() const;   // template + messages
+    [[nodiscard]] std::string digest() const;           // SHA-256 hex of canonical_json()
 private:
     LLMRequest   request_;
     LlmCallConfig config_;
@@ -237,19 +289,26 @@ stored.
 ```cpp
 namespace payload {
 
-// Logged before dispatch. One per request series start, plus one whenever the
-// header changes (call_config_equals == false, tool catalog changes, or the
-// rendered prompt changes). This is what makes a request reconstructable (from
-// the log plus the live registries; 26-I2) and detects silent per-call drift.
+// A changed snapshot, not a per-request record: logged at a request-series
+// start and whenever any header field changes (call_config_equals == false, the
+// tool catalog changes (names or schemas), the rendered prompt changes, or
+// `purpose` changes).
+// This is what makes the request TEMPLATE reconstructable (from the log plus
+// the live registries; 26-I2) and detects silent per-call drift. It does NOT
+// carry a per-request digest: messages grow every step, so a digest over them
+// would be stale the moment the next step is appended.
 struct LlmRequestHeader {
     TurnId                   turn = 0;
     StepId                   step = 0;
+    SessionId                session_id;       // envelope half; also implicit in the owning session
+    std::optional<CallPurpose> purpose;        // envelope half; absent == ordinary conversation
     LlmCallConfig            config;           // provider/model/effort/sampling
-    std::string              system_prompt;    // FULL rendered prompt text (not a one-way hash)
+    std::string              system_prompt_digest; // SHA-256 hex of the rendered prompt (always)
+    std::optional<std::string> system_prompt;  // full text ONLY when logging.log_prompts (26-I11)
     std::vector<std::string> tool_names;       // canonical order
     std::vector<std::string> tool_schema_digests;  // per-tool SHA-256 of canonical schema JSON
-    std::string              request_digest;   // SHA-256 of FrozenRequest::canonical_json()
-    bool                     starts_series = true;  // KV-cache series boundary
+    std::string              template_digest;  // SHA-256 of FrozenRequest::canonical_template()
+    bool                     starts_series = true;  // true iff config/prompt/tools changed (KV boundary)
 };
 
 } // namespace payload
@@ -257,28 +316,51 @@ struct LlmRequestHeader {
 
 **Loop rule.** `buildRequest()` derives `LlmCallConfig` from the last
 `LlmRequestHeader`; a proposed change is applied only if
-`!call_config_equals(proposed, held)`, in which case a new header is logged. A
-tool-set or rendered-prompt change also forces a new header and a new series.
-This is the direct analogue of `call-config.d.ts:1-6,33-40`.
+`!call_config_equals(proposed, held)`, in which case a new header is logged with
+`starts_series = true`. A tool-catalog (names or schemas) or rendered-prompt
+change also forces a new
+header and a new series; a `purpose` change forces a new header with
+`starts_series = false` unless it also changed config/prompt/tools. No header is
+logged for an unchanged template, and none is needed: the messages of each
+dispatch are the append-only message events. This is the direct analogue of
+`call-config.d.ts:1-6,33-40`.
 
-**Reconstruction contract (26-I2).** `FrozenRequest::canonical_json()` is a
-deterministic JSON object:
+**Reconstruction contract (26-I2).** `canonical_template()` is a deterministic
+JSON object:
 `schema_version`, `envelope` (`session_id` + optional `purpose`; D3 — adapters
 may map both to transport metadata, so they are covered by the digest),
 `config` (every `LlmCallConfig` field that can reach the
 provider wire, including the `top_p`/`seed`/`tool_choice` extensions; §4.9),
-`messages` (role + ordered content
-blocks; tool-call arguments as their raw JSON string), `tools` (each schema's
-`name`, `description`, `parameters` with recursively sorted keys). No
-timestamps, ids, or iteration-order-dependent data. Replay rebuilds a request
-from the logged message events plus the last header and asserts
-`rebuild.digest() == header.request_digest`. The `system_prompt` text is
-recoverable from the header; the tool schemas are **re-derived from the live
-`ToolRegistry`** and verified against `tool_schema_digests`; the message events
-already carry the conversation. Nothing is fabricated: a replay that finds no
-header for an attempt marks it **legacy / unreconstructable** (§4.6), and a
-replay whose re-derived schemas do not match the digests fails loud rather than
-guessing.
+`system_prompt` (the full rendered text held in memory — always hashed into
+`template_digest`, but persisted in the header only when the opt-in is set;
+`26-I11`/D23), and `tools` (each schema's
+`name`, `description`, `parameters` with recursively sorted keys).
+`canonical_json()` is the same object plus `messages` (role + ordered content
+blocks; tool-call arguments as their raw JSON string). No
+timestamps, ids, or iteration-order-dependent data.
+Replay rebuilds the **template** from the last header (re-deriving the tool
+schemas from the live `ToolRegistry` and verifying them against
+`tool_schema_digests`) and asserts
+`rebuild.template_digest() == header.template_digest`; it reconstructs the
+attempt's messages from the logged message events and asserts that two rebuilds
+of `canonical_json()` are byte-identical. Nothing is fabricated: a replay that
+finds no header for an attempt marks it **legacy / unreconstructable** (§4.6),
+and a replay whose re-derived schemas do not match the digests fails loud rather
+than guessing.
+
+**Prompt-text policy (D23, `26-I11`).** The header always records
+`system_prompt_digest`. The full `system_prompt` text is present only when
+`logging.log_prompts` is explicitly enabled; otherwise replay re-derives the
+prompt from the live registries, asserts `sha256(rendered) ==
+header.system_prompt_digest`, and fails loud on a mismatch. When the text is
+present it must be byte-identical to the in-memory rendered prompt. This keeps
+the reconstruction contract sound (`template_digest` always covers the prompt)
+while honouring the shipped policy that prompt bodies are never persisted
+implicitly (`redaction.hpp:4-6`, `config.hpp:84-86`, `config.cpp:787`). The
+opt-in governs the **session-DB copy only**: `config.hpp`'s "redacted even when
+it is on" clause describes the spdlog path, which keeps its own redaction and
+does not share a code path with the event log. The header text, when present, is
+the rendered prompt byte-for-byte, not a redacted variant.
 
 #### 4.3.3 The prompt registry (26-D4, D5, D6, D7, D15)
 
@@ -412,8 +494,11 @@ enum class ToolPresentationMode : std::uint8_t { Native, Ptc, Both };
 namespace ymh {
 
 // Adapter-private, lossless-JSON replay state carried by a successful terminal
-// `finish` (dsh ReplayEnvelope). `provider` + `version` tag the producer;
-// `state` is opaque to ymh. Empty when the adapter has no replay state.
+// `finish` (dsh ReplayEnvelope). DELIBERATE DIVERGENCE from dsh's shape
+// (`dsh-llm/lib/types/types.d.ts:331-350`: `{ response: unknown; blocks?: ... }`):
+// ymh wraps it as `{ provider, version, state }` so the producer is identified
+// and the payload is versioned; `state` is opaque to ymh. Empty when the
+// adapter has no replay state.
 struct ReplayEnvelope {
     std::string    provider;
     std::uint32_t  version = 1;
@@ -457,7 +542,9 @@ using AssistantStreamRecord = std::variant<TextRun, ReasoningRun, ToolCallRun, C
 class AssistantStreamAccumulator {
 public:
     // Returns the detached immutable timed event for live publication, without
-    // racing the accumulator (dsh push -> TimedStreamChunk; T-L4).
+    // racing the accumulator. Deliberate divergence: dsh returns a
+    // `TimedStreamChunk` (its chunk vocabulary); ymh returns a `TimedStreamEvent`
+    // because the sink and the accumulator speak `StreamEvent` (T-L4).
     [[nodiscard]] TimedStreamEvent push(const TimedStreamEvent&);
     // The detached immutable record list embedded in a durable attempt event.
     [[nodiscard]] std::vector<AssistantStreamRecord> snapshot() const;
@@ -470,12 +557,17 @@ public:
 ```
 
 **Stream-algebra changes required by D9 (T-H3).** The `Finished` stream event
-(`stream.hpp:160-163`) gains `std::optional<ReplayEnvelope> replay_state`. The
+(`stream.hpp:159-162`) gains `std::optional<ReplayEnvelope> replay_state` (the
+transient carrier from the adapter to the assembler; dsh's `finish` chunk carries
+`replayState`, `dsh-llm/lib/types/types.d.ts:352-389`). The
 `payload::AssistantMessage` event gains `std::vector<AssistantStreamRecord>
-stream` and the same `replay_state`, so the assembled message carries its exact
-compact attempt stream and its model-source replay state (dsh `assistant/message`
-embeds `stream`: `dsh-session/lib/types/types.d.ts:309-317`). Without these,
-`replay_state()` and `expand()` have no durable source. `ToolCallFinished.call`
+stream` and `std::optional<ReplayEnvelope> replay_state`, so the assembled
+message carries its exact compact attempt stream and its replay state (dsh
+`assistant/message` embeds `stream`: `dsh-session/lib/types/types.d.ts:309-317`).
+The event is the **single durable home** for replay state: `MessageSource` does
+not repeat it (§4.3.10). This is a stated divergence from dsh, which stores it on
+the model source; ymh keeps it on the settlement event because the event is the
+settlement authority and the source lands in a later wave. `ToolCallFinished.call`
 (the parsed object) is authoritative; `arguments_fragment` is the raw mirror
 (T-L5).
 
@@ -607,7 +699,7 @@ enum class CompactionTrigger : std::uint8_t { Pressure, ContextOverflow };
 
 // Existing ContextCompactor gains the two entry points. Its constructor is
 // RE-SEAMED from `LLMProvider&` to `LlmRuntime&` so the summarizer request
-// routes through the service like every other call (T-M9); `compactor.hpp:111`
+// routes through the service like every other call (T-M9); `compactor.hpp:113`
 // currently takes `LLMProvider&`, and Wave 1 removes raw providers from the
 // loop, so the seam must move in Wave 1 and the entry points land in Wave 4.
 Task<std::optional<CompactionResult>> compact_if_needed(CompactionTrigger, CancellationToken);
@@ -625,6 +717,7 @@ using GoalId   = std::uint64_t;
 using ScopeKey = std::string;                       // preset mount scope key
 struct ToolRestriction { std::vector<std::string> allow; std::vector<std::string> deny; };
 struct GoalBlockReason { std::string code; std::string message; };
+struct GoalRef { GoalId id = 0; std::uint64_t revision = 0; };  // dsh GoalRef
 struct AgentContext { AgentId agent; ScopeKey scope; };   // handle passed to the roster
 
 // 29: a preset selects tools, prompt sections, skills, and persona for one
@@ -678,13 +771,33 @@ struct CommandSpec { std::string name; std::string description;
 
 #### 4.3.9 New session events: wire names and codecs (T-M10)
 
-"Additive" understates the codec surface: every new event touches
-`include/ymh/core/event.hpp` at the `EventType` enum (`:51-75`), `wire_name`
-(`:79`), `parse_event_type` (`:82`), `all_event_types` (`:86`), the
-`SessionEventMap<Type>` specialization (`:116-117`), the `EventTraits<Payload>`
-specialization (`:127-128`), and the payload's `to_json`/`from_json`. The table
-below pins the first two; the payload structs follow it; the `to_json`/`from_json`
-bodies are mechanical but gated by the `01` errata.
+"Additive" understates the surface. Every new event touches **two** layers:
+
+1. **The codec**, in `include/ymh/core/event.hpp`: the `EventType` enum
+   (`:51-75`), `wire_name` (`:80`), `parse_event_type` (`:83`),
+   `all_event_types` (`:87`), the `SessionEventMap<Type>` specialization
+   (`:118`), the `EventTraits<Payload>` specialization (`:129`), and the
+   payload's `to_json`/`from_json`.
+2. **The consumers.** There are exactly **70 `case EventType::` labels** across
+   five translation units. One of them has **no `default:`**, so a new
+   enumerator without a case is a hard `-Werror=switch` build break; the other
+   four have a `default:`, so a missing case is a **silent drop**:
+
+   | Consumer | EventType switch(es) | Cases | `default:` | Failure if not updated |
+   |---|---|---|---|---|
+   | `src/session/session.cpp` (`deriveMessages`, `:375`) | 1 | 22 | **none** | **hard build break** (`-Werror=switch`) |
+   | `src/ui/ui_event_adapter.cpp` | 3 (`:60`,`:84`,`:205`) | 25 | yes (3×) | silent drop of live/transcript rows |
+   | `src/ui/session_export.cpp` | 1 (`:200`) | 9 | yes | silent drop in export |
+   | `src/cli/session_cli.cpp` | 1 (`:91`) | 8 | yes | silent drop in CLI output |
+   | `src/cli/headless.cpp` | 1 (`:196`) | 6 | yes | silent drop in `ymh run` output |
+
+The table below pins the event types and wire names; the payload structs and
+their JSON key schemas are pinned immediately after it (§4.3.9.1), and the
+per-type consumer obligations are pinned in §4.3.9.2. The `to_json`/`from_json`
+bodies are mechanical transcriptions of those key schemas, owned by the `01`
+errata. **The `01` errata must add a case to every one of the five switches for
+every new durable type** — including the projection switch, which has no
+`default:` and therefore gates the build.
 
 These wire names use ymh's existing slash/underscore convention (`01 §4.3`), not
 dsh's hyphenated names (`llm/retry-started`, `agent-preset/selected`,
@@ -701,7 +814,7 @@ dsh's hyphenated names (`llm/retry-started`, `agent-preset/selected`,
 | `AgentPresetSelected` | `agent_preset/selected` | `payload::AgentPresetSelected` | appended after commit |
 | `CommandRun` | `command/run` | `payload::CommandRun` | log-only, standalone append |
 | `CommandDone` | `command/done` | `payload::CommandDone` | log-only, standalone append |
-| `GoalChanged` | `goal/changed` | `payload::GoalChanged` | compare-and-set on `{id,revision}` |
+| `GoalChange` | `goal/change` | `payload::GoalChange` | durable goal mutation (dsh session event `goal/change`: `GoalChangeMeta`); compare-and-set on `{id,revision}` |
 | `JobChanged` | `job/changed` | `payload::JobChanged` | owner-scoped |
 
 ```cpp
@@ -765,11 +878,17 @@ struct CommandDone {
     std::optional<Sequence>    source_event_seq;
 };
 
-// dsh goal/changed (dsh-goal domain.d.ts:86-90): fresh projection or tombstone.
-struct GoalChanged {
-    GoalId                      id = 0;
-    std::uint64_t               revision = 0;
-    std::optional<GoalSnapshot> current;   // nullopt == cleared
+// dsh durable goal mutation, session event `goal/change`: GoalChangeMeta
+// (dsh-goal/lib/types/domain.d.ts:12-32). Snapshot changes carry the fresh
+// GoalSnapshot plus the admitted round count; a clear carries only the ref.
+// (dsh's `goal/changed` at domain.d.ts:68-73,86-90 is a LIVE Cordis
+// notification, not a session event, and is deliberately not copied.)
+enum class GoalOperation : std::uint8_t { Create, Edit, Pause, Resume, Complete, Block, Clear };
+struct GoalChange {
+    GoalOperation               operation = GoalOperation::Create;
+    std::optional<GoalSnapshot> goal;          // present for non-Clear (dsh GoalSnapshotChangeMeta)
+    std::optional<GoalRef>      cleared;       // present for Clear (dsh GoalRef)
+    std::uint32_t               rounds_started = 0;   // non-Clear
 };
 
 // ymh-local job registry change (owner-scoped; no dsh session-event analogue).
@@ -784,9 +903,91 @@ struct JobChanged {
 } // namespace payload
 ```
 
+#### 4.3.9.1 Pinned JSON key schemas (26-D2/D9/D12/D16..D21; closes N-M3)
+
+The `to_json`/`from_json` bodies are hand-written (`src/session/events.cpp`), so
+the C++ struct does not by itself pin the wire keys. The keys below are pinned;
+an implementing errata may not rename one without amending this table. Conventions
+match the existing codecs: `snake_case` keys, enums as lowercase strings,
+`optional` fields omitted when unset and read with a default, and no
+timestamps/ids beyond the fields listed (the core event envelope already carries
+`event_id` and `timestamp`).
+
+| Payload | JSON object keys |
+|---|---|
+| `payload::LlmRequestHeader` | `turn` int, `step` int, `session_id` string, `purpose` string (`"compaction"｜"session_title"`, omitted when unset), `config` object, `system_prompt_digest` string, `system_prompt` string (**omitted unless `logging.log_prompts`**), `tool_names` string[], `tool_schema_digests` string[], `template_digest` string, `starts_series` bool |
+| `LlmCallConfig` (nested) | `provider` string, `model` string, `reasoning_effort` string (omitted when unset), `temperature` number (omitted), `max_tokens` int (omitted), `stop` string[], `top_p` number (omitted), `seed` int (omitted), `tool_choice` string (omitted) |
+| `payload::LlmRetry` | `retry_id` int, `turn` int, `step` int, `provider` string, `mode` string (`"normal"｜"always"`), `policy_key` string, `retry` int, `max_retries` int (**only** when `mode=="normal"`), `delay_ms` int, `failure` `LLMError` object (existing spec-08 codec) |
+| `payload::LlmRetryStarted` | `retry_id` int, `turn` int, `step` int, `retry` int |
+| `payload::AssistantAttempt` | `turn` int, `step` int, `stream` `AssistantStreamRecord[]` |
+| `payload::ContextPrune` | `shadowed_start` int, `shadowed_end` int, `shadowed_seqs` int[], `shadowed_token_count` int |
+| `payload::AgentPresetSelected` | `agent_preset` string |
+| `payload::CommandRun` | `command_id` int, `name` string, `args` string (omitted when `recordInput=false`), `source` string (`"user"｜"agent"`) |
+| `payload::CommandDone` | `command_id` int, `kind` string (`"success"｜"error"`), `text` string (omitted), `source_event_seq` int (omitted) |
+| `payload::GoalChange` | `operation` string (`"create"｜"edit"｜"pause"｜"resume"｜"complete"｜"block"｜"clear"`), `goal` `GoalSnapshot` object (omitted on clear), `cleared` object `{id int, revision int}` (omitted on non-clear), `rounds_started` int |
+| `GoalSnapshot` (nested) | `id` int, `revision` int, `objective` string, `phase` string (`"active"｜"paused"｜"blocked"｜"complete"`), `blocked` object `{code string, message string}` (omitted unless blocked), `max_goal_rounds` int |
+| `payload::JobChanged` | `owner` string, `kind` string, `ordinal` int, `status` string (`"running"｜"stopping"｜"completed"｜"killed"｜"failed"`), `label` string |
+| `payload::AssistantMessage` (D9 additions) | existing `id`, `content`, `usage` (omitted) **plus** `stream` `AssistantStreamRecord[]` and `replay_state` object (omitted when none) |
+| `payload::ContextCompaction` (D13 additions) | existing `boundary`, `summary`, `token_estimate`, `model`, `created_at` **plus** `provider` string, `shadowed_start` int, `shadowed_end` int, `shadowed_seqs` int[], `shadowed_token_count` int |
+
+`AssistantStreamRecord[]` entries are discriminated by `type`:
+`{"type":"text_chunks","index":int,"time0_ms":int,"dt_ms":int[],"texts":string[]}`,
+`{"type":"reasoning_chunks",…}`,
+`{"type":"tool_call_chunks","index":int,"time0_ms":int,"dt_ms":int[],"id":…,"name":string(omitted),"args":string[]}`,
+`{"type":"chunk","time_ms":int,"event":<existing StreamEvent codec>}`.
+The `type` strings deliberately use ymh's underscore convention; dsh's are
+hyphenated (`text-chunks`, …), consistent with the stated wire-name divergence.
+
 Adding an `EventType` value is a codec change, not a free extension: `parse_event_type`
 rejects unknown strings loudly (S3), so an older binary cannot read a newer
 session DB (§4.6).
+
+#### 4.3.9.2 Consumer matrix for the new event types (closes the 70-switch gap)
+
+The `01` errata owns this matrix and may not ship a new type without filling in
+its row. "Ignore" means an explicit `case ...: break;` in the projection switch
+(no `default:` there) and, in the four `default:`-bearing switches, either an
+explicit no-op case or a documented fall-through to `default` — the choice is
+recorded, never implicit.
+
+| EventType | `deriveMessages` projection (`session.cpp`) | transcript / UI (`ui_event_adapter`, `session_export`, `session_cli`) | compaction & token accounting |
+|---|---|---|---|
+| `LlmRequestHeader` | ignore (metadata) | no row; never rendered | excluded (not model-visible content) |
+| `LlmRetry` | ignore | optional retry notice (status only) | excluded |
+| `LlmRetryStarted` | ignore | no row | excluded |
+| `AssistantAttempt` | ignore (committed no message) | optional debug row only | excluded |
+| `ContextPrune` | ignore — the replacement `ToolResult` carries the text | prune notice row | the **replacement** is counted; the prune event is not |
+| `AgentPresetSelected` | ignore | preset row | excluded |
+| `CommandRun` | ignore (log-only) | command row | excluded |
+| `CommandDone` | ignore (log-only) | command row | excluded |
+| `GoalChange` | ignore | goal row | excluded |
+| `JobChanged` | ignore | job row | excluded |
+| `AssistantChunk` (existing type, **new live-only role**) | ignore | **live delta feed (required)** — see §4.3.4/Wave 2 | excluded (durable stream lives in `assistant/message`) |
+| `AssistantMessage` (changed) | assistant message (existing) | existing | counted as assistant output |
+| `ContextCompaction` (changed) | existing projection | existing | excluded (projection) |
+
+Rules the errata must satisfy:
+
+1. **Build gate.** The projection switch (`session.cpp:375`) has no `default:`;
+   every new durable type gets an explicit case. This is checked by
+   `-Werror=switch`, and `all_event_types()` round-trip tests (`01 §15.1`) must
+   cover every new type.
+2. **No silent drops for user-visible events.** `AgentPresetSelected`,
+   `CommandRun`/`CommandDone`, `GoalChange`, and `JobChanged` are user-visible;
+   the four `default:`-bearing switches must render them explicitly (or record
+   why not). Internal events may fall through, but only with a documented reason
+   in the errata.
+3. **Token accounting.** No metadata event is counted toward the context/token
+   estimate; only message-bearing events (`UserMessage`, `AssistantMessage`,
+   tool results, compaction summaries) contribute.
+4. **Live vs durable.** `AssistantChunk` stays in the codec vocabulary (legacy
+   durable rows remain decodable) but new binaries do **not** append it; it is
+   published as a live-only event on the bus, like `McpServerStatusChanged`
+   (`core/event.hpp:72-74`). The durable settlement is `AssistantMessage.stream`.
+   Consumers that need live deltas (headless stdout, the UI adapter) read the
+   live event; consumers that need history read the durable event. The `01`
+   errata owns whether `AssistantChunk` is moved out of the compile-time
+   `SessionEventMap` or kept with an append guard.
 
 #### 4.3.10 Message provenance (26-D14)
 
@@ -808,24 +1009,28 @@ enum class ContextForm : std::uint8_t {
 // One named contribution to a Snapshot-form context (dsh ContextSnapshotSection).
 struct ContextSnapshotSection { std::string name; std::string text; };
 
-// Producer-declared form plus the fields that form requires (dsh ContextFormed,
-// message.d.ts:71-89): Snapshot requires `sections`, Notice requires `summary`.
+// Producer-declared form plus the fields that form requires. dsh's ContextFormed
+// is a discriminated union keyed by `form` (message.d.ts:71-89); ymh flattens it
+// to one defaulted struct for storage and enforces the same coupling at
+// construction (26-I7): `form == Snapshot` requires a non-empty `sections`,
+// `form == Notice` requires a non-empty `summary`; a violation fails loud.
 struct ContextFormed {
     ContextForm                         form = ContextForm::None;
-    std::vector<ContextSnapshotSection> sections;   // form == Snapshot
-    std::string                         summary;    // form == Notice
+    std::vector<ContextSnapshotSection> sections;   // required iff form == Snapshot
+    std::string                         summary;    // required iff form == Notice
 };
 
 // dsh MessageSourceMap (message.d.ts:94-104), flattened for C++.
+// Divergence (stated): dsh's ModelMessageSource carries `replayState`; ymh keeps
+// replay state once, on the assistant settlement event (§4.3.4), not here.
 struct MessageSource {
     enum class Kind : std::uint8_t { User, Plugin, Model, Tool };
-    Kind                          kind = Kind::User;
-    std::string                   plugin;                 // Kind::Plugin
-    ContextFormed                 context;                // Kind::Plugin
-    std::optional<ToolCallId>     call;                   // Kind::Tool
-    std::string                   provider;               // Kind::Model
-    std::string                   model;                  // Kind::Model
-    std::optional<ReplayEnvelope> replay_state;           // Kind::Model (§4.3.4)
+    Kind                      kind = Kind::User;
+    std::string               plugin;                 // Kind::Plugin
+    ContextFormed             context;                // Kind::Plugin
+    std::optional<ToolCallId> call;                   // Kind::Tool
+    std::string               provider;               // Kind::Model
+    std::string               model;                  // Kind::Model
 };
 
 } // namespace ymh
@@ -844,16 +1049,39 @@ wins and the spec text is corrected.
 | Spec | Decision(s) affecting it | Class | Why |
 |---|---|---|---|
 | **10** supervisor-tui | D16 (preset selection UI), D18/D19 (goal/job surfaces), D20 (commands) | **Additive** | New UI affordances; no existing surface contract changes. Must not alter the live-only switcher rule (`22`) or transcript rendering. |
-| **11** m2-errata | D16 (session header + events), D2/D9/D13 (new event types) | **Additive for D2; breaking for D9/D13/D16** | New event kinds are additive, but D9 changes the assistant-message payload, D13 adds `ContextCompaction` fields against spec 13's "does not add fields to the payload", and D16 changes the session header. Each is gated by its owning-spec errata in Wave 0. |
+| **11** m2-errata | D16 (session header + events), D2/D9/D13 (new event types) | **Additive for D2; breaking for D9/D13/D16** | New event kinds are additive, but D9 changes the assistant-message payload, D13 adds `ContextCompaction` fields against spec 13's "does not add fields to the payload", and D16 changes the session header. Each is gated by its owning-spec errata before its wave (Wave 0 Stage B, §5). |
 | **17** ui-transcript-errata | D4/D7 (prompt/context provenance shown), D9 (stream records), D11/D12 (tool-row retention notices), D14 (provenance), D15 (guidance), D20/D21 (command/reminder rows) | **Additive** | The transcript gains new row kinds/`source.form` rendering. The verified render contracts (fixed chrome budget, generation guard, `has_error` boolean) must be preserved; no change to them is proposed. |
 | **20** skills | D6 (shared `<system-reminder>`/`ContextForm` framing), D17 (child skills join composition), D15 (skill guidance ordering) | **Additive** | Spec 20's catalog/`SkillTool` contract is unchanged; the change is that the catalog message is now a sourced `catalog`-form context and children inherit the parent's skill set. If spec 20 pins the exact catalog text, updating it to the verbatim dsh text is an **errata** (text-only), not a semantic break. |
 | **21** config-jsonc-errata | D4/D5/D6/D15/D16 (new config keys) | **Additive** | New optional keys under existing/new sections (names pinned in §4.9). The required-global-layer rule, JSONC-only rule, and "never auto-create an explicit `--config`" rule are untouched. A new required key would be breaking; none is proposed (`max_bytes` is required only when the instructions loader is enabled). |
 | **22** switcher-sessions-errata | D16 (preset recorded per session) | **Additive** | `/sessions` still reads stored sessions from disk; a preset id is a new stored attribute, not a filter or a live-only rule change. |
 | **23** session-lifecycle-errata | D16 (session header names preset), D18 (goal state across resume/fork) | **Brk. (errata required)** | The session header gains a preset id and a goal projection, so the frozen header field list changes. Lifecycle rules (lease, resume, fork) are preserved. `23` is in the Wave 0 gate. |
-| **24** agent-lifetime-errata | D10 (scheduler holds the agent), D11 (retention: no lifetime change), D17 (children are agents with monotone depth) | **Additive** | The loop co-ownership invariant (`24-D1`, `agent_loop.hpp:71-73`) is preserved. Children are ordinary agents; monotone depth is a new persisted field. |
+| **24** agent-lifetime-errata | D10 (scheduler holds the agent), D11 (retention: no lifetime change), D17 (children are agents with monotone depth) | **Additive** | The loop co-ownership invariant (`24-D1`, `agent_loop.hpp:71-73`) is preserved. Children are ordinary agents; monotone depth is a new persisted field. D24 no longer bumps `kProtocolVersion`, so `24` `AL20` (`:1692`) and §1.3.3 (`:295`) — "`kProtocolVersion` unchanged" — remain accurate; **no spec-24 errata is required** (closes Rev-5 gate finding N-2). |
 
-Also affected and gated in Wave 0: `00`, `01`, `06`, `07`, `08`, `13`, `17`,
-`23`, `27` (new), `28` (new), `29` (new), `30` (new).
+The provider/architecture seams (not in the task's named list but architecture-level):
+
+| Spec | Decision(s) affecting it | Class | Why |
+|---|---|---|---|
+| **00** architecture | D1 (provider seam), D9/D2 (event family), D16/D18 (presets/goals), D24 (event-vocabulary decoupling) | **Brk. (errata required)** | The top-level gate changes: `LLMProvider`+registry → `LlmRuntime`, the `EventType` family grows, and the session header changes. `00` is the first Wave-0 up-front item (§5). The wire envelope version is **unchanged** (D24). |
+| **06** agent-loop | D1 (loop holds `LlmRuntime&`, not `LLMProvider*`), D10 (scheduler), D17 (children), D21 (reminders) | **Brk. (D1); additive (D10/D17/D21)** | D1 replaces the pinned `AgentServices::provider` seam (`agent_loop.hpp:64`) — the register classifies it `Brk. (06,08)`. D10/D17/D21 are additive behind it. |
+| **08** llm-provider | D1 (service boundary), D2/D3 (freeze/digest/header), D8 (assembler), D9 (replay state), D13 (summarizer routing), D23 (prompt-text policy) | **Brk. (D1/D2/D3); additive (D8/D9)** | D1 inserts a service above the provider and moves retry/serialization out of the adapter; the `LLMProvider` contract itself is retained. |
+| **05** transport | D24 (receiver tolerance for unknown event types), D2/D9 (new event types over the socket) | **Additive** | The envelope shape (`SessionEnvelope` = `{session,event}`, T5 `:1229`), the handshake, and `kProtocolVersion = 1` are unchanged; the only new rule is that the client skips an unknown event `type` (cursor still advances) instead of failing the connection. The §2.1 enum-string rule (`:201-203`) is unaffected — it governs the pinned enums, not the event vocabulary. |
+| **04** host-daemon / **16** daemon-ownership | D24 (no version change) | **Unaffected** | `kProtocolVersion` stays `1` and the handshake is unchanged, so the version constant and the handshake outcome do not change. Ownership/lifetime rules are untouched. |
+| **07** tools-execution | D11 (retention), D15 (presentation) | **Brk. (D11 `ToolResult`/clamp); additive (D15)** | Retention changes the pinned `ToolResult`/`clamp_tool_result` contract. |
+| **13** compaction | D12 (pruner), D13 (payload fields) | **Brk. (D13)** | D13 adds `ContextCompaction` fields against spec 13's "does not add fields to the payload". |
+| **15** mcp-adapter | D15, `26-I6` (a tool-set change starts a new request series) | **Additive** | MCP keeps its namespaced tool contract; the change is that a server connect/disconnect is a logged series boundary. |
+
+**Cascade coverage — the specs not classified above are unaffected in their
+pinned interfaces.** `02` persistence (no schema/DDL change, §4.6), `03`
+registry (untouched), `09` permissions (no semantics change; `ReadOnly` status is
+unchanged), `14` PTY (behind the execution seam, untouched), `18` context-errata
+and `25` ui-ux-errata (additive config keys only, §4.9), `19` session-rename
+(untouched). `10/11/17/20/21/22/23/24` are classified in the table above. Any
+spec not in this list is out of scope; the `00` errata (Wave-0 up-front) is the
+gate that confirms the list is complete.
+
+Up-front Wave-0 freezes (block Wave 1): `00`, the `01` event-family contract,
+`08` — see §5. JIT-gated before its own wave: `05`, `06`, `07`, `13`, `17`,
+`23`, `27`, `28`, `29`, `30`, and the touched `10`/`11`/`20`/`21`/`22`.
 
 ### 4.5 Failure modes (F-style, to be pinned by the owning specs)
 
@@ -873,7 +1101,8 @@ Also affected and gated in Wave 0: `00`, `01`, `06`, `07`, `08`, `13`, `17`,
   `complete`; a golden test hashes the rendered prompt.
 - `26-F6` — tool-catalog drift mid-session. Guard: `tool_names` +
   `tool_schema_digests` in the header; any change starts a new series and is
-  logged (`26-I6`).
+  logged (`26-I6`), and the re-derived schema must match its digest or replay
+  fails loud.
 - `26-F7` — malformed stream grows memory / corrupts a completed block. Guard:
   `BlockAssembler` ignores deltas for a closed index (dsh's rule).
 - `26-F8` — pruned replacement loses the original. Guard: replacement cites the
@@ -886,9 +1115,11 @@ Also affected and gated in Wave 0: `00`, `01`, `06`, `07`, `08`, `13`, `17`,
 - `26-F11` — job output read/stopped by a non-owner. Guard: owner-session fence.
 - `26-F12` — command becomes a model message. Guard: `command/run`/`command/done`
   are log-only standalone appends.
-- `26-F13` — replay non-determinism: a request rebuilt from the log has a
-  different digest. Guard: the §4.3.2 canonical-serialization contract plus the
-  replay-determinism harness (§5.2), which fails on any digest mismatch.
+- `26-F13` — replay non-determinism: a request template or a concrete request
+  rebuilt from the log differs from what was dispatched. Guard: the §4.3.2
+  canonical-serialization contract — `template_digest()` equality for the header
+  and byte-identical `canonical_json()` across two rebuilds per attempt — plus
+  the replay-determinism harness (§5.2), which fails on any mismatch.
 - `26-F14` — reserved presentation mode silently accepted. Guard: selecting
   `Ptc`/`Both` fails loud at load (`26-I7`); D22 is deferred.
 - `26-F15` — old session opened by a new binary with no header. Guard: attempts
@@ -896,51 +1127,89 @@ Also affected and gated in Wave 0: `00`, `01`, `06`, `07`, `08`, `13`, `17`,
 - `26-F16` — concurrent scheduler tool mutates shared state. Guard: the
   concurrency contract in §4.8; TSan tests.
 
-### 4.6 Backward compatibility and migration (T-M11)
+### 4.6 Backward compatibility (T-M11)
 
-- **Session DB schema 1 → 2 (DDL delta).** `migrate_fresh` currently only
-  creates schema 1 (`session_persistence.cpp:569-580`; `kSchemaVersion = 1` at
-  `session_persistence.hpp:68`). The new event family needs **no DDL**: every new
-  event is a row in the existing `events(sequence, session_id, event_id,
-  timestamp, type, payload)` table (`:53-61`), and the D16 header fields
-  (`preset`, `goal`) ride the existing `sessions.metadata JSON` column (`:47`)
-  rather than new columns. `migrate_v1_to_v2` is therefore a single idempotent
-  transaction that re-checks `PRAGMA application_id` and sets
-  `PRAGMA user_version = 2`; if a later decision adds a real column, its
-  `ALTER TABLE` lands in this same function before the version write.
-- **Versioning policy across waves.** `kSchemaVersion` tracks **structural
-  shape only** — tables, columns, indexes. New event *types* are not a shape
-  change, so there is exactly **one** bump (Wave 1); Waves 2/5 add event rows
-  and do not re-bump. A binary that does not know an event type fails loud at
-  `parse_event_type` (S3) regardless of `user_version`, which is the actual
-  forward-incompatibility fence. A future structural change adds a new
-  `migrate_vN_to_vN+1` and bumps again; readers must tolerate every version
-  `<= kSchemaVersion` (next bullet).
-- **Read-only opens must tolerate older shapes.** Today a read-only open
-  requires `user_version == kSchemaVersion` exactly
-  (`session_persistence.cpp:682`), so `/sessions` (spec `22`, which reads stored
-  sessions directly from disk) would reject a not-yet-migrated schema-1
-  workspace once the writer bumps to 2. Wave 1 must relax the read path to
-  accept `version <= kSchemaVersion` for read-only opens (rejecting only
-  `> kSchemaVersion`), because schema 1 is a strict subset: header-less attempts
-  and legacy `AssistantChunk` are already handled by the rules below. This is a
-  Wave-1 requirement, not an open question.
-- **Header-less resumed sessions.** A v1 session has no `LlmRequestHeader`. On
-  replay, an attempt with no preceding header is marked `legacy` and its
-  reconstruction is reported as unavailable — never fabricated. New turns on a
-  resumed legacy session write headers normally.
-- **Legacy `AssistantChunk`.** Retained and readable forever, but new binaries
-  do not append it. New sessions embed the compact stream in
+Compatibility is **two-axis**. The **durable/on-disk axis** is strict: an older
+binary must refuse a newer session DB loudly rather than misread it. The **wire
+axis** is tolerant: the socket is a live projection of the log, so a receiver
+skips an event type it does not know and stays connected. `kProtocolVersion`
+fences the wire **envelope** shape and handshake only; it is not an event-
+vocabulary counter (`26-I12`/`26-D24`).
+
+- **No schema bump; `kSchemaVersion` stays 1.** `kSchemaVersion` tracks
+  **structural shape only** — tables, columns, indexes (`session_persistence.hpp:68`).
+  This program changes no structural shape: every new event is a row in the
+  existing `events(sequence, session_id, event_id, timestamp, type, payload)`
+  table (`session_persistence.cpp:53-58`), and the D16 header fields (`preset`,
+  `goal`) ride the existing `sessions.metadata JSON` column (`:47`) rather than
+  new columns. `migrate_fresh` (`:569-580`) is unchanged; there is **no**
+  `migrate_v1_to_v2`, no DDL delta, and therefore **no call site** to pin. (Rev 3
+  proposed a 1→2 bump with zero DDL; that contradicted this very definition — a
+  bump with no structural change — so Rev 4 removes it.)
+- **Forward-incompatibility fence (durable/on-disk axis).** New event *types* are
+  not a shape change, so `user_version` does not gate them; the **on-disk/replay**
+  decode rejects unknown type names loudly (`src/session/session_persistence.cpp:228-232`
+  `CorruptionError`; `01` S3), which is the actual fence: an older binary refuses
+  a newer session DB at the first unknown event instead of silently misreading it.
+  Because `kSchemaVersion` stays 1, a read-only open keeps today's exact-match
+  rule (`session_persistence.cpp:682`) and `/sessions` (spec `22`) continues to
+  read schema-1 workspaces with no relaxation. A future change that adds a real
+  column is the first structural change and introduces `migrate_vN_to_vN+1` and
+  a bump at that point.
+- **Wire axis: unknown event types are skipped, not fatal.** The receiver decodes
+  `StreamNotification` → `SessionEnvelope` → `Event` (`src/transport/protocol.cpp:266-268,321-326`)
+  and must **skip** a `SessionEnvelope` whose event `type` it does not recognize:
+  log it, do not call `on_envelope`, and still advance the per-session cursor to
+  the notification's `cursor` (`src/ui/supervisor_connection.cpp:310-323`) so a
+  reconnect does not replay a poison pill. Skipping is safe because the durable
+  truth is the on-disk log, which a newer binary re-reads. The
+  old-binary-facing-a-newer-daemon direction is a downgrade (below) and fails
+  when it hits a type it cannot decode; that is the loud behavior we want for an
+  un-rebuilt binary, and it is why the envelope version is not the vocabulary
+  counter.
+- **Payload evolution on an existing event type.** New fields on a *known*
+  event (`AssistantMessage.stream`/`replay_state`, the `ContextCompaction`
+  fields) are additive JSON: each is optional or defaulted, and `from_json` must
+  ignore unknown keys so an older reader degrades gracefully instead of
+  rejecting the row. A field that cannot be made optional is a breaking payload
+  change and must be carried by a new event type.
+- **Header-less resumed sessions.** A pre-program session has no
+  `LlmRequestHeader`. On replay, an attempt with no preceding header is marked
+  `legacy` and its reconstruction is reported as unavailable — never fabricated.
+  New turns on a resumed legacy session write headers normally.
+- **Legacy durable `AssistantChunk`.** Retained and readable forever, but new
+  binaries do not append it to the log. New sessions embed the compact stream in
   `assistant/message` and retain non-message attempts in `assistant/attempt`;
-  `expand()` is defined over those records, and the transcript falls back to
-  `AssistantChunk` when no embedded/compact record exists.
-- **New event types.** `parse_event_type` rejects unknown wire names (S3), so a
-  v2 DB is not readable by a v1 binary. This forward-incompatibility is
-  accepted and documented; downgrades are unsupported.
+  `expand()` is defined over those records, and the transcript falls back to a
+  legacy `assistant/chunk` row when no embedded/compact record exists. New
+  binaries still **publish** `AssistantChunk` as a live-only event so live
+  consumers keep their deltas (D9, §4.3.9.2, Wave 2).
+- **New event types.** On the durable axis, a session DB containing the new event
+  types is not readable by an older binary (the on-disk fence above); this
+  forward-incompatibility is a **one-way door and an explicit product decision**:
+  the Wave-0 freeze must record the user's acceptance (the alternative — a
+  migration/dual-read window — is not proposed). Downgrades are unsupported. On
+  the wire axis, the same new type is **skipped** by an older receiver, so it does
+  not by itself break the connection.
+- **Protocol version (`kProtocolVersion` stays `1`).** The event vocabulary is
+  **decoupled** from the wire envelope version: new durable event types do **not**
+  bump `kProtocolVersion`, which fences the **envelope** shape (`SessionEnvelope`
+  = `{session,event}`, `05` T5) and the handshake only. This is what makes the
+  spec-24 outliving-daemon case work: a non-last supervisor's daemon outlives it
+  (`24` §1.3.3, `AL23`/`AL25`), so a **new** supervisor frequently attaches to an
+  **old** daemon process. With the version held at `1` the handshake matches
+  (`protocol_server.cpp:285-293`) and the new supervisor understands every type
+  the old daemon can emit (a superset); with a bump the exact-match handshake
+  would reject the attach outright, forcing a co-upgrade that spec 24 says is not
+  required. Spec `24` `AL20` (`:1692`) / §1.3.3 (`:295`) ("`kProtocolVersion`
+  unchanged") therefore remain accurate — **no spec-24 errata is required**. A
+  future change that alters the envelope shape or handshake semantics is the only
+  thing that bumps the version; that bump is then `Brk. (05)` and gates spec `05`
+  in Stage B.
 - **Registry DB** (`0x594D4802`, schema 2) is untouched.
-- **Rollout order.** Reader support (accept `version <= kSchemaVersion`
-  read-only, parse new events, tolerate a missing header) ships in the same wave
-  as writer support; there is no separate downgrade path.
+- **Rollout order.** Reader support (parse new events, tolerate a missing
+  header) ships in the same wave as writer support; there is no separate
+  downgrade path.
 
 ### 4.7 Error taxonomy (completeness)
 
@@ -1041,6 +1310,11 @@ contract unsound. This is a deliberate superset of dsh's 6-field
 later decision removes them from the wire, they are removed from both the
 config and the digest together (open question 3).
 
+`logging.log_prompts` is an **existing** key (`include/ymh/config/config.hpp:84-88`,
+`src/config/config.cpp:787`), not a new one; D23 reuses it as the durable-prompt
+opt-in. No new config key is introduced for the header, and the default
+(`false`) keeps prompt text out of the session DB (`26-I11`).
+
 ---
 
 ## 5. Phased migration plan
@@ -1051,36 +1325,56 @@ spec is gated in Wave 0, per `AGENTS.md`'s two-gate rule.
 
 ### Wave 0 — Pin the specs (no code)
 
-Write/amend and verify, in order, with Oracle PASS and zero open HIGH/MEDIUM
-before any code:
+Wave 0 has **two stages**. Only Stage A blocks Wave 1; Stage B is JIT-gated
+before its own wave's code. Nothing is coded until its owning spec is verified.
 
-0. `00-architecture.md`: confirm the amended provider/prompt/event seams and the
-   new session events do not violate a top-level invariant, and update the seam
-   inventory (the register and §4.4 both gate `00`).
-1. `27-system-prompt.md` (new): registry, order tables, persona, instructions,
-   runtime contexts, presentation, `assemble()`.
-2. `28-output-retention.md` (new): retainers, omission metadata, `ToolResult`
-   mapping.
-3. `29-agent-presets.md` (new): roster, standing/per-session model, child
-   composition.
-4. `30-goals-jobs-commands.md` (new): goals, jobs, commands.
-5. `01` errata: new event family, wire codecs, migration.
-6. `06` errata: bounded-parallel scheduler, steering, reminders.
-7. `07` errata: `ToolResult` retention fields, clamp retirement.
-8. `08` errata: service boundary, freeze/serialization, assembler, retry
-   durability, `LLMErrorCode::InvalidPreparedCall`.
-9. `13` errata: trigger taxonomy, shadowed-seq accounting, payload fields.
-10. `17` errata: new transcript rows/`source.form`.
-11. `23` errata: session header preset/goal fields.
-12. `10`/`11`/`20`/`21`/`22` errata only where touched.
+**Stage A — up-front freeze (blocks Wave 1).** Three items, in order, each with
+Oracle PASS and zero open HIGH/MEDIUM:
+
+- **A0. `00-architecture.md`** — confirm the amended provider/prompt/event seams
+  and the new session events do not violate a top-level invariant, and update the
+  seam inventory (the register and §4.4 both gate `00`).
+- **A1. `01` errata — the event-family contract only** — the
+  `EventType`/`wire_name` extension rule, the two-axis compatibility rule (§4.6),
+  the live-only vs durable split, the consumer matrix (§4.3.9.2), and the
+  `llm/request_header` event + codec.
+- **A2. `08` errata — the service boundary** — `LlmRuntime`/`PreparedCall`/
+  `FrozenRequest`, freeze/serialization/digest, and
+  `LLMErrorCode::InvalidPreparedCall`.
+
+Wave 1 needs nothing else: its header carries the **current**
+`AgentConfig::system_prompt` (below), so spec `27` is **not** a Wave-1
+dependency. Freezing the prompt registry before Wave 1 would buy zero Wave-1
+risk reduction.
+
+**Stage B — JIT-gated per wave (verified before that wave's code).**
+
+| Wave | Specs verified before its code |
+|---|---|
+| 1 | none new — the Stage-A A1 `01` errata already pins the D24 wire-vocabulary rule; no `05` change |
+| 2 | `01` assistant-stream payloads; `08` assembler/replay errata |
+| 3 | `27-system-prompt.md` (new); `01` provenance payloads; `17`/`21` errata |
+| 4 | `28-output-retention.md` (new); `06`/`07`/`13` errata |
+| 5 | `29-agent-presets.md` (new); `23` errata; `01` preset event |
+| 6 | `30-goals-jobs-commands.md` (new); `01` goal/job/command events |
+| any | `10`/`11`/`20`/`22` errata only where that wave changes them |
+
+Every owning spec is still verified before its wave's code, per `AGENTS.md`'s
+two-gate rule; Stage B defers the *verification date*, not the requirement.
 
 ### Wave 1 — LLM service boundary, logged header, frozen request (D1–D3)
 
 - Add `LlmRuntime`, `PreparedCall`, `AdapterHandle`, `ProviderInfo`,
   `LlmCallConfig`/`call_config_equals`, `FrozenRequest` with
-  `canonical_json()`/`digest()`, the `llm/stream` interceptor registration, and
+  `canonical_template()`/`template_digest()`/`canonical_json()`/`digest()`, the
+  `llm/stream` interceptor registration, and
   the `payload::LlmRequestHeader` event.
 - Point `AgentLoop::buildRequest` at the runtime; derive the header from the log.
+- Header prompt policy (D23): always write `system_prompt_digest`; write the full
+  `system_prompt` only when `logging.log_prompts` is explicitly enabled.
+- Do **not** bump `kProtocolVersion` (D24): `llm/request_header` is a vocabulary
+  addition, handled by the receiver-skip rule pinned in the `01` errata; the
+  envelope version stays `1`.
 - Re-seam `ContextCompactor`'s constructor from `LLMProvider&` to `LlmRuntime&`
   (T-M9) so Wave 4 can route the summarizer.
 - The Wave-1 header carries the **current** `AgentConfig::system_prompt`
@@ -1100,10 +1394,23 @@ before any code:
   embedded compact `stream` to the `payload::AssistantMessage` payload and
   `replay_state` to the `Finished` stream event; add the `assistant/attempt`
   event.
-- Stop appending `AssistantChunk` in new sessions; it stays readable as legacy
-  (no migration).
+- Stop **persisting** `AssistantChunk` in new sessions; legacy durable rows stay
+  readable (no migration). New binaries keep **publishing** `AssistantChunk` as a
+  live-only event (`core/event.hpp:72-74`) so live deltas survive.
+- **Consumer migration (required, not optional).** `src/cli/headless.cpp:197-202`
+  builds `ymh run`'s stdout purely from `AssistantChunk` and has no
+  `AssistantMessage` case; `src/ui/ui_event_adapter.cpp:90-108` derives live
+  `AssistantMessageStarted` from it. Wave 2 must (a) keep the live delta path on
+  the live-only event, and (b) make headless and the transcript/export paths read
+  `assistant/message` (embedded `stream`) for durable text. Without (b),
+  `ymh run` prints nothing and returns empty text on a resumed/replayed session.
+  The `session_export.cpp`/`session_cli.cpp` fallback to legacy `assistant/chunk`
+  is retained.
 - Tests: golden assembly from recorded chunk fixtures, interrupted-stream
-  blocks, replay expansion round-trip, `replay_state` propagation.
+  blocks, replay expansion round-trip, `replay_state` propagation, a
+  **headless-output test** (`ymh run` text from `assistant/message` with no
+  `AssistantChunk`), and a **live-delta test** (UI adapter receives the live-only
+  event).
 - Rationale: replay fidelity before the prompt system, so prompt changes can be
   diffed against recorded attempts.
 
@@ -1129,9 +1436,13 @@ before any code:
   accounting and the `LlmRuntime`-routed summarizer; repeat-tool reminders.
 - Tests: scheduler ordering/barriers/abort-synthetics + TSan; retainer
   exact-omission goldens; pruner replay round-trip; compaction trigger selection.
-- Rationale: independent of the prompt system; improves context pressure and
-  replay safety. `clamp_tool_result` (`tool.hpp:82`) is retired in favour of the
-  retainer once all call sites migrate.
+- **Dependency: serialize Wave 3 → Wave 4.** This wave is *not* independent of
+  the prompt system: `ContextAcceptor` (§4.3.5) consumes `ContextMessage`
+  (`agent.hpp:88`) and D13/D14 both reshape the spec-13 message model, so Wave 4
+  must land after Wave 3. It improves context pressure and
+  replay safety once Wave 3's provenance exists. `clamp_tool_result`
+  (`tool.hpp:82`) is retired in favour of the retainer once all call sites
+  migrate.
 
 ### Wave 5 — Presets and subagent composition (D16, D17)
 
@@ -1179,13 +1490,17 @@ The suite follows §44 (unit, integration with fakes, golden TUI render, replay)
 Additions required by this spec:
 
 1. **Replay-determinism harness (new).** Record a session against `FakeLLM`;
-   for every `LlmRequestHeader`, rebuild the request from the logged message
-   events plus the header **and the running registries** (tool schemas
-   re-derived from the live `ToolRegistry`) and assert
-   `rebuild.digest() == request_digest`; run the rebuild twice and assert
-   byte-identical `canonical_json()`. This is the executable form of
-   `26-I2`/`26-F13`. A companion negative test mutates one tool schema and
-   asserts the rebuild fails loud as a registry mismatch.
+   for every `LlmRequestHeader`, rebuild the request **template** from the header
+   and the running registries (tool schemas re-derived from the live
+   `ToolRegistry`) and assert
+   `rebuild.template_digest() == header.template_digest`; for every dispatched
+   attempt, rebuild `canonical_json()` twice and assert the two are
+   byte-identical. When `logging.log_prompts` is off, the harness asserts
+   `sha256(rendered) == header.system_prompt_digest`; when it is on, it also
+   asserts the stored text is byte-identical. This is the executable form of
+   `26-I2`/`26-F13`/`26-I11`. A companion negative test mutates one tool schema
+   and asserts the template rebuild fails loud as a registry mismatch; a second
+   negative test perturbs the prompt and asserts the prompt-digest check fails.
 2. **Fixture provenance.** Hermetic fixtures are generated by `FakeLLM` runs and
    checked in under `tests/fixtures/` with a generator test that regenerates and
    diffs them; no real-LLM transcript is a hermetic fixture. Live tests remain
@@ -1196,13 +1511,25 @@ Additions required by this spec:
 4. **Scheduler concurrency.** Deterministic barrier/pool ordering tests,
    abort-drain/synthetic-result tests, and a TSan run over the scheduler and the
    `LlmRuntime` registry.
-5. **Migration.** Open a checked-in schema-1 DB fixture; assert the v1→v2
-   upgrade, that a header-less attempt is marked legacy and not fabricated, and
-   that a **read-only** open of the still-schema-1 fixture succeeds (the
-   `version <= kSchemaVersion` rule).
-6. **Codec round-trip.** Extend the exhaustive `all_event_types()` wire/encode
+5. **Compatibility (durable/on-disk axis).** Open a checked-in pre-program DB
+   fixture (schema 1); assert there is no migration (the version is unchanged),
+   that a header-less attempt is marked legacy and not fabricated, that a
+   **read-only** open still succeeds under the exact-match rule, and that an
+   unknown event type **fails loud** in the on-disk/replay decode
+   (`decode_event`, `session_persistence.cpp:228-232`).
+6. **Mixed-version wire compatibility (D24).** (a) A handshake with a genuinely
+   mismatched **envelope** `protocol_version` is still rejected with
+   `UnsupportedProtocol` (`protocol_server.cpp:285-293`) — the envelope fence is
+   retained. (b) A new supervisor attached to an old daemon (handshake `1`==`1`)
+   decodes every old event type normally. (c) A `SessionEnvelope` carrying an
+   unknown event `type` is **skipped**: `on_envelope` is not invoked, the
+   connection stays open, and the per-session cursor still advances to the
+   notification's `cursor` (so a reconnect does not loop on the skipped event).
+   (d) The on-disk replay of that same unknown type still fails loud, proving the
+   two axes are independent.
+7. **Codec round-trip.** Extend the exhaustive `all_event_types()` wire/encode
    round-trip test (`01 §15.1`) to every new event in §4.3.9.
-7. **Property tests.** Canonical-serialization round-trip and strict-variable
+8. **Property tests.** Canonical-serialization round-trip and strict-variable
    interpolation fuzz.
 
 ---
@@ -1324,3 +1651,54 @@ classification (N-M6); added `00` to Wave 0, folded `top_p`/`seed`/`tool_choice`
 into `LlmCallConfig`/`canonical_json()`, removed `header_seq`, completed
 `Deque`/`ChunkedList`, renamed `build_request` to `buildRequest`, pinned
 `CallPurpose`, and aligned the instructions loader to dsh (N-L1–N-L5).*
+
+*Rev 4 (2026-09-19): repair pass after the Rev-3 re-gate
+(`/tmp/opencode/regate26-rev3.md`; open HIGH = 1, MEDIUM = 3, LOW = 6). Full
+revision log in `26-dsh-alignment.md` §7. Part 2 changes: chose the
+changed-snapshot + **template-digest** design and made `26-I2`, D2, §4.3.2,
+§4.5 (`26-F13`) and the §5.2 harness agree — added
+`FrozenRequest::canonical_template()`/`template_digest()`, renamed the header
+field to `template_digest`, and excluded `messages` from the header digest
+(NEW-H1); added `session_id`/`purpose` to `LlmRequestHeader` (NEW-M1); pinned the
+JSON key schemas for every new/changed payload in §4.3.9.1 (NEW-M2); replaced
+`GoalChanged`/`goal/changed` with the durable `goal/change` → `GoalChange`
+(NEW-M3); removed D2's stale sequence clause, corrected the ymh citations and
+deleted the unsupported `supervisor.cpp:1487`, single-homed `replay_state` on the
+assistant event, removed the zero-DDL schema bump (schema stays 1), stated the
+`push()` return-type divergence, and pinned `ContextFormed` field coupling via
+`26-I7` (NEW-L1–NEW-L6).*
+
+*Rev 5 (2026-09-19): repair pass after the Rev-4 re-gate
+(`/tmp/opencode/regate26-rev4.md`; open HIGH = 0, MEDIUM = 5, LOW = 5). The five
+MEDIUMs were first identified by the adversarial planning panel
+(`/tmp/opencode/hyperplan-bundle.md`, `/tmp/opencode/hyperplan-r2.md`) and then
+independently confirmed by the re-gate. Full revision log in
+`26-dsh-alignment.md` §7. Part 2 changes: added `26-I11`/`26-D23` (prompt text
+durable only under `logging.log_prompts`; header always carries
+`system_prompt_digest`) and threaded it through `26-I2`, D2, §4.3.2, §4.3.9.1,
+§4.9 and the §5.2 harness; added `26-I12`/`26-D24` (bump `kProtocolVersion`
+1→2 in Wave 1) and the §4.6/§5.2 protocol rules; added §4.3.9.2 (the
+70-switch consumer matrix) and made `AssistantChunk` a live-only publication in
+D9/§4.6/Wave 2 with the headless/UI migration; restaged Wave 0 into Stage A
+(up-front `00`+`01`+`08`) and Stage B (JIT per wave); reclassified D1 as
+`Brk. (06,08)` and extended §4.4 with 00/06/08/05/04/16/07/13/15 rows and a
+cascade-coverage note; escalated the no-downgrade door to a product sign-off;
+corrected the Wave 4 dependency rationale; stated the `ReplayEnvelope`
+divergence; fixed the `permission_policy.hpp:120` citation (Rev-4 LOWs).*
+
+*Rev 6 (2026-09-19): repair pass after the Rev-5 re-gate
+(`/tmp/opencode/regate26-rev5.md`; open HIGH = 0, MEDIUM = 2, LOW = 4). Rev 6
+resolves **M-3 → N-2** only; **M-1/N-1 (prompt-logging policy) is deliberately
+left open** — it is the user's decision, not this revision's. Part 2 changes:
+replaced `26-I12` and `26-D24` with the **decoupled** design (option (b)) —
+`kProtocolVersion` stays `1`, new event types do not bump it, the wire receiver
+**skips** an unknown event `type` (advancing the per-session cursor) while the
+on-disk/replay decode keeps its loud `CorruptionError` fence
+(`session_persistence.cpp:228-232`, `01` S3); rewrote §4.6 as an explicit
+two-axis compat story and pinned the spec-24 outliving-daemon rationale;
+reclassified §4.4 rows `00`/`05` and marked `04`/`16` unaffected, with `24` now
+explicitly consistent with `AL20`/§1.3.3 (no spec-24 errata required — the Rev-5
+gate's N-2 conflict is dissolved by removing the bump); updated the §5 Stage-B
+Wave-1 row and the Wave-1 task list; replaced §5.2 test 5/6 with the two-axis
+compatibility harness (mixed-version attach, wire skip + cursor advance, loud
+on-disk decode). No dsh claim changes.*
