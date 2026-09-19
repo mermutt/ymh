@@ -238,6 +238,9 @@ public:
     // Takes `appendMutex_` and copies the log, so it is safe to call from a
     // thread other than the one appending (25 review H2: the plan-mode fold
     // runs on the transport io thread while a TurnExecutor worker appends).
+    // Must NOT be called from a committed handler: `publishCommitted` runs
+    // synchronously under the non-recursive `appendMutex_` (appendEventLocked),
+    // so a re-entrant call would self-deadlock.
     [[nodiscard]] EventRange events() const;
     // This session's physical events only (excludes any inherited prefix).
     [[nodiscard]] EventRange ownEvents() const;

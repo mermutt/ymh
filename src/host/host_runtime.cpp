@@ -641,12 +641,7 @@ protocol::SetModeResult HostRuntime::setSessionMode(const nlohmann::json& params
         // agentStatus throws UnknownSession for an id the daemon does not know.
         const bool turn_open = agentStatus(id) != "Idle";
         std::shared_ptr<Session> session = runtime_.sessions().sessionPtr(id);
-        // 25 review H1: warm the non-authoritative projection memo from the
-        // durable log before `set()` decides Unchanged vs append. Without this a
-        // freshly resumed/forked plan-active session has a cold memo, `set()`
-        // assumes the logged state is false, and `/plan off` is a silent no-op.
-        (void)runtime_.plan_mode().active(*session);
-        const PlanModeSetResult result = runtime_.plan_mode().set(id, turn_open, active);
+        const PlanModeSetResult result = runtime_.plan_mode().set(*session, turn_open, active);
         const bool effective =
             result == PlanModeSetResult::Committed || result == PlanModeSetResult::Queued
                 ? active
