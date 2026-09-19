@@ -2,8 +2,12 @@
 
 ```
 Status: written · verified: — · reviewer: —
-Revision: Rev 2 — fixes the gate-31 MEDIUM (the `LlmCallConfig::provider`
-          source) and the six LOWs. `LlmCallConfig::provider` is now sourced from
+Revision: Rev 3 — citation-only hygiene pass (no design change): every spec-28
+          citation re-derived against 28 Rev 3 (whose §3.5 provider pin shifted
+          all later lines), `28 §3.5`/`L26`/`28-D9` named at the provider-source
+          references, `L18–L25`→`L18–L26` and `L-F19–L-F26`→`L-F19–L-F27`, and
+          the `held_config_` write-back stated. Rev 2 — fixes the gate-31 MEDIUM
+          (the `LlmCallConfig::provider` source) and the six LOWs. `LlmCallConfig::provider` is now sourced from
           a new `AgentConfig::provider` (config-driven, set by `to_agent_config`
           from `config.llm.provider`), defaulting to the runtime's registered
           default route when unset; a missing route is a loud typed
@@ -24,9 +28,9 @@ Depends on: `26-dsh-alignment-part2.md` (verified Rev 7, GATE PASS) §4.2
             §4.3.2 :293-390 (the logged header + reconstruction contract),
             §4.4 :1087-1093 (the `06` classification :1092), §4.8 :1257-1290,
             §4.9 :1291-1351, §5 Wave 1 :1397-1422;
-            `28-llm-service-boundary-errata.md` (verified Rev 2; amended for the
-            provider-source decision) §3.1/§3.3/§3.4/§5.1/§5.3/§6.2/§6.3/§8/
-            §9 (L18–L25)/§10 (L-F19–L-F26)/§13;
+            `28-llm-service-boundary-errata.md` (verified Rev 3) §3.1/§3.3/§3.4/
+            §3.5/§5.1/§5.3/§6.2/§6.3/§8/§9 (L18–L26)/§10 (L-F19–L-F27)/§13
+            (28-D9);
             `29-event-family-errata.md` (verified) §4.2 :306-310 (the
             `LlmRequestHeader` projection is metadata/ignored);
             `30-architecture-cascade-errata.md` §5.1 :261-293;
@@ -106,7 +110,7 @@ rule). `06`'s half was left unassigned: `26 §5` Stage A lists only `00`/`01`/`0
 as up-front items, so no Wave-0 owner existed for `06`, and `26 §5` schedules the
 `06` errata in Stage-B Wave 4 (`26p2:1389`) — *after* Wave 1, which already
 changes `AgentLoop::buildRequest` (`:1404`) and re-seams `ContextCompactor`
-(`:1412-1413`). `28 §13.1 :795-802` and `30 §5.1 :276-283` both flag this as a
+(`:1412-1413`). `28 §13.1 :937-944` and `30 §5.1 :276-283` both flag this as a
 sequencing defect. This errata closes it: `06`'s Wave-1 surface is pinned here,
 before any Wave-1 code.
 
@@ -115,7 +119,8 @@ before any Wave-1 code.
 1. The `AgentServices` provider seam: the three fields `providers`
    (`include/ymh/agent/agent_loop.hpp:53`), `provider` (`:64`), and
    `provider_config` (`:65`) are replaced by a single `LlmRuntime* runtime`
-   (`28 §3.4 :351-355`); `pool` and every other field are retained.
+   (`28 §3.4 :372-376`, the `AgentServices` change); `pool` and every other
+   field are retained.
 2. The `AgentRegistry` construction path: the `ProviderRegistry&` convenience
    ctor parameter becomes `LlmRuntime&`; the fallback adapter construction
    (`src/agent/agent_registry.cpp:37-44`) and the provider injection
@@ -130,8 +135,8 @@ before any Wave-1 code.
    `AgentConfig::provider` (`agent.hpp:94-104`; set by `to_agent_config` from
    `config.llm.provider`, `src/cli/wiring.cpp:63,174-190`); when it is empty the
    runtime's registered default route is used. A missing route is a loud typed
-   `prepare_call` failure (`A-F23`). `28` (amended) owns the pin; this errata
-   consumes it and defines no second source (`31-D7`).
+   `prepare_call` failure (`A-F23`). `28` (Rev 3 §3.5, `L26`, `28-D9`) owns the
+   pin; this errata consumes it and defines no second source (`31-D7`).
 5. The loop invariants (`06 §10`) and failure modes (`06 §11.2`) that follow,
    additively (A19–A23, A-F19–A-F23).
 
@@ -293,7 +298,7 @@ struct AgentServices {
 
 ### 4.2 Pinned target
 
-`28 §3.4 :356-358` pins the direction: *"`AgentRegistry`'s fallback provider
+`28 §3.4 :377-379` pins the direction: *"`AgentRegistry`'s fallback provider
 construction (`src/agent/agent_registry.cpp:37-44,111`) moves to the daemon; the
 registry no longer creates adapters."* This errata pins the concrete shape:
 
@@ -336,7 +341,7 @@ registration site (`28 §3.3`):
   factory (`register_builtin_providers`/`make_default_provider_registry`,
   `provider_registry.hpp:60-63`) at boot, registers them into its one
   `LlmRuntime` via `register_adapter`, and keeps **no owning reference**
-  (`28 §3.3 :321-333`). It wires `services_.runtime = &runtime_` and drops the
+  (`28 §3.3 :345-349`, the ownership statement). It wires `services_.runtime = &runtime_` and drops the
   three provider fields. The compactor is constructed from `runtime_` (13-owned,
   §6). `agents_` construction is unchanged.
 - `WorkspaceRuntime::provider()` (`include/ymh/agent/workspace_runtime.hpp:149`)
@@ -376,7 +381,7 @@ for (int attempt = 0; attempt < 2; ++attempt) {       // :771  (compaction re-at
 ```
 
 Nothing freezes the request, nothing logs a request header, and the model/config
-come from `AgentConfig` per call (`28 §1.1 :100-103`).
+come from `AgentConfig` per call (`28 §1.1 :117-120`).
 
 ### 5.2 Pinned dispatch path (26-D1/D3)
 
@@ -401,10 +406,10 @@ for attempt in {First, CompactionRetry}:
 ```
 
 - The bracketed unit is `prepare_call` **plus** one `PreparedCall::stream`
-  (`A12` retained; `28 §6.1 :545-565`).
+  (`A12` retained; `28 §6.1 :636-659`).
 - `PreparedCall` is **one-shot** (`28-L24`): the loop never calls `stream` twice
   on the same `PreparedCall`. The compaction re-attempt builds a **new**
-  `FrozenRequest` and a **new** `PreparedCall` (`28 §6.3 :582-588`); it is a new
+  `FrozenRequest` and a **new** `PreparedCall` (`28 §6.3 :675-684`); it is a new
   step/request, not an adapter retry.
 - `LlmRuntime::stream` returns a terminal `LLMResponse` (`28-L23`); the loop maps
   it to the terminal event exactly as today (`06 §5.7`), unchanged.
@@ -419,7 +424,7 @@ for attempt in {First, CompactionRetry}:
 :1328-1334`; `T-M5`) with the provider id pinned below, (iii) reconcile that
 proposal against the last logged `LlmRequestHeader` via `call_config_equals`,
 (iv) append a new header iff config/prompt/tools/purpose changed
-(`28 §5.1 :459-472`), and (v) return the
+(`28 §5.1 :532-546`), and (v) return the
 deep-frozen envelope:
 
 ```cpp
@@ -443,15 +448,18 @@ the runtime header, both `agent_loop.hpp` and `agent_loop.cpp` see the complete
   runtime resolves its **registered default route** at `prepare_call`; a missing
   route (the named provider is unregistered, or no default route exists) is a
   loud typed `prepare_call` failure normalized at the loop to `ProviderFailed`
-  (`A-F23`), never a silent fallback. `28` (amended) pins the source and the
-  default-route representation; this errata consumes it and defines no competing
-  source.
+  (`A-F23`), never a silent fallback. `28` (Rev 3 §3.5, `L26`, `28-D9`) pins the
+  source and the default-route representation; this errata consumes it and
+  defines no competing source.
 - **Config source.** `AgentConfig::provider`/`model`/`parameters`
   (`agent.hpp:94-104`) are the *proposed* values; the *held* values come from the
-  last `LlmRequestHeader` (`28 §5.3 :502-507`). If they differ, the loop logs a
-  new header with the proposed config and `starts_series = true`; it never
-  dispatches a silent drift (`28-L-F19`). If they match, no header is logged and
-  the held config is used.
+  last `LlmRequestHeader` (`28 §5.3 :575-600`, the held-config rule). If they
+  differ, the loop logs a new header with the proposed config and
+  `starts_series = true`; it never dispatches a silent drift (`28-L-F19`). If
+  they match, no header is logged and the held config is used. In both cases
+  `held_config_` is then set to the *proposed* config (after logging a new
+  header), so a fresh/legacy session logs exactly one header and does not
+  re-log one per dispatch (A21).
 - **Held-config lifetime.** The loop holds
   `std::optional<LlmCallConfig> held_config_` (worker-only, alongside
   `compactions_this_turn_`, `agent_loop.hpp:158`); this member needs the
@@ -470,12 +478,12 @@ the runtime header, both `agent_loop.hpp` and `agent_loop.cpp` see the complete
   default route when empty) plus model/parameters — is logged as the first
   header with `starts_series = true` (`A-F22`). It cannot be filled in later:
   `PreparedCall::stream` checks `call_config_equals(request.config(), config())`
-  (`28 §7 :618-620`), so the config frozen into the request is the one
+  (`28 §7 :724-725`), so the config frozen into the request is the one
   `prepare_call` binds.
 - **Freeze and digest.** `buildRequest` freezes via
-  `FrozenRequest::freeze(std::move(request), config)` (`28 §3.1 :189-203`) and
+  `FrozenRequest::freeze(std::move(request), config)` (`28 §3.1 :210-224`) and
   the header's `template_digest` is `FrozenRequest::template_digest()`
-  (`28 §4.2`). `RequestId` is never persisted (`28 §3.2 :314-317`); the header is
+  (`28 §4.2`). `RequestId` is never persisted (`28 §3.2 :335-338`); the header is
   found positionally at replay (`28 §5.3`).
 - **Prompt text.** The header always carries `system_prompt_digest`; the full
   `system_prompt` only under `session.persist_prompt_text` (`28 §5.4`,
@@ -492,7 +500,7 @@ the runtime header, both `agent_loop.hpp` and `agent_loop.cpp` see the complete
 
 `06 §5.7 :817-820` ("The loop does not retry a mid-stream failure … The one
 exception is the single `ContextLengthExceeded` compaction retry") is **retained
-verbatim**. `28 §6.3 :582-588` confirms it is a new step/request with a new
+verbatim**. `28 §6.3 :675-684` confirms it is a new step/request with a new
 `PreparedCall`. The adapter's in-adapter pre-first-event retry
 (`src/llm/openai_adapter.cpp:923-1000`) is **not removed in Wave 1** and remains
 the single retry owner until the separate executor lands (`28 §6.2`). The loop
@@ -507,11 +515,11 @@ adds **no** retry of its own.
   726-727,798-805`) is unchanged.
 - The **concrete** `ContextCompactor` ctor re-seams from `LLMProvider&` to
   `LlmRuntime&` (`include/ymh/agent/compactor.hpp:113-117`; member `:140`; call
-  `src/agent/compactor.cpp:252`) per `28 §8 :639-664`. That text is
+  `src/agent/compactor.cpp:252`) per `28 §8 :752-788`. That text is
   **13-owned** and is pinned by the sibling errata `32`; this errata does not
   duplicate it.
 - The frozen `Compactor` virtual interface (`06 §5.3 :686-692`) is
-  **unaffected** — it has no provider parameter (`28 §13.3 :807-809`).
+  **unaffected** — it has no provider parameter (`28 §13.3 :949-951`).
 - The daemon constructs the compactor from the runtime instead of `*provider_`
   (`workspace_runtime.cpp:170-173`).
 
@@ -561,7 +569,7 @@ registered adapters. (`28 §3.3`, `28-D2`)
 `buildRequest` sets `LlmCallConfig::provider` from `AgentConfig::provider`
 (populated by `to_agent_config`); when it is empty the runtime's registered
 default route is used. A missing route is a loud typed `prepare_call` failure,
-never a silent fallback to another provider. (`28` amended; `31-D7`; `A-F23`)
+never a silent fallback to another provider. (`28` Rev 3 §3.5, `L26`, `28-D9`; `31-D7`; `A-F23`)
 
 **Retained unchanged:** `A1`–`A18`. `A12` is retained and its bracketed unit is
 `prepare_call` + one `PreparedCall::stream` (§5.2). `A2`/`A10` (exactly one
@@ -578,7 +586,7 @@ unaffected — `LlmRuntime` is a core type.
 | **A-F20** | `PreparedCall` misuse | second `stream()` on a consumed call, or a config mismatch | `PreparedCallError{InvalidPreparedCall}` normalized at the loop to `ProviderFailed` (`28-L-F24`); the loop never re-dispatches a `PreparedCall` (`A20`) |
 | **A-F21** | Silent config drift | `call_config_equals(proposed, held) == false` at `buildRequest` and no header logged | Defect (`28-L-F19`): log a new header with `starts_series = true`; never dispatch a drift |
 | **A-F22** | Legacy/unreconstructable request | resumed session whose log has no `LlmRequestHeader` for a dispatch | The first new dispatch logs a header (`starts_series = true`); the pre-header portion is **legacy/unreconstructable** and is never fabricated (`28-L20`, `28-L-F25`) |
-| **A-F23** | No route for `config.provider` | `prepare_call` route lookup (`28` amended) | Loud typed failure normalized at the loop to `ProviderFailed`; never a silent fallback to another provider; no `PreparedCall` is produced (`A23`) |
+| **A-F23** | No route for `config.provider` | `prepare_call` route lookup (`28` Rev 3 §3.5, `L26`, `28-D9`) | Loud typed failure normalized at the loop to `ProviderFailed`; never a silent fallback to another provider; no `PreparedCall` is produced (`A23`) |
 
 `A-F1`–`A-F18` are unchanged. `A-F1` (provider terminal failure) now observes the
 terminal `LLMResponse` returned by `LlmRuntime::stream` (`28-L23`); `A-F10`
@@ -590,7 +598,7 @@ terminal `LLMResponse` returned by `LlmRuntime::stream` (`28-L23`); `A-F10`
 
 `26p2 §5` Waves 1–6 assign **no** wave to the separate durable retry executor
 required by `26-I3` and the `llm/retry`/`llm/retry-started` events
-(`26p2 §4.3.9.1 :947-948`); `28 §6.2 :578-580` and `28 §13.2 :803-806` record
+(`26p2 §4.3.9.1 :947-948`); `28 §6.2 :660-674` and `28 §13.2 :945-948` record
 the same gap. This errata **repeats the record and claims nothing**:
 
 - Wave 1 does **not** implement the retry executor. The adapter's in-adapter
@@ -705,6 +713,7 @@ A-F19–A-F23 to the `06 §13.6` failure-mode matrix.
 |---|---|
 | 1 | Initial write. Pins the `06`-owned half of `26-D1` as a Wave-1 blocking prerequisite: the `AgentServices` provider seam (`providers`/`provider`/`provider_config` → `LlmRuntime* runtime`), the `AgentRegistry` ctor/fallback removal, the loop's `buildRequest`→`prepare_call`→`PreparedCall::stream` dispatch, invariants A19–A22, failure modes A-F19–A-F22, and the retry-executor ownership-gap record. All `file:line` re-derived against the tree. |
 | 2 | Fixes the gate-31 MEDIUM and six LOWs. (M) Pins the provider-id source: new `AgentConfig::provider` → `LlmCallConfig::provider`, runtime default route when empty, loud typed `prepare_call` failure on a missing route (new `A23`/`A-F23`, `31-D7`), consuming `28`'s forthcoming amendment. (L1) `held_config_` needs the complete `LlmCallConfig`, so `agent_loop.hpp` includes the 08-owned runtime header. (L2) The last `LlmRequestHeader` is read by scanning `Session::events()`; `29` pins the event as projection-invisible. (L3) `§9 (L18–L25)` range corrected. (L4) `LLMPool::Slot` is RAII; no explicit `release()`. (L5) Test callers enumerated. (L6) No-route failure mode added. All changed `file:line` re-derived against the tree. |
+| 3 | **Citation-only hygiene pass (no design change).** Re-derives every spec-28 citation against 28 Rev 3 (the new §3.5 provider pin shifted all later lines): §1.1, §3.1–§3.4, §5.1, §5.3, §6.1–§6.3, §7, §8, §13.1–§13.3 and the §16 reference block. Names `28 §3.5`/`L26`/`28-D9` at the provider-source references; `L18–L25`→`L18–L26`, `L-F19–L-F26`→`L-F19–L-F27`. States the `held_config_` write-back after logging a header (§5.3). No decision, invariant, or failure mode changed. |
 
 ---
 
@@ -733,8 +742,9 @@ A-F19–A-F23 to the `06 §13.6` failure-mode matrix.
   `AgentConfig::provider` (config-driven, `to_agent_config` from
   `config.llm.provider`); when it is empty the runtime's registered default
   route is used; a missing route is a loud typed `prepare_call` failure
-  (`A-F23`). `28` (amended) owns the pin; no competing source is defined.
-  (`28` amended; `A23`)
+  (`A-F23`). `28` (Rev 3 §3.5, `L26`, `28-D9`) owns the pin; no competing source
+  is defined.
+  (`28` Rev 3; `A23`)
 
 ---
 
@@ -744,10 +754,10 @@ A-F19–A-F23 to the `06 §13.6` failure-mode matrix.
   :139 (26-D1, `Brk. (06,08)`), §4.3.1 :172-291, §4.3.2 :293-390, §4.4
   :1087-1093 (the `06` row :1092), §4.8 :1257-1290, §4.9 :1291-1351, §5 Wave 1
   :1397-1422.
-- `docs/design/28-llm-service-boundary-errata.md` (verified Rev 2; amended for
-  the provider-source decision): §1.1 :93-120, §3.1 :154-296, §3.3 :319-341,
-  §3.4 :342-366, §4 :370-456, §5 :457-540, §6 :541-591, §7 :592-638, §8 :639-664,
-  §9 (L18–L25) :668-714, §10 (L-F19–L-F26) :717-728, §13 :793-823.
+- `docs/design/28-llm-service-boundary-errata.md` (verified Rev 3): §1.1
+  :105-133, §3.1 :175-317, §3.3 :340-362, §3.4 :363-388, §3.5 :389-440, §4
+  :441-529, §5 :530-633, §6 :634-684, §7 :685-751, §8 :752-788, §9 (L18–L26)
+  :789-845, §10 (L-F19–L-F27) :846-861, §13 :935-979.
 - `docs/design/30-architecture-cascade-errata.md` §5.1 :261-293 (the two Wave-1
   blocking prerequisites).
 - `docs/design/06-agent-loop.md` (verified): §4.1 :428-466, §4.2 :468-508, §5.1

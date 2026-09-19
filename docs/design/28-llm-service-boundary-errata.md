@@ -418,6 +418,11 @@ competing source.
   contributes none). When no adapter/route is registered there is no default
   route. `resolve_call_config` is deliberately **not** added: the provider is
   resolved by `prepare_call`'s route lookup, not by a separate service call.
+  `prepare_call` stores the input `LlmCallConfig` **verbatim** in
+  `PreparedCall::config()`: it binds the resolved adapter but does **not**
+  back-fill `config.provider`, so the §7 one-shot
+  `call_config_equals(request.config(), config())` check holds for sentinel
+  calls.
 - **No route is a loud typed failure.** `prepare_call` resolves
   `config.provider`: an empty value selects the default route, a non-empty value
   must match a registered route exactly. If neither resolves (the named provider
@@ -462,8 +467,10 @@ interceptor nor an adapter can rewrite it (26-I2).
   (`messages[0]`; the assembler inserts at most one, at index 0 —
   `src/agent/context_assembler.cpp:44-63`). This is the *assembled* text, not the
   bare `AgentConfig::system_prompt`: in plan mode the assembler appends
-  `AgentConfig::plan_section` (`:46-53`; wired at
-  `src/agent/workspace_runtime.cpp:149-152`). When no `Role::System` message
+  `AgentConfig::plan_section` (the assembler's plan branch invokes the injected
+  `plan_policy_` at `src/agent/context_assembler.cpp:46-53`; the
+  `plan_mode_.active(session)` gate is `src/agent/workspace_runtime.cpp:151`,
+  provider wired at `:149-152`). When no `Role::System` message
   exists, it is the empty string (still serialized, so the field is always
   present). **Always hashed** into `template_digest`; persisted in the header only
   under the opt-in (§5.4).
@@ -576,9 +583,14 @@ found positionally at replay; `RequestId` is never persisted (26-D2 :140).
   `LlmCallConfig::provider` from `AgentConfig::provider` (§3.5). Because
   `provider` is a `LlmCallConfig` field, a provider change is a config change
   (`call_config_equals` false) and forces a new header with
-  `starts_series = true`, exactly like a model or parameter change.
+  `starts_series = true`, exactly like a model or parameter change. A change in
+  the *effective default route* (adapter re-registration) is **not** a config
+  change: the header still stores the empty sentinel and `template_digest`
+  hashes it, so no series boundary is emitted. That is acceptable because routes
+  are boot-stable (§3.3) and the reconstruction contract is over the template,
+  not the adapter identity.
 - **First dispatch of a fresh session.** On a fresh (or legacy) session
-  `held_config_` is `nullopt` (`31` §5.3 :423-431; L20), so there is no held
+  `held_config_` is `nullopt` (`31` §5.3 :456-468; L20), so there is no held
   header to read. The proposed config — including the provider — is therefore
   built entirely from `AgentConfig` and logged as the first header; the loop
   never waits for a later dispatch to obtain the provider, and the empty
@@ -608,8 +620,9 @@ found positionally at replay; `RequestId` is never persisted (26-D2 :140).
   message text (§4.2): the `AgentConfig::system_prompt` (config override or
   `default_system_prompt()`, `src/cli/wiring.cpp:48-52`; effective assignment
   `:179-180`) **plus the active plan-mode paragraph** when
-  `plan_mode_.active(session)` is true (`src/agent/context_assembler.cpp:46-53`;
-  provider wired at `src/agent/workspace_runtime.cpp:149-152`). Wave 1 writes the
+  `plan_mode_.active(session)` is true (`src/agent/workspace_runtime.cpp:151`;
+  the assembler's plan branch is `src/agent/context_assembler.cpp:46-53`,
+  provider wired at `:149-152`). Wave 1 writes the
   digest of that assembled text; it is not a rendered-registry hash (26 §5 Wave 1
   :1414-1418). The shorthand "the Wave-1 header carries
   `AgentConfig::system_prompt`" is therefore read through this rule, so a
@@ -953,7 +966,8 @@ Wave 1 lands.
    `AgentConfig::provider` touches spec 21's config allowlist and mapping
    surface: `to_agent_config` gains a new `Config`→`AgentConfig` mapping from
    `config.llm.provider`
-   (`21` §5.4's `to_agent_config` row, `:532`). The JSON key
+   (`21` §5.4's `to_agent_config` row, `:532`; when applying, the row's stale
+   `src/cli/wiring.cpp:167-180` should read `174-189`). The JSON key
    `llm.default.provider` is **already** in 21's allowlist (`21` §7.7 :1242-1253;
    the key-set table `:407`), so no new JSON key is introduced by this pin; the
    required amendment is the mapping-table record (and the §7.3 `agent` note).
@@ -967,6 +981,7 @@ Wave 1 lands.
 
 | Rev | Change |
 |---|---|
+| 3.1 | **Citation-only hygiene pass (no design change).** Fixes the gate28 Rev-3 LOWs: the stale `31 §5.3 :423-431` cross-ref → `31 §5.3 :456-468` (§5.3); the imprecise `plan_mode_.active(session)` anchor — the gate is `src/agent/workspace_runtime.cpp:151`, while `src/agent/context_assembler.cpp:46-53` is the plan branch (§4.2, §5.4); the stale `src/cli/wiring.cpp:167-180` range in the §13.8 21-amendment advisory → `174-189`; and clarifying sentences for `PreparedCall::config()` storing the input config verbatim (§3.5) and the default-route sentinel being invisible to `call_config_equals` (§5.3). No decision, invariant, or failure mode changed. |
 | 3 | Pins the `LlmCallConfig::provider` source — the cross-cutting decision gate31's spec-31 MEDIUM and gate32's spec-32 M2 converged on. `AgentConfig::provider` (new field, `agent.hpp:94-105`) is populated by `to_agent_config` from `config.llm.provider` (`config.hpp:101`; `wiring.cpp:63,174-190`); an empty value resolves to the runtime's registered default route (a 28-owned representation: the first route of the first adapter registered) at `prepare_call`; a no-route request is a loud typed `NoProviderRouteError{LLMErrorCode::NoProviderRoute}` with `detail = "no route for config.provider"`, never a silent fallback — §3.5, §5.3, §7, §8, §9 (L26), §10 (L-F27), §11, §12, §13.8, 28-D9. Specs 31/32 reference this pin. Records the required 21 config-surface amendment. |
 | 2 | Closes the gate28 findings. **MEDIUM-1:** `PreparedCall::retry_policy()` is sourced from a new non-pure `LLMProvider::retry_policy()` accessor captured by `register_adapter` (signature unchanged; `LLMProviderConfig::retry` stays the single source of truth) — §3.1, §6.1. **MEDIUM-2:** `canonical_template()`'s `system_prompt` and `system_prompt_digest` basis is pinned to the frozen request's `Role::System` message text, and §5.4 is reconciled so the plan-mode divergence is removed — §4.2, §4.5, §5.4. **LOW-1:** `to_string(InvalidPreparedCall)` = `"invalid_prepared_call"` plus the exhaustive-switch audit — §7. **LOW-2:** the loop's dispatch path is pinned to `prepare_call`→`PreparedCall::stream` — §3.1. **LOW-3:** adapter ownership is stated once (the runtime owns the registered adapters) — §3.3, §3.4, 28-D2. **LOW-4:** `kTemplateSchemaVersion = 1` and its change rule are pinned — §4.2, 28-D4. |
 | 0 | Initial Wave-0 A2 errata. Pins `LlmRuntime`/`PreparedCall`/`AdapterHandle`/`InterceptorHandle`/`ProviderInfo`, `LlmCallConfig`/`call_config_equals`/`CallPurpose`, `FrozenRequest` + canonical serialization/reconstruction, `payload::LlmRequestHeader` as a changed snapshot, one-attempt-per-stream with the separate-retry end state and the no-double-retry constraint, the `ContextCompactor` re-seam, `LLMErrorCode::InvalidPreparedCall`, `L18–L25`, `L-F19–L-F26`, and the `28-D1–28-D8` decisions. Records three ownership gaps (06 errata, retry-executor wave, 13 errata) without inventing a resolution. Claims number 28; supersedes the stale 27–30 reservation. |
