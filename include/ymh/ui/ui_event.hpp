@@ -136,6 +136,7 @@ struct PermissionRequested {
     PermissionRequestId request;
     std::string         tool;
     std::string         summary;   // bounded, redacted by 09
+    bool                force_ask = false;
 };
 
 struct PermissionResolved {
@@ -194,6 +195,11 @@ struct SessionTitleChanged {
     std::string title;
 };
 
+struct PlanModeChanged {
+    SessionId session;
+    bool      active = false;
+};
+
 struct UiEvent {
     std::variant<
         UserMessage,
@@ -214,7 +220,8 @@ struct UiEvent {
         StatusChanged,
         CompactionMarker,
         CompactionOutcomeNotice,
-        SessionTitleChanged>
+        SessionTitleChanged,
+        PlanModeChanged>
         value;
 };
 

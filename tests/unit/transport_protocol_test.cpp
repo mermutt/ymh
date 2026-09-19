@@ -38,15 +38,14 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 }
 
 TEST(TransportProtocol, MethodCatalogIsComplete) {
-    // 18 §3.4.1 (CX-D11/M10): the size is relative to landing order. Before
-    // `context.show` the catalog is `C = 32`; this errata adds exactly one
-    // entry, so the landing total is `C + 1 = 33` (never a hard-coded number).
-    EXPECT_EQ(protocol::all_methods().size(), 33u);
+    // 18 §3.4.1 (CX-D11/M10) landed at 33; 25-D5 adds `session.set_mode`.
+    EXPECT_EQ(protocol::all_methods().size(), 34u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
     EXPECT_TRUE(protocol::is_known_method("host.ownership"));
     EXPECT_TRUE(protocol::is_known_method("session.rename"));
+    EXPECT_TRUE(protocol::is_known_method("session.set_mode"));
     EXPECT_TRUE(protocol::is_known_method("skills.list"));
     EXPECT_TRUE(protocol::is_known_method("skills.show"));
     EXPECT_TRUE(protocol::is_known_method("context.show"));

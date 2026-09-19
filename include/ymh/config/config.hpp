@@ -26,6 +26,8 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace ymh {
 
 // Thrown on a malformed/unreadable config file or an unknown key.
@@ -62,6 +64,7 @@ struct AgentDefaults {
     std::size_t                max_steps = 100;
     std::optional<std::string> reasoning_effort;  // "low" | "medium" | "high"
     std::string                system_prompt;     // empty => built-in default
+    std::string                plan_section;      // empty => built-in default (25-D3)
     CompactionSettings         compaction;
 };
 
@@ -231,6 +234,26 @@ struct ScaffoldResult {
 // throws.
 void apply_jsonc_file(Config& config, const std::filesystem::path& path,
                       bool required = false);
+
+// 25-D13: parses the localcode-shaped `mcp_servers` object into `mcp.servers`,
+// applying key normalization, the id-dedupe algorithm, and the
+// `type`/`transport`, `env`/`headers`, `url`/`cwd` rules. Replaces the server
+// array wholesale (per-layer semantics). Throws `ConfigError` on any
+// shape/grammar violation. `source` is used only for error text.
+void apply_mcp_servers_object(McpSettings& mcp, const nlohmann::json& table,
+                              const std::filesystem::path& source);
+
+// 25-D15: builds a ymh config document (JSON object) from a parsed localcode
+// document, including all mapped servers. Pure mapping: no logging, no
+// filesystem, no provider api_key copy; escapes a literal `${` as `$${` in every
+// copied MCP value and forces `required=false` on every copied server. Returns
+// `std::nullopt` and fills `error` on an unrecoverable shape problem. Semantic
+// MCP validation lives in the CLI layer (25-D16).
+[[nodiscard]] std::optional<nlohmann::json> build_localcode_import(
+    const nlohmann::json& localcode, std::string& error);
+
+// `$HOME/.localcode/config.json`.
+[[nodiscard]] std::filesystem::path localcode_config_path();
 
 // Merges `YMH_*` environment variables over `config`. Unset variables are a
 // no-op; a malformed value (e.g. non-numeric timeout) throws `ConfigError`.

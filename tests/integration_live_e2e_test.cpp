@@ -256,10 +256,11 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
     second.read_available();
 
     const std::string frame = second.last_frame();
-    EXPECT_NE(frame.find(kSecret), std::string::npos)
+    const std::string body  = conversation_body(frame);
+    EXPECT_NE(body.find(kSecret), std::string::npos)
         << "prior messages missing after reconnect:\n"
         << frame;
-    EXPECT_EQ(count_occurrences(frame, kPrompt), 1u)
+    EXPECT_EQ(count_occurrences(body, kPrompt), 1u)
         << "prior user message rendered more than once after reconnect:\n"
         << frame;
 
@@ -280,10 +281,11 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
     }
     EXPECT_EQ(user_messages, 1u) << "user message duplicated in the session log";
 
+    // 25-D10: `/exit` exits immediately with no dialog; the daemon is torn down.
     second.write("/exit\r");
-    ASSERT_TRUE(second.wait_for("Exiting will terminate", 30s)) << second.plain();
-    second.write("y");
-    second.terminate();
+    const std::optional<int> second_status = second.wait_for_exit(30s);
+    ASSERT_TRUE(second_status.has_value()) << second.plain();
+    EXPECT_EQ(*second_status, 0);
     guard.stop();
     EXPECT_TRUE(host_processes(&workspace.id().value).empty()) << "daemon leaked";
 }
@@ -314,15 +316,9 @@ TEST(LiveE2E, TwoSupervisorsCleanExitNoOrphan) {
     EXPECT_EQ(host_processes(&workspace.id().value).size(), 1u)
         << "the daemon must survive while the peer supervisor remains";
 
+    // 25-D10: `/exit` exits immediately with no dialog.
     second.write("/exit\r");
-    std::optional<int> second_status;
-    const auto         exit_deadline = std::chrono::steady_clock::now() + 60s;
-    while (!second_status.has_value() && std::chrono::steady_clock::now() < exit_deadline) {
-        if (second.plain().find("Exiting will terminate") != std::string::npos) {
-            second.write("y");
-        }
-        second_status = second.wait_for_exit(200ms);
-    }
+    const std::optional<int> second_status = second.wait_for_exit(60s);
     ASSERT_TRUE(second_status.has_value()) << second.plain();
     EXPECT_EQ(*second_status, 0);
     for (int attempt = 0;

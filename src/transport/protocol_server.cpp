@@ -403,6 +403,12 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             const SessionRenamedResult renamed = host_.renameSession(request.params);
             respond(conn, request.id,
                     nlohmann::json{{"session", renamed.session.value}, {"title", renamed.title}});
+        } else if (method_name == method::kSessionSetMode) {
+            const SetModeResult mode = host_.setSessionMode(request.params);
+            respond(conn, request.id,
+                    nlohmann::json{{"session", mode.session.value},
+                                   {"active", mode.active},
+                                   {"pending", mode.pending}});
         } else if (method_name == method::kSessionResume) {
             const SessionResumed resumed = host_.resumeSession(session_param(request.params));
             respond(conn, request.id,

@@ -93,6 +93,73 @@ TEST(UiModel, FinishesAssistantMessageWithUsage) {
     EXPECT_EQ(state->status.output_tokens, 3);
 }
 
+TEST(UiModel, ComputesTpsFromInjectedClock) {
+    UiModel model = make_model();
+    auto    now   = std::chrono::steady_clock::time_point{};
+    model.set_now_reader([&now] { return now; });
+
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    now += std::chrono::seconds(2);
+    Usage usage;
+    usage.output_tokens = 100;
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "done", usage}});
+
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_TRUE(state->status.tps.has_value());
+    EXPECT_DOUBLE_EQ(*state->status.tps, 50.0);
+    EXPECT_FALSE(state->stream_started_at.has_value());
+}
+
+TEST(UiModel, TpsSkipsShortAndEmptyResponses) {
+    UiModel model = make_model();
+    auto    now   = std::chrono::steady_clock::time_point{};
+    model.set_now_reader([&now] { return now; });
+
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    now += std::chrono::milliseconds(100);
+    Usage usage;
+    usage.output_tokens = 100;
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "done", usage}});
+    EXPECT_FALSE(model.session(kSession)->status.tps.has_value());
+
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a2"}});
+    now += std::chrono::seconds(2);
+    Usage empty;
+    empty.output_tokens = 0;
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a2", "done", empty}});
+    EXPECT_FALSE(model.session(kSession)->status.tps.has_value());
+}
+
+TEST(UiModel, PlanModeChangedSetsStatusAndDirty) {
+    UiModel model = make_model();
+    static_cast<void>(model.dirty.takeDirtySessions());
+    model.apply(UiEvent{PlanModeChanged{kSession, true}});
+
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    EXPECT_TRUE(state->status.plan_active);
+    EXPECT_TRUE(any_flag(model.dirty.peek(kSession) & UiDirtyFlag::Status));
+
+    model.apply(UiEvent{PlanModeChanged{kSession, false}});
+    EXPECT_FALSE(state->status.plan_active);
+}
+
+TEST(UiModel, ForceAskDialogDefaultsToDenyWithTwoOptions) {
+    UiModel model = make_model();
+    PermissionRequested requested;
+    requested.session   = kSession;
+    requested.request   = PermissionRequestId{"r1"};
+    requested.tool      = "exit_plan_mode";
+    requested.summary   = "the plan";
+    requested.force_ask = true;
+    model.apply(UiEvent{std::move(requested)});
+
+    EXPECT_TRUE(model.dialog.open);
+    EXPECT_TRUE(model.dialog.force_ask);
+    EXPECT_EQ(model.dialog.selected, 1);
+}
+
 TEST(UiModel, TracksToolCallAndResult) {
     UiModel model = make_model();
     model.apply(UiEvent{ToolStarted{kSession, "t1", "read_file", "{\"path\":\"a\"}"}});

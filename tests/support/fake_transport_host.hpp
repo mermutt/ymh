@@ -209,6 +209,14 @@ public:
         return protocol::SessionRenamedResult{id, title};
     }
 
+    protocol::SetModeResult setSessionMode(const nlohmann::json& params) override {
+        calls.push_back("session.set_mode");
+        const SessionId id{params.value("session", std::string{})};
+        const bool      active = params.value("active", false);
+        require_session(id);
+        return protocol::SetModeResult{id, active, false};
+    }
+
     void agentPrompt(const SessionId& id, const nlohmann::json& message) override {
         calls.push_back("agent.prompt");
         require_session(id);

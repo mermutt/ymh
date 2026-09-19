@@ -101,6 +101,7 @@ struct AgentConfig {
     std::size_t              compaction_threshold_tokens = 0;
     SandboxMode              sandbox = SandboxMode::Workspace;
     std::string              system_prompt;
+    std::string              plan_section;
 };
 
 class Agent {

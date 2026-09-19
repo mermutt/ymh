@@ -32,6 +32,16 @@ namespace ymh {
                                                             const McpConfig& config,
                                                             double jitter_roll);
 
+// 25-D16: the daemon's own semantic checks, extracted from
+// `McpManager::validate()` so the first-run importer can run them on an
+// in-memory document before writing. Each returns an empty string when valid,
+// else a human-readable reason that NEVER contains an env/header value.
+[[nodiscard]] std::string validate_mcp_server(const McpServerConfig& server,
+                                              const McpConfig& config,
+                                              const ToolConfig& tools);
+[[nodiscard]] std::string validate_mcp_config(const McpConfig& config,
+                                              const ToolConfig& tools);
+
 class McpManager {
 public:
     McpManager(McpConfig               config,

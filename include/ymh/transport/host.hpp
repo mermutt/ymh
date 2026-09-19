@@ -62,6 +62,14 @@ struct SessionRenamedResult {
     std::string title;
 };
 
+// 25-D2/D5: the `session.set_mode` result. `active` is the effective selection;
+// `pending` is true iff the change was queued behind an open turn.
+struct SetModeResult {
+    SessionId session;
+    bool      active  = false;
+    bool      pending = false;
+};
+
 class TransportHost {
 public:
     virtual ~TransportHost() = default;
@@ -107,6 +115,8 @@ public:
     // supervisor never reads skill files.
     virtual nlohmann::json listSkills() = 0;
     virtual nlohmann::json showSkill(const std::string& name) = 0;
+
+    virtual SetModeResult setSessionMode(const nlohmann::json& params) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,
                                   PermissionScope scope) = 0;

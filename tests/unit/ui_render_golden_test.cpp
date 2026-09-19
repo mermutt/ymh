@@ -172,7 +172,7 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 │                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
 │> _                                                                   │
-│idle · test-model · ↑12 ↓3 ⚡0                    0 active · 0 waiting│
+│build · test-model · ↑12 ↓3 ⚡0 · [░░░░░░░░░░] —  0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
 TEST(UiRenderGolden, ConversationSnapshot) {
@@ -335,6 +335,84 @@ TEST(UiRenderGolden, StatusShowsTokenUsage) {
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("↑12"), std::string::npos);
     EXPECT_NE(rendered.find("↓3"), std::string::npos);
+}
+
+TEST(UiRenderGolden, StatusWideShowsAllSegments) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->status.plan_active          = true;
+    state->status.agent_state          = AgentState::Thinking;
+    state->status.tps                  = 50.0;
+    state->status.context_used_tokens  = 50;
+    state->status.context_window_tokens = 100;
+    state->status.note                 = "a note";
+    model.pushNotice("a notice");
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{200, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("plan · thinking · test-model · ↑12 ↓3 ⚡0 · 50.0 tps · "
+                            "[█████░░░░░] 50.0% · a note · a notice"),
+              std::string::npos);
+}
+
+TEST(UiRenderGolden, StatusPlanModeGolden) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    state->status.plan_active = true;
+    std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("│plan · test-model"), std::string::npos);
+
+    state->status.plan_active = false;
+    rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("│build · test-model"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ContextBarGeometryAndUnknownWindow) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    state->status.context_used_tokens   = 0;
+    state->status.context_window_tokens = 0;
+    std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{120, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("[░░░░░░░░░░] —"), std::string::npos);
+
+    state->status.context_used_tokens   = 1;
+    state->status.context_window_tokens = 1000;
+    rendered = normalize(render_to_ansi(model, TerminalSize{120, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("[█░░░░░░░░░] 0.1%"), std::string::npos);
+
+    state->status.context_used_tokens   = 80;
+    state->status.context_window_tokens = 100;
+    rendered = normalize(render_to_ansi(model, TerminalSize{120, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("[████████░░] 80.0%"), std::string::npos);
+}
+
+TEST(UiRenderGolden, StatusNarrowDegradationDropsTpsBeforeNoteAndNotice) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->status.tps                   = 50.0;
+    state->status.context_used_tokens   = 50;
+    state->status.context_window_tokens = 100;
+    state->status.note                  = "note";
+    model.pushNotice("notice");
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{91, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("↑12 ↓3 ⚡0"), std::string::npos);
+    EXPECT_NE(rendered.find("[█████░░░░░] 50.0%"), std::string::npos);
+    EXPECT_NE(rendered.find("note"), std::string::npos);
+    EXPECT_NE(rendered.find("notice"), std::string::npos);
+    EXPECT_EQ(rendered.find("50.0 tps"), std::string::npos);
+    EXPECT_NE(rendered.find("build · test-model"), std::string::npos);
 }
 
 TEST(UiRenderGolden, SubagentPanelRendered) {

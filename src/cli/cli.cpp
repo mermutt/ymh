@@ -1,34 +1,46 @@
 #include "ymh/cli/cli.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
 
 #include <CLI/CLI.hpp>
-#include <unistd.h>
+#include <nlohmann/json.hpp>
 
 #include "ymh/cli/headless.hpp"
 #include "ymh/cli/provider_factory.hpp"
 #include "ymh/cli/session_cli.hpp"
+#include "ymh/cli/wiring.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
+#include "ymh/execution/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
+#include "ymh/mcp/mcp_manager.hpp"
+#include "ymh/mcp/mcp_types.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/transport/host_connection.hpp"
@@ -559,6 +571,288 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
     }
 }
 
+std::string trim_copy(std::string_view value) {
+    std::size_t begin = 0;
+    std::size_t end   = value.size();
+    while (begin < end && std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return std::string{value.substr(begin, end - begin)};
+}
+
+std::string lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool prompt_import_yes(std::istream& in, std::ostream& out) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::string line;
+        if (!std::getline(in, line)) {
+            return false;
+        }
+        const std::string answer = lower_copy(trim_copy(line));
+        if (answer.empty() || answer == "y" || answer == "yes") {
+            return true;
+        }
+        if (answer == "n" || answer == "no") {
+            return false;
+        }
+        if (attempt == 0) {
+            out << "     [Y/n] ";
+            out.flush();
+        }
+    }
+    return false;
+}
+
+std::optional<nlohmann::json> read_localcode_document(const std::filesystem::path& path,
+                                                      std::string& reason) {
+    std::error_code      error;
+    const std::uintmax_t size = std::filesystem::file_size(path, error);
+    if (error) {
+        reason = "unreadable";
+        return std::nullopt;
+    }
+    if (size > kLocalcodeImportMaxBytes) {
+        reason = "larger than 4 MiB";
+        return std::nullopt;
+    }
+    std::ifstream input{path, std::ios::binary};
+    if (!input) {
+        reason = "unreadable";
+        return std::nullopt;
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    if (input.bad()) {
+        reason = "unreadable";
+        return std::nullopt;
+    }
+    const std::string text = buffer.str();
+    if (text.size() > kLocalcodeImportMaxBytes) {
+        reason = "larger than 4 MiB";
+        return std::nullopt;
+    }
+    try {
+        nlohmann::json parsed = nlohmann::json::parse(text);
+        if (!parsed.is_object()) {
+            reason = "not valid JSON";
+            return std::nullopt;
+        }
+        return parsed;
+    } catch (const nlohmann::json::exception&) {
+        reason = "not valid JSON";
+        return std::nullopt;
+    }
+}
+
+bool is_http_url(std::string_view url) {
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
+const nlohmann::json* localcode_provider(const nlohmann::json& localcode) {
+    const auto default_profile = localcode.find("default_profile");
+    if (default_profile == localcode.end() || !default_profile->is_string()) {
+        return nullptr;
+    }
+    const auto profiles = localcode.find("profiles");
+    if (profiles == localcode.end() || !profiles->is_object()) {
+        return nullptr;
+    }
+    const auto profile = profiles->find(default_profile->get<std::string>());
+    if (profile == profiles->end() || !profile->is_object()) {
+        return nullptr;
+    }
+    const auto provider_name = profile->find("provider");
+    const auto providers     = localcode.find("providers");
+    if (provider_name == profile->end() || !provider_name->is_string() ||
+        providers == localcode.end() || !providers->is_object()) {
+        return nullptr;
+    }
+    const auto provider = providers->find(provider_name->get<std::string>());
+    if (provider == providers->end() || !provider->is_object()) {
+        return nullptr;
+    }
+    return &(*provider);
+}
+
+void print_localcode_notes(const nlohmann::json& localcode, std::ostream& err) {
+    if (const auto skip = localcode.find("skip_permissions");
+        skip != localcode.end() && skip->is_boolean() && skip->get<bool>()) {
+        err << "ymh: note: localcode 'skip_permissions' is not imported; permission prompts stay "
+               "enabled\n";
+    }
+    if (const auto rules = localcode.find("permission");
+        rules != localcode.end() && rules->is_array() && !rules->empty()) {
+        err << "ymh: note: localcode permission rules are not imported (ymh uses coarse "
+               "permission modes)\n";
+    }
+    if (const nlohmann::json* provider = localcode_provider(localcode); provider != nullptr) {
+        const auto type = provider->find("type");
+        const auto base_url = provider->find("base_url");
+        if (type != provider->end() && type->is_string() &&
+            type->get<std::string>() == "openai-compatible" && base_url != provider->end() &&
+            base_url->is_string() && !is_http_url(base_url->get<std::string>())) {
+            err << "ymh: note: localcode provider base_url is not an http(s) URL; model settings "
+                   "not imported\n";
+        }
+    }
+}
+
+bool validate_imported_mcp(nlohmann::json& document, const nlohmann::json& localcode,
+                           const std::filesystem::path& source, std::ostream& err) {
+    const auto fail_import = [&](const std::string& reason) {
+        err << "ymh: imported config failed validation: " << reason
+            << "; writing the default config instead\n";
+        return false;
+    };
+    const auto servers = document.find("mcp_servers");
+    if (servers == document.end() || !servers->is_object() || servers->empty()) {
+        return true;
+    }
+
+    Config candidate;
+    try {
+        apply_mcp_servers_object(candidate.mcp, document["mcp_servers"], source);
+    } catch (const ConfigError& error) {
+        return fail_import(error.what());
+    }
+    McpConfig candidate_mcp;
+    try {
+        candidate_mcp = to_mcp_config(candidate);
+    } catch (const ConfigError& error) {
+        return fail_import(error.what());
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(document["mcp_servers"].size());
+    for (auto it = document["mcp_servers"].begin(); it != document["mcp_servers"].end(); ++it) {
+        keys.push_back(it.key());
+    }
+
+    const nlohmann::json* original = nullptr;
+    if (const auto it = localcode.find("mcp_servers"); it != localcode.end() && it->is_object()) {
+        original = &(*it);
+    }
+
+    std::vector<std::string> erase_keys;
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        const McpServerConfig& server = candidate_mcp.servers[index];
+        std::string            reason;
+        if (server.transport != McpTransportKind::Stdio) {
+            reason = "no http_sse transport implemented";
+        } else {
+            reason = validate_mcp_server(server, candidate_mcp, ToolConfig{});
+        }
+        if (!reason.empty()) {
+            erase_keys.push_back(keys[index]);
+            err << "ymh: import: skipping mcp server '" << keys[index] << "': " << reason << "\n";
+            continue;
+        }
+        if (original != nullptr) {
+            const auto raw = original->find(keys[index]);
+            if (raw != original->end() && raw->is_object()) {
+                const auto required = raw->find("required");
+                if (required != raw->end() && required->is_boolean() && required->get<bool>()) {
+                    err << "ymh: import: server '" << keys[index]
+                        << "': 'required' is not imported (server starts non-required)\n";
+                }
+            }
+        }
+    }
+
+    for (const std::string& key : erase_keys) {
+        document["mcp_servers"].erase(key);
+    }
+
+    if (!erase_keys.empty()) {
+        Config reduced;
+        try {
+            apply_mcp_servers_object(reduced.mcp, document["mcp_servers"], source);
+            candidate_mcp = to_mcp_config(reduced);
+        } catch (const ConfigError& error) {
+            return fail_import(error.what());
+        }
+    }
+
+    const std::string backstop = validate_mcp_config(candidate_mcp, ToolConfig{});
+    if (!backstop.empty()) {
+        return fail_import(backstop);
+    }
+    return true;
+}
+
+bool write_imported_config(const nlohmann::json& document,
+                           const std::filesystem::path& global_config, std::ostream& err) {
+    const auto fail_import = [&](const std::string& reason) {
+        err << "ymh: imported config failed validation: " << reason
+            << "; writing the default config instead\n";
+        return false;
+    };
+
+    std::error_code error;
+    std::filesystem::create_directories(global_config.parent_path(), error);
+    if (error) {
+        return fail_import("cannot create '" + global_config.parent_path().string() +
+                           "': " + error.message());
+    }
+
+    const std::filesystem::path temp = global_config.string() + ".import.tmp";
+    const auto                  open_temp = [&]() {
+        return ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    };
+    int fd = open_temp();
+    if (fd < 0 && errno == EEXIST) {
+        (void)::unlink(temp.c_str());
+        fd = open_temp();
+    }
+    if (fd < 0) {
+        return fail_import("cannot create temp file");
+    }
+
+    const std::string body    = document.dump(2) + "\n";
+    bool              ok      = true;
+    std::size_t       written = 0;
+    while (written < body.size()) {
+        const ssize_t count = ::write(fd, body.data() + written, body.size() - written);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        written += static_cast<std::size_t>(count);
+    }
+    if (::close(fd) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        (void)::unlink(temp.c_str());
+        return fail_import("cannot write temp file");
+    }
+
+    try {
+        Config validation_config;
+        apply_jsonc_file(validation_config, temp, /*required=*/true);
+    } catch (const ConfigError& error_) {
+        (void)::unlink(temp.c_str());
+        return fail_import(error_.what());
+    }
+
+    if (::rename(temp.c_str(), global_config.c_str()) != 0) {
+        (void)::unlink(temp.c_str());
+        return fail_import("cannot rename temp file");
+    }
+    return true;
+}
+
 } // namespace
 
 bool workspace_stop_may_proceed(std::size_t live_supervisors, std::size_t live_automation,
@@ -585,6 +879,62 @@ bool workspace_stop_may_proceed(std::size_t live_supervisors, std::size_t live_a
         return false;
     }
     return std::tolower(static_cast<unsigned char>(answer[first])) == 'y';
+}
+
+bool maybe_import_localcode_config(const CliInvocation& invocation,
+                                   const std::filesystem::path& global_config, bool interactive,
+                                   std::istream& in, std::ostream& out, std::ostream& err) {
+    if (invocation.command != CliInvocation::Command::Tui) {
+        return false;
+    }
+    if (!invocation.config_path.empty()) {
+        return false;
+    }
+    std::error_code error;
+    if (std::filesystem::exists(global_config.parent_path(), error) && !error) {
+        return false;
+    }
+    const std::filesystem::path localcode = localcode_config_path();
+    if (!std::filesystem::exists(localcode, error) || error) {
+        return false;
+    }
+    if (!std::filesystem::is_regular_file(localcode, error) || error) {
+        return false;
+    }
+    if (!interactive) {
+        return false;
+    }
+
+    std::string                         reason;
+    const std::optional<nlohmann::json> localcode_doc = read_localcode_document(localcode, reason);
+    if (!localcode_doc.has_value()) {
+        err << "ymh: localcode config at " << localcode.string() << " is " << reason
+            << "; skipping import\n";
+        return false;
+    }
+
+    out << "ymh: first run — no config at " << global_config.string() << ".\n"
+        << "     Found localcode settings at " << localcode.string() << ".\n"
+        << "     Import MCP servers, model, compaction, and concurrency? (Permission rules\n"
+        << "     and API keys are not imported; ymh keeps its own permission prompts.)\n"
+        << "     [Y/n] ";
+    out.flush();
+    if (!prompt_import_yes(in, out)) {
+        return false;
+    }
+
+    std::string                   import_error;
+    std::optional<nlohmann::json> document = build_localcode_import(*localcode_doc, import_error);
+    if (!document.has_value()) {
+        err << "ymh: import failed: " << import_error << "; writing the default config instead\n";
+        return false;
+    }
+
+    print_localcode_notes(*localcode_doc, err);
+    if (!validate_imported_mcp(*document, *localcode_doc, global_config, err)) {
+        return false;
+    }
+    return write_imported_config(*document, global_config, err);
 }
 
 CliInvocation parse_cli(const std::vector<std::string>& args) {
@@ -767,6 +1117,10 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
     }
 
     const std::filesystem::path root = resolve_workspace(invocation);
+    const bool import_interactive =
+        ::isatty(STDIN_FILENO) != 0 && ::isatty(STDOUT_FILENO) != 0;
+    (void)maybe_import_localcode_config(invocation, default_global_config_path(),
+                                        import_interactive, std::cin, out, err);
     scaffold_for_invocation(invocation, root);
 
     Config config;

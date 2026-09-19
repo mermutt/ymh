@@ -11,6 +11,17 @@ namespace {
 constexpr std::size_t kMaxToolOutput = 64u * 1024u;
 constexpr std::size_t kMaxToolConversationOutput = 4u * 1024u;
 
+// 25-D5: the transient plan notices are cleared on the next plan/mode change or
+// when the turn ends, whichever is first.
+void clear_plan_notices(UiModel& model) {
+    const auto is_plan_notice = [](const UiNotice& notice) {
+        return notice.text == "plan change queued" || notice.text == "plan exit queued";
+    };
+    model.notices.erase(
+        std::remove_if(model.notices.begin(), model.notices.end(), is_plan_notice),
+        model.notices.end());
+}
+
 void append_bounded(std::string& target, const std::string& chunk, std::size_t max_bytes) {
     if (target.size() >= max_bytes) {
         return;
@@ -638,6 +649,7 @@ void UiModel::apply(const UiEvent& event) {
                     state.conversation.by_message[e.message] = state.conversation.entries.size();
                     state.conversation.entries.push_back(std::move(entry));
                 }
+                state.stream_started_at = now_reader();
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, AssistantTextDelta>) {
                 if (e.reasoning) {
@@ -679,6 +691,22 @@ void UiModel::apply(const UiEvent& event) {
                     state.status.output_tokens = e.usage->output_tokens;
                     state.status.cached_tokens = e.usage->cached_tokens;
                     dirty.mark(e.session, UiDirtyFlag::Status);
+                }
+                if (state.stream_started_at.has_value()) {
+                    if (e.usage.has_value() && e.usage->output_tokens > 0) {
+                        const std::chrono::steady_clock::duration elapsed =
+                            now_reader() - *state.stream_started_at;
+                        if (elapsed >= std::chrono::milliseconds(250)) {
+                            const double seconds =
+                                std::chrono::duration<double>(elapsed).count();
+                            if (seconds > 0.0) {
+                                state.status.tps =
+                                    static_cast<double>(e.usage->output_tokens) / seconds;
+                                dirty.mark(e.session, UiDirtyFlag::Status);
+                            }
+                        }
+                    }
+                    state.stream_started_at.reset();
                 }
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, ToolStarted>) {
@@ -744,7 +772,8 @@ void UiModel::apply(const UiEvent& event) {
                 dialog.request = e.request;
                 dialog.tool = e.tool;
                 dialog.summary = e.summary;
-                dialog.selected = 0;
+                dialog.force_ask = e.force_ask;
+                dialog.selected = e.force_ask ? 1 : 0;
                 state.attention.needsInput = true;
                 mode = UiMode::Dialog;
                 dirty.mark(e.session, UiDirtyFlag::Attention);
@@ -761,6 +790,9 @@ void UiModel::apply(const UiEvent& event) {
                 state.attention.lastState = e.newState;
                 state.attention.needsInput = is_waiting_state(e.newState);
                 state.attention.completed = e.newState == AgentState::Idle;
+                if (e.newState == AgentState::Idle) {
+                    clear_plan_notices(*this);
+                }
                 dirty.mark(e.session, UiDirtyFlag::Attention | UiDirtyFlag::Status |
                                            UiDirtyFlag::SessionBar);
             } else if constexpr (std::is_same_v<T, SubagentUpdated>) {
@@ -827,6 +859,10 @@ void UiModel::apply(const UiEvent& event) {
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, SessionTitleChanged>) {
                 setCellTitle(state.workspace, e.session, e.title);
+            } else if constexpr (std::is_same_v<T, PlanModeChanged>) {
+                state.status.plan_active = e.active;
+                clear_plan_notices(*this);
+                dirty.mark(e.session, UiDirtyFlag::Status);
             }
             refreshCell(e.session);
         },
@@ -1149,6 +1185,12 @@ bool UiModel::advance_reasoning_spinner(std::chrono::milliseconds delta) {
         changed = true;
     }
     return changed;
+}
+
+void UiModel::set_now_reader(ClockReader reader) {
+    if (reader) {
+        now_reader = std::move(reader);
+    }
 }
 
 } // namespace ymh::ui

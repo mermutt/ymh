@@ -49,6 +49,7 @@ class Executor;
 class SkillCatalog;
 class TokenEstimator;
 class McpManager;
+class PlanModeController;
 struct AgentConfig;
 struct CompactionPolicy;
 struct LLMProviderConfig;
@@ -148,6 +149,10 @@ public:
     [[nodiscard]] LLMProvider*          provider() noexcept;
     [[nodiscard]] LLMPool&              pool() noexcept;
     [[nodiscard]] ContextAssembler&     context() noexcept;
+
+    // 25-D2: the owned plan-mode controller, for the `session.set_mode` handler
+    // and `deleteSession`'s memo cleanup.
+    [[nodiscard]] PlanModeController& plan_mode() noexcept;
 
     [[nodiscard]] const AgentConfig&       agent_config() const noexcept;
     [[nodiscard]] const LLMProviderConfig& provider_config() const noexcept;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -14,6 +15,7 @@
 #include <ftxui/screen/box.hpp>
 #include <ftxui/screen/pixel.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/string.hpp>
 
 #include "ymh/session/session.hpp"
 #include "ymh/ui/render/diff_renderer.hpp"
@@ -354,62 +356,248 @@ Element render_input(const UiModel& model, const Theme& theme) {
     });
 }
 
-Element render_status(const UiModel& model, const SessionUiState* active, const Theme& theme) {
-    const AggregateStatus& counts = model.aggregate.current;
-    std::string state = active == nullptr ? "idle" : state_name(active->agent_state);
-    std::string left = state;
-    if (active != nullptr && !active->status.model.empty()) {
-        left += " · " + active->status.model;
+std::string format_percent(std::uint64_t tokens, std::uint64_t window);
+
+std::string ellipsize_text(const std::string& text, int max_width) {
+    if (ftxui::string_width(text) <= max_width) {
+        return text;
     }
-    if (active != nullptr) {
-        const StatusModel& status = active->status;
-        if (status.input_tokens != 0 || status.output_tokens != 0 || status.cached_tokens != 0) {
-            left += " · ↑" + std::to_string(status.input_tokens) + " ↓" +
-                    std::to_string(status.output_tokens) + " ⚡" +
-                    std::to_string(status.cached_tokens);
+    if (max_width <= 0) {
+        return {};
+    }
+    const int   target = max_width - 1;
+    std::string out;
+    int         width = 0;
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[index]);
+        std::size_t         length = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            length = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            length = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            length = 4;
+        }
+        if (index + length > text.size()) {
+            length = 1;
+        }
+        const std::string glyph       = text.substr(index, length);
+        const int         glyph_width = ftxui::string_width(glyph);
+        if (width + glyph_width > target) {
+            break;
+        }
+        out += glyph;
+        width += glyph_width;
+        index += length;
+    }
+    out += "…";
+    return out;
+}
+
+std::string format_tps(double tps) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.1f tps", tps);
+    return buffer;
+}
+
+constexpr int kContextCells = 10;
+
+int context_filled_cells(std::uint64_t used, std::uint64_t window) {
+    if (window == 0) {
+        return 0;
+    }
+    std::uint64_t filled = (used * 10) / window;
+    if (filled > static_cast<std::uint64_t>(kContextCells)) {
+        filled = static_cast<std::uint64_t>(kContextCells);
+    }
+    int cells = static_cast<int>(filled);
+    if (used > 0 && cells == 0) {
+        cells = 1;
+    }
+    return cells;
+}
+
+Element render_context_bar(std::uint64_t used, std::uint64_t window, const Theme& theme) {
+    const int filled = context_filled_cells(used, window);
+    ftxui::Color fill = ftxui::Color::Green;
+    if (window > 0) {
+        const double percent = static_cast<double>(used) * 100.0 / static_cast<double>(window);
+        if (percent >= 95.0) {
+            fill = ftxui::Color::Red;
+        } else if (percent >= 80.0) {
+            fill = ftxui::Color::Yellow;
         }
     }
-    if (active != nullptr && !active->status.note.empty()) {
-        left += " · " + active->status.note;
+    Elements cells;
+    cells.reserve(kContextCells);
+    for (int index = 0; index < kContextCells; ++index) {
+        if (index < filled) {
+            cells.push_back(paint(ftxui::text("█"), fill, theme));
+        } else {
+            cells.push_back(paint(ftxui::text("░"), ftxui::Color::GrayDark, theme));
+        }
     }
-    if (!model.notices.empty()) {
-        left += " · " + model.notices.back().text;
-    }
-    std::string right = std::to_string(counts.activeCount) + " active · " +
-                        std::to_string(counts.waitingCount) + " waiting";
+    return ftxui::hbox(std::move(cells));
+}
+
+Element render_status(const UiModel& model, const SessionUiState* active, const Theme& theme,
+                      int width) {
+    const AggregateStatus& counts = model.aggregate.current;
+    const std::string right = std::to_string(counts.activeCount) + " active · " +
+                              std::to_string(counts.waitingCount) + " waiting";
     Element aggregate = ftxui::text(right);
     if (theme.color && model.aggregate.flash.isFlashing()) {
         aggregate = aggregate | ftxui::inverted;
     }
-    return ftxui::hbox({
-        ftxui::text(left),
-        ftxui::filler(),
-        aggregate,
-    });
+    if (active == nullptr) {
+        return ftxui::hbox({ftxui::text(""), ftxui::filler(), aggregate});
+    }
+
+    const StatusModel& status = active->status;
+    int avail = width - ftxui::string_width(right) - 1;
+    if (avail < 1) {
+        avail = 1;
+    }
+    constexpr int kSeparatorWidth = 3;   // " · "
+
+    std::string mode = status.plan_active ? "plan" : "build";
+    if (ftxui::string_width(mode) > avail) {
+        mode = ellipsize_text(mode, avail);
+    }
+    int used = ftxui::string_width(mode);
+
+    std::string model_name;
+    if (!status.model.empty()) {
+        const int remaining = avail - used - kSeparatorWidth;
+        if (remaining >= 4) {
+            model_name = ftxui::string_width(status.model) > remaining
+                             ? ellipsize_text(status.model, remaining)
+                             : status.model;
+            used += kSeparatorWidth + ftxui::string_width(model_name);
+        }
+    }
+
+    const std::string counters = "↑" + std::to_string(status.input_tokens) + " ↓" +
+                                 std::to_string(status.output_tokens) + " ⚡" +
+                                 std::to_string(status.cached_tokens);
+    const std::string percent =
+        format_percent(status.context_used_tokens, status.context_window_tokens);
+    const int context_width = 1 + kContextCells + 2 + ftxui::string_width(percent);
+    const std::string tps =
+        status.tps.has_value() ? format_tps(*status.tps) : std::string{"— tps"};
+    const std::string state = status.agent_state == AgentState::Idle
+                                  ? std::string{}
+                                  : std::string{state_name(status.agent_state)};
+    const std::string notice =
+        model.notices.empty() ? std::string{} : model.notices.back().text;
+
+    const auto fits = [&](int text_width) {
+        return used + kSeparatorWidth + text_width <= avail;
+    };
+
+    const bool include_counters = fits(ftxui::string_width(counters));
+    if (include_counters) {
+        used += kSeparatorWidth + ftxui::string_width(counters);
+    }
+    const bool include_context = fits(context_width);
+    if (include_context) {
+        used += kSeparatorWidth + context_width;
+    }
+    const bool include_note = !status.note.empty() && fits(ftxui::string_width(status.note));
+    if (include_note) {
+        used += kSeparatorWidth + ftxui::string_width(status.note);
+    }
+    const bool include_notice = !notice.empty() && fits(ftxui::string_width(notice));
+    if (include_notice) {
+        used += kSeparatorWidth + ftxui::string_width(notice);
+    }
+    const bool include_tps = fits(ftxui::string_width(tps));
+    if (include_tps) {
+        used += kSeparatorWidth + ftxui::string_width(tps);
+    }
+    const bool include_state = !state.empty() && fits(ftxui::string_width(state));
+    if (include_state) {
+        used += kSeparatorWidth + ftxui::string_width(state);
+    }
+
+    Elements left_cells;
+    const auto append_segment = [&](Element element) {
+        if (!left_cells.empty()) {
+            left_cells.push_back(ftxui::text(" · "));
+        }
+        left_cells.push_back(std::move(element));
+    };
+    append_segment(status.plan_active ? paint(ftxui::text(mode), ftxui::Color::Yellow, theme)
+                                      : ftxui::text(mode));
+    if (include_state) {
+        append_segment(ftxui::text(state));
+    }
+    if (!model_name.empty()) {
+        append_segment(ftxui::text(model_name));
+    }
+    if (include_counters) {
+        append_segment(ftxui::text(counters));
+    }
+    if (include_tps) {
+        append_segment(ftxui::text(tps));
+    }
+    if (include_context) {
+        append_segment(ftxui::hbox({ftxui::text("["),
+                                    render_context_bar(status.context_used_tokens,
+                                                       status.context_window_tokens, theme),
+                                    ftxui::text("] " + percent)}));
+    }
+    if (include_note) {
+        append_segment(ftxui::text(status.note));
+    }
+    if (include_notice) {
+        append_segment(ftxui::text(notice));
+    }
+
+    return ftxui::hbox({ftxui::hbox(std::move(left_cells)), ftxui::filler(), aggregate});
 }
 
 Element render_dialog(const UiModel& model, const Theme& theme) {
+    constexpr int kMaxPlanPreviewRows = 12;
     const PermissionDialogModel& dialog = model.dialog;
     Elements rows;
     rows.push_back(ftxui::text("Permission required") | ftxui::bold);
     rows.push_back(ftxui::separator());
     rows.push_back(ftxui::text("tool: " + dialog.tool));
     if (!dialog.summary.empty()) {
-        rows.push_back(ftxui::paragraph(dialog.summary) | ftxui::dim);
+        Element preview = ftxui::paragraph(dialog.summary) | ftxui::dim;
+        if (dialog.force_ask) {
+            preview = preview | ftxui::size(ftxui::HEIGHT, ftxui::LESS_THAN,
+                                            kMaxPlanPreviewRows) |
+                      ftxui::frame;
+        }
+        rows.push_back(std::move(preview));
     }
     rows.push_back(ftxui::separator());
-    const char* options[] = {
-        "Allow once",
-        "Allow for session",
-        "Always allow",
-        "Deny",
-    };
-    for (int index = 0; index < 4; ++index) {
-        Element row = ftxui::text(options[index]);
-        if (index == dialog.selected) {
-            row = row | ftxui::inverted;
+    if (dialog.force_ask) {
+        const char* options[] = {"Allow once", "Deny"};
+        for (int index = 0; index < 2; ++index) {
+            Element row = ftxui::text(options[index]);
+            if (index == dialog.selected) {
+                row = row | ftxui::inverted;
+            }
+            rows.push_back(row);
         }
-        rows.push_back(row);
+    } else {
+        const char* options[] = {
+            "Allow once",
+            "Allow for session",
+            "Always allow",
+            "Deny",
+        };
+        for (int index = 0; index < 4; ++index) {
+            Element row = ftxui::text(options[index]);
+            if (index == dialog.selected) {
+                row = row | ftxui::inverted;
+            }
+            rows.push_back(row);
+        }
     }
     rows.push_back(ftxui::text("↑/↓ select · Enter confirm · Esc cancel") | ftxui::dim);
     (void)theme;
@@ -939,7 +1127,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
         rows.push_back(render_command_hints(active, theme));
     }
     rows.push_back(render_input(model, theme));
-    rows.push_back(render_status(model, active, theme));
+    rows.push_back(render_status(model, active, theme, size.width));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
     if (model.exitConfirm.open) {

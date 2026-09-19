@@ -179,6 +179,7 @@ add_library(ymh_session STATIC
     src/session/session.cpp
     src/session/session_persistence.cpp
     src/session/session_manager.cpp
+    src/session/plan_mode.cpp
 )
 add_library(ymh::session ALIAS ymh_session)
 
@@ -314,6 +315,7 @@ add_library(ymh_tools STATIC
     src/tools/tool_registry.cpp
     src/tools/builtin_tools.cpp
     src/tools/git_tools.cpp
+    src/tools/plan_tools.cpp
     src/tools/terminal_tool.cpp
 )
 add_library(ymh::tools ALIAS ymh_tools)
@@ -406,6 +408,7 @@ add_library(ymh_agent STATIC
     src/agent/context_assembler.cpp
     src/agent/context_snapshot.cpp
     src/agent/llm_pool.cpp
+    src/agent/plan_mode_controller.cpp
     src/agent/subagent.cpp
 )
 add_library(ymh::agent ALIAS ymh_agent)
@@ -443,8 +446,10 @@ target_include_directories(ymh_config
 )
 
 target_link_libraries(ymh_config
-    PRIVATE
+    PUBLIC
         nlohmann_json::nlohmann_json
+    PRIVATE
+        ymh::mcp
         ymh::warnings
 )
 

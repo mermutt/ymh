@@ -498,3 +498,14 @@ TEST(McpEnvTest, ResolvesReferencesAndRejectsMissing) {
     EXPECT_THROW((void)ymh::resolve_mcp_env({"KEY=${YMH_MCP_MISSING_VAR_XYZ}"}), McpError);
     EXPECT_THROW((void)ymh::resolve_mcp_env({"NOEQUALS"}), McpError);
 }
+
+TEST(McpEnvTest, DollarDollarBraceIsLiteralEscape) {
+    ::setenv("YMH_MCP_TEST_VAR", "secret", 1);
+    const std::vector<std::pair<std::string, std::string>> resolved =
+        ymh::resolve_mcp_env({"A=$${YMH_MCP_TEST_VAR}", "B=$$", "C=$${", "D=x$${y}"});
+    ASSERT_EQ(resolved.size(), 4u);
+    EXPECT_EQ(resolved[0].second, "${YMH_MCP_TEST_VAR}");
+    EXPECT_EQ(resolved[1].second, "$$");
+    EXPECT_EQ(resolved[2].second, "${");
+    EXPECT_EQ(resolved[3].second, "x${y}");
+}

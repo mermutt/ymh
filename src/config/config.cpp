@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -9,6 +10,7 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -19,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/core/logger.hpp"
+#include "ymh/mcp/mcp_types.hpp"
 
 namespace ymh {
 namespace {
@@ -292,10 +295,16 @@ void apply_compaction(Config& config, const Json& table, const std::filesystem::
                   compaction.retry_on_context_length, source);
 }
 
+void apply_plan(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "agent.plan", {"section"}, source);
+    config.agent.plan_section =
+        read_string(table, "section", "agent.plan", config.agent.plan_section, source);
+}
+
 void apply_agent(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "agent",
                    {"model", "max_steps", "reasoning_effort", "system_prompt", "compaction",
-                    "compaction_threshold_tokens"},
+                    "compaction_threshold_tokens", "plan"},
                    source);
     config.agent.model = read_string(table, "model", "agent", config.agent.model, source);
     config.agent.max_steps = static_cast<std::size_t>(read_int64(
@@ -311,6 +320,12 @@ void apply_agent(Config& config, const Json& table, const std::filesystem::path&
             fail(source, "invalid type for 'agent.compaction'");
         }
         apply_compaction(config, *nested, source);
+    }
+    if (const Json* nested = member(table, "plan"); nested != nullptr) {
+        if (!nested->is_object()) {
+            fail(source, "invalid type for 'agent.plan'");
+        }
+        apply_plan(config, *nested, source);
     }
 }
 
@@ -508,6 +523,114 @@ void apply_mcp(Config& config, const Json& table, const std::filesystem::path& s
     }
 }
 
+bool is_valid_localcode_server_name(std::string_view name) {
+    if (name.empty() || name.size() > 64) {
+        return false;
+    }
+    for (const char c : name) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string canonical_mcp_transport(std::string_view value) {
+    if (value == "http" || value == "sse") {
+        return "http_sse";
+    }
+    return std::string{value};
+}
+
+std::vector<std::string> read_string_object_as_env(const Json& obj,
+                                                   std::string_view key,
+                                                   std::string_view table_name,
+                                                   const std::filesystem::path& source) {
+    std::vector<std::string> result;
+    const Json*              node = member(obj, key);
+    if (node == nullptr) {
+        return result;
+    }
+    if (!node->is_object()) {
+        fail(source, "invalid type for '" + std::string{table_name} + "." + std::string{key} +
+                         "' (expected an object)");
+    }
+    for (auto it = node->begin(); it != node->end(); ++it) {
+        if (!it.value().is_string()) {
+            fail(source, "'" + std::string{table_name} + "." + std::string{key} + "." + it.key() +
+                             "' must be a string");
+        }
+        result.push_back(it.key() + "=" + it.value().get<std::string>());
+    }
+    return result;
+}
+
+void apply_mcp_servers_entry(McpServerSettings& server, const Json& entry, const std::string& key,
+                             const std::filesystem::path& source) {
+    const std::string table = "mcp_servers." + key;
+    reject_unknown(entry, table,
+                   {"type", "transport", "command", "args", "env", "headers", "url", "cwd",
+                    "header_env", "protocol_version", "enabled", "required", "allowed_tools",
+                    "denied_tools", "default_verdict", "call_timeout_ms", "max_result_bytes"},
+                   source);
+
+    const std::optional<std::string> type = read_optional_string(entry, "type", table, source);
+    const std::optional<std::string> transport =
+        read_optional_string(entry, "transport", table, source);
+    if (type.has_value() && transport.has_value() &&
+        canonical_mcp_transport(*type) != canonical_mcp_transport(*transport)) {
+        fail(source, "'" + table + "': 'type' and 'transport' must not differ");
+    }
+    std::string kind = type.has_value() ? *type : (transport.has_value() ? *transport : "stdio");
+    kind = canonical_mcp_transport(kind);
+    if (kind != "stdio" && kind != "http_sse") {
+        fail(source, "'" + table + ".type' must be one of: stdio, http_sse, http, sse (got '" +
+                         kind + "')");
+    }
+    server.transport = std::move(kind);
+
+    server.enabled = read_bool(entry, "enabled", table, server.enabled, source);
+    server.required = read_bool(entry, "required", table, server.required, source);
+    server.command = read_string(entry, "command", table, server.command, source);
+    server.cwd = read_string(entry, "cwd", table, server.cwd, source);
+    server.url = read_string(entry, "url", table, server.url, source);
+    server.protocol_version =
+        read_string(entry, "protocol_version", table, server.protocol_version, source);
+    server.default_verdict =
+        read_string(entry, "default_verdict", table, server.default_verdict, source);
+    server.call_timeout_ms =
+        read_int64(entry, "call_timeout_ms", table, server.call_timeout_ms, source);
+    server.max_result_bytes = static_cast<std::size_t>(read_int64(
+        entry, "max_result_bytes", table, static_cast<std::int64_t>(server.max_result_bytes),
+        source));
+
+    if (auto values = read_string_array(entry, "args", table, source); !values.empty()) {
+        server.args = std::move(values);
+    }
+    if (auto values = read_string_array(entry, "header_env", table, source); !values.empty()) {
+        server.header_env = std::move(values);
+    }
+    if (auto values = read_string_array(entry, "allowed_tools", table, source); !values.empty()) {
+        server.allowed_tools = std::move(values);
+    }
+    if (auto values = read_string_array(entry, "denied_tools", table, source); !values.empty()) {
+        server.denied_tools = std::move(values);
+    }
+
+    if (const Json* env = member(entry, "env"); env != nullptr) {
+        server.env = read_string_object_as_env(entry, "env", table, source);
+    }
+    if (const Json* headers = member(entry, "headers"); headers != nullptr) {
+        server.header_env = read_string_object_as_env(entry, "headers", table, source);
+    }
+
+    if (server.transport != "stdio" && server.url.empty()) {
+        fail(source, "'" + table + "': non-stdio transport requires a non-empty 'url'");
+    }
+}
+
 void apply_skills(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "skills",
                    {"enabled", "expose_workspace", "max_skills", "max_skill_bytes",
@@ -535,7 +658,8 @@ void apply_skills(Config& config, const Json& table, const std::filesystem::path
 
 void apply_document(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "",
-                   {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills"},
+                   {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
+                    "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -548,6 +672,21 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         }
         return nested;
     };
+
+    const Json* mcp_servers = nullptr;
+    if (const Json* node = member(table, "mcp_servers"); node != nullptr) {
+        if (!node->is_object()) {
+            fail(source, "invalid type for 'mcp_servers'");
+        }
+        if (const Json* mcp = member(table, "mcp");
+            mcp != nullptr && mcp->is_object()) {
+            if (const Json* server = member(*mcp, "server");
+                server != nullptr && server->is_array() && !server->empty()) {
+                fail(source, "define MCP servers in mcp_servers or mcp.server, not both");
+            }
+        }
+        mcp_servers = node;
+    }
 
     if (const Json* ui = section("ui"); ui != nullptr) {
         apply_ui(config, *ui, source);
@@ -572,6 +711,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     }
     if (const Json* skills = section("skills"); skills != nullptr) {
         apply_skills(config, *skills, source);
+    }
+    if (mcp_servers != nullptr) {
+        apply_mcp_servers_object(config.mcp, *mcp_servers, source);
     }
 }
 
@@ -713,6 +855,54 @@ bool write_default_config(const std::filesystem::path& file, Logger* logger, boo
 
 } // namespace
 
+void apply_mcp_servers_object(McpSettings& mcp, const Json& table,
+                              const std::filesystem::path& source) {
+    if (!table.is_object()) {
+        fail(source, "invalid type for 'mcp_servers'");
+    }
+
+    std::vector<std::pair<std::string, std::string>> assigned;
+    assigned.reserve(table.size());
+    std::set<std::string> used;
+    for (auto it = table.begin(); it != table.end(); ++it) {
+        const std::string& key = it.key();
+        if (!is_valid_localcode_server_name(key)) {
+            fail(source, "invalid mcp server name '" + key + "'");
+        }
+        const std::string base = normalize_mcp_server_id(key);
+        std::string       id   = base;
+        if (used.count(id) != 0) {
+            id.clear();
+            for (std::size_t n = 2; n <= kMaxMcpDedupeAttempts; ++n) {
+                const std::string suffix    = "_" + std::to_string(n);
+                const std::size_t room      = suffix.size() < 32 ? 32 - suffix.size() : 0;
+                std::string       candidate = base.substr(0, room) + suffix;
+                if (used.count(candidate) == 0) {
+                    id = std::move(candidate);
+                    break;
+                }
+            }
+            if (id.empty()) {
+                fail(source, "mcp_servers: too many id collisions for '" + key + "'");
+            }
+        }
+        used.insert(id);
+        assigned.emplace_back(key, std::move(id));
+    }
+
+    mcp.servers.clear();
+    for (const auto& [key, id] : assigned) {
+        const Json& entry = table.at(key);
+        if (!entry.is_object()) {
+            fail(source, "invalid type for mcp_servers.'" + key + "'");
+        }
+        McpServerSettings server;
+        server.id = id;
+        apply_mcp_servers_entry(server, entry, key, source);
+        mcp.servers.push_back(std::move(server));
+    }
+}
+
 std::optional<std::string> env_value(std::string_view name) {
     const char* raw = std::getenv(std::string{name}.c_str());
     if (raw == nullptr || *raw == '\0') {
@@ -733,6 +923,13 @@ std::filesystem::path default_global_config_path() {
 
 std::filesystem::path workspace_config_path(const std::filesystem::path& workspace_root) {
     return workspace_root / ".ymh" / kConfigFile;
+}
+
+std::filesystem::path localcode_config_path() {
+    if (const std::optional<std::string> home = env_value("HOME"); home.has_value()) {
+        return std::filesystem::path{*home} / ".localcode" / "config.json";
+    }
+    return std::filesystem::path{".localcode"} / "config.json";
 }
 
 ScaffoldResult scaffold_config(const std::filesystem::path& workspace_root,
@@ -881,6 +1078,238 @@ Config load_config(const std::filesystem::path& workspace_root) {
     paths.global    = default_global_config_path();
     paths.workspace = workspace_config_path(workspace_root);
     return load_config(paths);
+}
+
+namespace {
+
+std::string escape_localcode_reference(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    std::size_t i = 0;
+    while (i < value.size()) {
+        if (value[i] == '$' && i + 1 < value.size() && value[i + 1] == '{') {
+            const std::size_t name_start = i + 2;
+            const bool        starts_name =
+                name_start < value.size() &&
+                ((value[name_start] >= 'A' && value[name_start] <= 'Z') ||
+                 (value[name_start] >= 'a' && value[name_start] <= 'z') ||
+                 value[name_start] == '_');
+            if (starts_name) {
+                std::size_t end = name_start + 1;
+                while (end < value.size() && ((value[end] >= 'A' && value[end] <= 'Z') ||
+                                              (value[end] >= 'a' && value[end] <= 'z') ||
+                                              (value[end] >= '0' && value[end] <= '9') ||
+                                              value[end] == '_')) {
+                    ++end;
+                }
+                if (end < value.size() && value[end] == '}') {
+                    result.append(value.substr(i, end + 1 - i));
+                    i = end + 1;
+                    continue;
+                }
+            }
+            result += "$${";
+            i += 2;
+            continue;
+        }
+        result.push_back(value[i]);
+        ++i;
+    }
+    return result;
+}
+
+bool is_http_url(std::string_view url) {
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
+std::optional<std::int64_t> read_non_negative_integer(const Json& value) {
+    if (value.is_number_unsigned()) {
+        const std::uint64_t raw = value.get<std::uint64_t>();
+        if (raw <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            return static_cast<std::int64_t>(raw);
+        }
+        return std::nullopt;
+    }
+    if (value.is_number_integer()) {
+        const std::int64_t raw = value.get<std::int64_t>();
+        if (raw >= 0) {
+            return raw;
+        }
+    }
+    return std::nullopt;
+}
+
+void copy_mcp_string(const Json& entry, std::string_view key, Json& out) {
+    const Json* node = member(entry, key);
+    if (node != nullptr && node->is_string()) {
+        out[std::string{key}] = escape_localcode_reference(node->get<std::string>());
+    }
+}
+
+void copy_mcp_string_array(const Json& entry, std::string_view key, Json& out) {
+    const Json* node = member(entry, key);
+    if (node == nullptr || !node->is_array()) {
+        return;
+    }
+    Json array = Json::array();
+    for (const Json& element : *node) {
+        if (!element.is_string()) {
+            return;
+        }
+        array.push_back(escape_localcode_reference(element.get<std::string>()));
+    }
+    out[std::string{key}] = std::move(array);
+}
+
+void copy_mcp_string_object(const Json& entry, std::string_view key, Json& out) {
+    const Json* node = member(entry, key);
+    if (node == nullptr || !node->is_object()) {
+        return;
+    }
+    Json object = Json::object();
+    for (auto it = node->begin(); it != node->end(); ++it) {
+        if (it.value().is_string()) {
+            object[it.key()] = escape_localcode_reference(it.value().get<std::string>());
+        }
+    }
+    out[std::string{key}] = std::move(object);
+}
+
+Json map_localcode_mcp_server(const Json& entry) {
+    Json mapped = Json::object();
+    copy_mcp_string(entry, "type", mapped);
+    copy_mcp_string(entry, "transport", mapped);
+    copy_mcp_string(entry, "command", mapped);
+    copy_mcp_string_array(entry, "args", mapped);
+    copy_mcp_string_object(entry, "env", mapped);
+    copy_mcp_string_object(entry, "headers", mapped);
+    copy_mcp_string(entry, "url", mapped);
+    copy_mcp_string(entry, "cwd", mapped);
+    copy_mcp_string_array(entry, "header_env", mapped);
+    copy_mcp_string(entry, "protocol_version", mapped);
+    if (const Json* enabled = member(entry, "enabled");
+        enabled != nullptr && enabled->is_boolean()) {
+        mapped["enabled"] = enabled->get<bool>();
+    }
+    copy_mcp_string_array(entry, "allowed_tools", mapped);
+    copy_mcp_string_array(entry, "denied_tools", mapped);
+    copy_mcp_string(entry, "default_verdict", mapped);
+    if (const Json* timeout = member(entry, "call_timeout_ms"); timeout != nullptr) {
+        if (const auto value = read_non_negative_integer(*timeout); value.has_value()) {
+            mapped["call_timeout_ms"] = *value;
+        }
+    }
+    if (const Json* max_bytes = member(entry, "max_result_bytes"); max_bytes != nullptr) {
+        if (const auto value = read_non_negative_integer(*max_bytes); value.has_value()) {
+            mapped["max_result_bytes"] = *value;
+        }
+    }
+    mapped["required"] = false;
+    return mapped;
+}
+
+} // namespace
+
+std::optional<Json> build_localcode_import(const Json& localcode, std::string& error) {
+    error.clear();
+    if (!localcode.is_object()) {
+        error = "localcode config must be a JSON object";
+        return std::nullopt;
+    }
+
+    Json document = Json::object();
+
+    if (const Json* servers = member(localcode, "mcp_servers"); servers != nullptr) {
+        if (servers->is_object()) {
+            Json mapped = Json::object();
+            for (auto it = servers->begin(); it != servers->end(); ++it) {
+                if (it.value().is_object()) {
+                    mapped[it.key()] = map_localcode_mcp_server(it.value());
+                }
+            }
+            if (!mapped.empty()) {
+                document["mcp_servers"] = std::move(mapped);
+            }
+        }
+    }
+
+    if (const Json* enabled = member(localcode, "auto_compact_enabled");
+        enabled != nullptr && enabled->is_boolean()) {
+        document["agent"]["compaction"]["enabled"] = enabled->get<bool>();
+    }
+    if (const Json* percent = member(localcode, "auto_compact_percent");
+        percent != nullptr && percent->is_number()) {
+        double ratio = percent->get<double>() / 100.0;
+        if (!std::isfinite(ratio)) {
+            ratio = 1.0;
+        }
+        document["agent"]["compaction"]["threshold_ratio"] =
+            std::clamp(ratio, std::numeric_limits<double>::min(), 1.0);
+    }
+    if (const Json* tasks = member(localcode, "max_concurrent_tasks"); tasks != nullptr) {
+        if (const auto value = read_non_negative_integer(*tasks);
+            value.has_value() && *value > 0) {
+            document["llm"]["default"]["max_concurrency"] = *value;
+        }
+    }
+
+    const Json* default_profile = member(localcode, "default_profile");
+    if (default_profile != nullptr && default_profile->is_string()) {
+        const std::string profile_name = default_profile->get<std::string>();
+        const Json*       profiles     = member(localcode, "profiles");
+        const Json*       profile      = nullptr;
+        if (profiles != nullptr && profiles->is_object()) {
+            if (auto it = profiles->find(profile_name);
+                it != profiles->end() && it->is_object()) {
+                profile = &(*it);
+            }
+        }
+
+        const Json* provider = nullptr;
+        if (profile != nullptr) {
+            const Json* provider_name = member(*profile, "provider");
+            const Json* providers     = member(localcode, "providers");
+            if (provider_name != nullptr && provider_name->is_string() && providers != nullptr &&
+                providers->is_object()) {
+                if (auto it = providers->find(provider_name->get<std::string>());
+                    it != providers->end() && it->is_object()) {
+                    provider = &(*it);
+                }
+            }
+        }
+
+        bool openai_compatible = false;
+        if (provider != nullptr) {
+            const Json* type = member(*provider, "type");
+            openai_compatible = type != nullptr && type->is_string() &&
+                                type->get<std::string>() == "openai-compatible";
+        }
+        if (openai_compatible) {
+            if (const Json* window = member(*profile, "context_window"); window != nullptr) {
+                if (const auto value = read_non_negative_integer(*window); value.has_value()) {
+                    document["agent"]["compaction"]["context_window_tokens"] = *value;
+                }
+            }
+            const Json* base_url = member(*provider, "base_url");
+            if (base_url != nullptr && base_url->is_string()) {
+                const std::string url = base_url->get<std::string>();
+                if (is_http_url(url)) {
+                    document["llm"]["default"]["base_url"] = url;
+                    if (const Json* model = member(*profile, "model");
+                        model != nullptr && model->is_string()) {
+                        document["llm"]["default"]["model"] = model->get<std::string>();
+                    }
+                }
+            } else if (base_url == nullptr) {
+                if (const Json* model = member(*profile, "model");
+                    model != nullptr && model->is_string()) {
+                    document["llm"]["default"]["model"] = model->get<std::string>();
+                }
+            }
+        }
+    }
+
+    return document;
 }
 
 std::string effective_model(const Config& config) {

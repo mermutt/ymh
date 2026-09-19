@@ -204,6 +204,14 @@ struct SessionRenamed {
     RenameOrigin origin = RenameOrigin::User;
 };
 
+// ---- plan mode (25-D2) -----------------------------------------------------
+
+// Whole-value-replace collaboration state. The last `plan/mode` in a session
+// log wins; a log with none folds to inactive (25-D2, UX11).
+struct PlanMode {
+    bool active = false;
+};
+
 } // namespace payload
 
 // ---------------------------------------------------------------------------
@@ -290,6 +298,10 @@ template <>
 struct SessionEventMap<EventType::SessionRenamed> {
     using type = payload::SessionRenamed;
 };
+template <>
+struct SessionEventMap<EventType::PlanMode> {
+    using type = payload::PlanMode;
+};
 
 // Payload type -> EventType (01 §4.4).
 template <>
@@ -372,6 +384,10 @@ template <>
 struct EventTraits<payload::SessionRenamed> {
     static constexpr EventType type = EventType::SessionRenamed;
 };
+template <>
+struct EventTraits<payload::PlanMode> {
+    static constexpr EventType type = EventType::PlanMode;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -433,5 +449,7 @@ void to_json(nlohmann::json& json, const SubagentFanIn& value);
 void from_json(const nlohmann::json& json, SubagentFanIn& value);
 void to_json(nlohmann::json& json, const SessionRenamed& value);
 void from_json(const nlohmann::json& json, SessionRenamed& value);
+void to_json(nlohmann::json& json, const PlanMode& value);
+void from_json(const nlohmann::json& json, PlanMode& value);
 
 } // namespace ymh::payload

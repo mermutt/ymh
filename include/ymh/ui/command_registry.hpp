@@ -29,8 +29,9 @@ struct CommandContext {
     std::function<std::string(const std::string&)> export_session;
     // 20 §5.8: `/skills [--show NAME]` lists discovered skills (read-only).
     std::function<void(const std::string& args)> skills;
-    // 20 §5.8: `/skill NAME` loads a skill's instructions into the active session.
-    std::function<void(const std::string& name)> skill;
+    // 25-D5: `active` selects plan mode; a non-empty `message` is steered as one
+    // user message after the selection (so it is composed under plan guidance).
+    std::function<void(bool active, const std::string& message)> plan_mode;
     // 18 §4.1: opens the read-only context overlay for the active session.
     std::function<void()> context;
     // 22 §4.3/§4.6 (S2): opens the History catalog overlay (`/sessions`).
@@ -45,6 +46,7 @@ struct Command {
     std::string name;   // without the leading '/'
     std::string description;
     std::function<void(CommandContext&, const std::string& args)> handler;
+    std::vector<std::string> aliases{};   // 25-D12
 };
 
 class CommandRegistry {

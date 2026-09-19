@@ -24,6 +24,7 @@
 #include "ymh/agent/chunk_coalescer.hpp"
 #include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
+#include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/core/cancellation.hpp"
 #include "ymh/core/task.hpp"
@@ -64,6 +65,8 @@ struct AgentServices {
     LLMProviderConfig     provider_config;
     LLMPool*              pool = nullptr;
     PermissionResolver    permission_resolver;
+    // 25-D2: null => plan mode is unavailable; `exit_plan_mode` fails closed.
+    PlanModeController*   plan_mode = nullptr;
 };
 
 class AgentLoop final : public Agent {

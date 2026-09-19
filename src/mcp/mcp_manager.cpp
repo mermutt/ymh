@@ -27,6 +27,48 @@ std::chrono::milliseconds compute_mcp_backoff(std::uint32_t attempt,
     return std::chrono::milliseconds{static_cast<std::int64_t>(capped * factor)};
 }
 
+std::string validate_mcp_server(const McpServerConfig& server, const McpConfig& config,
+                                const ToolConfig& tools) {
+    if (server.transport == McpTransportKind::HttpSse) {
+        if (server.enabled && !config.allow_network_servers) {
+            return "http_sse requires allow_network_servers";
+        }
+        if (server.url.empty()) {
+            return "http_sse server '" + server.id.value + "' has no url";
+        }
+    } else {
+        if (server.command.empty()) {
+            return "stdio server '" + server.id.value + "' has no command";
+        }
+        try {
+            (void)resolve_mcp_env(server.env);
+        } catch (const McpError& error) {
+            return "server '" + server.id.value + "': " + error.what();
+        }
+    }
+    if (server.max_result_bytes > tools.tool_result_max_bytes) {
+        return "server '" + server.id.value + "' max_result_bytes exceeds tool_result_max_bytes";
+    }
+    return {};
+}
+
+std::string validate_mcp_config(const McpConfig& config, const ToolConfig& tools) {
+    std::set<std::string> ids;
+    for (const McpServerConfig& server : config.servers) {
+        if (!is_valid_mcp_server_id(server.id.value)) {
+            return "invalid server id '" + server.id.value + "'";
+        }
+        if (!ids.insert(server.id.value).second) {
+            return "duplicate server id '" + server.id.value + "'";
+        }
+        const std::string reason = validate_mcp_server(server, config, tools);
+        if (!reason.empty()) {
+            return reason;
+        }
+    }
+    return {};
+}
+
 McpManager::McpManager(McpConfig               config,
                        const ToolConfig&       tools,
                        ExecutionEnvironment&   environment,
@@ -68,37 +110,9 @@ McpManager::~McpManager() {
 }
 
 void McpManager::validate() const {
-    std::set<std::string> ids;
-    for (const McpServerConfig& server : config_.servers) {
-        if (!is_valid_mcp_server_id(server.id.value)) {
-            throw ConfigError("mcp: invalid server id '" + server.id.value + "'");
-        }
-        if (!ids.insert(server.id.value).second) {
-            throw ConfigError("mcp: duplicate server id '" + server.id.value + "'");
-        }
-        if (server.transport == McpTransportKind::HttpSse) {
-            if (server.enabled && !config_.allow_network_servers) {
-                throw ConfigError("mcp: http_sse requires allow_network_servers");
-            }
-            if (server.url.empty()) {
-                throw ConfigError("mcp: http_sse server '" + server.id.value +
-                                  "' has no url");
-            }
-        } else {
-            if (server.command.empty()) {
-                throw ConfigError("mcp: stdio server '" + server.id.value +
-                                  "' has no command");
-            }
-            try {
-                (void)resolve_mcp_env(server.env);
-            } catch (const McpError& error) {
-                throw ConfigError("mcp: server '" + server.id.value + "': " + error.what());
-            }
-        }
-        if (server.max_result_bytes > tool_config_.tool_result_max_bytes) {
-            throw ConfigError("mcp: server '" + server.id.value +
-                              "' max_result_bytes exceeds tool_result_max_bytes");
-        }
+    const std::string reason = validate_mcp_config(config_, tool_config_);
+    if (!reason.empty()) {
+        throw ConfigError("mcp: " + reason);
     }
 }
 

@@ -762,11 +762,9 @@ TEST_F(TwoProcess, SupervisorExitWithPeerKeepsDaemon) {
     ASSERT_EQ(count_hosts(workspace_id.value), 1u)
         << "the daemon must survive while a peer supervisor remains";
 
-    // `second` is now the sole owner, so its own clean exit prompts and tears the
-    // daemon down; a prompt here proves `first`'s exit did not orphan the daemon.
+    // `second` is now the sole owner, so its clean exit tears the daemon down.
+    // 25-D10: `/exit` never prompts; Ctrl+D is the prompting path.
     second.write("/exit\r");
-    ASSERT_TRUE(second.wait_for("Exiting will terminate", 20s)) << second.plain();
-    second.write("y");
     const std::optional<int> second_status = second.wait_for_exit(30s);
     ASSERT_TRUE(second_status.has_value()) << second.plain();
     EXPECT_EQ(*second_status, 0);
@@ -803,12 +801,9 @@ TEST_F(TwoProcess, LastSupervisorExitTearsDaemonDown) {
 
     ASSERT_EQ(count_hosts(workspace_id.value), 1u);
 
+    // 25-D10: `/exit` exits immediately with no dialog even though the daemon
+    // would be orphaned; the spec-16 teardown still runs.
     child.write("/exit\r");
-    ASSERT_TRUE(child.wait_for("Exiting will terminate", 20s)) << child.plain();
-    ASSERT_EQ(count_hosts(workspace_id.value), 1u)
-        << "declining would keep the daemon; the prompt alone must not stop it";
-
-    child.write("y");
     const std::optional<int> status = child.wait_for_exit(30s);
     ASSERT_TRUE(status.has_value()) << child.plain();
     EXPECT_EQ(*status, 0);

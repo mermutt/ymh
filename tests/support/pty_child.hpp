@@ -63,6 +63,26 @@ inline std::size_t count_occurrences(const std::string& haystack, const std::str
     return count;
 }
 
+// The conversation region of a rendered frame: the rows below the header.
+// `render_header` (src/ui/ui_render.cpp) carries the active session's title in
+// the header row, and an auto-named session's title is a copy of its first user
+// message, so counting a prompt across the whole frame double-counts the
+// header title. Tests that assert on conversation contents (e.g. "the user
+// message appears exactly once") count over this region instead. The header is
+// the frame's second row; it is the only row that begins with the `ymh` product
+// mark (which also precedes the workspace cwd in that same row).
+inline std::string conversation_body(const std::string& frame) {
+    const std::size_t header = frame.find("ymh");
+    if (header == std::string::npos) {
+        return frame;
+    }
+    const std::size_t line_end = frame.find('\n', header);
+    if (line_end == std::string::npos) {
+        return std::string{};
+    }
+    return frame.substr(line_end + 1);
+}
+
 // The last complete full-screen frame FTXUI printed, with styling removed.
 // `ScreenInteractive` repaints the whole screen each frame after moving the
 // cursor home: `\r` followed by (rows - 1) `ESC[1A` cursor-up sequences. That

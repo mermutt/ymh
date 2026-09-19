@@ -61,6 +61,20 @@ enum class McpTransportKind : std::uint8_t {
 // `[a-z][a-z0-9_]{0,31}` (07 §2.1 ToolName sub-segment grammar, M3).
 [[nodiscard]] bool is_valid_mcp_server_id(std::string_view value) noexcept;
 
+// 25-D13: deterministic normalization of a localcode server name to a valid ymh
+// id. Header-visible because `config.cpp` (`apply_mcp_servers_object`) calls it
+// from a different TU. Algorithm (pinned):
+//   lower = lowercase(name)
+//   replace '-', '.', ' ' with '_'; drop every other char
+//   if empty or first char not [a-z]: prefix "s"
+//   truncate to 32
+//   if still empty: "server"
+[[nodiscard]] std::string normalize_mcp_server_id(std::string_view name);
+
+// 25-D13: bound on the terminating id-dedupe loop (M2/N9). Header-visible for
+// the same cross-TU reason as `normalize_mcp_server_id`.
+inline constexpr std::size_t kMaxMcpDedupeAttempts = 10000;
+
 enum class McpErrorCode : std::uint8_t {
     ConfigInvalid,
     SpawnFailed,

@@ -253,6 +253,8 @@ struct PermissionRequest {
     nlohmann::json  arguments;
     std::string     summary;
     std::int64_t    expires_at_ms{0};
+    // 25-D4 (NEW-3 Rev 5): true => the dialog offers only {Allow once, Deny}.
+    bool            force_ask{false};
 };
 
 struct PermissionDecisionParams {
@@ -504,6 +506,7 @@ inline constexpr std::string_view kPermissionDecide = "permission.decide";
 inline constexpr std::string_view kEventSubscribe   = "event.subscribe";
 inline constexpr std::string_view kEventUnsubscribe = "event.unsubscribe";
 inline constexpr std::string_view kSessionRename    = "session.rename";
+inline constexpr std::string_view kSessionSetMode   = "session.set_mode";
 inline constexpr std::string_view kSkillsList       = "skills.list";
 inline constexpr std::string_view kSkillsShow       = "skills.show";
 inline constexpr std::string_view kContextShow      = "context.show";

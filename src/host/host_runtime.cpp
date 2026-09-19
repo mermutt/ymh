@@ -15,6 +15,7 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/context_snapshot.hpp"
+#include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/core/logging.hpp"
@@ -622,6 +623,33 @@ protocol::SessionRenamedResult HostRuntime::renameSession(const nlohmann::json& 
     });
 }
 
+protocol::SetModeResult HostRuntime::setSessionMode(const nlohmann::json& params) {
+    return translate([&]() -> protocol::SetModeResult {
+        if (!params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const auto session_it = params.find("session");
+        const auto active_it  = params.find("active");
+        if (session_it == params.end() || !session_it->is_string() ||
+            active_it == params.end() || !active_it->is_boolean()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const SessionId id{session_it->get<std::string>()};
+        const bool      active = active_it->get<bool>();
+        // agentStatus throws UnknownSession for an id the daemon does not know.
+        const bool turn_open = agentStatus(id) != "Idle";
+        const PlanModeSetResult result = runtime_.plan_mode().set(id, turn_open, active);
+        std::shared_ptr<Session> session = runtime_.sessions().sessionPtr(id);
+        const bool effective =
+            result == PlanModeSetResult::Committed || result == PlanModeSetResult::Queued
+                ? active
+                : runtime_.plan_mode().active(*session);
+        return protocol::SetModeResult{id, effective, result == PlanModeSetResult::Queued};
+    });
+}
+
 protocol::SessionResumed HostRuntime::resumeSession(const SessionId& id) {
     return translate([&]() -> protocol::SessionResumed {
         std::expected<AgentId, AgentError> resumed = runtime_.agents().resume(id);
@@ -734,6 +762,7 @@ void HostRuntime::deleteSession(const SessionId& id, bool only_if_empty, bool fo
         }
 
         runtime_.sessions().deleteSession(id, only_if_empty);
+        runtime_.plan_mode().erase(id);
 
         if (active_session_.has_value() && active_session_->value == id.value) {
             active_session_.reset();

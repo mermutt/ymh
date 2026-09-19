@@ -35,6 +35,36 @@ ContentBlock tool_use_block(const ToolCallAssembled& call) {
     return block;
 }
 
+bool has_valid_plan_argument(const nlohmann::json& arguments) {
+    if (!arguments.is_object()) {
+        return false;
+    }
+    const auto plan = arguments.find("plan");
+    if (plan == arguments.end() || !plan->is_string()) {
+        return false;
+    }
+    return plan->get_ref<const std::string&>().find_first_not_of(" \t\r\n") != std::string::npos;
+}
+
+// 25-D5/N5: commits any queued plan selection on every turn exit (normal end,
+// error, cancellation, lease/store failure, step limit), including maintenance.
+class PlanFlushGuard {
+public:
+    PlanFlushGuard(PlanModeController* controller, Session& session)
+        : controller_(controller), session_(session) {}
+    PlanFlushGuard(const PlanFlushGuard&) = delete;
+    PlanFlushGuard& operator=(const PlanFlushGuard&) = delete;
+    ~PlanFlushGuard() {
+        if (controller_ != nullptr) {
+            controller_->flush_pending_at_turn_end(session_);
+        }
+    }
+
+private:
+    PlanModeController* controller_;
+    Session&            session_;
+};
+
 } // namespace
 
 AgentLoop::AgentLoop(AgentId id, std::shared_ptr<Session> session, AgentServices services,
@@ -429,6 +459,29 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
     call.requestedAt = std::chrono::system_clock::now();
     session_.append(call);
 
+    const auto reject_exit_plan = [&](std::string message) {
+        payload::ToolResult rejected;
+        rejected.id      = call.id;
+        rejected.name    = call.name;
+        rejected.outcome = payload::ToolOutcome::Error;
+        rejected.output  = std::move(message);
+        rejected.error   = rejected.output;
+        session_.append(rejected);
+        return false;
+    };
+
+    const bool plan_active =
+        services_.plan_mode != nullptr && services_.plan_mode->active(session_);
+    if (call.name == "exit_plan_mode") {
+        if (!plan_active) {
+            return reject_exit_plan("exit_plan_mode is only valid in plan mode");
+        }
+        if (!has_valid_plan_argument(call.arguments)) {
+            return reject_exit_plan(
+                "exit_plan_mode requires a non-empty string 'plan' argument");
+        }
+    }
+
     PermissionRequest request;
     request.call      = call.id;
     request.session   = session_.id();
@@ -444,6 +497,9 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         if (Tool* tool = services_.tools->find(ToolName{call.name}); tool != nullptr) {
             request.destructive = tool->schema().destructive;
         }
+    }
+    if (call.name == "exit_plan_mode") {
+        request.force_ask = true;
     }
 
     payload::PermissionDecisionKind decision = payload::PermissionDecisionKind::Deny;
@@ -483,7 +539,8 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
                 reason   = outcome.reason;
             } else {
                 decision = payload::PermissionDecisionKind::Deny;
-                reason   = "no permission resolver attached";
+                reason   = request.force_ask ? "exit_plan_mode requires an interactive review"
+                                             : "no permission resolver attached";
             }
             state_ = AgentState::CallingTool;
         }
@@ -494,7 +551,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         recorded.reason   = reason;
         session_.append(recorded);
 
-        if (services_.policy != nullptr) {
+        if (services_.policy != nullptr && !request.force_ask) {
             const GrantScope scope = decision == payload::PermissionDecisionKind::AllowAlways
                                          ? GrantScope::Always
                                          : GrantScope::Once;
@@ -539,11 +596,16 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         result.error   = std::string{error.what()};
     }
     session_.append(result);
+    if (call.name == "exit_plan_mode" && result.outcome == payload::ToolOutcome::Ok &&
+        services_.plan_mode != nullptr) {
+        services_.plan_mode->request_exit(session_.id());
+    }
     return true;
 }
 
 void AgentLoop::runMaintenanceTurn(TurnId turn) {
     session_.append(payload::TurnStarted{turn, payload::TurnOrigin::Maintenance});
+    PlanFlushGuard plan_flush{services_.plan_mode, session_};
     {
         std::lock_guard<std::mutex> lock(control_mutex_);
         turn_cancel_   = CancellationSource{};
@@ -553,6 +615,9 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
 
     const StepId step = session_.nextStepId();
     session_.append(payload::StepStarted{turn, step});
+    if (services_.plan_mode != nullptr) {
+        services_.plan_mode->apply_pending_at_step_start(session_);
+    }
     state_ = AgentState::Thinking;
 
     if (services_.context == nullptr) {
@@ -610,6 +675,7 @@ void AgentLoop::runTurn() {
         appendUserMessage(trigger.message);
     }
     session_.append(payload::TurnStarted{turn, trigger.origin});
+    PlanFlushGuard plan_flush{services_.plan_mode, session_};
 
     CancellationToken turnToken;
     {
@@ -635,6 +701,9 @@ void AgentLoop::runTurn() {
     for (std::size_t stepNumber = 1;; ++stepNumber) {
         const StepId step = session_.nextStepId();
         session_.append(payload::StepStarted{turn, step});
+        if (services_.plan_mode != nullptr) {
+            services_.plan_mode->apply_pending_at_step_start(session_);
+        }
 
         drainFoldedItems();
         state_ = AgentState::Thinking;

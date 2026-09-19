@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -23,6 +24,9 @@ namespace ymh::ui {
 struct UiModel;
 
 constexpr std::size_t kNoEntry = static_cast<std::size_t>(-1);
+
+// 25-D6: injectable monotonic clock reader for TPS.
+using ClockReader = std::function<std::chrono::steady_clock::time_point()>;
 
 enum class UiDirtyFlag : std::uint32_t {
     None         = 0,
@@ -181,6 +185,11 @@ struct StatusModel {
     AgentState  agent_state = AgentState::Idle;
     std::string last_error;
     std::string note;
+    // 25-D1/D2/D6/D7
+    bool                  plan_active = false;
+    std::optional<double> tps;
+    std::uint64_t         context_used_tokens = 0;
+    std::uint64_t         context_window_tokens = 0;
 };
 
 // Derived/cached attention for one session; never advanced in Render() (10 §4.4).
@@ -218,6 +227,8 @@ struct SessionUiState {
     std::size_t command_hint_selected = 0;
     // 17 §4 (RB-02): global expand-all / collapse-all for foldable entries.
     bool expand_all_folds = false;
+    // 25-D6: non-durable TPS clock start for the streaming assistant message.
+    std::optional<std::chrono::steady_clock::time_point> stream_started_at;
 
     AgentState agent_state = AgentState::Idle;
 };
@@ -368,6 +379,8 @@ struct PermissionDialogModel {
     std::string         tool;
     std::string         summary;
     int                 selected = 0;   // 0=Once 1=Session 2=Always 3=Deny
+    // 25-D4 (NEW-3 Rev 5): true => only {Allow once, Deny}; default Deny.
+    bool                force_ask = false;
 };
 
 // 16 §7.6 / §4.2: the last-supervisor exit confirmation. Counts and workspace
@@ -484,6 +497,11 @@ struct UiModel {
     // iff the frame changed. With no streaming reasoning the clock is reset and
     // the frame is left untouched, so an idle TUI never animates.
     bool advance_reasoning_spinner(std::chrono::milliseconds delta);
+
+    // 25-D6: injects the TPS clock; defaults to `std::chrono::steady_clock::now`.
+    void set_now_reader(ClockReader reader);
+
+    ClockReader now_reader = [] { return std::chrono::steady_clock::now(); };
 };
 
 [[nodiscard]] bool is_active_state(AgentState state) noexcept;

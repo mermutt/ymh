@@ -47,8 +47,48 @@ nlohmann::json bounded_arguments(const nlohmann::json& arguments,
     }
 }
 
+std::string truncate_plan(const std::string& plan) {
+    constexpr std::size_t kMaxPlanSummary = 4096;
+    constexpr std::size_t kMaxPlanSummaryLines = 12;
+
+    std::string result = plan;
+    bool        capped = false;
+    std::size_t lines  = 1;
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        if (result[index] != '\n') {
+            continue;
+        }
+        ++lines;
+        if (lines > kMaxPlanSummaryLines) {
+            result.resize(index);
+            capped = true;
+            break;
+        }
+    }
+    if (result.size() > kMaxPlanSummary) {
+        result.resize(kMaxPlanSummary);
+        capped = true;
+    }
+    if (capped) {
+        result += "...";
+    }
+    return result;
+}
+
 std::string bounded_summary(const PermissionRequest& request, bool truncated) {
     constexpr std::size_t kMaxSummary = 256;
+
+    if (request.tool == "exit_plan_mode") {
+        if (!request.arguments.is_object()) {
+            return "exit_plan_mode (no plan provided)";
+        }
+        const auto plan = request.arguments.find("plan");
+        if (plan == request.arguments.end() || !plan->is_string() ||
+            plan->get_ref<const std::string&>().empty()) {
+            return "exit_plan_mode (no plan provided)";
+        }
+        return truncate_plan(plan->get_ref<const std::string&>());
+    }
 
     std::string summary = request.tool;
     try {
@@ -91,6 +131,7 @@ protocol::PermissionRequest make_wire(const PermissionRequest& request,
     wire.arguments = bounded_arguments(request.arguments, config.arguments_max_bytes, truncated);
     wire.summary = bounded_summary(request, truncated);
     wire.expires_at_ms = wall_now_ms() + config.permission_timeout.count();
+    wire.force_ask = request.force_ask;
     return wire;
 }
 
@@ -288,7 +329,9 @@ bool PermissionBroker::onDecision(const protocol::PermissionDecisionParams& para
 
     const payload::PermissionDecisionKind kind = decision_kind(params.decision, params.scope);
     entry->promise.set_value({kind, "user"});
-    state->policy.remember(entry->core, kind, grant_scope(params.scope));
+    if (!entry->core.force_ask) {
+        state->policy.remember(entry->core, kind, grant_scope(params.scope));
+    }
     return true;
 }
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -470,6 +471,65 @@ TEST(PermissionBroker, ResolveAfterDenyAllIsDeniedByPersistentLatch) {
     EXPECT_EQ(outcome.reason, "shutdown");
     EXPECT_EQ(fixture.broker.pendingCount(), 0u);
     EXPECT_EQ(fixture.transport.broadcastCount(), 0u);
+}
+
+TEST(PermissionBroker, ExitPlanModePreviewIsBoundedAndForced) {
+    RulePermissionPolicy policy(PermissionConfig{});
+    FakeTransport        transport;
+    PermissionBroker     broker(policy, transport, PermissionConfig{});
+    broker.set_subscriber_count([](SessionId) { return 1u; });
+
+    PermissionRequest request = ask_request("s1", "exit_plan_mode");
+    request.force_ask = true;
+    request.arguments = nlohmann::json{{"plan", std::string(5000, 'x')}};
+    std::future<PermissionOutcome> future = broker.resolve(request, {});
+    ASSERT_EQ(transport.broadcastCount(), 1u);
+    const protocol::PermissionRequest wire = transport.broadcasts().front();
+    EXPECT_TRUE(wire.force_ask);
+    EXPECT_EQ(wire.summary.size(), 4096u + 3u);
+
+    PermissionRequest lines = ask_request("s2", "exit_plan_mode");
+    lines.force_ask = true;
+    std::string plan;
+    for (int index = 0; index < 20; ++index) {
+        plan += "line-" + std::to_string(index) + "\n";
+    }
+    lines.arguments = nlohmann::json{{"plan", plan}};
+    static_cast<void>(broker.resolve(lines, {}));
+    ASSERT_EQ(transport.broadcastCount(), 2u);
+    const std::string summary = transport.broadcasts().back().summary;
+    EXPECT_EQ(std::count(summary.begin(), summary.end(), '\n'), 11);
+    EXPECT_NE(summary.find("..."), std::string::npos);
+
+    PermissionRequest empty = ask_request("s3", "exit_plan_mode");
+    empty.force_ask = true;
+    empty.arguments = nlohmann::json::object();
+    static_cast<void>(broker.resolve(empty, {}));
+    ASSERT_EQ(transport.broadcastCount(), 3u);
+    EXPECT_EQ(transport.broadcasts().back().summary, "exit_plan_mode (no plan provided)");
+}
+
+TEST(PermissionBroker, ForcedReviewNeverRecordsAGrant) {
+    Fixture fixture;
+    PermissionRequest request = ask_request("s1", "exit_plan_mode");
+    request.force_ask = true;
+    request.arguments = nlohmann::json{{"plan", "do it"}};
+
+    std::future<PermissionOutcome> future = fixture.broker.resolve(request, {});
+    ASSERT_EQ(fixture.transport.broadcastCount(), 1u);
+    const std::string request_id = fixture.transport.broadcasts().front().request_id;
+    ASSERT_TRUE(fixture.broker.onDecision(
+        decision(request_id, protocol::PermissionAnswer::Allow, protocol::PermissionScope::Always)));
+    EXPECT_NE(future.get().decision, payload::PermissionDecisionKind::Deny);
+
+    PermissionRequest again = ask_request("s1", "exit_plan_mode");
+    again.force_ask = false;
+    again.arguments = nlohmann::json{{"plan", "do it again"}};
+    std::future<PermissionOutcome> second = fixture.broker.resolve(again, {});
+    ASSERT_EQ(fixture.transport.broadcastCount(), 2u)
+        << "the forced decision must not have been remembered as a grant";
+    fixture.broker.denyAll("test");
+    EXPECT_EQ(second.get().decision, payload::PermissionDecisionKind::Deny);
 }
 
 } // namespace

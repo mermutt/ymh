@@ -54,11 +54,20 @@ void CommandRegistry::add(Command command) {
 }
 
 const Command* CommandRegistry::find(const std::string& name) const {
-    const auto it = std::find_if(commands_.begin(), commands_.end(),
-                                 [&name](const Command& command) {
-                                     return command.name == name;
-                                 });
-    return it == commands_.end() ? nullptr : &*it;
+    const auto by_name = std::find_if(commands_.begin(), commands_.end(),
+                                      [&name](const Command& command) {
+                                          return command.name == name;
+                                      });
+    if (by_name != commands_.end()) {
+        return &*by_name;
+    }
+    const auto by_alias = std::find_if(commands_.begin(), commands_.end(),
+                                       [&name](const Command& command) {
+                                           return std::find(command.aliases.begin(),
+                                                            command.aliases.end(),
+                                                            name) != command.aliases.end();
+                                       });
+    return by_alias == commands_.end() ? nullptr : &*by_alias;
 }
 
 std::vector<const Command*> CommandRegistry::complete(const std::string& prefix) const {
@@ -193,17 +202,10 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
-        "skills", "list discovered skills (--show NAME for detail)",
+        "skills", "list available skills",
         [](CommandContext& context, const std::string& args) {
             if (context.skills) {
                 context.skills(args);
-            }
-        }});
-    registry.add(Command{
-        "skill", "load a skill's instructions into context",
-        [](CommandContext& context, const std::string& name) {
-            if (context.skill) {
-                context.skill(name);
             }
         }});
     registry.add(Command{
@@ -221,15 +223,38 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "plan", "enter plan mode (/plan off to leave)",
+        [](CommandContext& context, const std::string& args) {
+            if (context.session == nullptr) {
+                append_system(context, "no active session");
+                return;
+            }
+            if (!context.plan_mode) {
+                return;
+            }
+            if (args.empty()) {
+                context.plan_mode(true, std::string{});
+            } else if (args == "off") {
+                context.plan_mode(false, std::string{});
+            } else {
+                context.plan_mode(true, args);
+            }
+        }});
+    registry.add(Command{
         "exit", "quit the supervisor",
         [](CommandContext& context, const std::string&) {
             if (context.request_exit) {
                 context.request_exit();
             }
-        }});
+        },
+        {"quit"}});
     std::vector<std::pair<std::string, std::string>> listed{{"help", "list slash commands"}};
     for (const Command& command : registry.commands()) {
-        listed.emplace_back(command.name, command.description);
+        std::string description = command.description;
+        for (const std::string& alias : command.aliases) {
+            description += " (alias: /" + alias + ")";
+        }
+        listed.emplace_back(command.name, std::move(description));
     }
     registry.add(Command{
         "help", "list slash commands",
