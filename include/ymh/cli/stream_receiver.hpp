@@ -11,6 +11,8 @@
 // live daemon.
 
 #include <iosfwd>
+#include <set>
+#include <string>
 
 #include "ymh/transport/protocol.hpp"
 
@@ -26,8 +28,18 @@ enum class StreamDisposition {
 
 // Handles one `event.stream` notification, writing assistant text / failures to
 // `out` / `err` and reporting the loop action. A skipped envelope writes nothing
-// and must not be dispatched.
+// and must not be dispatched. When `streamed_messages` is non-null it records
+// every live-streamed message id and suppresses the durable `assistant/message`
+// text for those ids, so a retried attempt's live text is not double-printed
+// (34 §15 item 1).
 [[nodiscard]] StreamDisposition handle_stream_notification(
-    const protocol::StreamNotification& stream, std::ostream& out, std::ostream& err);
+    const protocol::StreamNotification& stream, std::ostream& out, std::ostream& err,
+    std::set<std::string>* streamed_messages = nullptr);
+
+// Handles one `event.live` notification (the live-only delta channel, 29 §4.2),
+// recording live-streamed message ids in `streamed_messages` when non-null.
+[[nodiscard]] StreamDisposition handle_live_notification(
+    const protocol::LiveNotification& live, std::ostream& out, std::ostream& err,
+    std::set<std::string>* streamed_messages = nullptr);
 
 } // namespace ymh

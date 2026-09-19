@@ -66,6 +66,7 @@ public:
     void onFrameWritten(ClientId id, std::size_t bytes);
 
     void onEventCommitted(const EventRecord& record);
+    void onLiveEvent(const Event& event);
     void onSessionCreated(const SessionId& session);
     void onSessionClosed(const SessionId& session, std::string reason);
     void onLeaseLost(const SessionId& session, std::string detail);

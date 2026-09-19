@@ -138,7 +138,7 @@ Task<LLMResponse> FakeLLM::stream(const LLMRequest& request,
     if (step_index >= script_.steps.size()) {
         response.outcome = StreamOutcome::Completed;
         response.finish = FinishReason::Stop;
-        if (!raw_emit(StreamEvent{Finished{FinishReason::Stop, std::nullopt}})) {
+        if (!raw_emit(StreamEvent{Finished{FinishReason::Stop, std::nullopt, std::nullopt}})) {
             return abort_cancelled();
         }
         return Task<LLMResponse>{std::move(response)};
@@ -211,7 +211,7 @@ Task<LLMResponse> FakeLLM::stream(const LLMRequest& request,
     response.finish = step.finish;
     response.usage = step.usage;
     response.tool_calls = std::move(tool_calls);
-    if (!raw_emit(StreamEvent{Finished{step.finish, step.usage}})) {
+    if (!raw_emit(StreamEvent{Finished{step.finish, step.usage, step.replay_state}})) {
         return abort_cancelled();
     }
     return Task<LLMResponse>{std::move(response)};

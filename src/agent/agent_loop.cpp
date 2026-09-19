@@ -10,6 +10,7 @@
 
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/resource_governor.hpp"
+#include "ymh/llm/assistant_stream.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/tools/tool.hpp"
 #include "ymh/tools/tool_context.hpp"
@@ -17,13 +18,6 @@
 
 namespace ymh {
 namespace {
-
-ContentBlock text_block(ContentBlockKind kind, std::string text) {
-    ContentBlock block;
-    block.kind = kind;
-    block.text = std::move(text);
-    return block;
-}
 
 std::string assembled_system_prompt(const LLMRequest& request) {
     if (request.messages.empty() || request.messages.front().role != Role::System) {
@@ -36,15 +30,6 @@ std::string assembled_system_prompt(const LLMRequest& request) {
         }
     }
     return text;
-}
-
-ContentBlock tool_use_block(const ToolCallAssembled& call) {
-    ContentBlock block;
-    block.kind         = ContentBlockKind::ToolUse;
-    block.tool_call_id = call.id;
-    block.tool_name    = call.name;
-    block.arguments    = call.arguments;
-    return block;
 }
 
 bool has_valid_plan_argument(const nlohmann::json& arguments) {
@@ -826,25 +811,8 @@ void AgentLoop::runTurn() {
         std::optional<FrozenRequest> request;
         request.emplace(buildRequest(messages, turn, step));
 
-        const MessageId messageId = make_event_id().value;
-        ChunkCoalescer  coalescer(session_, messageId, config_.max_chunk_batch,
-                                  config_.chunk_flush_interval);
-        std::string          text;
-        std::string          reasoning;
-        std::optional<Usage> streamUsage;
-
-        StreamSink sink = [&](const StreamEvent& event) -> SinkFlow {
-            if (const auto* delta = std::get_if<TextDelta>(&event)) {
-                text += delta->text;
-                coalescer.onText(delta->text);
-            } else if (const auto* delta = std::get_if<ReasoningDelta>(&event)) {
-                reasoning += delta->text;
-                coalescer.onReasoning(delta->text);
-            } else if (const auto* usage = std::get_if<UsageEvent>(&event)) {
-                streamUsage = usage->usage;
-            }
-            return SinkFlow::Continue;
-        };
+        const MessageId      messageId = make_event_id().value;
+        std::optional<Usage> settledUsage;
 
         LLMResponse response;
         bool        slotCancelled = false;
@@ -862,10 +830,40 @@ void AgentLoop::runTurn() {
                     break;
                 }
             }
+
+            // 34-D5: a fresh assembler/accumulator/coalescer and stream_start
+            // per provider attempt; a retried attempt must not leak into the
+            // retry's durable message.
+            BlockAssembler             assembler;
+            AssistantStreamAccumulator accumulator;
+            ChunkCoalescer             coalescer(session_, messageId, config_.max_chunk_batch,
+                                                 config_.chunk_flush_interval);
+            // 34 §5.1: the epoch is the instant immediately before this
+            // attempt's `call.stream(...)`, not before `prepare_call`.
+            AgentServices::StreamClock::time_point stream_start{};
+
+            StreamSink sink = [&](const StreamEvent& event) -> SinkFlow {
+                const TimedStreamEvent timed{
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        services_.stream_clock() - stream_start),
+                    event};
+                assembler.push(event);
+                const TimedStreamEvent live = accumulator.push(timed);
+                if (const auto* delta = std::get_if<TextDelta>(&live.event)) {
+                    coalescer.onText(delta->text);
+                } else if (const auto* delta = std::get_if<ReasoningDelta>(&live.event)) {
+                    coalescer.onReasoning(delta->text);
+                }
+                return SinkFlow::Continue;
+            };
+
+            bool dispatched = false;
             try {
                 PreparedCall call =
                     services_.runtime->prepare_call(request->config(), turnToken).get();
+                stream_start = services_.stream_clock();
                 response = call.stream(std::move(*request), sink, turnToken).get();
+                dispatched = true;
             } catch (const NoProviderRouteError& error) {
                 response              = LLMResponse{};
                 response.outcome      = StreamOutcome::Failed;
@@ -885,6 +883,42 @@ void AgentLoop::runTurn() {
                 response.error.code   = LLMErrorCode::ProviderInternal;
                 response.error.detail = error.what();
             }
+
+            // 34 §7.3: settlement happens only at the return of a real
+            // `call.stream(...)`. A `prepare_call` failure never dispatched a
+            // provider call, so it does not settle an attempt.
+            if (!dispatched) {
+                break;
+            }
+
+            // 34-D6: settle this attempt — stream -> flush -> settle. Exactly
+            // one durable event per settled attempt. `flush` is a live-only
+            // `Session::emit` (29-D4) and cannot throw LeaseLost/StoreError; a
+            // throw here can only come from a bus subscriber.
+            try {
+                coalescer.flush();
+            } catch (const std::exception& error) {
+                appendTurnFailed(turn, AgentErrorCode::Internal, error.what());
+                return;
+            }
+
+            if (response.outcome == StreamOutcome::Completed) {
+                payload::AssistantMessage assistant;
+                assistant.id           = messageId;
+                assistant.content      = assembler.blocks();
+                assistant.usage        = assembler.usage();
+                assistant.stream       = accumulator.snapshot();
+                assistant.replay_state = assembler.replay_state();
+                session_.append(assistant);
+                settledUsage = assembler.usage();
+            } else {
+                payload::AssistantAttempt attemptEvent;
+                attemptEvent.turn   = turn;
+                attemptEvent.step   = step;
+                attemptEvent.stream = accumulator.snapshot();
+                session_.append(attemptEvent);
+            }
+
             if (response.outcome != StreamOutcome::Failed ||
                 response.error.code != LLMErrorCode::ContextLengthExceeded) {
                 break;
@@ -914,34 +948,9 @@ void AgentLoop::runTurn() {
             response.finish  = FinishReason::Other;
         }
 
-        try {
-            coalescer.flush();
-        } catch (const LeaseLost& error) {
-            appendTurnFailed(turn, AgentErrorCode::LeaseLost, error.what());
-            return;
-        } catch (const StoreError& error) {
-            appendTurnFailed(turn, AgentErrorCode::StoreUnavailable, error.what());
-            return;
-        }
-
-        std::vector<ContentBlock> content;
-        if (!reasoning.empty()) {
-            content.push_back(text_block(ContentBlockKind::Reasoning, reasoning));
-        }
-        if (!text.empty()) {
-            content.push_back(text_block(ContentBlockKind::Text, text));
-        }
-        for (const ToolCallAssembled& call : response.tool_calls) {
-            content.push_back(tool_use_block(call));
-        }
-
-        payload::AssistantMessage assistant;
-        assistant.id      = messageId;
-        assistant.content = std::move(content);
-        const std::optional<Usage> usage =
-            response.usage.has_value() ? response.usage : streamUsage;
-        assistant.usage = usage;
-        session_.append(assistant);
+        // 34-D11: the settled Completed attempt's `assembler.usage()` is the
+        // single durable usage source.
+        const std::optional<Usage>& usage = settledUsage;
 
         std::string cancelReason;
         {

@@ -321,6 +321,10 @@ void to_json(nlohmann::json& json, const AssistantMessage& value) {
     if (value.usage.has_value()) {
         json["usage"] = *value.usage;
     }
+    json["stream"] = value.stream;
+    if (value.replay_state.has_value()) {
+        json["replay_state"] = *value.replay_state;
+    }
 }
 
 void from_json(const nlohmann::json& json, AssistantMessage& value) {
@@ -331,6 +335,26 @@ void from_json(const nlohmann::json& json, AssistantMessage& value) {
     } else {
         value.usage = std::nullopt;
     }
+    value.stream = json.value("stream", std::vector<AssistantStreamRecord>{});
+    if (json.contains("replay_state") && !json.at("replay_state").is_null()) {
+        value.replay_state = json.at("replay_state").get<ReplayEnvelope>();
+    } else {
+        value.replay_state = std::nullopt;
+    }
+}
+
+void to_json(nlohmann::json& json, const AssistantAttempt& value) {
+    json = nlohmann::json{
+        {"turn", value.turn},
+        {"step", value.step},
+        {"stream", value.stream},
+    };
+}
+
+void from_json(const nlohmann::json& json, AssistantAttempt& value) {
+    value.turn   = json.at("turn").get<TurnId>();
+    value.step   = json.at("step").get<StepId>();
+    value.stream = json.value("stream", std::vector<AssistantStreamRecord>{});
 }
 
 void to_json(nlohmann::json& json, const ToolCall& value) {

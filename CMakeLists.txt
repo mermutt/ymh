@@ -202,6 +202,7 @@ target_link_libraries(ymh_session
 # ---------------------------------------------------------------------------
 
 add_library(ymh_llm STATIC
+    src/llm/assistant_stream.cpp
     src/llm/llm_provider.cpp
     src/llm/llm_runtime.cpp
     src/llm/sha256.cpp

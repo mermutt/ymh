@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -48,7 +49,7 @@ public:
         } else {
             response.outcome = StreamOutcome::Completed;
             response.finish  = FinishReason::Stop;
-            sink(StreamEvent{Finished{FinishReason::Stop, std::nullopt}});
+            sink(StreamEvent{Finished{FinishReason::Stop, std::nullopt, std::nullopt}});
         }
         return Task<LLMResponse>{std::move(response)};
     }
@@ -198,6 +199,31 @@ TEST_F(HeadlessTest, ResumeAppendsToExistingSession) {
     EXPECT_EQ(second_result.assistant_text, "second-answer");
 }
 
+TEST_F(HeadlessTest, DurableMessageWithoutLiveChunksIsHandled) {
+    test::TempWorkspace workspace("headless_durable_only");
+    std::ostringstream out;
+    std::ostringstream err;
+
+    HeadlessOptions options;
+    options.workspace = workspace.path();
+    options.task      = "no visible text";
+    options.out       = &out;
+    options.err       = &err;
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        FakeScript script;
+        FakeResponseStep step;
+        step.text   = "";
+        step.finish = FinishReason::Stop;
+        script.steps.push_back(std::move(step));
+        return std::make_unique<FakeLLM>(std::move(script));
+    };
+
+    const HeadlessResult result = run_headless(options);
+    EXPECT_EQ(result.exit_code, 0);
+    EXPECT_EQ(result.terminal, "turn/end");
+    EXPECT_TRUE(result.assistant_text.empty());
+}
+
 TEST_F(HeadlessTest, BusyWorkspaceReportsActionableError) {
     test::TempWorkspace workspace("headless_busy");
     std::filesystem::create_directories(workspace.path() / ".ymh");
@@ -259,6 +285,56 @@ TEST(StreamReceiver, KnownEventTypesDispatch) {
     std::ostringstream err;
     EXPECT_EQ(handle_stream_notification(stream, out, err), StreamDisposition::TurnFinished);
     EXPECT_EQ(out.str(), "\n");
+    EXPECT_TRUE(err.str().empty());
+}
+
+TEST(StreamReceiver, LiveChunkSuppressesDurableDuplicateText) {
+    std::set<std::string> streamed;
+    std::ostringstream    out;
+    std::ostringstream    err;
+
+    protocol::LiveNotification live;
+    live.envelope.session    = SessionId{"s"};
+    live.envelope.event.type = EventType::AssistantChunk;
+    payload::AssistantChunk chunk;
+    chunk.message = "m1";
+    chunk.text    = "hello";
+    chunk.kind    = payload::AssistantChunkKind::Text;
+    live.envelope.event.payload = chunk;
+    EXPECT_EQ(handle_live_notification(live, out, err, &streamed), StreamDisposition::Continue);
+    EXPECT_EQ(out.str(), "hello");
+
+    protocol::StreamNotification stream;
+    stream.envelope.session    = SessionId{"s"};
+    stream.envelope.event.type = EventType::AssistantMessage;
+    payload::AssistantMessage message;
+    message.id = "m1";
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "hello";
+    message.content.push_back(block);
+    stream.envelope.event.payload = message;
+    EXPECT_EQ(handle_stream_notification(stream, out, err, &streamed), StreamDisposition::Continue);
+    EXPECT_EQ(out.str(), "hello");
+}
+
+TEST(StreamReceiver, DurableAssistantMessagePrintsAssembledText) {
+    protocol::StreamNotification stream;
+    stream.envelope.session    = SessionId{"s"};
+    stream.envelope.event.type = EventType::AssistantMessage;
+
+    payload::AssistantMessage message;
+    message.id = "a1";
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "durable text";
+    message.content.push_back(block);
+    stream.envelope.event.payload = message;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    EXPECT_EQ(handle_stream_notification(stream, out, err), StreamDisposition::Continue);
+    EXPECT_EQ(out.str(), "durable text");
     EXPECT_TRUE(err.str().empty());
 }
 

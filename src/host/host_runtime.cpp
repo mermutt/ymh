@@ -238,14 +238,16 @@ HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
                          protocol::ProtocolServer& server,
                          TurnExecutor& turns,
                          PermissionBroker& broker,
-                         EventForwarder forwarder)
+                         EventForwarder forwarder,
+                         LiveEventForwarder live_forwarder)
     : runtime_(runtime),
       registry_(registry),
       identity_(std::move(identity)),
       server_(&server),
       turns_(turns),
       broker_(broker),
-      forwarder_(std::move(forwarder)) {
+      forwarder_(std::move(forwarder)),
+      live_forwarder_(std::move(live_forwarder)) {
     wireServer();
     startForwarding();
 }
@@ -255,13 +257,15 @@ HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
                          HostIdentity identity,
                          TurnExecutor& turns,
                          PermissionBroker& broker,
-                         EventForwarder forwarder)
+                         EventForwarder forwarder,
+                         LiveEventForwarder live_forwarder)
     : runtime_(runtime),
       registry_(registry),
       identity_(std::move(identity)),
       turns_(turns),
       broker_(broker),
-      forwarder_(std::move(forwarder)) {
+      forwarder_(std::move(forwarder)),
+      live_forwarder_(std::move(live_forwarder)) {
     startForwarding();
 }
 
@@ -292,12 +296,26 @@ void HostRuntime::startForwarding() {
         return;
     }
     forwarding_ = true;
-    // 24-D6/24-D12: the live channel keeps only the live-only MCP status
-    // branch; the committed channel carries the `EventRecord` (with its store
-    // `Sequence`) so the forwarder never re-reads the store (AL16/AL17).
+    // 24-D6/24-D12: the live channel carries the live-only events. MCP status
+    // is handled inline; a live-only `AssistantChunk` (29-D4) is forwarded to
+    // subscribed clients so the live delta feed survives the daemon boundary
+    // (26 §5.2 Wave 2 / 29 §4.2). The committed channel carries the
+    // `EventRecord` (with its store `Sequence`) so the forwarder never re-reads
+    // the store (AL16/AL17).
     live_subscription_ = runtime_.bus().subscribe([this](const Event& event) {
-        if (event.type == EventType::McpServerStatusChanged && server_ != nullptr) {
-            server_->onMcpServerStatus(mcp_status_detail(event));
+        if (event.type == EventType::McpServerStatusChanged) {
+            if (server_ != nullptr) {
+                server_->onMcpServerStatus(mcp_status_detail(event));
+            }
+            return;
+        }
+        if (event.type != EventType::AssistantChunk) {
+            return;
+        }
+        if (live_forwarder_) {
+            live_forwarder_(event);
+        } else if (server_ != nullptr) {
+            server_->onLiveEvent(event);
         }
     });
     committed_subscription_ = runtime_.bus().subscribeCommitted(

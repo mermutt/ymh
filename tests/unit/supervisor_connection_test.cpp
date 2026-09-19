@@ -128,6 +128,19 @@ public:
             protocol::Notification{std::string(protocol::notify::kEventStream), std::move(body)}));
     }
 
+    void push_live(const SessionId& session, EventType type) {
+        protocol::LiveNotification notification;
+        notification.envelope.session           = session;
+        notification.envelope.event.id.value    = "live-1";
+        notification.envelope.event.session_id  = session;
+        notification.envelope.event.timestamp   = std::chrono::system_clock::now();
+        notification.envelope.event.type        = type;
+        nlohmann::json body;
+        protocol::to_json(body, notification);
+        broadcast(protocol::encode(
+            protocol::Notification{std::string(protocol::notify::kEventLive), std::move(body)}));
+    }
+
     void push_unknown_stream(const SessionId& session, const std::string& type,
                              const std::string& cursor) {
         nlohmann::json body;
@@ -370,6 +383,29 @@ SupervisorSink sink_for(Collected& collected) {
 }
 
 const SessionId kSession{"session-1"};
+
+TEST(SupervisorConnection, DispatchesLiveEventsWithoutAdvancingCursor) {
+    test::ShortTempRoot root("ymh_sup_live");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected      collected;
+
+    SupervisorConnection connection(config_for(socket_path), sink_for(collected));
+    connection.track(kSession);
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Attached, 3s));
+
+    server.push_stream(kSession, EventType::TurnStarted, "c1:s:1", true);
+    ASSERT_TRUE(collected.wait_envelopes(1, 3s));
+    server.push_live(kSession, EventType::AssistantChunk);
+    ASSERT_TRUE(collected.wait_envelopes(2, 3s));
+    EXPECT_EQ(collected.envelopes[1].event.type, EventType::AssistantChunk);
+    ASSERT_TRUE(connection.cursor(kSession).has_value());
+    EXPECT_EQ(connection.cursor(kSession)->value, "c1:s:1");
+
+    connection.stop();
+}
 
 TEST(SupervisorConnection, MarshalsRequestsAndDeliversEnvelopes) {
     test::ShortTempRoot root("ymh_sup");

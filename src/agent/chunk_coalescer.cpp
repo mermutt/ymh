@@ -54,18 +54,15 @@ void ChunkCoalescer::flush() {
         return;
     }
 
-    std::vector<Event> events;
-    events.reserve(pending_.size());
     for (const payload::AssistantChunk& chunk : pending_) {
         TypedEvent<payload::AssistantChunk> typed;
         typed.id         = make_event_id();
         typed.session_id = session_.id();
         typed.timestamp  = std::chrono::system_clock::now();
         typed.payload    = chunk;
-        events.push_back(encode(typed));
+        session_.emit(encode(typed));
     }
 
-    session_.appendBatch(events);
     pending_.clear();
     lastFlush_ = std::chrono::steady_clock::now();
 }

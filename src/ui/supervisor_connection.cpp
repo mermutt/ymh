@@ -335,6 +335,17 @@ void SupervisorConnection::dispatch(const protocol::Notification& notification) 
         cursors_[envelope.session] = stream.cursor;
         return;
     }
+    if (notification.method == protocol::notify::kEventLive) {
+        const auto live = notification.params.get<protocol::LiveNotification>();
+        const protocol::SessionEnvelope& envelope = live.envelope;
+        if (envelope.event_skipped || envelope.session != envelope.event.session_id) {
+            return;
+        }
+        if (sink_.on_envelope) {
+            sink_.on_envelope(envelope);
+        }
+        return;
+    }
     if (notification.method == protocol::notify::kPermissionRequest) {
         const auto request = notification.params.get<protocol::PermissionRequest>();
         if (sink_.on_permission) {

@@ -70,6 +70,8 @@ EventRange make_events() {
             "m2",
             {text_block(ContentBlockKind::Reasoning, "Check the auth path."),
              text_block(ContentBlockKind::Text, "I will inspect the file.")},
+            std::nullopt,
+            {},
             std::nullopt}));
     events.push_back(record(5, 1700000003000, EventType::ToolCall,
                             payload::ToolCall{"call-1", 1, 1, "read",

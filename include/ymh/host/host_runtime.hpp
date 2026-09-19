@@ -19,12 +19,12 @@
 //     the two-phase variant; tests and simple wiring use the pinned ctor.
 //
 // Event marshalling (errata §2.2 E2 / §4): HostRuntime owns a live `EventBus`
-// subscription for the live-only MCP status branch and a committed-record
-// subscription (24-D6). The committed channel carries the store `Sequence`, so
-// the forwarder forwards the record directly and never re-reads the store
-// (AL16/AL17). The daemon wires that forwarder to
-// `TransportServer::post([server, r]{ server->onEventCommitted(r); })`, so the
-// `ProtocolServer` fan-out always runs on the transport io thread (M-F1).
+// subscription for the live-only events (MCP status and `AssistantChunk`) and a
+// committed-record subscription (24-D6). The committed channel carries the store
+// `Sequence`, so the forwarder forwards the record directly and never re-reads
+// the store (AL16/AL17). The daemon wires those forwarders to
+// `TransportServer::post(...)`, so the `ProtocolServer` fan-out always runs on
+// the transport io thread (M-F1).
 
 #include <atomic>
 #include <cstddef>
@@ -78,6 +78,12 @@ public:
     // `ProtocolServer::onEventCommitted` directly (single-threaded tests only).
     using EventForwarder = std::function<void(const EventRecord&)>;
 
+    // Marshalling seam for live-only events (`AssistantChunk`, 29-D4). The
+    // daemon wires this to `TransportServer::post()` so `ProtocolServer` fan-out
+    // stays on the io thread; when unset HostRuntime calls
+    // `ProtocolServer::onLiveEvent` directly (single-threaded tests only).
+    using LiveEventForwarder = std::function<void(const Event&)>;
+
     // A wire error: the numeric JSON-RPC/application code plus the stable
     // `data.kind` token (errata §4.4, E12). Exposed so the daemon and the test
     // suite can assert the mapping table without provoking every failure.
@@ -93,7 +99,8 @@ public:
                 protocol::ProtocolServer& server,
                 TurnExecutor& turns,
                 PermissionBroker& broker,
-                EventForwarder forwarder = {});
+                EventForwarder forwarder = {},
+                LiveEventForwarder live_forwarder = {});
 
     // Two-phase variant for the daemon (see the construction-cycle note above).
     // The server is attached later with `attachServer`.
@@ -102,7 +109,8 @@ public:
                 HostIdentity identity,
                 TurnExecutor& turns,
                 PermissionBroker& broker,
-                EventForwarder forwarder = {});
+                EventForwarder forwarder = {},
+                LiveEventForwarder live_forwarder = {});
 
     ~HostRuntime() override;
 
@@ -231,6 +239,7 @@ private:
     TurnExecutor&       turns_;
     PermissionBroker&   broker_;
     EventForwarder      forwarder_;
+    LiveEventForwarder  live_forwarder_;
 
     std::atomic<protocol::HostState>       state_{protocol::HostState::Serving};
     std::optional<SessionId>               active_session_;

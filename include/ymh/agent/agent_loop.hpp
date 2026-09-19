@@ -2,12 +2,13 @@
 
 // The concrete turn/step driver, pinned by 06-agent-loop.md §5. It implements
 // the `Agent` handle surface and runs the daemon-driven loop: assemble context,
-// call `LLMProvider::stream` under one `LLMPool` slot, coalesce deltas into
-// durable `AssistantChunk`s, drive tools through the permission policy, and
+// call `LLMProvider::stream` under one `LLMPool` slot, publish deltas as
+// live-only `AssistantChunk`s, drive tools through the permission policy, and
 // close every turn with exactly one terminal event (A2). No UI type appears
 // here (A17).
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -66,6 +67,15 @@ struct AgentServices {
     PermissionResolver    permission_resolver;
     // 25-D2: null => plan mode is unavailable; `exit_plan_mode` fails closed.
     PlanModeController*   plan_mode = nullptr;
+
+    // 34-D4: monotonic source for `TimedStreamEvent.at`. Production default is
+    // steady_clock::now; tests inject a deterministic reader.
+    using StreamClock       = std::chrono::steady_clock;
+    using StreamClockReader = std::function<StreamClock::time_point()>;
+    // Immutable after construction: written once when the loop is built, read on
+    // the owning executor thread by the sink. `const` enforces the read-only
+    // intent (34 §5.2).
+    const StreamClockReader stream_clock = std::chrono::steady_clock::now;
 };
 
 class AgentLoop final : public Agent {
