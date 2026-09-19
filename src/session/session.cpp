@@ -421,6 +421,8 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             }
             case EventType::AssistantChunk:
                 break;
+            case EventType::AssistantAttempt:
+                break;
             case EventType::AssistantMessage: {
                 const auto& value = event.payload.get<payload::AssistantMessage>();
                 Message message;

@@ -33,6 +33,7 @@ struct FakeResponseStep {
     std::vector<FakeToolCallStep> tool_calls;
     std::optional<Usage>          usage;
     FinishReason                  finish = FinishReason::Stop;
+    std::optional<ReplayEnvelope> replay_state;  // emitted on the terminal Finished
     std::optional<LLMError>       error;    // inject a terminal failure
     std::chrono::milliseconds     latency{0};  // simulated, never slept
 };

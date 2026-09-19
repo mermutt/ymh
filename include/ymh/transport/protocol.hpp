@@ -336,6 +336,16 @@ struct StreamNotification {
     EventCursor     cursor;          // position AFTER `envelope.event` (T21)
 };
 
+// 26 §5.2 Wave 2 / 29 §4.2: a live-only session event forwarded on the daemon's
+// live channel. `AssistantChunk` is the only producer today. It carries no
+// `Sequence` and no cursor, so a receiver must NEVER advance its resume cursor
+// from it (unlike `event.stream`); the live event is a transient delta that the
+// durable `assistant/message` settles. Delivered only to clients subscribed to
+// `envelope.session`.
+struct LiveNotification {
+    SessionEnvelope envelope;
+};
+
 struct UnsubscribedNotice {
     SubscriptionId subscription;
     std::string    reason;   // replay_complete | session_closed | unsubscribed | superseded
@@ -437,6 +447,9 @@ void from_json(const nlohmann::json& json, SubscribeResult& result);
 void to_json(nlohmann::json& json, const StreamNotification& notification);
 void from_json(const nlohmann::json& json, StreamNotification& notification);
 
+void to_json(nlohmann::json& json, const LiveNotification& notification);
+void from_json(const nlohmann::json& json, LiveNotification& notification);
+
 void to_json(nlohmann::json& json, const UnsubscribedNotice& notice);
 void from_json(const nlohmann::json& json, UnsubscribedNotice& notice);
 
@@ -533,6 +546,7 @@ inline constexpr std::string_view kContextShow      = "context.show";
 
 namespace notify {
 inline constexpr std::string_view kEventStream   = "event.stream";
+inline constexpr std::string_view kEventLive     = "event.live";
 inline constexpr std::string_view kEventUnsubscribed = "event.unsubscribed";
 inline constexpr std::string_view kPermissionRequest = "permission.request";
 inline constexpr std::string_view kHostEvent     = "host.event";

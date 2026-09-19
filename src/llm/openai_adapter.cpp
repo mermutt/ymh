@@ -349,7 +349,7 @@ public:
         const FinishReason reason =
             finish_seen_ ? finish_
                          : (tool_calls_.empty() ? FinishReason::Stop : FinishReason::ToolCalls);
-        emit(StreamEvent{Finished{reason, usage_}});
+        emit(StreamEvent{Finished{reason, usage_, std::nullopt}});
         terminal_ = true;
 
         response.outcome = StreamOutcome::Completed;

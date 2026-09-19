@@ -50,11 +50,17 @@ std::size_t terminal_count(const EventRange& events) {
            count_type(events, EventType::TurnFailed);
 }
 
-std::string chunk_text(const EventRange& events) {
+std::string assistant_text(const EventRange& events) {
     std::string text;
     for (const EventRecord& record : events) {
-        if (record.event.type == EventType::AssistantChunk) {
-            text += record.event.payload.get<payload::AssistantChunk>().text;
+        if (record.event.type != EventType::AssistantMessage) {
+            continue;
+        }
+        for (const ContentBlock& block :
+             record.event.payload.get<payload::AssistantMessage>().content) {
+            if (block.kind == ContentBlockKind::Text) {
+                text += block.text;
+            }
         }
     }
     return text;
@@ -225,6 +231,63 @@ private:
     FakeLLM                 fake_;
 };
 
+// Emits a text delta and then a ContextLengthExceeded failure on the first
+// call, and a completed text on the second: the retried-attempt text must not
+// leak into the settled message (34 §7.2).
+class OverflowAfterTextProvider final : public LLMProvider {
+public:
+    ProviderId id() const override { return "overflow-after-text"; }
+    ProviderCapabilities capabilities() const override { return {}; }
+
+    Task<LLMResponse> stream(const LLMRequest&, StreamSink sink, CancellationToken) override {
+        ++calls;
+        if (calls == 1) {
+            sink(StreamEvent{TextDelta{"attempt-zero-text"}});
+            LLMResponse failed;
+            failed.outcome      = StreamOutcome::Failed;
+            failed.finish       = FinishReason::Error;
+            failed.error.code   = LLMErrorCode::ContextLengthExceeded;
+            failed.error.detail = "overflow";
+            sink(StreamEvent{StreamError{failed.error}});
+            return Task<LLMResponse>{failed};
+        }
+        sink(StreamEvent{TextDelta{"attempt-one-text"}});
+        sink(StreamEvent{Finished{FinishReason::Stop, std::nullopt, std::nullopt}});
+        LLMResponse done;
+        done.outcome = StreamOutcome::Completed;
+        done.finish  = FinishReason::Stop;
+        return Task<LLMResponse>{done};
+    }
+
+    int calls = 0;
+};
+
+TEST(AgentLoop, RetriedAttemptTextIsAbsentFromTheSettledMessage) {
+    CountingCompactor          compactor;
+    std::unique_ptr<OverflowAfterTextProvider> provider =
+        std::make_unique<OverflowAfterTextProvider>();
+    OverflowAfterTextProvider* provider_raw = provider.get();
+    AgentEnv                   env("agent_retry_text", std::move(provider), AgentConfig{},
+                                  allow_all_permission_config(), {}, false, 4, &compactor);
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(agent);
+    const EventRange events = session_owner->events();
+    EXPECT_EQ(provider_raw->calls, 2);
+    EXPECT_EQ(compactor.calls, 1);
+    EXPECT_EQ(count_type(events, EventType::AssistantAttempt), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 1u);
+    EXPECT_EQ(assistant_text(events), "attempt-one-text");
+    EXPECT_EQ(assistant_text(events).find("attempt-zero-text"), std::string::npos);
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::AssistantAttempt) {
+            EXPECT_FALSE(record.event.payload.get<payload::AssistantAttempt>().stream.empty());
+        }
+    }
+}
+
 TEST(AgentLoop, CompactionReattemptUsesDistinctFrozenRequests) {
     FakeResponseStep overflow;
     LLMError         error;
@@ -268,11 +331,13 @@ TEST(AgentLoop, FullTurnCoalescesAndEndsOnce) {
     EXPECT_EQ(count_type(events, EventType::TurnStarted), 1u);
     EXPECT_EQ(count_type(events, EventType::StepStarted), 1u);
     EXPECT_EQ(count_type(events, EventType::AssistantMessage), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantAttempt), 0u);
+    EXPECT_EQ(count_type(events, EventType::AssistantChunk), 0u);
     EXPECT_EQ(count_type(events, EventType::StepEnded), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 1u);
     EXPECT_EQ(count_type(events, EventType::TokenUsage), 1u);
     EXPECT_EQ(terminal_count(events), 1u);
-    EXPECT_EQ(chunk_text(events), "Hello world");
+    EXPECT_EQ(assistant_text(events), "Hello world");
 
     const std::vector<Message> messages = session.deriveMessages();
     ASSERT_EQ(messages.size(), 2u);
@@ -280,6 +345,56 @@ TEST(AgentLoop, FullTurnCoalescesAndEndsOnce) {
     EXPECT_EQ(messages[1].role, Role::Assistant);
     ASSERT_FALSE(messages[1].content.empty());
     EXPECT_EQ(messages[1].content.at(0).text, "Hello world");
+}
+
+TEST(AgentLoop, ReplayStatePropagatesToSettledMessage) {
+    FakeResponseStep step = text_step("hi");
+    ReplayEnvelope   envelope;
+    envelope.provider       = "fake";
+    envelope.version        = 1;
+    envelope.state          = nlohmann::json{{"response_id", "r-1"}};
+    step.replay_state       = envelope;
+
+    AgentEnv env("agent_replay_state", std::make_unique<FakeLLM>(script_of({step})));
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(agent);
+    const EventRange events = session_owner->events();
+    bool saw_message = false;
+    for (const EventRecord& record : events) {
+        if (record.event.type != EventType::AssistantMessage) {
+            continue;
+        }
+        const auto& message = record.event.payload.get<payload::AssistantMessage>();
+        ASSERT_TRUE(message.replay_state.has_value());
+        EXPECT_EQ(message.replay_state->provider, "fake");
+        EXPECT_FALSE(message.stream.empty());
+        saw_message = true;
+    }
+    EXPECT_TRUE(saw_message);
+}
+
+TEST(AgentLoop, LiveChunksArePublishedButNeverDurable) {
+    AgentEnv env("agent_live_chunks",
+                 std::make_unique<FakeLLM>(script_of({text_step("streamed")})));
+
+    std::vector<payload::AssistantChunk> live;
+    Subscription subscription = env.bus.subscribe([&](const Event& event) {
+        if (event.type == EventType::AssistantChunk) {
+            live.push_back(event.payload.get<payload::AssistantChunk>());
+        }
+    });
+
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
+    subscription.unsubscribe();
+
+    EXPECT_FALSE(live.empty());
+    const EventRange events = env.sessionOf(agent)->events();
+    EXPECT_EQ(count_type(events, EventType::AssistantChunk), 0u);
 }
 
 TEST(AgentLoop, ToolCallLoopWithBuiltins) {
@@ -364,6 +479,8 @@ TEST(AgentLoop, CancelMidStreamYieldsOneTurnCancelled) {
     EXPECT_EQ(count_type(events, EventType::TurnCancelled), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 0u);
     EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+    EXPECT_EQ(count_type(events, EventType::AssistantAttempt), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 0u);
     EXPECT_EQ(terminal_count(events), 1u);
 }
 
@@ -384,6 +501,8 @@ TEST(AgentLoop, ProviderFailureYieldsOneTurnFailed) {
     const EventRange events  = session.events();
     EXPECT_EQ(count_type(events, EventType::TurnFailed), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnCancelled), 0u);
+    EXPECT_EQ(count_type(events, EventType::AssistantAttempt), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 0u);
     EXPECT_EQ(terminal_count(events), 1u);
     for (const EventRecord& record : events) {
         if (record.event.type == EventType::TurnFailed) {
@@ -413,6 +532,8 @@ TEST(AgentLoop, ContextLengthExceededRetriesOnce) {
     const EventRange events  = session.events();
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 1u);
     EXPECT_EQ(count_type(events, EventType::ContextCompaction), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantAttempt), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 1u);
     EXPECT_EQ(terminal_count(events), 1u);
 }
 
@@ -436,6 +557,8 @@ TEST(AgentLoop, SecondContextOverflowFailsCompaction) {
     const EventRange events  = session.events();
     ASSERT_EQ(count_type(events, EventType::TurnFailed), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnCancelled), 0u);
+    EXPECT_EQ(count_type(events, EventType::AssistantAttempt), 2u);
+    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 0u);
     EXPECT_EQ(terminal_count(events), 1u);
     for (const EventRecord& record : events) {
         if (record.event.type == EventType::TurnFailed) {

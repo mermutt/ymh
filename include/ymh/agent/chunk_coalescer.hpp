@@ -1,10 +1,11 @@
 #pragma once
 
-// Delta -> durable `AssistantChunk` coalescing, owned by the agent loop
-// (06-agent-loop.md §5.4). One instance per in-flight step. Bounds come from
-// 02 §6.2: flush when the pending batch reaches `max_chunk_batch`, when
-// `chunk_flush_interval` elapses, or at a barrier event (A4/A5). A flush is one
-// `Session::appendBatch` (one transaction) and preserves delta order.
+// Delta -> live-only `AssistantChunk` publication, owned by the agent loop
+// (06-agent-loop.md §5.4; 29-D4). One instance per provider attempt (34-D5).
+// Bounds come from 02 §6.2: flush when the pending batch reaches
+// `max_chunk_batch`, when `chunk_flush_interval` elapses, or at a barrier event
+// (A4/A5). A flush is a sequence of live-only `Session::emit` publications
+// (never a durable append) and preserves delta order.
 
 #include <chrono>
 #include <cstddef>

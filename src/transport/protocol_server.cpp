@@ -798,6 +798,30 @@ void ProtocolServer::onEventCommitted(const EventRecord& record) {
     }
 }
 
+void ProtocolServer::onLiveEvent(const Event& event) {
+    const SessionId& session = event.session_id;
+    for (auto& entry : connections_) {
+        Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done) {
+            continue;
+        }
+        const bool subscribed =
+            std::any_of(conn.subscriptions.begin(), conn.subscriptions.end(),
+                        [&session](const auto& sub_entry) {
+                            return sub_entry.second.session == session;
+                        });
+        if (!subscribed) {
+            continue;
+        }
+        enqueue(conn, notification_json(
+                         notify::kEventLive,
+                         to_json_value(LiveNotification{SessionEnvelope{session, event, false}})));
+        if (conn.dropped) {
+            break;
+        }
+    }
+}
+
 void ProtocolServer::onSessionCreated(const SessionId& session) {
     for (auto& entry : connections_) {
         Connection& conn = entry.second;

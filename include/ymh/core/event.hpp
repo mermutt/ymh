@@ -60,6 +60,7 @@ enum class EventType : std::uint16_t {
     UserMessage,         // wire: user/message
     AssistantChunk,      // wire: assistant/chunk
     AssistantMessage,    // wire: assistant/message
+    AssistantAttempt,    // wire: assistant/attempt (29-D2, 26-D9)
     ToolCall,            // wire: tool/call
     ToolResult,          // wire: tool/result
     PermissionDecision,  // wire: permission/decision

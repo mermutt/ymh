@@ -269,6 +269,8 @@ std::string render_session_markdown(const SessionHeader& header, const EventRang
                     << compaction.summary << "\n\n</details>\n\n";
                 break;
             }
+            case EventType::AssistantAttempt:
+                break;
             default:
                 break;
         }

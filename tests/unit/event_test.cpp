@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/core/event.hpp"
+#include "ymh/session/events.hpp"
 
 namespace ymh {
 
@@ -35,6 +36,7 @@ struct EventTraits<TestPayload> {
 namespace {
 
 using namespace std::chrono_literals;
+using namespace ymh;
 
 ymh::Event make_event(ymh::EventType type, const std::string& session = "s1") {
     return ymh::Event{
@@ -87,7 +89,8 @@ TEST(EventTest, FromJsonRejectsUnknownType) {
 
 TEST(EventTypeTest, LlmRequestHeaderWireNameAndVocabularySize) {
     EXPECT_EQ(ymh::wire_name(ymh::EventType::LlmRequestHeader), "llm/request_header");
-    EXPECT_EQ(ymh::all_event_types().size(), 23u);
+    EXPECT_EQ(ymh::wire_name(ymh::EventType::AssistantAttempt), "assistant/attempt");
+    EXPECT_EQ(ymh::all_event_types().size(), 24u);
 }
 
 TEST(EventTest, TryDecodeSkipsUnknownTypeButDecodesKnown) {
@@ -125,6 +128,120 @@ TEST(EventRecordTest, EventRecordCarriesSequence) {
     const ymh::EventRecord record{5, make_event(ymh::EventType::SessionStarted)};
     EXPECT_EQ(record.seq, 5);
     EXPECT_EQ(record.event.type, ymh::EventType::SessionStarted);
+}
+
+TEST(EventCodecTest, AssistantAttemptRoundTripsItsStream) {
+    payload::AssistantAttempt attempt;
+    attempt.turn = 2;
+    attempt.step = 3;
+    TextRun run;
+    run.index    = 0;
+    run.time0_ms = 5;
+    run.dt_ms    = {2};
+    run.texts    = {"a", "b"};
+    attempt.stream.push_back(run);
+
+    const nlohmann::json json = attempt;
+    EXPECT_EQ(json.at("turn"), 2);
+    EXPECT_EQ(json.at("step"), 3);
+    const payload::AssistantAttempt restored = json.get<payload::AssistantAttempt>();
+    EXPECT_EQ(restored.turn, 2u);
+    EXPECT_EQ(restored.step, 3u);
+    EXPECT_EQ(restored.stream, attempt.stream);
+}
+
+TEST(EventCodecTest, AssistantMessageCarriesStreamAndReplayState) {
+    payload::AssistantMessage message;
+    message.id = "m1";
+    ChunkRecord chunk;
+    chunk.time_ms = 1;
+    chunk.event   = TextDelta{"x"};
+    message.stream.push_back(chunk);
+    ReplayEnvelope envelope;
+    envelope.provider    = "p";
+    envelope.state       = nlohmann::json{{"k", 1}};
+    message.replay_state = envelope;
+
+    const nlohmann::json json = message;
+    ASSERT_TRUE(json.contains("stream"));
+    ASSERT_TRUE(json.contains("replay_state"));
+    const payload::AssistantMessage restored = json.get<payload::AssistantMessage>();
+    EXPECT_EQ(restored.stream, message.stream);
+    EXPECT_EQ(restored.replay_state, message.replay_state);
+}
+
+TEST(EventCodecTest, AssistantMessageStreamCoversAllRecordAndEventTypes) {
+    payload::AssistantMessage message;
+    message.id = "m-all";
+
+    TextRun text_run;
+    text_run.index    = 0;
+    text_run.time0_ms = 1;
+    text_run.dt_ms    = {1};
+    text_run.texts    = {"a", "b"};
+
+    ReasoningRun reasoning_run;
+    reasoning_run.index    = 0;
+    reasoning_run.time0_ms = 2;
+    reasoning_run.dt_ms    = {2};
+    reasoning_run.texts    = {"r1", "r2"};
+
+    ToolCallRun tool_run;
+    tool_run.index    = 0;
+    tool_run.time0_ms = 3;
+    tool_run.dt_ms    = {1};
+    tool_run.id       = ToolCallId{"call-0"};
+    tool_run.name     = "read_file";
+    tool_run.args     = {"{}"};
+
+    message.stream.push_back(text_run);
+    message.stream.push_back(reasoning_run);
+    message.stream.push_back(tool_run);
+
+    ToolCallAssembled assembled;
+    assembled.id        = "call-0";
+    assembled.name      = "read_file";
+    assembled.arguments = nlohmann::json::object();
+    LLMError error;
+    error.code = LLMErrorCode::None;
+
+    const std::vector<StreamEvent> events{
+        TextDelta{"t"},
+        ReasoningDelta{"r"},
+        ToolCallStarted{0, ToolCallId{"call-0"}, "read_file"},
+        ToolCallDelta{0, "{}"},
+        ToolCallFinished{0, assembled},
+        UsageEvent{Usage{1, 2, 3, 4}},
+        Finished{FinishReason::Stop, Usage{1, 2, 3, 4},
+                 ReplayEnvelope{"fake", 1, nlohmann::json(nullptr)}},
+        StreamError{error},
+    };
+    std::int64_t at = 10;
+    for (const StreamEvent& event : events) {
+        ChunkRecord chunk;
+        chunk.time_ms = at++;
+        chunk.event   = event;
+        message.stream.push_back(chunk);
+    }
+
+    const TypedEvent<payload::AssistantMessage> typed{
+        EventId{"evt-stream"},
+        SessionId{"s1"},
+        std::chrono::system_clock::time_point{7ms},
+        message,
+    };
+    const Event erased   = encode(typed);
+    const Event restored = nlohmann::json(erased).get<Event>();
+    const payload::AssistantMessage decoded =
+        decode<payload::AssistantMessage>(restored).payload;
+    EXPECT_EQ(decoded.stream, message.stream);
+}
+
+TEST(EventCodecTest, AssistantMessageIgnoresUnknownKeys) {
+    nlohmann::json json =
+        payload::AssistantMessage{"m1", {}, std::nullopt, {}, std::nullopt};
+    json["future_key"] = 1;
+    EXPECT_NO_THROW(static_cast<void>(json.get<payload::AssistantMessage>()));
 }
 
 } // namespace

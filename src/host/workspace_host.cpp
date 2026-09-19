@@ -321,6 +321,7 @@ private:
     void cleanupStartupFailure();
     void restoreCwd();
     void forwardEvent(const EventRecord& record);
+    void forwardLiveEvent(const Event& event);
     void armSignals();
     void armHeartbeat();
     void armLeaseRenewal();
@@ -542,7 +543,8 @@ HostExitCode WorkspaceHost::Impl::startup() {
 
     host_runtime_ = std::make_unique<HostRuntime>(
         *runtime_, *registry_, identity, *turns_, *broker_,
-        [this](const EventRecord& record) { forwardEvent(record); });
+        [this](const EventRecord& record) { forwardEvent(record); },
+        [this](const Event& event) { forwardLiveEvent(event); });
     host_runtime_->setShutdownHook(
         [this](ShutdownReason reason) { requestShutdown(reason); });
 
@@ -761,6 +763,16 @@ void WorkspaceHost::Impl::forwardEvent(const EventRecord& record) {
         transport_->post([this, record] {
             if (protocol_ != nullptr) {
                 protocol_->onEventCommitted(record);
+            }
+        });
+    }
+}
+
+void WorkspaceHost::Impl::forwardLiveEvent(const Event& event) {
+    if (transport_ != nullptr && transport_->running()) {
+        transport_->post([this, event] {
+            if (protocol_ != nullptr) {
+                protocol_->onLiveEvent(event);
             }
         });
     }

@@ -72,6 +72,8 @@ AgentState UiEventAdapter::project_state(const SessionId& session, const Event& 
             return AgentState::Idle;
         case EventType::TurnFailed:
             return AgentState::Error;
+        case EventType::AssistantAttempt:
+            return old;
         default:
             return old;
     }
@@ -160,6 +162,8 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             events.push_back(UiEvent{PlanModeChanged{session, payload.active}});
             break;
         }
+        case EventType::AssistantAttempt:
+            break;
         default:
             break;
     }
@@ -250,6 +254,8 @@ std::vector<UiEvent> UiEventAdapter::adapt_maintenance(const Event& event) {
             events.push_back(UiEvent{notice});
             break;
         }
+        case EventType::AssistantAttempt:
+            break;
         default:
             break;
     }

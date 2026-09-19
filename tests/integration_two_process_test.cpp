@@ -348,6 +348,17 @@ ui::SupervisorReply submit_sync(ui::SupervisorConnection& connection, const std:
     return captured;
 }
 
+std::vector<protocol::SessionEnvelope> committed_envelopes(
+    const std::vector<protocol::SessionEnvelope>& envelopes) {
+    std::vector<protocol::SessionEnvelope> committed;
+    for (const protocol::SessionEnvelope& envelope : envelopes) {
+        if (envelope.event.type != EventType::AssistantChunk) {
+            committed.push_back(envelope);
+        }
+    }
+    return committed;
+}
+
 std::set<std::string> event_ids(const std::vector<protocol::SessionEnvelope>& envelopes) {
     std::set<std::string> ids;
     for (const protocol::SessionEnvelope& envelope : envelopes) {
@@ -663,7 +674,8 @@ TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {
         std::this_thread::sleep_for(50ms);
     }
 
-    const std::vector<protocol::SessionEnvelope> received          = collector.snapshot();
+    const std::vector<protocol::SessionEnvelope> received =
+        committed_envelopes(collector.snapshot());
     const std::set<std::string>                  received_ids      = event_ids(received);
     const std::set<std::string>                  authoritative_ids = event_ids(authoritative);
 

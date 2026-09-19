@@ -5,6 +5,9 @@ add_executable(ymh_tests
     unit/session_test.cpp
     unit/persistence_test.cpp
     unit/llm_types_test.cpp
+    unit/stream_event_codec_test.cpp
+    unit/assistant_stream_test.cpp
+    unit/replay_harness_test.cpp
     unit/llm_runtime_test.cpp
     unit/tool_call_assembler_test.cpp
     unit/sse_parser_test.cpp
@@ -77,6 +80,7 @@ add_executable(ymh_tests
     unit/no_raw_map_handle_test.cpp
     unit/global_test_env_test.cpp
     support/global_test_env.cpp
+    support/replay_harness.cpp
     integration_child_process_test.cpp
     integration_host_harness_test.cpp
     integration_pty_test.cpp

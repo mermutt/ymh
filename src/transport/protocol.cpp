@@ -336,6 +336,14 @@ void from_json(const nlohmann::json& json, StreamNotification& notification) {
     notification.cursor.value = json.at("cursor").get<std::string>();
 }
 
+void to_json(nlohmann::json& json, const LiveNotification& notification) {
+    json = nlohmann::json{{"envelope", notification.envelope}};
+}
+
+void from_json(const nlohmann::json& json, LiveNotification& notification) {
+    notification.envelope = json.at("envelope").get<SessionEnvelope>();
+}
+
 void to_json(nlohmann::json& json, const UnsubscribedNotice& notice) {
     json = nlohmann::json{{"subscription", notice.subscription.value},
                           {"reason", notice.reason}};

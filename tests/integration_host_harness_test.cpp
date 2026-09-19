@@ -253,13 +253,13 @@ TEST_F(HostIntegration, SupervisorConnectionStreamsFromRealDaemon) {
             }
             return false;
         })) << "no streamed envelope arrived";
-        bool saw_assistant = false;
+        bool saw_chunk = false;
         for (const auto& envelope : envelopes) {
             if (envelope.event.type == ymh::EventType::AssistantChunk) {
-                saw_assistant = true;
+                saw_chunk = true;
             }
         }
-        EXPECT_TRUE(saw_assistant);
+        EXPECT_TRUE(saw_chunk);
     }
 
     connection.stop();
@@ -289,7 +289,12 @@ TEST_F(HostIntegration, RunRoutesThroughLiveDaemon) {
     const int code = ymh::run_cli(
         {"--workspace", root.path().string(), "run", "say hello"}, out, err);
     EXPECT_EQ(code, 0) << err.str();
-    EXPECT_NE(out.str().find("hello from the daemon"), std::string::npos) << out.str();
+    const std::string output = out.str();
+    const std::string needle = "hello from the daemon";
+    const std::size_t first  = output.find(needle);
+    EXPECT_NE(first, std::string::npos) << output;
+    EXPECT_EQ(output.find(needle, first + needle.size()), std::string::npos)
+        << "assistant text was printed twice: " << output;
 
     const ymh::test::ExitStatus status = harness.stop();
     EXPECT_TRUE(status.exited);

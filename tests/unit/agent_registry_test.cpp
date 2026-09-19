@@ -48,7 +48,7 @@ public:
             return Task<LLMResponse>{cancelled};
         }
         sink(TextDelta{"hello"});
-        sink(Finished{FinishReason::Stop, std::nullopt});
+        sink(Finished{FinishReason::Stop, std::nullopt, std::nullopt});
         LLMResponse response;
         response.outcome = StreamOutcome::Completed;
         response.finish  = FinishReason::Stop;
@@ -261,7 +261,7 @@ TEST(AgentRegistry, OpenTurnAtResumeIsNotAutoContinued) {
     session.append(payload::TurnStarted{1, payload::TurnOrigin::User});
     session.append(payload::StepStarted{1, 1});
     session.append(payload::UserMessage{"u1", {}});
-    session.append(payload::AssistantMessage{"a1", {}, std::nullopt});
+    session.append(payload::AssistantMessage{"a1", {}, std::nullopt, {}, std::nullopt});
     const std::size_t before = session.events().size();
 
     const std::expected<AgentId, AgentError> resumed = env.registry.resume(sessionId);

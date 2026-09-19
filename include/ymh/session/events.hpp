@@ -16,6 +16,7 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/llm/assistant_stream.hpp"
 #include "ymh/llm/llm_call_config.hpp"
 #include "ymh/session/ids.hpp"
 
@@ -102,9 +103,20 @@ struct AssistantChunk {
 };
 
 struct AssistantMessage {
-    MessageId                 id;
-    std::vector<ContentBlock> content;
-    std::optional<Usage>      usage;
+    MessageId                          id;
+    std::vector<ContentBlock>          content;
+    std::optional<Usage>               usage;
+    // 29-D3 / 26 §4.3.9.1 :949: additive, defaulted stream + replay state.
+    std::vector<AssistantStreamRecord> stream;
+    std::optional<ReplayEnvelope>      replay_state;
+};
+
+// 29-D2 / 26 §4.3.9.1 :957: a settled non-Completed provider attempt. Durable,
+// projection-invisible (deriveMessages ignores it).
+struct AssistantAttempt {
+    TurnId                             turn = 0;
+    StepId                             step = 0;
+    std::vector<AssistantStreamRecord> stream;
 };
 
 // ---- tool pipeline (01 §4.5, §11, §14) -------------------------------------
@@ -275,12 +287,12 @@ struct SessionEventMap<EventType::UserMessage> {
     using type = payload::UserMessage;
 };
 template <>
-struct SessionEventMap<EventType::AssistantChunk> {
-    using type = payload::AssistantChunk;
-};
-template <>
 struct SessionEventMap<EventType::AssistantMessage> {
     using type = payload::AssistantMessage;
+};
+template <>
+struct SessionEventMap<EventType::AssistantAttempt> {
+    using type = payload::AssistantAttempt;
 };
 template <>
 struct SessionEventMap<EventType::ToolCall> {
@@ -373,6 +385,10 @@ struct EventTraits<payload::AssistantMessage> {
     static constexpr EventType type = EventType::AssistantMessage;
 };
 template <>
+struct EventTraits<payload::AssistantAttempt> {
+    static constexpr EventType type = EventType::AssistantAttempt;
+};
+template <>
 struct EventTraits<payload::ToolCall> {
     static constexpr EventType type = EventType::ToolCall;
 };
@@ -459,6 +475,8 @@ void to_json(nlohmann::json& json, const AssistantChunk& value);
 void from_json(const nlohmann::json& json, AssistantChunk& value);
 void to_json(nlohmann::json& json, const AssistantMessage& value);
 void from_json(const nlohmann::json& json, AssistantMessage& value);
+void to_json(nlohmann::json& json, const AssistantAttempt& value);
+void from_json(const nlohmann::json& json, AssistantAttempt& value);
 void to_json(nlohmann::json& json, const ToolCall& value);
 void from_json(const nlohmann::json& json, ToolCall& value);
 void to_json(nlohmann::json& json, const ToolResult& value);

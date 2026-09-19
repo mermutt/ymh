@@ -138,6 +138,8 @@ std::string event_detail(const Event& event) {
             const auto& cancelled = event.payload.get<payload::TurnCancelled>();
             return "reason=" + cancelled.reason;
         }
+        case EventType::AssistantAttempt:
+            return {};
         default:
             return {};
     }

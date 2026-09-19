@@ -8,6 +8,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -40,6 +41,16 @@ Message user_message(std::string text) {
     block.text = std::move(text);
     message.content.push_back(std::move(block));
     return message;
+}
+
+std::string assistant_text_of(const std::vector<ContentBlock>& content) {
+    std::string text;
+    for (const ContentBlock& block : content) {
+        if (block.kind == ContentBlockKind::Text) {
+            text += block.text;
+        }
+    }
+    return text;
 }
 
 std::string first_line(const std::string& text, std::size_t max_bytes) {
@@ -188,7 +199,8 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         .info("run session=" + result.session.value + " model=" + agent_config.model +
               " provider=" + runtime->provider_config().provider);
 
-    std::string terminal;
+    std::string           terminal;
+    std::set<std::string> streamed_messages;
     Subscription subscription = runtime->bus().subscribe([&](const Event& event) {
         if (event.session_id.value != result.session.value) {
             return;
@@ -200,9 +212,23 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
                     out << chunk.text;
                     out.flush();
                     result.assistant_text += chunk.text;
+                    streamed_messages.insert(chunk.message);
                 } else if (options.verbose) {
                     err << chunk.text;
                     err.flush();
+                }
+                break;
+            }
+            case EventType::AssistantMessage: {
+                const auto& message = event.payload.get<payload::AssistantMessage>();
+                // 29 §4.2: durable assembled text is the source when no live
+                // delta was re-emitted (resume/replay); a live run already
+                // streamed the same message's text via the live-only chunks.
+                if (streamed_messages.find(message.id) == streamed_messages.end()) {
+                    const std::string text = assistant_text_of(message.content);
+                    out << text;
+                    out.flush();
+                    result.assistant_text += text;
                 }
                 break;
             }
@@ -230,6 +256,8 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
                 terminal = "turn/end";
                 break;
             }
+            case EventType::AssistantAttempt:
+                break;
             default:
                 break;
         }

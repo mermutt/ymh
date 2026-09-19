@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -55,17 +56,32 @@
 
 namespace ymh {
 
-StreamDisposition handle_stream_notification(const protocol::StreamNotification& stream,
-                                             std::ostream& out, std::ostream& err) {
-    if (stream.envelope.event_skipped) {
-        return StreamDisposition::Skipped;
-    }
-    const Event& event = stream.envelope.event;
+namespace {
+
+StreamDisposition handle_session_event(const Event& event, std::ostream& out, std::ostream& err,
+                                       std::set<std::string>* streamed_messages) {
     if (event.type == EventType::AssistantChunk) {
         const auto chunk = event.payload.get<payload::AssistantChunk>();
         if (chunk.kind == payload::AssistantChunkKind::Text) {
             out << chunk.text << std::flush;
+            if (streamed_messages != nullptr) {
+                streamed_messages->insert(chunk.message);
+            }
         }
+        return StreamDisposition::Continue;
+    }
+    if (event.type == EventType::AssistantMessage) {
+        const auto message = event.payload.get<payload::AssistantMessage>();
+        if (streamed_messages != nullptr &&
+            streamed_messages->find(message.id) != streamed_messages->end()) {
+            return StreamDisposition::Continue;
+        }
+        for (const ContentBlock& block : message.content) {
+            if (block.kind == ContentBlockKind::Text) {
+                out << block.text;
+            }
+        }
+        out << std::flush;
         return StreamDisposition::Continue;
     }
     if (event.type == EventType::TurnFailed) {
@@ -77,6 +93,26 @@ StreamDisposition handle_stream_notification(const protocol::StreamNotification&
         return StreamDisposition::TurnFinished;
     }
     return StreamDisposition::Continue;
+}
+
+} // namespace
+
+StreamDisposition handle_stream_notification(const protocol::StreamNotification& stream,
+                                             std::ostream& out, std::ostream& err,
+                                             std::set<std::string>* streamed_messages) {
+    if (stream.envelope.event_skipped) {
+        return StreamDisposition::Skipped;
+    }
+    return handle_session_event(stream.envelope.event, out, err, streamed_messages);
+}
+
+StreamDisposition handle_live_notification(const protocol::LiveNotification& live,
+                                           std::ostream& out, std::ostream& err,
+                                           std::set<std::string>* streamed_messages) {
+    if (live.envelope.event_skipped) {
+        return StreamDisposition::Skipped;
+    }
+    return handle_session_event(live.envelope.event, out, err, streamed_messages);
 }
 
 namespace {
@@ -565,6 +601,7 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
         static_cast<void>(connection.request(protocol::method::kAgentPrompt,
                                              {{"session", session.value}, {"message", task}}));
 
+        std::set<std::string> streamed_messages;
         while (true) {
             const std::optional<protocol::Notification> notification =
                 connection.nextNotification(std::chrono::minutes{10});
@@ -572,13 +609,18 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
                 err << "ymh: timed out waiting for the daemon turn\n";
                 return 1;
             }
-            if (notification->method != protocol::notify::kEventStream) {
+            StreamDisposition disposition = StreamDisposition::Continue;
+            if (notification->method == protocol::notify::kEventStream) {
+                const protocol::StreamNotification stream =
+                    notification->params.get<protocol::StreamNotification>();
+                disposition = handle_stream_notification(stream, out, err, &streamed_messages);
+            } else if (notification->method == protocol::notify::kEventLive) {
+                const protocol::LiveNotification live =
+                    notification->params.get<protocol::LiveNotification>();
+                disposition = handle_live_notification(live, out, err, &streamed_messages);
+            } else {
                 continue;
             }
-            const protocol::StreamNotification stream =
-                notification->params.get<protocol::StreamNotification>();
-            const StreamDisposition disposition =
-                handle_stream_notification(stream, out, err);
             if (disposition == StreamDisposition::TurnFailed) {
                 return 1;
             }
