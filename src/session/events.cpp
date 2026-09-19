@@ -482,6 +482,14 @@ void from_json(const nlohmann::json& json, SessionRenamed& value) {
     value.origin = parse_rename_origin(json.at("origin").get<std::string>());
 }
 
+void to_json(nlohmann::json& json, const PlanMode& value) {
+    json = nlohmann::json{{"active", value.active}};
+}
+
+void from_json(const nlohmann::json& json, PlanMode& value) {
+    value.active = json.value("active", false);
+}
+
 } // namespace payload
 
 } // namespace ymh

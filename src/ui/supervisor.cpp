@@ -424,7 +424,7 @@ public:
         adapter_.onPermissionResolved(session, request, decision);
     }
 
-    void requestExit() override { begin_exit(); }
+    void requestExit() override { begin_exit(/*allow_prompt=*/false); }
 
 private:
     // 22 §10.1/§10.2: the additive test seam (`SupervisorHarnessImpl`) needs the
@@ -443,16 +443,12 @@ private:
     // 16 §4.2 (16-D9). The supervisor stays registered until the user confirms:
     // query the orphaning set read-only, then either exit (empty set), auto-
     // confirm (--yes), or open the prompt. Ctrl+D and `/exit` stay thin callers.
-    void begin_exit() {
+    void begin_exit(bool allow_prompt) {
         if (quit_.load() || model_.exitConfirm.open) {
             return;
         }
         const std::vector<WorkspaceId> orphaning = compute_orphaning_set();
-        if (orphaning.empty()) {
-            confirm_exit({});
-            return;
-        }
-        if (options_.no_prompt) {
+        if (orphaning.empty() || !allow_prompt || options_.no_prompt) {
             confirm_exit(orphaning);
             return;
         }
@@ -744,6 +740,9 @@ private:
         sink.on_envelope = [this, workspace_id](const protocol::SessionEnvelope& envelope) {
             enqueue([this, workspace_id, envelope] {
                 adapter_.onSessionEnvelope(workspace_id, envelope);
+                if (envelope.event.type == EventType::AssistantMessage) {
+                    refresh_status_context(workspace_id, envelope.session);
+                }
             });
         };
         sink.on_permission = [this, workspace_id](const protocol::PermissionRequest& request) {
@@ -1004,6 +1003,7 @@ private:
                       }
                       enqueue([this, workspace, session] {
                           apply_resume_success(workspace, session);
+                          refresh_status_context(workspace, session);
                       });
                   });
     }
@@ -1579,47 +1579,6 @@ private:
         append_system_entry(model_, *state, format_skill_detail(reply.result));
     }
 
-    void request_skill(const std::string& name) {
-        WorkspaceModel* workspace = model_.activeWorkspace();
-        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
-            return;
-        }
-        const std::string trimmed = trim_command_arg(name);
-        if (trimmed.empty()) {
-            if (SessionUiState* state = model_.session(workspace->activeSessionId);
-                state != nullptr) {
-                append_system_entry(model_, *state, "usage: /skill <name>");
-            }
-            return;
-        }
-        const WorkspaceId id = workspace->id;
-        const SessionId   session = workspace->activeSessionId;
-        submit_to(id, std::string(protocol::method::kSkillsShow), nlohmann::json{{"name", trimmed}},
-                  [this, id, session, trimmed](SupervisorReply reply) {
-                      enqueue([this, id, session, trimmed, reply = std::move(reply)] {
-                          activate_skill(id, session, trimmed, reply);
-                      });
-                  });
-    }
-
-    void activate_skill(const WorkspaceId& id, const SessionId& session,
-                        const std::string& name, const SupervisorReply& reply) {
-        if (!reply.ok) {
-            if (SessionUiState* state = model_.session(session); state != nullptr) {
-                append_system_entry(model_, *state, "skill: unknown skill '" + name + "'");
-            }
-            return;
-        }
-        const std::string actual = reply.result.value("name", name);
-        const std::string body = reply.result.value("body", std::string{});
-        nlohmann::json    context{{"role", "system"},
-                                  {"text", "[skill: " + actual + "]\n" + body},
-                                  {"starts_turn", false}};
-        submit_to(id, std::string(protocol::method::kAgentInject),
-                  nlohmann::json{{"session", session.value}, {"context", std::move(context)}},
-                  nullptr);
-    }
-
     bool dispatch_command(const std::string& line) {
         CommandContext context{model_};
         context.session = active();
@@ -1660,7 +1619,42 @@ private:
         };
         context.export_session = [this](const std::string& args) { return export_session(args); };
         context.skills = [this](const std::string& args) { request_skills(args); };
-        context.skill = [this](const std::string& name) { request_skill(name); };
+        context.plan_mode = [this](bool active, const std::string& message) {
+            WorkspaceModel* workspace = model_.activeWorkspace();
+            if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+                return;
+            }
+            const WorkspaceId id = workspace->id;
+            const SessionId   session = workspace->activeSessionId;
+            submit_to(id, std::string(protocol::method::kSessionSetMode),
+                      nlohmann::json{{"session", session.value}, {"active", active}},
+                      [this, id, session, message](SupervisorReply reply) {
+                          enqueue([this, id, session, message,
+                                   reply = std::move(reply)]() mutable {
+                              if (!reply.ok) {
+                                  if (SessionUiState* state = model_.session(session);
+                                      state != nullptr) {
+                                      append_system_entry(
+                                          model_, *state,
+                                          "plan: " + (reply.error.empty()
+                                                          ? std::string{"request failed"}
+                                                          : reply.error));
+                                  }
+                                  return;
+                              }
+                              if (reply.result.value("pending", false)) {
+                                  model_.pushNotice("plan change queued");
+                                  model_.dirty.markAggregate();
+                              }
+                              if (!message.empty()) {
+                                  submit_to(id, std::string(protocol::method::kAgentSteer),
+                                            nlohmann::json{{"session", session.value},
+                                                           {"message", message}},
+                                            nullptr);
+                              }
+                          });
+                      });
+        };
         context.context = [this] { open_context(); };
         context.sessions = [this] { open_sessions(); };
         return registry_.dispatch(line, context);
@@ -1727,7 +1721,8 @@ private:
         input.cursor = input.draft.size();
         cycle->draft = input.draft;
         cycle->index = reverse ? (applied + count - 1) % count : (applied + 1) % count;
-        state.command_hint_selected = cycle->index;
+        // 25-D8: highlight the inserted candidate (`applied`), not the advanced index.
+        state.command_hint_selected = applied;
         set_command_hints(state, cycle->names);
         return true;
     }
@@ -1741,6 +1736,22 @@ private:
                     CommandHint{command->name, command->description});
             }
         }
+    }
+
+    bool accept_highlight(const SessionUiState& state, std::string& text) const {
+        if (text.size() < 2 || text.front() != '/' || text == "/") {
+            return false;
+        }
+        if (text.find_first_of(" \t") != std::string::npos) {
+            return false;
+        }
+        if (state.command_hints.empty()) {
+            return false;
+        }
+        const std::size_t selected =
+            std::min(state.command_hint_selected, state.command_hints.size() - 1);
+        text = "/" + state.command_hints[selected].name;
+        return true;
     }
 
     void scroll_by(bool up, bool page) {
@@ -1792,15 +1803,25 @@ private:
             resolve_dialog(payload::PermissionDecisionKind::Deny, GrantScope::Once);
             return true;
         }
+        const int option_count = model_.dialog.force_ask ? 2 : 4;
         if (event == ftxui::Event::ArrowUp) {
-            model_.dialog.selected = (model_.dialog.selected + 3) % 4;
+            model_.dialog.selected =
+                (model_.dialog.selected + option_count - 1) % option_count;
             return true;
         }
         if (event == ftxui::Event::ArrowDown) {
-            model_.dialog.selected = (model_.dialog.selected + 1) % 4;
+            model_.dialog.selected = (model_.dialog.selected + 1) % option_count;
             return true;
         }
         if (event == ftxui::Event::Return) {
+            if (model_.dialog.force_ask) {
+                if (model_.dialog.selected == 0) {
+                    resolve_dialog(payload::PermissionDecisionKind::Allow, GrantScope::Once);
+                } else {
+                    resolve_dialog(payload::PermissionDecisionKind::Deny, GrantScope::Once);
+                }
+                return true;
+            }
             switch (model_.dialog.selected) {
                 case 0:
                     resolve_dialog(payload::PermissionDecisionKind::Allow, GrantScope::Once);
@@ -1828,6 +1849,11 @@ private:
     void resolve_dialog(payload::PermissionDecisionKind decision, GrantScope scope) {
         const PermissionDialogModel dialog = model_.dialog;
         last_dialog_resolution_ = std::make_pair(decision, scope);
+        if (dialog.tool == "exit_plan_mode" &&
+            decision != payload::PermissionDecisionKind::Deny) {
+            model_.pushNotice("plan exit queued");
+            model_.dirty.markAggregate();
+        }
         resolvePermission(dialog.session, dialog.request, decision, scope);
     }
 
@@ -1920,7 +1946,10 @@ private:
             return true;
         }
         if (event == ftxui::Event::Return) {
-            const std::string text = input.draft;
+            std::string text = input.draft;
+            if (accept_highlight(*state, text)) {
+                input.draft = text;
+            }
             if (dispatch_command(text)) {
                 input.push_history(text);
                 input.draft.clear();
@@ -2014,6 +2043,35 @@ private:
             return true;
         }
         return false;
+    }
+
+    void refresh_status_context(const WorkspaceId& workspace, const SessionId& session) {
+        submit_to(workspace, std::string(protocol::method::kContextShow),
+                  nlohmann::json{{"session", session.value}},
+                  [this, session](SupervisorReply reply) {
+                      ContextSnapshot snapshot;
+                      const bool loaded = reply.ok && parse_context_snapshot(reply.result, snapshot);
+                      enqueue([this, session, loaded, snapshot]() mutable {
+                          SessionUiState* state = model_.session(session);
+                          if (state == nullptr) {
+                              return;
+                          }
+                          if (!loaded) {
+                              state->status.context_used_tokens =
+                                  static_cast<std::uint64_t>(std::max<std::int64_t>(
+                                      0, state->status.input_tokens));
+                              model_.dirty.mark(session, UiDirtyFlag::Status);
+                              return;
+                          }
+                          state->status.context_used_tokens = snapshot.used_tokens;
+                          state->status.context_window_tokens =
+                              snapshot.budget.window_tokens != 0
+                                  ? snapshot.budget.window_tokens
+                                  : static_cast<std::uint64_t>(
+                                        options_.config.agent.compaction.context_window_tokens);
+                          model_.dirty.mark(session, UiDirtyFlag::Status);
+                      });
+                  });
     }
 
     // 18 §4.3 (M9): opens the read-only context overlay. Every request bumps the
@@ -2143,7 +2201,7 @@ private:
             return true;
         }
         if (event == ftxui::Event::CtrlD) {
-            requestExit();
+            begin_exit(/*allow_prompt=*/true);
             return true;
         }
         if (event == ftxui::Event::CtrlC) {

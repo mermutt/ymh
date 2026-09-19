@@ -1,6 +1,7 @@
 #include "ymh/mcp/mcp_types.hpp"
 
 #include <array>
+#include <cctype>
 #include <string>
 #include <utility>
 
@@ -77,6 +78,29 @@ bool is_valid_mcp_server_id(std::string_view value) noexcept {
         }
     }
     return true;
+}
+
+std::string normalize_mcp_server_id(std::string_view name) {
+    std::string normalized;
+    normalized.reserve(name.size());
+    for (const char c : name) {
+        const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if ((lower >= 'a' && lower <= 'z') || (lower >= '0' && lower <= '9') || lower == '_') {
+            normalized.push_back(lower);
+        } else if (lower == '-' || lower == '.' || lower == ' ') {
+            normalized.push_back('_');
+        }
+    }
+    if (normalized.empty() || normalized.front() < 'a' || normalized.front() > 'z') {
+        normalized.insert(normalized.begin(), 's');
+    }
+    if (normalized.size() > 32) {
+        normalized.resize(32);
+    }
+    if (normalized.empty()) {
+        return "server";
+    }
+    return normalized;
 }
 
 std::string_view to_string(McpErrorCode code) noexcept {

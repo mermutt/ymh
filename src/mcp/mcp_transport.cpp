@@ -31,7 +31,11 @@ std::vector<std::pair<std::string, std::string>> resolve_mcp_env(
         const std::string raw = entry.substr(equals + 1);
         std::string value;
         for (std::size_t index = 0; index < raw.size();) {
-            if (raw[index] == '$' && index + 1 < raw.size() && raw[index + 1] == '{') {
+            if (raw[index] == '$' && index + 2 < raw.size() && raw[index + 1] == '$' &&
+                raw[index + 2] == '{') {
+                value += "${";
+                index += 3;
+            } else if (raw[index] == '$' && index + 1 < raw.size() && raw[index + 1] == '{') {
                 const std::size_t close = raw.find('}', index + 2);
                 if (close == std::string::npos) {
                     throw McpError{McpErrorCode::ConfigInvalid,

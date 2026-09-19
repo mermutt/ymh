@@ -155,6 +155,11 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             events.push_back(UiEvent{SessionTitleChanged{session, payload.title}});
             break;
         }
+        case EventType::PlanMode: {
+            const auto payload = event.payload.get<payload::PlanMode>();
+            events.push_back(UiEvent{PlanModeChanged{session, payload.active}});
+            break;
+        }
         default:
             break;
     }
@@ -285,6 +290,7 @@ void UiEventAdapter::onPermissionRequest(const SessionId& session,
     requested.request = id;
     requested.tool = request.tool;
     requested.summary = summarize_tool_arguments(request.tool, request.arguments);
+    requested.force_ask = request.force_ask;
     applyAndMark(UiEvent{std::move(requested)});
 
     const auto previous = lastState_.find(session);
@@ -307,6 +313,7 @@ void UiEventAdapter::onPermissionRequest(const WorkspaceId& workspace,
     requested.summary = request.summary.empty()
                             ? summarize_tool_arguments(request.tool, request.arguments)
                             : request.summary;
+    requested.force_ask = request.force_ask;
     applyAndMark(UiEvent{std::move(requested)});
 
     const auto previous = lastState_.find(request.session);

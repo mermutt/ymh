@@ -507,6 +507,7 @@ void to_json(nlohmann::json& json, const PermissionRequest& request) {
         {"arguments", request.arguments},
         {"summary", request.summary},
         {"expires_at_ms", request.expires_at_ms},
+        {"force_ask", request.force_ask},
     };
 }
 
@@ -517,6 +518,7 @@ void from_json(const nlohmann::json& json, PermissionRequest& request) {
     request.arguments = json.value("arguments", nlohmann::json::object());
     request.summary = json.value("summary", std::string{});
     request.expires_at_ms = json.at("expires_at_ms").get<std::int64_t>();
+    request.force_ask = json.value("force_ask", false);
 }
 
 void to_json(nlohmann::json& json, const PermissionDecisionParams& params) {
@@ -609,7 +611,7 @@ void from_json(const nlohmann::json& json, SessionDetail& detail) {
 
 namespace {
 
-constexpr std::array<std::string_view, 33> kMethodCatalog{{
+constexpr std::array<std::string_view, 34> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kHostOwnership,
@@ -621,8 +623,8 @@ constexpr std::array<std::string_view, 33> kMethodCatalog{{
     method::kAgentPrompt,      method::kAgentFollowup,    method::kAgentSteer,
     method::kAgentInject,      method::kAgentCancel,      method::kAgentStatus,
     method::kPermissionDecide, method::kEventSubscribe,   method::kEventUnsubscribe,
-    method::kSessionRename,    method::kSkillsList,       method::kSkillsShow,
-    method::kContextShow,
+    method::kSessionRename,    method::kSessionSetMode,   method::kSkillsList,
+    method::kSkillsShow,       method::kContextShow,
 }};
 
 } // namespace

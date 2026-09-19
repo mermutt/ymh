@@ -9,11 +9,14 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "support/test_env.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/logger.hpp"
 #include "ymh/llm/provider_registry.hpp"
+#include "ymh/mcp/mcp_types.hpp"
 
 namespace {
 
@@ -679,6 +682,247 @@ TEST(Config, WorkspaceNonRegularRejected) {
         EXPECT_EQ(std::string{error.what()},
                   "config " + directory.string() + ": config path is not a regular file");
     }
+}
+
+TEST(Config, McpServersObjectParsesAndNormalizes) {
+    test::TempWorkspace         workspace("config_mcp_servers_parse");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    R"JSONC({
+  "mcp_servers": {
+    "1234": { "command": "digits" },
+    "BRAVE-SEARCH": { "command": "other" },
+    "brave-search": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["a"],
+      "env": { "TOKEN": "x", "A": "y" }
+    }
+  }
+})JSONC");
+    ConfigPaths paths;
+    paths.global = global;
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.mcp.servers.size(), 3u);
+    EXPECT_EQ(config.mcp.servers[0].id, "s1234");
+    EXPECT_EQ(config.mcp.servers[1].id, "brave_search");
+    EXPECT_EQ(config.mcp.servers[2].id, "brave_search_2");
+    EXPECT_EQ(config.mcp.servers[2].transport, "stdio");
+    EXPECT_EQ(config.mcp.servers[2].command, "python3");
+    EXPECT_EQ(config.mcp.servers[2].env, (std::vector<std::string>{"A=y", "TOKEN=x"}));
+}
+
+TEST(Config, McpServersTransportAliasesAndHeaders) {
+    nlohmann::json table = nlohmann::json::object();
+    table["net"] = {{"type", "sse"}, {"url", "https://example.test/sse"},
+                    {"headers", {{"Authorization", "Bearer x"}}}};
+    McpSettings mcp;
+    apply_mcp_servers_object(mcp, table, std::filesystem::path{"test.jsonc"});
+    ASSERT_EQ(mcp.servers.size(), 1u);
+    EXPECT_EQ(mcp.servers[0].transport, "http_sse");
+    EXPECT_EQ(mcp.servers[0].url, "https://example.test/sse");
+    EXPECT_EQ(mcp.servers[0].header_env, (std::vector<std::string>{"Authorization=Bearer x"}));
+}
+
+TEST(Config, McpServersDedupeTruncatesBaseFirst) {
+    const std::string base(32, 'a');
+    nlohmann::json    table = nlohmann::json::object();
+    table[base]             = {{"command", "x"}};
+    table[base + "-"]       = {{"command", "y"}};
+    McpSettings mcp;
+    apply_mcp_servers_object(mcp, table, std::filesystem::path{"test.jsonc"});
+    ASSERT_EQ(mcp.servers.size(), 2u);
+    EXPECT_EQ(mcp.servers[0].id, base);
+    EXPECT_EQ(mcp.servers[1].id, std::string(30, 'a') + "_2");
+    EXPECT_TRUE(is_valid_mcp_server_id(mcp.servers[0].id));
+    EXPECT_TRUE(is_valid_mcp_server_id(mcp.servers[1].id));
+}
+
+TEST(Config, McpServersDedupeExhaustionThrows) {
+    const std::string base(32, 'z');
+    nlohmann::json    table = nlohmann::json::object();
+    table[std::string(32, 'Z')] = {{"command", "x"}};
+    for (std::size_t n = 2; n <= kMaxMcpDedupeAttempts; ++n) {
+        const std::string suffix = "_" + std::to_string(n);
+        const std::size_t room   = suffix.size() < 32 ? 32 - suffix.size() : 0;
+        table[base.substr(0, room) + suffix] = {{"command", "x"}};
+    }
+    table[base] = {{"command", "x"}};
+    McpSettings mcp;
+    EXPECT_THROW(apply_mcp_servers_object(mcp, table, std::filesystem::path{"test.jsonc"}),
+                 ConfigError);
+}
+
+TEST(Config, McpServersStrictness) {
+    const std::filesystem::path source{"test.jsonc"};
+    {
+        nlohmann::json table = {{"s", {{"unknown", "x"}}}};
+        McpSettings    mcp;
+        EXPECT_THROW(apply_mcp_servers_object(mcp, table, source), ConfigError);
+    }
+    {
+        nlohmann::json table = {{"s", {{"command", "c"}, {"env", {{"K", 5}}}}}};
+        McpSettings    mcp;
+        EXPECT_THROW(apply_mcp_servers_object(mcp, table, source), ConfigError);
+    }
+    {
+        nlohmann::json table = {{"bad/name", {{"command", "c"}}}};
+        McpSettings    mcp;
+        EXPECT_THROW(apply_mcp_servers_object(mcp, table, source), ConfigError);
+    }
+    {
+        nlohmann::json table = {
+            {"s", {{"type", "stdio"}, {"transport", "http_sse"}, {"url", "u"}}}};
+        McpSettings mcp;
+        EXPECT_THROW(apply_mcp_servers_object(mcp, table, source), ConfigError);
+    }
+    {
+        nlohmann::json table = {{"s", {{"type", "http"}}}};
+        McpSettings    mcp;
+        EXPECT_THROW(apply_mcp_servers_object(mcp, table, source), ConfigError);
+    }
+}
+
+TEST(Config, McpMigrationOldArrayAloneLoads) {
+    test::TempWorkspace         workspace("config_mcp_old");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    R"JSONC({"mcp": {"server": [{"id": "alpha", "command": "a"}]}})JSONC");
+    ConfigPaths paths;
+    paths.global = global;
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.mcp.servers.size(), 1u);
+    EXPECT_EQ(config.mcp.servers[0].id, "alpha");
+}
+
+TEST(Config, McpMigrationNewObjectAloneLoads) {
+    test::TempWorkspace         workspace("config_mcp_new");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    R"JSONC({"mcp_servers": {"alpha": {"command": "a"}}})JSONC");
+    ConfigPaths paths;
+    paths.global = global;
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.mcp.servers.size(), 1u);
+    EXPECT_EQ(config.mcp.servers[0].id, "alpha");
+}
+
+TEST(Config, McpMigrationBothKeysSameLayerRejected) {
+    test::TempWorkspace         workspace("config_mcp_both");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    R"JSONC({"mcp": {"server": [{"id": "a", "command": "x"}]},
+                              "mcp_servers": {"b": {"command": "y"}}})JSONC");
+    ConfigPaths paths;
+    paths.global = global;
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("not both"), std::string::npos) << error.what();
+    }
+}
+
+TEST(Config, McpMigrationEmptyOldArrayWithNewObjectLoads) {
+    test::TempWorkspace         workspace("config_mcp_empty_old");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    R"JSONC({"mcp": {"server": []}, "mcp_servers": {"b": {"command": "y"}}})JSONC");
+    ConfigPaths paths;
+    paths.global = global;
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.mcp.servers.size(), 1u);
+    EXPECT_EQ(config.mcp.servers[0].id, "b");
+}
+
+TEST(Config, McpMigrationWorkspaceReplacesGlobalWholesale) {
+    test::TempWorkspace         workspace("config_mcp_layers");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    R"JSONC({"mcp": {"server": [{"id": "g", "command": "g"}]}})JSONC");
+    workspace.write(".ymh/config.jsonc",
+                    R"JSONC({"mcp_servers": {"w": {"command": "w"}}})JSONC");
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.mcp.servers.size(), 1u);
+    EXPECT_EQ(config.mcp.servers[0].id, "w");
+}
+
+TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {
+    const nlohmann::json localcode = nlohmann::json::parse(R"JSON({
+      "mcp_servers": {
+        "brave-search": {
+          "type": "stdio", "command": "python3", "args": ["a"],
+          "env": { "TOKEN": "secret", "REF": "${HOST}" }, "required": true
+        }
+      },
+      "auto_compact_enabled": true,
+      "auto_compact_percent": 80,
+      "max_concurrent_tasks": 3,
+      "skip_permissions": true,
+      "permission": [{ "match": "*.sh", "decision": "allow" }],
+      "default_profile": "p",
+      "profiles": { "p": { "provider": "prov", "model": "m", "max_tokens": 5,
+                           "context_window": 128000 } },
+      "providers": { "prov": { "type": "openai-compatible",
+                               "base_url": "https://x.test/v1", "api_key": "SECRET" } },
+      "orchestrate": true
+    })JSON");
+
+    std::string                         error;
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    ASSERT_TRUE(document.has_value()) << error;
+    const nlohmann::json& doc = *document;
+
+    ASSERT_TRUE(doc.contains("mcp_servers"));
+    const nlohmann::json& server = doc["mcp_servers"]["brave-search"];
+    EXPECT_FALSE(server["required"].get<bool>());
+    EXPECT_EQ(server["env"]["TOKEN"].get<std::string>(), "secret");
+    EXPECT_EQ(server["env"]["REF"].get<std::string>(), "${HOST}");
+    EXPECT_FALSE(doc.contains("providers"));
+    EXPECT_FALSE(doc.contains("permission"));
+    EXPECT_FALSE(doc.contains("skip_permissions"));
+    EXPECT_FALSE(doc.contains("orchestrate"));
+    EXPECT_TRUE(doc["agent"]["compaction"]["enabled"].get<bool>());
+    EXPECT_DOUBLE_EQ(doc["agent"]["compaction"]["threshold_ratio"].get<double>(), 0.8);
+    EXPECT_EQ(doc["agent"]["compaction"]["context_window_tokens"].get<std::int64_t>(), 128000);
+    EXPECT_EQ(doc["llm"]["default"]["base_url"].get<std::string>(), "https://x.test/v1");
+    EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
+    EXPECT_FALSE(doc["llm"]["default"].contains("api_key"));
+    EXPECT_EQ(doc["llm"]["default"]["max_concurrency"].get<std::int64_t>(), 3);
+}
+
+TEST(Config, BuildLocalcodeImportEscapesLiteralDollarBrace) {
+    const nlohmann::json localcode = nlohmann::json::parse(R"JSON({
+      "mcp_servers": {
+        "s": { "command": "echo ${not_a_ref", "env": { "K": "a${1}" } }
+      }
+    })JSON");
+    std::string                         error;
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    ASSERT_TRUE(document.has_value()) << error;
+    EXPECT_EQ((*document)["mcp_servers"]["s"]["command"].get<std::string>(), "echo $${not_a_ref");
+    EXPECT_EQ((*document)["mcp_servers"]["s"]["env"]["K"].get<std::string>(), "a$${1}");
+}
+
+TEST(Config, BuildLocalcodeImportSkipsNonOpenAiProvider) {
+    const nlohmann::json localcode = nlohmann::json::parse(R"JSON({
+      "default_profile": "p",
+      "profiles": { "p": { "provider": "prov", "model": "m" } },
+      "providers": { "prov": { "type": "anthropic", "base_url": "https://x.test/v1" } }
+    })JSON");
+    std::string                         error;
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    ASSERT_TRUE(document.has_value()) << error;
+    EXPECT_FALSE(document->contains("llm"));
+}
+
+TEST(Config, LocalcodeConfigPathUsesHome) {
+    test::TempWorkspace workspace("config_localcode_path");
+    ScopedEnv           home("HOME", (workspace.path() / "home").string());
+    EXPECT_EQ(localcode_config_path(), workspace.path() / "home" / ".localcode" / "config.json");
 }
 
 } // namespace

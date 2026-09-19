@@ -67,6 +67,10 @@ struct PermissionRequest {
 
     SandboxMode            sandbox = SandboxMode::Workspace;
     bool                   destructive = false;
+    // 25-D4: non-mutating forced review. `evaluate` returns Ask before rules,
+    // tool_defaults, default_verdict, and grants; `tool_is_mutating` never
+    // reads it, so `SandboxMode::ReadOnly` does not pre-rule deny the review.
+    bool                   force_ask = false;
 };
 
 struct PolicyRule {

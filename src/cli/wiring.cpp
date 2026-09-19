@@ -51,6 +51,13 @@ std::string default_system_prompt() {
            "invent tool output.";
 }
 
+std::string default_plan_section() {
+    return "You are in plan mode. Explore the codebase and design a concrete plan before "
+           "acting. Every tool remains available, but do not make changes; when the plan is "
+           "ready, present it by calling exit_plan_mode. The user may leave plan mode with "
+           "/plan off.";
+}
+
 LLMProviderConfig to_provider_config(const Config& config) {
     LLMProviderConfig provider;
     provider.provider     = config.llm.provider;
@@ -171,6 +178,8 @@ AgentConfig to_agent_config(const Config& config) {
     agent.sandbox     = SandboxMode::Workspace;
     agent.system_prompt =
         config.agent.system_prompt.empty() ? default_system_prompt() : config.agent.system_prompt;
+    agent.plan_section =
+        config.agent.plan_section.empty() ? default_plan_section() : config.agent.plan_section;
     if (config.agent.reasoning_effort.has_value()) {
         agent.parameters.reasoning_effort = config.agent.reasoning_effort;
     } else if (config.llm.reasoning_effort.has_value()) {

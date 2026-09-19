@@ -41,6 +41,10 @@ namespace ymh {
 
 [[nodiscard]] std::string default_system_prompt();
 
+// 25-D3: the built-in plan-mode guidance section, used when
+// `agent.plan.section` is empty.
+[[nodiscard]] std::string default_plan_section();
+
 // 11-m2-errata §6 (D17): the per-process boot nonce. Minted EXACTLY ONCE at
 // daemon startup (04 §3.3 step 3), after chdir, before store open; a UUIDv4
 // (03 §9.7 / 02 §5.2) stored in `HostIdentity.boot_id` and read by reference

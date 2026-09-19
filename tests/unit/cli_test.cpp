@@ -1,21 +1,26 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <CLI/CLI.hpp>
+#include <nlohmann/json.hpp>
 
 #include "support/test_env.hpp"
 #include "ymh/cli/cli.hpp"
+#include "ymh/config/config.hpp"
 #include "ymh/core/logging.hpp"
 
 namespace {
@@ -294,6 +299,254 @@ TEST(Cli, WorkspaceCommandNeedsNoConfig) {
     EXPECT_EQ(run_cli({"workspace", "list"}, out, err), 0) << err.str();
     EXPECT_EQ(err.str().find("ConfigError"), std::string::npos);
     EXPECT_FALSE(std::filesystem::exists(xdg / "ymh" / "config.jsonc"));
+}
+
+struct ImportRun {
+    bool                  result = false;
+    std::string           out;
+    std::string           err;
+    std::filesystem::path global;
+};
+
+ImportRun run_import(const test::TempWorkspace& workspace, const std::string& localcode_body,
+                     const std::string& input, bool interactive,
+                     const std::string&          config_path = std::string(),
+                     CliInvocation::Command      command     = CliInvocation::Command::Tui) {
+    ScopedEnv xdg("XDG_CONFIG_HOME", (workspace.path() / "config").string());
+    ScopedEnv home("HOME", (workspace.path() / "home").string());
+
+    const std::filesystem::path localcode =
+        workspace.path() / "home" / ".localcode" / "config.json";
+    if (!localcode_body.empty()) {
+        std::filesystem::create_directories(localcode.parent_path());
+        std::ofstream(localcode, std::ios::binary) << localcode_body;
+    }
+
+    CliInvocation invocation;
+    invocation.command     = command;
+    invocation.config_path = config_path;
+
+    ImportRun          run;
+    run.global = workspace.path() / "config" / "ymh" / "config.jsonc";
+    std::istringstream in(input);
+    std::ostringstream out;
+    std::ostringstream err;
+    run.result = maybe_import_localcode_config(invocation, run.global, interactive, in, out, err);
+    run.out    = out.str();
+    run.err    = err.str();
+    return run;
+}
+
+std::string read_text(const std::filesystem::path& path) {
+    std::ifstream      input{path, std::ios::binary};
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+std::size_t count_occurrences(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t pos = text.find(needle); pos != std::string::npos;
+         pos = text.find(needle, pos + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+constexpr const char* kOneServer = R"JSON({"mcp_servers": {"s": {"command": "c"}}})JSON";
+
+TEST(CliImport, NonInteractiveSkipsSilently) {
+    test::TempWorkspace workspace("cli_import_noninteractive");
+    const ImportRun     run = run_import(workspace, kOneServer, "", false);
+    EXPECT_FALSE(run.result);
+    EXPECT_TRUE(run.out.empty());
+    EXPECT_TRUE(run.err.empty());
+    EXPECT_FALSE(std::filesystem::exists(run.global));
+}
+
+TEST(CliImport, OnlyTuiCommandPrompts) {
+    test::TempWorkspace workspace("cli_import_non_tui");
+    const ImportRun     run =
+        run_import(workspace, kOneServer, "\n", true, std::string(), CliInvocation::Command::List);
+    EXPECT_FALSE(run.result);
+    EXPECT_TRUE(run.out.empty());
+}
+
+TEST(CliImport, ExplicitConfigSkips) {
+    test::TempWorkspace workspace("cli_import_explicit");
+    const ImportRun     run = run_import(workspace, kOneServer, "\n", true,
+                                         (workspace.path() / "explicit.jsonc").string());
+    EXPECT_FALSE(run.result);
+    EXPECT_TRUE(run.out.empty());
+}
+
+TEST(CliImport, GlobalDirPresentSkips) {
+    test::TempWorkspace workspace("cli_import_dir_present");
+    std::filesystem::create_directories(workspace.path() / "config" / "ymh");
+    const ImportRun run = run_import(workspace, kOneServer, "\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_TRUE(run.out.empty());
+}
+
+TEST(CliImport, LocalcodeAbsentSkips) {
+    test::TempWorkspace workspace("cli_import_absent");
+    const ImportRun     run = run_import(workspace, "", "\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_TRUE(run.out.empty());
+}
+
+TEST(CliImport, EmptyAnswerImportsAndWritesMode0600) {
+    test::TempWorkspace workspace("cli_import_accept");
+    const ImportRun     run = run_import(workspace, kOneServer, "\n", true);
+    EXPECT_TRUE(run.result) << run.err;
+    EXPECT_NE(run.out.find("first run"), std::string::npos) << run.out;
+    EXPECT_NE(run.out.find("[Y/n]"), std::string::npos) << run.out;
+    ASSERT_TRUE(std::filesystem::is_regular_file(run.global));
+    struct stat st {};
+    ASSERT_EQ(::stat(run.global.c_str(), &st), 0);
+    EXPECT_EQ(static_cast<unsigned>(st.st_mode & 0777u), 0600u);
+
+    const nlohmann::json written = nlohmann::json::parse(read_text(run.global));
+    ASSERT_TRUE(written["mcp_servers"].contains("s"));
+    EXPECT_FALSE(written["mcp_servers"]["s"]["required"].get<bool>());
+
+    ConfigPaths paths;
+    paths.global        = run.global;
+    const Config config = load_config(paths);
+    EXPECT_EQ(config.mcp.servers.size(), 1u);
+}
+
+TEST(CliImport, NoDeclinesWithoutWriting) {
+    test::TempWorkspace workspace("cli_import_decline");
+    const ImportRun     run = run_import(workspace, kOneServer, "n\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_FALSE(std::filesystem::exists(run.global));
+}
+
+TEST(CliImport, EofDeclines) {
+    test::TempWorkspace workspace("cli_import_eof");
+    const ImportRun     run = run_import(workspace, kOneServer, "", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_FALSE(std::filesystem::exists(run.global));
+}
+
+TEST(CliImport, UnknownAnswerRepromptsOnce) {
+    test::TempWorkspace workspace("cli_import_reprompt");
+    const ImportRun     run = run_import(workspace, kOneServer, "huh\ny\n", true);
+    EXPECT_TRUE(run.result) << run.err;
+    EXPECT_EQ(count_occurrences(run.out, "[Y/n]"), 2u) << run.out;
+}
+
+TEST(CliImport, UnknownTwiceDeclines) {
+    test::TempWorkspace workspace("cli_import_unknown");
+    const ImportRun     run = run_import(workspace, kOneServer, "huh\nmeh\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_FALSE(std::filesystem::exists(run.global));
+}
+
+TEST(CliImport, MalformedJsonIsSkippedWithOneLine) {
+    test::TempWorkspace workspace("cli_import_malformed");
+    const ImportRun     run = run_import(workspace, "not json", "\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_TRUE(run.out.empty());
+    EXPECT_NE(run.err.find("is not valid JSON; skipping import"), std::string::npos) << run.err;
+    EXPECT_EQ(count_occurrences(run.err, "\n"), 1u) << run.err;
+}
+
+TEST(CliImport, NonObjectJsonIsInvalid) {
+    test::TempWorkspace workspace("cli_import_nonobject");
+    const ImportRun     run = run_import(workspace, "[]", "\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_NE(run.err.find("is not valid JSON; skipping import"), std::string::npos) << run.err;
+}
+
+TEST(CliImport, OversizedFileIsSkipped) {
+    test::TempWorkspace workspace("cli_import_oversized");
+    const std::string   body =
+        "{\"x\":\"" + std::string(4u * 1024u * 1024u, 'a') + "\"}";
+    const ImportRun run = run_import(workspace, body, "\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_NE(run.err.find("larger than 4 MiB; skipping import"), std::string::npos) << run.err;
+}
+
+TEST(CliImport, SecretsAreNeverLogged) {
+    test::TempWorkspace workspace("cli_import_secrets");
+    const std::string   body = R"JSON({
+      "mcp_servers": {
+        "s": { "command": "c", "env": { "TOKEN": "SUPERSECRET_VALUE" },
+               "headers": { "Authorization": "SECRET_HEADER_VALUE" } }
+      }
+    })JSON";
+    const ImportRun run = run_import(workspace, body, "\n", true);
+    EXPECT_TRUE(run.result) << run.err;
+    EXPECT_EQ(run.out.find("SUPERSECRET_VALUE"), std::string::npos);
+    EXPECT_EQ(run.err.find("SUPERSECRET_VALUE"), std::string::npos);
+    EXPECT_EQ(run.out.find("SECRET_HEADER_VALUE"), std::string::npos);
+    EXPECT_EQ(run.err.find("SECRET_HEADER_VALUE"), std::string::npos);
+    EXPECT_NE(read_text(run.global).find("SUPERSECRET_VALUE"), std::string::npos);
+}
+
+TEST(CliImport, SemanticValidationSkipsAndNotes) {
+    ::unsetenv("YMH_IMPORT_MISSING_VAR");
+    test::TempWorkspace workspace("cli_import_semantic");
+    const std::string   body = R"JSON({
+      "mcp_servers": {
+        "net": { "type": "http", "url": "https://x.test/sse" },
+        "badref": { "command": "c", "env": { "K": "${YMH_IMPORT_MISSING_VAR}" } },
+        "toobig": { "command": "c", "max_result_bytes": 999999999 },
+        "needed": { "command": "c", "required": true },
+        "good": { "command": "c" }
+      }
+    })JSON";
+    const ImportRun run = run_import(workspace, body, "\n", true);
+    EXPECT_TRUE(run.result) << run.err;
+    EXPECT_NE(run.err.find("skipping mcp server 'net': no http_sse transport implemented"),
+              std::string::npos)
+        << run.err;
+    EXPECT_NE(run.err.find("skipping mcp server 'badref': server 'badref': missing environment "
+                           "variable: YMH_IMPORT_MISSING_VAR"),
+              std::string::npos)
+        << run.err;
+    EXPECT_NE(run.err.find("skipping mcp server 'toobig'"), std::string::npos) << run.err;
+    EXPECT_NE(run.err.find("server 'needed': 'required' is not imported"), std::string::npos)
+        << run.err;
+
+    const nlohmann::json written = nlohmann::json::parse(read_text(run.global));
+    EXPECT_FALSE(written["mcp_servers"].contains("net"));
+    EXPECT_FALSE(written["mcp_servers"].contains("badref"));
+    EXPECT_FALSE(written["mcp_servers"].contains("toobig"));
+    ASSERT_TRUE(written["mcp_servers"].contains("needed"));
+    EXPECT_FALSE(written["mcp_servers"]["needed"]["required"].get<bool>());
+    EXPECT_TRUE(written["mcp_servers"].contains("good"));
+}
+
+TEST(CliImport, LoaderRejectedDocumentIsNotWritten) {
+    test::TempWorkspace workspace("cli_import_loader_reject");
+    const ImportRun     run = run_import(
+        workspace, R"JSON({"mcp_servers": {"s": {"type": "bogus", "command": "c"}}})JSON",
+        "\n", true);
+    EXPECT_FALSE(run.result);
+    EXPECT_FALSE(std::filesystem::exists(run.global));
+    EXPECT_NE(run.err.find("imported config failed validation"), std::string::npos) << run.err;
+}
+
+TEST(CliImport, MoreThanMaxServersStaysNonRequired) {
+    test::TempWorkspace workspace("cli_import_many");
+    std::string         body = "{\"mcp_servers\": {";
+    for (int i = 0; i < 9; ++i) {
+        if (i > 0) {
+            body += ",";
+        }
+        body += "\"s" + std::to_string(i) + "\": {\"command\": \"c\"}";
+    }
+    body += "}}";
+    const ImportRun run = run_import(workspace, body, "\n", true);
+    EXPECT_TRUE(run.result) << run.err;
+    const nlohmann::json written = nlohmann::json::parse(read_text(run.global));
+    ASSERT_EQ(written["mcp_servers"].size(), 9u);
+    for (auto it = written["mcp_servers"].begin(); it != written["mcp_servers"].end(); ++it) {
+        EXPECT_FALSE(it.value()["required"].get<bool>());
+    }
 }
 
 } // namespace

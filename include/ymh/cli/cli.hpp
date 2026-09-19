@@ -12,6 +12,7 @@
 //   ymh --version
 
 #include <cstddef>
+#include <filesystem>
 #include <iosfwd>
 #include <string>
 #include <vector>
@@ -81,5 +82,18 @@ struct CliInvocation {
 // Parses and executes. Returns a process exit code.
 int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err);
 int run_cli(int argc, char** argv);
+
+// 25-D14/D15: first-run localcode import. Returns true iff a config was imported
+// and written. Runs only under 25-D14's trigger (Tui, no explicit `--config`, the
+// conventional global config directory absent, `~/.localcode/config.json` a
+// regular file, interactive). `in`/`out`/`err` are injected for tests. Creates
+// the global config directory and writes via a 0600 temp + atomic rename.
+[[nodiscard]] bool maybe_import_localcode_config(const CliInvocation& invocation,
+                                                 const std::filesystem::path& global_config,
+                                                 bool interactive, std::istream& in,
+                                                 std::ostream& out, std::ostream& err);
+
+// 25-D14: hard size bound on the localcode file read before prompting.
+inline constexpr std::size_t kLocalcodeImportMaxBytes = 4u * 1024u * 1024u;
 
 } // namespace ymh

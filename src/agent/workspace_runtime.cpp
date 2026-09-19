@@ -10,6 +10,7 @@
 #include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/llm_pool.hpp"
+#include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
@@ -25,6 +26,7 @@
 #include "ymh/skills/skill_catalog.hpp"
 #include "ymh/skills/skill_tool.hpp"
 #include "ymh/tools/builtin_tools.hpp"
+#include "ymh/tools/plan_tools.hpp"
 #include "ymh/tools/terminal_tool.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
@@ -114,10 +116,19 @@ public:
           pool_(governor_.caps().max_llm_concurrency),
           ring_(governor_.caps().session_output_ring_bytes),
           sink_(ring_),
-          sessions_(*store_, bus_) {
+          sessions_(*store_, bus_),
+          plan_mode_([this](const SessionId& id, payload::PlanMode mode) {
+              try {
+                  if (auto session = sessions_.sessionPtr(id)) {
+                      session->append(mode);
+                  }
+              } catch (const UnknownSession&) {
+              }
+          }) {
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
             registrations_.push_back(tools_.add(std::move(tool)));
         }
+        registrations_.push_back(tools_.add(make_exit_plan_mode_tool()));
         if (environment_->pty().available()) {
             registrations_.push_back(tools_.add(make_terminal_tool(tool_config_)));
         }
@@ -135,7 +146,13 @@ public:
         mcp_->start({}).get();
         tools_.freeze();
 
+        assembler_.set_plan_policy_provider(
+            [this](const Session& session) -> std::string {
+                return plan_mode_.active(session) ? agent_config_.plan_section : std::string{};
+            });
+
         services_.sessions        = &sessions_;
+        services_.plan_mode       = &plan_mode_;
         services_.governor        = &governor_;
         services_.tools           = &tools_;
         services_.policy          = &policy_;
@@ -186,6 +203,7 @@ public:
     OutputRing                         ring_;
     RingOutputSink                     sink_;
     SessionManager                     sessions_;
+    PlanModeController                 plan_mode_;
     AgentServices                      services_;
     std::unique_ptr<AgentRegistry>     agents_;
 };
@@ -297,6 +315,7 @@ const SkillCatalog&   WorkspaceRuntime::skills() const noexcept {
 LLMProvider*          WorkspaceRuntime::provider() noexcept { return impl_->provider_.get(); }
 LLMPool&              WorkspaceRuntime::pool() noexcept { return impl_->pool_; }
 ContextAssembler&     WorkspaceRuntime::context() noexcept { return impl_->assembler_; }
+PlanModeController&   WorkspaceRuntime::plan_mode() noexcept { return impl_->plan_mode_; }
 
 const AgentConfig& WorkspaceRuntime::agent_config() const noexcept { return impl_->agent_config_; }
 

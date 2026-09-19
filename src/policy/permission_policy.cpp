@@ -205,6 +205,9 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request) c
     if (request.sandbox == SandboxMode::ReadOnly && tool_is_mutating(request)) {
         return PolicyVerdict::Deny;
     }
+    if (request.force_ask) {
+        return PolicyVerdict::Ask;
+    }
 
     std::vector<PolicyRule> candidates;
     {

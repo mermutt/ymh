@@ -6,6 +6,7 @@
 // never overrides provider-reported `Usage`.
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -60,12 +61,18 @@ class SessionContextAssembler final : public ContextAssembler {
 public:
     SessionContextAssembler(ToolRegistry& tools, std::string systemPrompt);
 
+    // 25-D3: optional. When set and it returns non-empty for the assembled
+    // session, the text is appended to the system message as a paragraph.
+    void set_plan_policy_provider(
+        std::function<std::string(const Session&)> provider);
+
     std::vector<Message> assemble(const Session&, const TurnContext&) const override;
     std::vector<ToolSchema> tools() const override;
 
 private:
-    ToolRegistry& tools_;
-    std::string   systemPrompt_;
+    ToolRegistry&                              tools_;
+    std::string                                systemPrompt_;
+    std::function<std::string(const Session&)> plan_policy_;
 };
 
 class NullCompactor final : public Compactor {
