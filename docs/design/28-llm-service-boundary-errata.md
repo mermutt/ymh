@@ -2,7 +2,16 @@
 
 ```
 Status: written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
-Revision: Rev 2 — closes the gate28 MEDIUMs and LOWs. (1) `PreparedCall::retry_policy()`
+Revision: Rev 3 — pins the `LlmCallConfig::provider` source, the cross-cutting
+          decision that gate31's spec-31 MEDIUM and gate32's spec-32 M2 converged
+          on: `AgentConfig::provider` (a new field on `agent.hpp:94-105`),
+          populated by `to_agent_config` from `config.llm.provider`
+          (`config.hpp:101`; `wiring.cpp:63,174-190`), with the runtime's
+          registered default route when unset and a loud typed
+          `LLMErrorCode::NoProviderRoute` failure at `prepare_call` — §3.5,
+          §5.3, §7, §8, §9 (L26), §10 (L-F27), §13.8, 28-D9. Specs 31/32
+          **reference** this pin; they define no competing source. Rev 2 — closes
+          the gate28 MEDIUMs and LOWs. (1) `PreparedCall::retry_policy()`
           is sourced from `LLMProvider::retry_policy()`, captured by
           `register_adapter` (signature unchanged) — §3.1, §6.1. (2)
           `canonical_template()`'s `system_prompt` and `system_prompt_digest` basis
@@ -27,7 +36,9 @@ Scope:    pin the provider-neutral call service (`LlmRuntime`) above
           /template-digest reconstruction contract; the logged request header as
           a changed snapshot; one provider attempt per stream with retry as a
           separate concern; the terminal result at the service boundary; the
-          `ContextCompactor` re-seam; and `LLMErrorCode::InvalidPreparedCall`.
+          `ContextCompactor` re-seam; `LLMErrorCode::InvalidPreparedCall`; and
+          the `LlmCallConfig::provider` source (`AgentConfig::provider` → the
+          runtime's default route → a loud typed no-route failure).
 Supersedes: (quoted with anchors; each is a 08 clause this errata replaces)
           - 08 §3.7 :469-492 "Retryable codes (only before any event is
             dispatched) … Retry policy is config-driven" — the pre-first-event
@@ -66,8 +77,8 @@ Retained: L1–L17 (L7 explicitly retained; only the retry-placement text of
 > reserve a number for them.
 
 **Naming note.** Invariants local to this errata extend the 08 `L` namespace as
-**`L18`–`L25`** (08 ends at `L17`, `08 §10 :981-1057`); failure modes extend as
-**`L-F19`–`L-F26`** (08 ends at `L-F18`); decisions are **`28-D1`–`28-D8`**.
+**`L18`–`L26`** (08 ends at `L17`, `08 §10 :981-1057`); failure modes extend as
+**`L-F19`–`L-F27`** (08 ends at `L-F18`); decisions are **`28-D1`–`28-D9`**.
 The `28-D#` prefix cannot collide with `26-D#` (the alignment register) or with
 the 08 decision letters `(a)`–`(u)`.
 
@@ -77,7 +88,8 @@ here, matching the convention of `21-config-jsonc-errata.md` and
 `23-session-lifecycle-errata.md`. It does not pin the `llm/request_header` or
 `llm/retry` **wire codecs** (owned by `29-event-family-errata.md`, keys pinned in
 `26` §4.3.9.1 :943-948) or the `session.persist_prompt_text` config key (owned by
-`21`). It records two ownership gaps in §13 rather than inventing a resolution.
+`21`). It records the ownership gaps and the required 21 amendment in §13 rather
+than inventing a resolution.
 
 ---
 
@@ -126,6 +138,9 @@ reconstructable from the log. A durable `LlmRequestHeader` is appended as a
 **changed snapshot**. `LLMProvider::stream` is **one provider attempt**; retry is
 a separate durable executor. Every service-level `stream()` returns a terminal
 `LLMResponse`. `ContextCompactor` is re-seamed to `LlmRuntime&`.
+`LlmCallConfig::provider` is config-sourced from `AgentConfig::provider`; an
+unset value resolves to the runtime's registered default route, and a request
+with no matching route fails loud at `prepare_call` (§3.5).
 
 ---
 
@@ -147,6 +162,12 @@ dispatch path changes. Both are true and are not contradictory: the adapter
 contract is additive-safe, the loop seam is breaking. **`08 §3.4` (`LLMProvider`)
 is retained; `AgentServices::provider` (`agent_loop.hpp:64`) is replaced.**
 
+**Rev 3 (28-D9) is additive.** The provider-source pin adds
+`AgentConfig::provider` (a new field on the runtime config, no JSON key of its
+own) and `LLMErrorCode::NoProviderRoute` (a new closed-enum value). The
+`LLMProvider` adapter contract is unchanged, and no wire codec changes: it is an
+`Add.` pin owned by `28` (§3.5), consumed by `31`/`32`.
+
 ---
 
 ## 3. The `LlmRuntime` seam (26-D1)
@@ -161,7 +182,7 @@ namespace ymh {
 // 1:1 in exactly one place (buildRequest), so there is one source of truth at
 // dispatch (26 §4.3.1 :177-180; T-M5).
 struct LlmCallConfig {
-    ProviderId                   provider;
+    ProviderId                   provider;   // source + default-route fallback: §3.5
     ModelId                      model;
     std::optional<std::string>   reasoning_effort;
     std::optional<double>        temperature;
@@ -365,6 +386,51 @@ sequence field is stored.
   runtime also exposes `list_providers`-backed discovery is pinned by the
   runtime interface above (`list_providers` returns `ProviderInfo`).
 
+### 3.5 The `LlmCallConfig::provider` source (Rev 3)
+
+This is the cross-cutting decision that **gate31's spec-31 MEDIUM and gate32's
+spec-32 M2** independently converged on. `31-agent-loop-errata.md` (Rev 2) and
+`32-compaction-errata.md` (Rev 1) **reference this pin**; they define no
+competing source.
+
+- **Source.** `LlmCallConfig::provider` is sourced from a new
+  **`AgentConfig::provider`** field (`include/ymh/agent/agent.hpp:94-105`),
+  populated by `to_agent_config` from `config.llm.provider`
+  (`include/ymh/config/config.hpp:101`; `src/cli/wiring.cpp:63,174-190`) — the
+  same config knob that names the adapter's route today, so there is one source,
+  not two. It is config-driven, mirroring how a localcode profile names its
+  provider (`25-ui-ux-errata.md` §9.1 :1735:
+  `profiles[name] = {provider, model, …}`).
+- **Layer, default, scope.** `AgentConfig::provider` has no separate JSON key of
+  its own: it inherits `config.llm.provider`'s layering (global then workspace
+  JSONC, workspace overrides; `21` §7.7) and its default `"openai-compatible"`
+  (`config.hpp:101`). `AgentConfig` is constructed once per daemon by
+  `to_agent_config`, so the field is daemon-scoped and fixed for the daemon's
+  lifetime; it is **empty** iff `config.llm.provider` is empty.
+- **Empty = the runtime's default route.** `LlmCallConfig::provider` is a
+  required field (the interface above) but may carry the empty sentinel. An
+  empty value means "resolve the runtime's registered **default route** at
+  `prepare_call`"; `buildRequest` does not invent a route. The runtime's default
+  route is a **28-owned representation** (dsh has no explicit default-route
+  concept): the **first non-empty `ProviderId` of the first adapter registered,
+  in registration order**, computed at route-lookup time over the currently
+  registered routes (a route is a non-empty id; an empty registration
+  contributes none). When no adapter/route is registered there is no default
+  route. `resolve_call_config` is deliberately **not** added: the provider is
+  resolved by `prepare_call`'s route lookup, not by a separate service call.
+- **No route is a loud typed failure.** `prepare_call` resolves
+  `config.provider`: an empty value selects the default route, a non-empty value
+  must match a registered route exactly. If neither resolves (the named provider
+  is unregistered, or the value is empty and no default route exists),
+  `prepare_call` fails **before producing a `PreparedCall`** with a typed
+  `NoProviderRouteError` carrying the new additive enumerator
+  `LLMErrorCode::NoProviderRoute` (§7) and `detail = "no route for
+  config.provider"`. It is never a silent fallback to another provider. The
+  direct `LlmRuntime::stream` route lookup raises the same error. At the loop
+  boundary it normalizes to `AgentErrorCode::ProviderFailed` (`31` A-F23); the
+  compactor maps it to `CompactionError::Code::NoProviderRoute` (`32` §2.1,
+  C-F24).
+
 ---
 
 ## 4. The frozen request and the reconstruction contract (26-D3, 26-I2)
@@ -506,6 +572,20 @@ proposed change is applied only if `!call_config_equals(proposed, held)`, in
 which case a new header is logged with `starts_series = true`. The header is
 found positionally at replay; `RequestId` is never persisted (26-D2 :140).
 
+- **Provider is part of the config.** `buildRequest()` sets the proposed
+  `LlmCallConfig::provider` from `AgentConfig::provider` (§3.5). Because
+  `provider` is a `LlmCallConfig` field, a provider change is a config change
+  (`call_config_equals` false) and forces a new header with
+  `starts_series = true`, exactly like a model or parameter change.
+- **First dispatch of a fresh session.** On a fresh (or legacy) session
+  `held_config_` is `nullopt` (`31` §5.3 :423-431; L20), so there is no held
+  header to read. The proposed config — including the provider — is therefore
+  built entirely from `AgentConfig` and logged as the first header; the loop
+  never waits for a later dispatch to obtain the provider, and the empty
+  provider sentinel is resolved by the runtime at `prepare_call` (§3.5), not
+  back-filled into the held config. `held_config_` is only the comparison
+  baseline for subsequent dispatches.
+
 ### 5.4 Prompt-text policy (D23, 26-I11)
 
 - The header **always** carries `system_prompt_digest`.
@@ -589,15 +669,16 @@ once (§7).
 
 ---
 
-## 7. `PreparedCall` misuse: `InvalidPreparedCall`
+## 7. `LLMErrorCode` additions: `InvalidPreparedCall` and `NoProviderRoute`
 
 `LLMErrorCode` is a closed enum (`include/ymh/llm/stream.hpp:40-56`). This errata
-adds **one** value, additively:
+adds **two** values, additively:
 
 ```cpp
 enum class LLMErrorCode : std::uint8_t {
     /* … existing values unchanged … */
     InvalidPreparedCall,
+    NoProviderRoute,        // Rev 3; §3.5, §7 (route lookup failure)
 };
 ```
 
@@ -613,26 +694,45 @@ struct PreparedCallError {
 };
 ```
 
-Mapping (26 §4.7 :1247-1250): at the loop boundary it maps to
-`AgentErrorCode::ProviderFailed`; at load/assembly it maps to `ConfigError`
-(process exit 2). The `PreparedCall::stream` path checks
+`NoProviderRouteError` is the carrier for the §3.5 route-lookup failure — it is
+not a `PreparedCall` misuse (no `PreparedCall` is ever produced):
+
+```cpp
+struct NoProviderRouteError {
+    LLMErrorCode code = LLMErrorCode::NoProviderRoute;
+    ProviderId   provider;   // the requested id; empty => no default route exists
+    std::string  detail = "no route for config.provider";
+};
+```
+
+Mapping for `PreparedCallError` (26 §4.7 :1247-1250): at the loop boundary it
+maps to `AgentErrorCode::ProviderFailed`; at load/assembly it maps to
+`ConfigError` (process exit 2). The `PreparedCall::stream` path checks
 `call_config_equals(request.config(), config())` before dispatch and consumes
 the one-shot flag; a second call or mismatch is a programming error and is
 never silently retried.
 
-**Wire/diagnostic string and switch audit (gate28 LOW-1 pin).**
+`NoProviderRouteError` maps the same way at the loop
+(`AgentErrorCode::ProviderFailed`, §3.5) and additionally to
+`CompactionError::Code::NoProviderRoute` in the compactor (`32` C-F24). It is
+raised by the route lookup **before** any `PreparedCall` exists, so it never
+reaches the one-shot/mismatch path.
+
+**Wire/diagnostic string and switch audit (gate28 LOW-1 pin; extended Rev 3).**
 `to_string(LLMErrorCode::InvalidPreparedCall)` returns exactly
-`"invalid_prepared_call"` (snake_case, matching the existing values). Because
-`to_string` is the only exhaustive, `default:`-less switch over `LLMErrorCode`
-(`include/ymh/llm/stream.hpp:69-87`), adding the enumerator requires adding
-`case LLMErrorCode::InvalidPreparedCall: return "invalid_prepared_call";` in the
-same change — otherwise the build breaks under `-Wswitch`/`-Werror`, which
-`AGENTS.md` forbids suppressing. No event codec serializes `LLMErrorCode` today
-(no reference under `src/session/`), so the string is diagnostic-only; it is
-pinned now so a future codec has a stable value.
+`"invalid_prepared_call"` and `to_string(LLMErrorCode::NoProviderRoute)` returns
+exactly `"no_provider_route"` (snake_case, matching the existing values).
+Because `to_string` is the only exhaustive, `default:`-less switch over
+`LLMErrorCode` (`include/ymh/llm/stream.hpp:69-87`), adding either enumerator
+requires adding its `case` in the same change — otherwise the build breaks under
+`-Wswitch`/`-Werror`, which `AGENTS.md` forbids suppressing. No event codec
+serializes `LLMErrorCode` today (no reference under `src/session/`), so the
+strings are diagnostic-only; they are pinned now so a future codec has stable
+values.
 
 The `LLMError`/`LlmFailure` shapes are reused verbatim by the `llm/retry` and
-`llm/request_header` payloads; no other error code is added (26 §4.7 :1243-1246).
+`llm/request_header` payloads; no error code beyond `InvalidPreparedCall` and
+`NoProviderRoute` is added (26 §4.7 :1243-1246).
 
 ---
 
@@ -659,6 +759,14 @@ ContextCompactor(LlmRuntime&           runtime,
   (`src/agent/compactor.cpp:103-113`) is unchanged.
 - The daemon's construction (`src/agent/workspace_runtime.cpp:170-172`) passes
   the runtime instead of `*provider_`.
+- **Summarizer provider (closes gate32 M2).** The compactor's
+  `LlmCallConfig::provider` comes from the same source as the loop's (§3.5):
+  `CompactionPolicy::provider` (`32` §2.1 :132-148) is populated from
+  `AgentConfig::provider`, and an empty value resolves to the runtime default
+  route at `prepare_call`. A missing route surfaces as
+  `CompactionError::Code::NoProviderRoute` (`32` C-F24). `32` owns the 13-side
+  field and the error mapping; this errata owns the source and the runtime
+  failure.
 - **13-owned text change.** `13-context-compaction.md §5.2 :604-610` and
   `:633` pin the old constructor; they require a 13 errata before Wave 1 code.
   This errata records the dependency; it does not amend 13.
@@ -707,6 +815,14 @@ a second dispatch or a config mismatch is `InvalidPreparedCall`. (26-D3, §7)
 `session.persist_prompt_text`, and replay verifies the digest in both cases.
 (26-I11, D23)
 
+**L26 — Provider id is config-sourced and route-resolved at the boundary.**
+`LlmCallConfig::provider` is sourced from `AgentConfig::provider` (itself from
+`config.llm.provider`); an empty value resolves to the runtime's registered
+default route at `prepare_call`, and a request with no matching route fails loud
+with `NoProviderRouteError{NoProviderRoute}` before any `PreparedCall` is
+produced — never a silent fallback to another provider. (`31` A23, `32` C-F24;
+§3.5)
+
 L1–L17 remain in force; L7 is explicitly retained, L4 is re-scoped to the
 adapter sink (the service-level terminal is L23), and L16 (no exception crosses
 the **provider** seam) is unchanged — `PreparedCallError` is raised **above**
@@ -726,6 +842,7 @@ the provider seam and is normalized at the loop boundary (§7).
 | **L-F24** | `PreparedCall` double dispatch or config mismatch | one-shot flag + `call_config_equals` | `PreparedCallError{InvalidPreparedCall}`; `ProviderFailed` at the loop, `ConfigError` at load (§7) |
 | **L-F25** | Replay template digest mismatch | `rebuild.template_digest() != header.template_digest` | Fail loud; never guess or synthesize a header (26-F13) |
 | **L-F26** | Tool-catalog drift mid-series | `tool_names`/`tool_schema_digests` in the header | New header + new series; re-derived schema must match its digest (26-F6) |
+| **L-F27** | No route for `config.provider` | `prepare_call`/`stream` route lookup (§3.5) | Loud typed `NoProviderRouteError{NoProviderRoute}` with `detail = "no route for config.provider"`; no `PreparedCall` is produced; the loop normalizes to `ProviderFailed`, the compactor to `CompactionError::Code::NoProviderRoute`; never a silent fallback (`31` A-F23, `32` C-F24) |
 
 ---
 
@@ -737,6 +854,8 @@ the provider seam and is normalized at the loop boundary (§7).
 | `registerAdapter` / `AdapterRegistrationHandle` | `register_adapter` / `AdapterHandle` | 26 §4.3.1 :255-261, :278-279 |
 | `llm/stream` waterfall | `add_stream_interceptor` / `StreamInterceptor` | 26 §4.3.1 :263-267 |
 | `prepareCall` / `PreparedLlmCall` (deep-frozen config) | `prepare_call` / `PreparedCall` / `FrozenRequest` | 26 §4.3.1 :210-247; L19, L24 |
+| `GenerateOptions.provider` / `LlmCallConfig.provider` | `AgentConfig::provider` (config-driven) → `LlmCallConfig::provider`, runtime default route when empty | 26 §2.1.1 :127, :183; §3.5; L26 |
+| `resolveCallConfig` (materializes adapter defaults) | **not added**; the provider is resolved by `prepare_call`'s route lookup instead (§3.5) | 26 §2.1.1 :130 |
 | `callConfigEquals` + logged changed snapshots | `call_config_equals` + `payload::LlmRequestHeader` | 26 §4.3.2; L21 |
 | "One provider attempt per stream; retry separate" | `LLMProvider::stream` one attempt; durable executor | 26-I3; L22 |
 | Terminal `finish`/`error`/`aborted` | terminal `LLMResponse` at the service boundary | 26-I4; L23 |
@@ -784,6 +903,16 @@ Deterministic, offline (`FakeLLM`, spec 08 §7; `include/ymh/llm/fake_llm.hpp`):
 11. TSan: concurrent `register_adapter`/`AdapterHandle` destruction versus
     in-flight `stream`.
 
+**Provider routing (Rev 3).**
+12. `buildRequest` sets `LlmCallConfig::provider` from `AgentConfig::provider`;
+    an empty value is the sentinel and `prepare_call` selects the first
+    registered route; a named but unregistered provider, and an empty provider
+    with no registered route, both fail with
+    `NoProviderRouteError{NoProviderRoute}` and produce no `PreparedCall`; the
+    loop normalizes to `ProviderFailed` and the compactor to
+    `CompactionError::Code::NoProviderRoute` (`L26`, `L-F27`). A provider change
+    between dispatches logs a new header with `starts_series = true`.
+
 **Live (opt-in).** No new live test is required by this errata; the existing
 opt-in live layer (`YMH_LIVE_LLM=1`) exercises the same `LlmRuntime` path once
 Wave 1 lands.
@@ -820,6 +949,17 @@ Wave 1 lands.
 7. **`08` in-place text remains the verified baseline.** This errata amends by
    reference; `DESIGN_STATUS.md` should record that `08` now has errata `28` and
    is re-gated together with it. (Tracker edit is the lead's.)
+8. **21 config-surface amendment required (Rev 3).** Adding
+   `AgentConfig::provider` touches spec 21's config allowlist and mapping
+   surface: `to_agent_config` gains a new `Config`→`AgentConfig` mapping from
+   `config.llm.provider`
+   (`21` §5.4's `to_agent_config` row, `:532`). The JSON key
+   `llm.default.provider` is **already** in 21's allowlist (`21` §7.7 :1242-1253;
+   the key-set table `:407`), so no new JSON key is introduced by this pin; the
+   required amendment is the mapping-table record (and the §7.3 `agent` note).
+   If a distinct `agent.provider` override key is ever wanted, that is a
+   separate 21 decision, not this pin. Recorded as a required 21 amendment; this
+   errata does not edit 21.
 
 ---
 
@@ -827,12 +967,13 @@ Wave 1 lands.
 
 | Rev | Change |
 |---|---|
+| 3 | Pins the `LlmCallConfig::provider` source — the cross-cutting decision gate31's spec-31 MEDIUM and gate32's spec-32 M2 converged on. `AgentConfig::provider` (new field, `agent.hpp:94-105`) is populated by `to_agent_config` from `config.llm.provider` (`config.hpp:101`; `wiring.cpp:63,174-190`); an empty value resolves to the runtime's registered default route (a 28-owned representation: the first route of the first adapter registered) at `prepare_call`; a no-route request is a loud typed `NoProviderRouteError{LLMErrorCode::NoProviderRoute}` with `detail = "no route for config.provider"`, never a silent fallback — §3.5, §5.3, §7, §8, §9 (L26), §10 (L-F27), §11, §12, §13.8, 28-D9. Specs 31/32 reference this pin. Records the required 21 config-surface amendment. |
 | 2 | Closes the gate28 findings. **MEDIUM-1:** `PreparedCall::retry_policy()` is sourced from a new non-pure `LLMProvider::retry_policy()` accessor captured by `register_adapter` (signature unchanged; `LLMProviderConfig::retry` stays the single source of truth) — §3.1, §6.1. **MEDIUM-2:** `canonical_template()`'s `system_prompt` and `system_prompt_digest` basis is pinned to the frozen request's `Role::System` message text, and §5.4 is reconciled so the plan-mode divergence is removed — §4.2, §4.5, §5.4. **LOW-1:** `to_string(InvalidPreparedCall)` = `"invalid_prepared_call"` plus the exhaustive-switch audit — §7. **LOW-2:** the loop's dispatch path is pinned to `prepare_call`→`PreparedCall::stream` — §3.1. **LOW-3:** adapter ownership is stated once (the runtime owns the registered adapters) — §3.3, §3.4, 28-D2. **LOW-4:** `kTemplateSchemaVersion = 1` and its change rule are pinned — §4.2, 28-D4. |
 | 0 | Initial Wave-0 A2 errata. Pins `LlmRuntime`/`PreparedCall`/`AdapterHandle`/`InterceptorHandle`/`ProviderInfo`, `LlmCallConfig`/`call_config_equals`/`CallPurpose`, `FrozenRequest` + canonical serialization/reconstruction, `payload::LlmRequestHeader` as a changed snapshot, one-attempt-per-stream with the separate-retry end state and the no-double-retry constraint, the `ContextCompactor` re-seam, `LLMErrorCode::InvalidPreparedCall`, `L18–L25`, `L-F19–L-F26`, and the `28-D1–28-D8` decisions. Records three ownership gaps (06 errata, retry-executor wave, 13 errata) without inventing a resolution. Claims number 28; supersedes the stale 27–30 reservation. |
 
 ---
 
-## 15. Decisions (28-D1–28-D8)
+## 15. Decisions (28-D1–28-D9)
 
 - **28-D1** — `LlmRuntime` is the loop's only LLM handle; `AgentServices` carries
   `LlmRuntime*` and no `LLMProvider*`. (26-D1; L18)
@@ -857,6 +998,13 @@ Wave 1 lands.
   terminal. (26-I4; L23)
 - **28-D8** — `ContextCompactor` takes `LlmRuntime&`; its summarizer call is a
   `CallPurpose::Compaction` dispatch under one `LLMPool` slot. (T-M9)
+- **28-D9** — `LlmCallConfig::provider` is sourced from `AgentConfig::provider`
+  (populated from `config.llm.provider`); an empty value resolves to the
+  runtime's registered default route at `prepare_call`; a request with no
+  matching route fails loud with `NoProviderRouteError{NoProviderRoute}`,
+  normalized to `ProviderFailed` at the loop and
+  `CompactionError::Code::NoProviderRoute` in the compactor. Specs 31/32
+  reference this pin. (`31` A23/A-F23, `32` C-F24; L26; §3.5)
 
 ---
 
@@ -886,5 +1034,14 @@ Wave 1 lands.
   `include/ymh/llm/redaction.hpp:4-6`; `include/ymh/config/config.hpp:83-88`;
   `src/cli/wiring.cpp:48-52,70-74,179-180`; `include/ymh/session/events.hpp:117`;
   `src/session/session_persistence.cpp:228-232`.
+- Rev 3 tree anchors: `include/ymh/agent/agent.hpp:94-105` (no `provider` field
+  today), `include/ymh/config/config.hpp:101` (`LlmSettings::provider`),
+  `src/cli/wiring.cpp:63,174-190` (`to_provider_config`/`to_agent_config`);
+  `include/ymh/agent/agent_loop.hpp:158` (the target `held_config_` site —
+  `compactions_this_turn_` today, per `31` §5.3).
+- Referencing errata: `docs/design/31-agent-loop-errata.md` (Rev 2) §5.3
+  :438-447 (A23, A-F23, 31-D7) and `docs/design/32-compaction-errata.md` (Rev 1)
+  §2.1 :132-148 and C-F24 — both consume this errata's provider-source pin and
+  define no competing source.
 - Conventions: `21-config-jsonc-errata.md` §15 (revision log),
   `23-session-lifecycle-errata.md` (amends-by-reference).

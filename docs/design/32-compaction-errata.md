@@ -1,7 +1,7 @@
 # 32 — Compaction Errata: The Wave-1 Re-seam and the D12/D13 Output-Processing Contract (spec-13 amendment)
 
 ```
-Status: written · verified: — · reviewer: — · Rev 0 (Wave-1 prerequisite)
+Status: written · verified: — · reviewer: — · Rev 1 (Wave-1 prerequisite)
 Component: 32 (errata) — amends `13-context-compaction.md` by reference. It owns
            the 13 side of the `26-dsh-alignment-part2.md` (verified Rev 7, GATE
            PASS) decisions `26-D12` (the tool-result pruner) and `26-D13`
@@ -15,7 +15,9 @@ Depends on: `26-dsh-alignment-part2.md` (verified Rev 7, GATE PASS) §4.2
             §4.3.9.1 (:945-958), §4.3.9.2 (:986, :994), §4.4 (:1079, :1097),
             §4.6 (:1197-1202), §5 Wave 1 (:1412-1413) and Wave 4 (:1466-1479);
             `28-llm-service-boundary-errata.md` (verified Rev 2) §3, §8
-            (:639-664); `13-context-compaction.md` (verified); `07-tools-
+            (:639-664) and the pending Rev 3 `LlmCallConfig::provider` amendment
+            (`AgentConfig::provider`; runtime default-route fallback; loud typed
+            no-route failure); `13-context-compaction.md` (verified); `07-tools-
             execution.md` (verified) §5.2 (:601-612) and X10; `06-agent-loop.md`
             (verified) §5.3/§5.9; `30-architecture-cascade-errata.md` Rev 2
             (:5-12); the working tree at authoring time.
@@ -35,7 +37,7 @@ Supersedes: `26-dsh-alignment-part2.md` §5 Stage B (:1389), which placed the `1
             `27`/`28`/`29`/`30` are renumbered to `31+` per `28` §14 / `29` §1.1.
 Amends: `13-context-compaction.md` §4.1 (the "does not add fields to the payload"
         pin, :489), §5.2 (the constructor and member, :604-637), §5.5 (the
-        summarization call, :748-783), §11.3 (the errata ledger, :1800-1806) — all
+        summarization call, :748-783), §11.3 (the errata ledger, :1802-1812) — all
         by reference, not in place.
 ```
 
@@ -69,12 +71,13 @@ verified `26` program changes two things it pins:
 
 2. **The payload pin.** `13` §4.1 (:489) states: "This spec does **not** add
    fields to the payload." `26-D13` (:151) adds fields to
-   `payload::ContextCompaction`. `26` §4.4 (:1097) classifies this `Brk. (13)`.
+   `payload::ContextCompaction`. `26` §4.4 (:1097) classifies this `Brk. (D13)`.
    `13`'s text must therefore be amended — by this errata, not in place.
 
-`13` §11.3 (:1764-1806) already carries an errata ledger (`A1`–`A5`) for the
-manual-`/compact` path. This errata extends that ledger (`A6`–`A7`) and does not
-disturb `A1`–`A5`.
+`13` §11.3 (:1764-1812) already carries an errata ledger `A1`–`A11` (the table
+runs `:1802-1812`; `A6` is at `:1807`, `A7` at `:1808`) for the manual-`/compact`
+path and the M3 re-review fixes. This errata extends that ledger (`A12`–`A13`)
+and does not disturb `A1`–`A11`.
 
 ### 1.1 Verified baseline (tree facts)
 
@@ -84,7 +87,7 @@ disturb `A1`–`A5`.
 | member is `LLMProvider& provider_` | `include/ymh/agent/compactor.hpp:140`; `src/agent/compactor.cpp:122` |
 | the summarizer call is `provider_.stream(...)` | `src/agent/compactor.cpp:252` |
 | the daemon constructs it with `*provider_` | `src/agent/workspace_runtime.cpp:170-172` |
-| test callers pass a `FakeLLM`/`LLMProvider` | `tests/support/agent_test_env.hpp:92-96`; `tests/unit/compaction_test.cpp:162,186` |
+| test callers pass a `FakeLLM`/`LLMProvider` | `tests/support/agent_test_env.hpp:92-96`; `tests/unit/compaction_test.cpp:162,186,207,226,246,270,291,327,350,372,394,411,428,450,472` (15 direct constructions) |
 | payload struct has 5 fields | `include/ymh/session/events.hpp:159-165` |
 | payload is constructed with 5 fields | `src/agent/compactor.cpp:294-299` |
 | `LlmRuntime` is **not** in the tree | `grep class LlmRuntime` → none |
@@ -117,13 +120,33 @@ ContextCompactor(LlmRuntime&           runtime,   // was: LLMProvider& provider
   `src/agent/compactor.cpp:122`) becomes `LlmRuntime& runtime_`.
 - The summarizer call `provider_.stream(request, collect, cancel).get()`
   (`src/agent/compactor.cpp:252`; mirrored in `13` §5.5 :783) becomes
-  `prepare_call(config, cancel)` → `PreparedCall::stream(frozen, collect,
-  cancel)` with `purpose = CallPurpose::Compaction` (`28` §8 :653-656).
+  `prepare_call(config, cancel).get()` → `PreparedCall::stream(frozen, collect,
+  cancel).get()` with `purpose = CallPurpose::Compaction` (`28` §8 :653-656).
+  Both `.get()`s are required: `compact()` is synchronous and `Task<T>` is eager
+  (`13` §5.5 :751-754), exactly as the existing `pool_.acquire(...).get()` is.
 - The compactor still brackets exactly one provider call with exactly one
   `LLMPool` slot (`06` §5.9, A12; `13` §5.5 :750-751; `28` §8 :657-658).
 - The summarizer-model resolution (`src/agent/compactor.cpp:103-113`) is
   **unchanged** (`28` §8 :658-659); the resolved model remains the value that
   populates the payload's `model` (`13` §5.5 :803).
+- **The summarizer provider id (closes gate M2).** `prepare_call` routes on
+  `LlmCallConfig::provider`, a required field (`28` §3 :163-176, :252). Its
+  source is pinned by the pending `28` Rev 3 amendment: the effective
+  `AgentConfig::provider` (a new field on `include/ymh/agent/agent.hpp:94`), with
+  the runtime's registered **default route** when it is unset, and a **loud typed
+  failure** at `prepare_call` when no registered route matches (never a silent
+  fallback). Because the `28` §8 constructor signature is applied verbatim
+  (`32-D2`), the id is **not** a new constructor parameter: the 13-owned
+  `CompactionPolicy` (`include/ymh/agent/compactor.hpp:30-58`) gains
+  `ProviderId provider`, populated from the same `config.llm.provider`
+  (`include/ymh/config/config.hpp:101`) that populates `AgentConfig::provider`
+  (`to_agent_config`/`to_compaction_policy`, `src/cli/wiring.cpp:174-212`) — one
+  source, not two. The daemon already holds the resolved `AgentConfig`
+  (`agent_config_`, `src/agent/workspace_runtime.cpp:195`) at the construction
+  site (`:171-172`). The compactor sets `config.provider = policy_.provider`; an
+  empty value resolves to the runtime default route. `CompactionError::Code`
+  gains `NoProviderRoute`, so the loud failure maps onto the existing compaction
+  outcome (`13` §5.3).
 - The `Compactor::run` frozen seam (`13` §5.1 :556-581; `06` §5.3) is
   **unchanged**: it is `optional`-returning and synchronous, and the re-seam is
   below it.
@@ -134,7 +157,7 @@ ContextCompactor(LlmRuntime&           runtime,   // was: LLMProvider& provider
 |---|---|
 | `src/agent/workspace_runtime.cpp:170-172` | pass the daemon's `LlmRuntime&` instead of `*provider_` (`28` §8 :660-661). The `provider_` member (`:200`) and the `AgentServices::provider` assignment (`:167`) are re-seamed by the `06`/`08` errata, not here. |
 | `tests/support/agent_test_env.hpp:92-96` | construct the runtime around the test provider and pass it. |
-| `tests/unit/compaction_test.cpp:162,186` | same. |
+| `tests/unit/compaction_test.cpp:162,186,207,226,246,270,291,327,350,372,394,411,428,450,472` (15 direct constructions; each passes a `FakeLLM` as the first argument) | same. |
 
 This errata pins the **13-owned** constructor text and the callers' obligation;
 the runtime type itself is owned by `28` §3/§8.
@@ -158,7 +181,7 @@ explicit.
 > This spec does **not** add fields to the payload.
 
 `26-D13` (:151) adds fields. `26` §4.4 (:1097) classifies the decision
-`Brk. (13)` precisely because of that sentence. **This errata supersedes
+`Brk. (D13)` precisely because of that sentence. **This errata supersedes
 `:489`.** The pin now reads: *13 adds the D13 fields below; the payload's struct
 text and codec are owned by the `01` errata, not by 13.*
 
@@ -296,13 +319,25 @@ Invariants pinned here (13-owned):
 - **Code-point budget.** The thresholds count Unicode code points, not bytes
   (`26` §4.3.7 :703). This is deliberately different from the byte-oriented
   durable cap in `07` (§5.2 below).
-- **Projection/accounting.** `context/prune` is ignored by `deriveMessages` (the
-  replacement `ToolResult` carries the text), and the **replacement** is counted
-  in the token estimate while the prune event is not (`26` §4.3.9.2 :986). The
-  pruner's replacement is an ordinary `ToolResult` event that the existing
-  projection already folds; `13` §4.2's compaction projection is unaffected.
+- **Projection/accounting — replace-by-id (closes gate M1).** `context/prune`
+  contributes no message of its own (`26` §4.3.9.2 :986), but the replacement
+  must **replace**, not append. The replacement `ToolResult` reuses the shadowed
+  original's `payload::ToolResult::id`, and `deriveMessages`'s `ToolResult` case
+  becomes **replace-by-id**: a `Role::Tool` message whose `tool_call_id` already
+  exists has its content replaced in place instead of a second message being
+  added. This is chosen over "consume `shadowed_seqs` in the projection" because
+  `26` §4.3.9.2 :986 pins `ContextPrune` as projection-ignore (the shadowed set is
+  audit provenance), and because a same-`id` replacement keeps `01` §6.3's pure
+  fold shape. Without it, the original full result and the replacement would both
+  project for the same `tool_call_id` — `src/session/session.cpp:441-455` folds
+  every `ToolResult` unconditionally — growing the context and double-counting
+  tokens. With it, exactly one Tool message per call is projected and counted
+  (the **replacement**); the prune event is never counted; and the original event
+  stays durable-but-unprojected (`26-F8`). `13` §4.2's `ContextCompaction` fold
+  is unaffected.
 - **Citation.** The pair is the citation: the `context/prune` event carries
-  `shadowed_seqs`; the replacement immediately follows. `payload::ToolResult`
+  `shadowed_seqs`, the replacement immediately follows and reuses the shadowed
+  original's `id`. `payload::ToolResult`
   (`include/ymh/session/events.hpp:127-135`) gains **no** citation field. If a
   direct citation field were later required, it is a `01`/`07` change owned
   elsewhere — not pinned here.
@@ -325,7 +360,7 @@ transform:
 | Axis | durable payload | projected context |
 | Unit | bytes (serialized JSON) | Unicode code points |
 | When | at append time (registry/loop) | at context-build time |
-| Effect | truncates `output` in place | appends `context/prune` + a replacement `ToolResult` |
+| Effect | truncates `output` in place | appends `context/prune` + a same-`id` replacement `ToolResult` (replace-by-id projection) |
 | Model | n/a | model-free |
 
 They are **orthogonal and both apply**: the durable cap bounds what is stored;
@@ -353,12 +388,12 @@ errata resolves it:
 
 | Obligation | Wave | Gate before code |
 |---|---|---|
-| `13` §5.2 constructor text → `LlmRuntime&`; member; call site | **1** | this errata + `28` §8 (verified) |
-| caller updates: daemon (`workspace_runtime.cpp:170-172`), tests | **1** | this errata + the `06`/`08` errata (`31`/`28`) |
+| `13` §5.2 constructor text → `LlmRuntime&`; member; call site; provider source (`32-D8`) | **1** | this errata + `28` §8 + the pending `28` Rev 3 provider amendment |
+| caller updates: daemon (`workspace_runtime.cpp:170-172`), fixture (`agent_test_env.hpp:92-96`), 15 `compaction_test.cpp` sites | **1** | this errata + the `06`/`08` errata (`31`/`28`) |
 | `ContextCompaction` D13 fields (semantics) | **4** | this errata |
 | `ContextCompaction` struct/codec text | **4** | future `01` errata (`26` §4.3.9.1) |
 | `CompactionTrigger`, `compact_if_needed`/`compact_now` | **4** | this errata |
-| `ToolResultPruner` + `ContextPrune` event/codec + projection row | **4** | this errata + future `01` errata |
+| `ToolResultPruner` + `ContextPrune` event/codec + replace-by-id projection row (`32-D9`) | **4** | this errata + future `01` errata |
 | `clamp_tool_result` retirement (D11) | **4** | `07` + `28-output-retention.md` (separate) |
 
 Wave 4 additionally **depends on Wave 3** (`26` §5 :1473-1479): `ContextAcceptor`
@@ -366,7 +401,7 @@ consumes `ContextMessage` (`include/ymh/agent/agent.hpp:88`) and D13/D14 both
 reshape the spec-13 message model, so Wave 4 must land after Wave 3. This errata
 does not change that ordering; it only makes the Wave-1 piece available now.
 
-This errata adds no code, no event type, and no version bump. `kSchemaVersion`
+This errata is design-only: it adds no code and no version bump. `kSchemaVersion`
 stays `1` and `kProtocolVersion` stays `1` (`26` §4.6 :1166-1167, :1221).
 
 ---
@@ -395,9 +430,11 @@ deterministic function of the log. (`26` §4.3.7 :717-719)
 **C25 — Code-point budget.** Prune thresholds count Unicode code points, never
 bytes. (`26` §4.3.7 :703)
 
-**C26 — Prune/replacement ordering.** A replacement `ToolResult` is immediately
-preceded by its `context/prune`; the projection uses the replacement and excludes
-the prune event from the token estimate. (`26` §4.3.9.2 :986)
+**C26 — Prune/replacement replace-by-id.** A replacement `ToolResult` is
+immediately preceded by its `context/prune` and reuses the shadowed original's
+`payload::ToolResult::id`; `deriveMessages` replaces the projected Tool message
+for that `tool_call_id` in place, so exactly one (pruned) Tool message is
+projected and counted and the prune event is never counted. (`26` §4.3.9.2 :986)
 
 ---
 
@@ -411,45 +448,56 @@ the prune event from the token estimate. (`26` §4.3.9.2 :986)
 | **C-F21** | A replacement re-overflows the durable byte cap. | The replacement is smaller than the original; the durable cap still applies. |
 | **C-F22** | `context/prune` and its replacement are reordered or split across turns. | C26; immediate adjacency; replay round-trip. |
 | **C-F23** | Trigger misattribution: an overflow compaction recorded as pressure (or vice versa). | C24; the trigger is an explicit argument; the caller may log it in the turn context. |
+| **C-F24** | No provider route for the summarizer call. | The pending `28` amendment's loud typed failure at `prepare_call` ("no route for config.provider"); `CompactionError::Code::NoProviderRoute`; never a silent fallback. |
+| **C-F25** | A replacement `ToolResult` uses a fresh `id`, so replace-by-id misses and both results project. | C26; the replacement reuses the shadowed original's `id`; replay round-trip asserts exactly one Tool message per call. |
 
 ---
 
 ## 9. Test plan (additions to 13 §10)
 
 1. **Re-seam shape (unit/compile).** `ContextCompactor`'s constructor takes
-   `LlmRuntime&`; the daemon and the test fixture construct it that way; no
-   `LLMProvider*` remains in the class. The compactor still acquires exactly one
-   `LLMPool` slot per call (A12).
+   `LlmRuntime&`; the daemon, the test fixture, and **all fifteen**
+   `compaction_test.cpp` construction sites (`:162,186,207,226,246,270,291,327,
+   350,372,394,411,428,450,472`) construct it that way; no `LLMProvider*` remains
+   in the class. The compactor still acquires exactly one `LLMPool` slot per call
+   (A12).
 2. **Payload evolution (unit, golden).** A legacy 5-field `context/compaction`
    payload decodes with defaults; a full D13 payload round-trips byte-identically;
    an unknown key is ignored (`26` §4.6).
 3. **Pruner (unit, golden).** Code-point boundaries at 8192/4096/1024; the
    `kPruneMarker` string verbatim; a replay round-trip
    (`prune_session` → replacement → `deriveMessages`) yields the same messages as
-   the live path; the original event is still present; the token estimate counts
-   the replacement and not the prune event.
+   the live path; the original event is still present; **replace-by-id**: exactly
+   one `Role::Tool` message exists for the pruned `tool_call_id`, its text is the
+   replacement's (the original's full text is absent), and the token estimate
+   counts the replacement and not the prune event.
 4. **Triggers (unit).** `compact_if_needed(Pressure)` fires only above the
    effective threshold; `compact_if_needed(ContextOverflow)` fires only after a
    `ContextLengthExceeded`; `compact_now` always attempts; each maps to the
    `13` §3.1 path.
 5. **Live (opt-in, `YMH_LIVE_LLM=1`).** The existing compaction live path now
    exercises the `LlmRuntime`-routed summarizer; unchanged otherwise.
+6. **Provider resolution (unit).** The summarizer's `LlmCallConfig.provider` is
+   the effective `AgentConfig::provider`; when unset it resolves to the runtime's
+   registered default route; an unroutable provider fails loud and typed at
+   `prepare_call` and maps to `CompactionError::Code::NoProviderRoute` (C-F24).
 
 ---
 
-## 10. Errata ledger additions (extends 13 §11.3; `A1`–`A5` unchanged)
+## 10. Errata ledger additions (extends 13 §11.3; `A1`–`A11` unchanged)
 
 | # | Target | Required amendment | Why |
 |---|---|---|---|
-| **A6** | `include/ymh/agent/compactor.hpp` (`:113`, `:140`), `src/agent/compactor.cpp` (`:117-126`, `:252`), `src/agent/workspace_runtime.cpp` (`:170-172`), `tests/support/agent_test_env.hpp` (`:92-96`), `tests/unit/compaction_test.cpp` (`:162`, `:186`) | Re-seam the constructor and member from `LLMProvider&` to `LlmRuntime&`; rewrite the summarizer call to `prepare_call` → `PreparedCall::stream` with `purpose = CallPurpose::Compaction`; update all three callers. | `26` §5 Wave 1 :1412-1413; `28` §8 :639-664. |
-| **A7** | `include/ymh/session/events.hpp` / `src/session/events.cpp` / `01` §4.5; new `include/ymh/agent/tool_result_pruner.hpp`; `include/ymh/core/event.hpp` / `src/session/session.cpp` | Add the five D13 fields to `payload::ContextCompaction`; add `payload::ContextPrune`, `EventType::ContextPrune` / wire `context/prune`, its codec, and its `deriveMessages` no-op case; add `CompactionTrigger` and the two entry points; add `ToolResultPruner`. | `26-D12`/`26-D13`; `26` §4.3.7, §4.3.9.1, §4.3.9.2. |
+| **A12** | `include/ymh/agent/compactor.hpp` (`:30-58`, `:69-86`, `:113`, `:140`), `src/agent/compactor.cpp` (`:117-126`, `:252`), `src/agent/workspace_runtime.cpp` (`:170-172`), `tests/support/agent_test_env.hpp` (`:92-96`), `tests/unit/compaction_test.cpp` (`:162,:186,:207,:226,:246,:270,:291,:327,:350,:372,:394,:411,:428,:450,:472`) | Re-seam the constructor and member from `LLMProvider&` to `LlmRuntime&`; rewrite the summarizer call to `prepare_call(config, cancel).get()` → `PreparedCall::stream(frozen, collect, cancel).get()` with `purpose = CallPurpose::Compaction`; add `CompactionPolicy::provider` (from `AgentConfig::provider`) and `CompactionError::Code::NoProviderRoute`; update **every** caller site — 1 daemon, 1 fixture, and all 15 `compaction_test.cpp` constructions. | `26` §5 Wave 1 :1412-1413; `28` §8 :639-664; the pending `28` Rev 3 provider amendment. |
+| **A13** | `include/ymh/session/events.hpp` / `src/session/events.cpp` / `01` §4.5; new `include/ymh/agent/tool_result_pruner.hpp`; `include/ymh/core/event.hpp` / `src/session/session.cpp` | Add the five D13 fields to `payload::ContextCompaction`; add `payload::ContextPrune`, `EventType::ContextPrune` / wire `context/prune`, its codec, and its `deriveMessages` no-op case; add `CompactionTrigger` and the two entry points; add `ToolResultPruner`; make the `ToolResult` projection **replace-by-id** so a same-`id` replacement replaces the shadowed original (C26). | `26-D12`/`26-D13`; `26` §4.3.7, §4.3.9.1, §4.3.9.2; gate M1. |
 
-`A1`–`A5` (the manual-`/compact` path) remain in force; this errata does not
-touch them.
+`A1`–`A11` (the manual-`/compact` path and the M3 re-review fixes) remain in
+force; this errata does not touch them. `A12`/`A13` are the next free labels
+(`A6`/`A7` already exist at `13-context-compaction.md:1807-1808`).
 
 ---
 
-## 11. Decisions (32-D1–32-D7)
+## 11. Decisions (32-D1–32-D9)
 
 - **32-D1 — This errata is a Wave-1 prerequisite.** The constructor text is
   amended now; the D12/D13 behavior lands in Wave 4. (`30` Rev 2 :5-12)
@@ -468,6 +516,16 @@ touch them.
   the D11 retirement. New header `include/ymh/agent/tool_result_pruner.hpp`.
 - **32-D7 — `boundary` is retained.** The `shadowed*` fields are additive
   provenance; `tokenEstimate` keeps its C-D10 meaning.
+- **32-D8 — The summarizer provider is `AgentConfig::provider`.** The pending
+  `28` Rev 3 amendment pins the `LlmCallConfig::provider` source (config-driven;
+  the runtime's registered default route when unset; a loud typed failure when no
+  route matches). The compactor applies it via the 13-owned
+  `CompactionPolicy::provider`, preserving the `28` §8 constructor signature
+  (`32-D2`). `CompactionError::Code::NoProviderRoute` carries the failure.
+- **32-D9 — The pruner replacement is replace-by-id.** The replacement
+  `ToolResult` reuses the shadowed original's `payload::ToolResult::id`, and
+  `deriveMessages` replaces the projected Tool message in place (C26);
+  `context/prune` stays projection-ignore (`26` §4.3.9.2 :986).
 
 ---
 
@@ -476,6 +534,7 @@ touch them.
 | Rev | Change |
 |---|---|
 | 0 | Initial Wave-1-prerequisite errata. Applies the `28` §8 `ContextCompactor` re-seam (`LLMProvider& → LlmRuntime&`) to `13` §5.2; supersedes `13` §4.1 :489 with the `26-D13` payload fields (breaking in spec text, additive on the wire); pins the `26-D12` tool-result pruner and the `26-D13` trigger taxonomy/entry points; reconciles the pruner with `07`'s `clamp_tool_result`/`ToolResult`; makes the Wave-1/Wave-4 split coherent; adds `C20`–`C26`, `C-F18`–`C-F23`, the `A6`/`A7` ledger rows, and decisions `32-D1`–`32-D7`. Claims number 32. No code, no version bump. |
+| 1 | Gate remediation (gate32, `regate32.md`). **H1:** enumerates all fifteen `compaction_test.cpp` constructions (`:162,186,207,226,246,270,291,327,350,372,394,411,428,450,472`) and drops "all three callers". **H2:** corrects the ledger inventory to `A1`–`A11` (`13` :1802-1812) and renumbers the additions `A6`/`A7` → **`A12`/`A13`**. **M1:** pins the pruner projection as **replace-by-id** (C26/C-F25, `32-D9`) instead of "already folds". **M2:** pins the summarizer provider source via the pending `28` Rev 3 `AgentConfig::provider` amendment (C-F24, `32-D8`). **LOWs:** `Brk. (13)` → `Brk. (D13)`; adds the missing `.get()`s; rewrites the "adds no event type" sentence. Adds `32-D8`/`32-D9`. No code, no version bump. |
 
 ---
 
@@ -484,10 +543,11 @@ touch them.
 - `26-dsh-alignment-part2.md` (verified Rev 7): §4.2 :150-151; §4.3.7 :700-734;
   §4.3.9 :840, :880-885; §4.3.9.1 :933-958; §4.3.9.2 :986, :994; §4.4 :1079,
   :1097; §4.6 :1166-1167, :1197-1202, :1221; §5 :1389, :1412-1413, :1466-1479.
-- `28-llm-service-boundary-errata.md` (verified Rev 2): §3, §8 :639-664.
+- `28-llm-service-boundary-errata.md` (verified Rev 2): §3, §8 :639-664; the
+  pending Rev 3 `LlmCallConfig::provider` amendment (`AgentConfig::provider`).
 - `13-context-compaction.md` (verified): §3.1 :196-217; §4.1 :469-492; §4.2
   :496-517; §4.5; §5.1 :556-581; §5.2 :604-637; §5.3 :661-716; §5.5 :748-821;
-  §5.6; §5.7 :845-876; §6.7; §11.1 :1661-1738; §11.3 :1764-1806.
+  §5.6; §5.7 :845-876; §6.7; §11.1 :1661-1738; §11.3 :1764-1812.
 - `30-architecture-cascade-errata.md` (Rev 2): :5-12.
 - `07-tools-execution.md` (verified): §5.2 :601-612; X10; `ToolConfig`.
 - `06-agent-loop.md` (verified): §5.3 (`Compactor`); §5.9 (`LLMPool`, A12).
@@ -495,7 +555,7 @@ touch them.
   `src/agent/compactor.cpp:103-113,117-126,204-321`;
   `src/agent/workspace_runtime.cpp:158-202`;
   `tests/support/agent_test_env.hpp:80-109`;
-  `tests/unit/compaction_test.cpp:162,186`;
+  `tests/unit/compaction_test.cpp:162,186,207,226,246,270,291,327,350,372,394,411,428,450,472`;
   `include/ymh/session/events.hpp:127-135,159-165`;
   `include/ymh/core/event.hpp:51-76`;
   `include/ymh/tools/tool.hpp:82`; `src/tools/tool.cpp:253`;
