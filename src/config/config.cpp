@@ -363,6 +363,12 @@ void apply_logging(Config& config, const Json& table, const std::filesystem::pat
         read_bool(table, "log_prompts", "logging", config.logging.log_prompts, source);
 }
 
+void apply_session(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "session", {"persist_prompt_text"}, source);
+    config.session.persist_prompt_text = read_bool(
+        table, "persist_prompt_text", "session", config.session.persist_prompt_text, source);
+}
+
 void apply_retry(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "llm.default.retry",
                    {"max_attempts", "base_delay_ms", "max_delay_ms", "jitter", "honor_retry_after"},
@@ -667,10 +673,11 @@ void apply_skills(Config& config, const Json& table, const std::filesystem::path
         static_cast<std::int64_t>(skills.max_frontmatter_bytes), source));
 }
 
-void apply_document(Config& config, const Json& table, const std::filesystem::path& source) {
+void apply_document(Config& config, const Json& table, const std::filesystem::path& source,
+                    bool global_layer) {
     reject_unknown(table, "",
                    {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "mcp_servers"},
+                    "session", "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -722,6 +729,12 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     }
     if (const Json* skills = section("skills"); skills != nullptr) {
         apply_skills(config, *skills, source);
+    }
+    if (const Json* session = section("session"); session != nullptr) {
+        if (!global_layer) {
+            fail(source, "'session' is global-layer only");
+        }
+        apply_session(config, *session, source);
     }
     if (mcp_servers != nullptr) {
         apply_mcp_servers_object(config.mcp, *mcp_servers, source);
@@ -1001,7 +1014,7 @@ void apply_jsonc_file(Config& config, const std::filesystem::path& path, bool re
     if (!document.is_object()) {
         fail(path, "top-level value must be an object");
     }
-    apply_document(config, document, path);
+    apply_document(config, document, path, required);
 }
 
 void apply_env_overrides(Config& config) {

@@ -31,6 +31,30 @@ inline PermissionConfig allow_all_permission_config() {
     return config;
 }
 
+inline std::optional<AdapterHandle> register_test_adapter(
+    LlmRuntime& runtime, const std::shared_ptr<LLMProvider>& provider) {
+    if (provider == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<ProviderId> routes{provider->id()};
+    return runtime.register_adapter(std::move(routes), provider);
+}
+
+class ProviderRuntime {
+public:
+    explicit ProviderRuntime(FakeScript script)
+        : provider_(std::make_shared<FakeLLM>(std::move(script))) {
+        handle_ = runtime_.register_adapter({provider_->id()}, provider_);
+    }
+
+    [[nodiscard]] LlmRuntime& runtime() noexcept { return runtime_; }
+
+private:
+    std::shared_ptr<LLMProvider> provider_;
+    LlmRuntime                   runtime_;
+    std::optional<AdapterHandle> handle_;
+};
+
 inline AgentServices make_agent_services(SessionManager& sessions,
                                          ResourceGovernor& governor,
                                          ToolRegistry& tools,
@@ -40,7 +64,7 @@ inline AgentServices make_agent_services(SessionManager& sessions,
                                          ExecutionEnvironment& execution,
                                          Logger& logger,
                                          OutputSink& output,
-                                         LLMProvider& provider,
+                                         LlmRuntime& runtime,
                                          LLMPool& pool,
                                          TokenEstimator& estimator,
                                          AgentServices::PermissionResolver resolver,
@@ -57,7 +81,7 @@ inline AgentServices make_agent_services(SessionManager& sessions,
     services.execution           = &execution;
     services.logger              = &logger;
     services.output              = &output;
-    services.provider            = &provider;
+    services.runtime             = &runtime;
     services.pool                = &pool;
     services.estimator           = &estimator;
     services.compactor           = compactor;
@@ -84,13 +108,15 @@ struct AgentEnv {
           sessions(store, bus),
           env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
           provider(std::move(provider)),
+          runtime(),
+          adapter_handle(register_test_adapter(runtime, this->provider)),
           policy(std::move(permission)),
           gate(use_permission_gate ? std::make_unique<PermissionGate>(policy, PermissionConfig{})
                                    : nullptr),
           assembler(tools, config.system_prompt),
           pool(pool_capacity),
           context_compactor(compaction.has_value()
-                                ? std::make_unique<ContextCompactor>(*this->provider, pool, estimator,
+                                ? std::make_unique<ContextCompactor>(runtime, pool, estimator,
                                                                      *compaction,
                                                                      std::move(wall_clock))
                                 : nullptr),
@@ -103,7 +129,7 @@ struct AgentEnv {
                                          })
                                    : std::nullopt),
           registry(make_agent_services(sessions, governor, tools, policy, gate.get(), assembler, env,
-                                        logger, sink, *this->provider, pool, estimator,
+                                        logger, sink, runtime, pool, estimator,
                                         std::move(resolver), compactor, context_compactor.get(),
                                         plan_mode_controller ? &*plan_mode_controller : nullptr),
                    std::move(config)) {
@@ -148,7 +174,9 @@ struct AgentEnv {
     NullLogger logger;
     ToolRegistry tools;
     RegistrationKeeper keeper{tools};
-    std::unique_ptr<LLMProvider> provider;
+    std::shared_ptr<LLMProvider> provider;
+    LlmRuntime runtime;
+    std::optional<AdapterHandle> adapter_handle;
     RulePermissionPolicy policy;
     std::unique_ptr<PermissionGate> gate;
     SessionContextAssembler assembler;

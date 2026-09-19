@@ -19,6 +19,7 @@
 #include "ymh/agent/message.hpp"
 #include "ymh/core/cancellation.hpp"
 #include "ymh/llm/llm_provider.hpp"
+#include "ymh/llm/llm_runtime.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session.hpp"
 
@@ -28,6 +29,9 @@ namespace ymh {
 // config (§37) and injects it into the `ContextCompactor`; nothing reads
 // global state.
 struct CompactionPolicy {
+    // 32 §2.1 / 28 §3.5: the summarizer's route id, from config.llm.provider.
+    // Empty resolves to the runtime's registered default route.
+    ProviderId  provider;
     bool        enabled = false;
     std::size_t threshold_tokens = 0;
     double      threshold_ratio = 0.80;
@@ -75,6 +79,7 @@ struct CompactionError {
         SummarizerFailed,
         SummarizerOverflow,
         OversizedSummary,
+        NoProviderRoute,
         Cancelled,
         LeaseLost,
         StoreUnavailable,
@@ -110,7 +115,7 @@ using WallClock = std::function<std::chrono::system_clock::time_point()>;
 // never appended, so a shared instance cannot misattribute (13 §5.2).
 class ContextCompactor final : public Compactor {
 public:
-    ContextCompactor(LLMProvider&          provider,
+    ContextCompactor(LlmRuntime&           runtime,
                      LLMPool&              pool,
                      const TokenEstimator& estimator,
                      CompactionPolicy      policy,
@@ -137,7 +142,7 @@ private:
         const std::vector<Message>& prefix) const;
     [[nodiscard]] std::string bound_summary(const std::string& summary) const;
 
-    LLMProvider&          provider_;
+    LlmRuntime&           runtime_;
     LLMPool&              pool_;
     const TokenEstimator& estimator_;
     CompactionPolicy      policy_;

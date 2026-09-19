@@ -225,6 +225,10 @@ inline constexpr std::chrono::milliseconds kPingInterval{10'000};
 struct SessionEnvelope {
     SessionId session;
     Event     event;
+    // Decode-side only (29-D5 / 29 §3.3 Axis B); never serialized. True when
+    // the wire carried an event `type` this binary does not know, in which case
+    // `event` is left default-constructed and the receiver skips the envelope.
+    bool      event_skipped{false};
 };
 
 enum class HostNoticeKind : std::uint8_t {

@@ -152,6 +152,13 @@ struct McpSettings {
     bool                         allow_network_servers = false;
 };
 
+// [session] — durable session-DB options (26-D23, 28 §5.4). Global layer only.
+struct SessionSettings {
+    // Store the full rendered system prompt in `llm/request_header` instead of
+    // only its digest. Off by default and distinct from `logging.log_prompts`.
+    bool persist_prompt_text = false;
+};
+
 // [skills] — the skill subsystem (20 §5.6). Additive.
 struct SkillsSettings {
     bool        enabled = true;
@@ -172,6 +179,7 @@ struct Config {
     LlmSettings        llm;
     McpSettings        mcp;
     SkillsSettings     skills;
+    SessionSettings    session;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

@@ -502,7 +502,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     }
     runtime_ = std::move(*created);
 
-    if (runtime_->provider() == nullptr) {
+    if (!runtime_->has_provider()) {
         return HostExitCode::StartupRejected;
     }
 

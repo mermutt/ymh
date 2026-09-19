@@ -70,6 +70,7 @@ enum class EventType : std::uint16_t {
     SubagentFanIn,       // wire: subagent/fan_in
     SessionRenamed,      // wire: session/renamed  (19 §5.1)
     PlanMode,            // wire: plan/mode       (25-D2)
+    LlmRequestHeader,    // wire: llm/request_header (28 §5.2, 29 §3.2)
     // Live-only (15 §4.7, AM-1): never in the durable SessionEventMap, never
     // appended to the session log. Delivered to global EventBus subscribers.
     McpServerStatusChanged,  // wire: mcp/server_status_changed
@@ -99,6 +100,13 @@ struct Event {
 // encoded as epoch milliseconds; an unknown `type` string fails loudly (S3).
 void to_json(nlohmann::json& json, const Event& event);
 void from_json(const nlohmann::json& json, Event& event);
+
+// Wire-only tolerant decode (29-D5, 29 §3.3 Axis B, 29-I3). Returns `nullopt`
+// when `json["type"]` is not a known `EventType`, so a live-wire receiver can
+// skip the event and advance its cursor instead of dropping the connection.
+// Malformed JSON for a *known* type still throws: the durable/on-disk axis
+// stays loud and never calls this entry point.
+[[nodiscard]] std::optional<Event> try_decode_event(const nlohmann::json& json);
 
 // The read side wraps the erased event with the store-assigned sequence,
 // because `Event` itself carries no `Sequence` (01 §4.6).

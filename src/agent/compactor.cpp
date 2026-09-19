@@ -114,12 +114,12 @@ std::string resolve_summarizer_model(const CompactionPolicy& policy, const Sessi
 
 } // namespace
 
-ContextCompactor::ContextCompactor(LLMProvider&          provider,
+ContextCompactor::ContextCompactor(LlmRuntime&           runtime,
                                    LLMPool&              pool,
                                    const TokenEstimator& estimator,
                                    CompactionPolicy      policy,
                                    WallClock             clock)
-    : provider_(provider),
+    : runtime_(runtime),
       pool_(pool),
       estimator_(estimator),
       policy_(std::move(policy)),
@@ -231,9 +231,18 @@ CompactionResult ContextCompactor::compact(const Session& session,
         const std::string          model  = resolve_summarizer_model(policy_, session);
 
         LLMRequest request;
-        request.model                 = model;
-        request.messages              = build_summary_prompt(prefix);
+        request.model                  = model;
+        request.messages               = build_summary_prompt(prefix);
         request.parameters.tool_choice = std::string{"none"};
+        request.session_id             = session.id();
+        request.purpose                = CallPurpose::Compaction;
+
+        LlmCallConfig config;
+        config.provider    = policy_.provider;
+        config.model       = model;
+        config.tool_choice = std::string{"none"};
+
+        FrozenRequest frozen = FrozenRequest::freeze(std::move(request), config);
 
         std::optional<LLMPool::Slot> slot = pool_.acquire(cancel).get();
         if (!slot.has_value()) {
@@ -249,7 +258,22 @@ CompactionResult ContextCompactor::compact(const Session& session,
             }
             return SinkFlow::Continue;
         };
-        const LLMResponse response = provider_.stream(request, collect, cancel).get();
+
+        LLMResponse response;
+        try {
+            PreparedCall call = runtime_.prepare_call(config, cancel).get();
+            response          = call.stream(std::move(frozen), collect, cancel).get();
+        } catch (const NoProviderRouteError& error) {
+            result.outcome    = CompactionOutcome::Failed;
+            result.error.code = CompactionError::Code::NoProviderRoute;
+            result.error.detail = error.detail;
+            return result;
+        } catch (const PreparedCallError& error) {
+            result.outcome    = CompactionOutcome::Failed;
+            result.error.code = CompactionError::Code::SummarizerFailed;
+            result.error.detail = error.detail;
+            return result;
+        }
 
         if (response.outcome == StreamOutcome::Cancelled) {
             result.outcome    = CompactionOutcome::Cancelled;

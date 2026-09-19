@@ -78,6 +78,7 @@ public:
     [[nodiscard]] ProviderId id() const override;
     [[nodiscard]] ProviderCapabilities capabilities() const override;
     [[nodiscard]] std::vector<ModelInfo> models() const override;
+    [[nodiscard]] RetryPolicy retry_policy() const override { return config_.retry; }
 
     Task<LLMResponse> stream(const LLMRequest& request,
                              StreamSink sink,

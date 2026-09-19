@@ -18,15 +18,15 @@ AgentServices make_services(SessionManager& sessions,
                             ResourceGovernor& governor,
                             ToolRegistry& tools,
                             PermissionPolicy& policy,
-                            ProviderRegistry& providers,
+                            LlmRuntime& runtime,
                             ContextAssembler& context) {
     AgentServices services;
-    services.sessions  = &sessions;
-    services.governor  = &governor;
-    services.tools     = &tools;
-    services.policy    = &policy;
-    services.providers = &providers;
-    services.context   = &context;
+    services.sessions = &sessions;
+    services.governor = &governor;
+    services.tools    = &tools;
+    services.policy   = &policy;
+    services.runtime  = &runtime;
+    services.context  = &context;
     return services;
 }
 
@@ -34,15 +34,6 @@ AgentServices make_services(SessionManager& sessions,
 
 AgentRegistry::AgentRegistry(AgentServices services, AgentConfig config)
     : services_(std::move(services)), config_(std::move(config)) {
-    if (services_.provider == nullptr && services_.providers != nullptr) {
-        std::expected<std::unique_ptr<LLMProvider>, LLMError> created =
-            services_.providers->create(services_.provider_config);
-        if (created.has_value()) {
-            providerStorage_ = std::move(*created);
-        }
-    }
-    provider_ = providerStorage_ ? providerStorage_.get() : services_.provider;
-
     if (services_.pool != nullptr) {
         pool_ = services_.pool;
     } else {
@@ -59,10 +50,10 @@ AgentRegistry::AgentRegistry(SessionManager& sessions,
                              ResourceGovernor& governor,
                              ToolRegistry& tools,
                              PermissionPolicy& policy,
-                             ProviderRegistry& providers,
+                             LlmRuntime& runtime,
                              ContextAssembler& context,
                              AgentConfig config)
-    : AgentRegistry(make_services(sessions, governor, tools, policy, providers, context),
+    : AgentRegistry(make_services(sessions, governor, tools, policy, runtime, context),
                     std::move(config)) {}
 
 std::expected<AgentId, AgentError> AgentRegistry::create(const SessionOptions& options) {
@@ -108,7 +99,6 @@ std::expected<AgentId, AgentError> AgentRegistry::resume(const SessionId& id) {
 
 std::expected<AgentId, AgentError> AgentRegistry::registerAgent(const SessionId& sessionId) {
     AgentServices services = services_;
-    services.provider      = provider_;
     services.pool          = pool_;
 
     const AgentId agentId{make_event_id().value};

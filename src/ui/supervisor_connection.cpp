@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "ymh/core/logging.hpp"
+
 namespace ymh::ui {
 namespace {
 
@@ -311,6 +313,18 @@ void SupervisorConnection::dispatch(const protocol::Notification& notification) 
     if (notification.method == protocol::notify::kEventStream) {
         const auto stream = notification.params.get<protocol::StreamNotification>();
         const protocol::SessionEnvelope& envelope = stream.envelope;
+        if (envelope.event_skipped) {
+            // 29-D5 / 29 §3.3 Axis B / 29-I3: an unknown wire event type is
+            // skipped, not fatal. Advance the per-session cursor to the
+            // notification's cursor so a reconnect never replays the poison
+            // pill, and never call on_envelope.
+            category_logger(LogCategory::Network)
+                .warn("skipping unknown wire event type for session " +
+                      envelope.session.value);
+            std::lock_guard lock(mutex_);
+            cursors_[envelope.session] = stream.cursor;
+            return;
+        }
         if (envelope.session != envelope.event.session_id) {
             return;
         }

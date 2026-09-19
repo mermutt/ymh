@@ -28,7 +28,7 @@
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/core/cancellation.hpp"
 #include "ymh/core/task.hpp"
-#include "ymh/llm/provider_registry.hpp"
+#include "ymh/llm/llm_runtime.hpp"
 #include "ymh/policy/permission_policy.hpp"
 
 namespace ymh {
@@ -39,7 +39,6 @@ class ToolRegistry;
 class ExecutionEnvironment;
 class Logger;
 class OutputSink;
-class LLMProvider;
 
 struct AgentServices {
     using PermissionResolver =
@@ -50,7 +49,9 @@ struct AgentServices {
     ToolRegistry*         tools = nullptr;
     PermissionPolicy*     policy = nullptr;
     PermissionGate*       gate = nullptr;
-    ProviderRegistry*     providers = nullptr;
+    // 26-D1 / 31-D1: the provider-neutral service. Replaces `providers`,
+    // `provider`, and `provider_config`; no `LLMProvider*` remains here.
+    LlmRuntime*           runtime = nullptr;
     ContextAssembler*     context = nullptr;
     ExecutionEnvironment* execution = nullptr;
     Logger*               logger = nullptr;
@@ -61,8 +62,6 @@ struct AgentServices {
     // above remains for the legacy path.
     ContextCompactor*     context_compactor = nullptr;
     TokenEstimator*       estimator = nullptr;
-    LLMProvider*          provider = nullptr;
-    LLMProviderConfig     provider_config;
     LLMPool*              pool = nullptr;
     PermissionResolver    permission_resolver;
     // 25-D2: null => plan mode is unavailable; `exit_plan_mode` fails closed.
@@ -137,7 +136,8 @@ private:
     void                      appendContextInjected(const ContextMessage& context);
     void                      appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message);
     CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn);
-    [[nodiscard]] LLMRequest  buildRequest(const std::vector<Message>& messages) const;
+    [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,
+                                             TurnId turn, StepId step);
     bool                      executeToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
     void                      flushIdleCallbacks();
 
@@ -156,6 +156,10 @@ private:
     std::atomic<bool>                   running_{false};
     std::atomic<AgentState>             state_{AgentState::Idle};
     std::size_t                         compactions_this_turn_ = 0;  // worker-only
+    std::optional<LlmCallConfig>        held_config_;               // worker-only
+    std::optional<CallPurpose>          held_purpose_;              // worker-only
+    std::optional<std::string>          held_prompt_digest_;        // worker-only
+    std::optional<std::vector<std::string>> held_tool_digests_;     // worker-only
     CancellationSource                  turn_cancel_;
 };
 

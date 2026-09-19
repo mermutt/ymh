@@ -17,12 +17,12 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_loop.hpp"
 #include "ymh/agent/llm_pool.hpp"
-#include "ymh/llm/llm_provider.hpp"
-#include "ymh/llm/provider_registry.hpp"
 #include "ymh/session/session_handle.hpp"
 #include "ymh/session/session_manager.hpp"
 
 namespace ymh {
+
+class LlmRuntime;
 
 class AgentRegistry {
 public:
@@ -31,7 +31,7 @@ public:
                   ResourceGovernor& governor,
                   ToolRegistry& tools,
                   PermissionPolicy& policy,
-                  ProviderRegistry& providers,
+                  LlmRuntime& runtime,
                   ContextAssembler& context,
                   AgentConfig config);
 
@@ -92,9 +92,7 @@ public:
 private:
     std::expected<AgentId, AgentError> registerAgent(const SessionId& sessionId);
 
-    std::unique_ptr<LLMProvider> providerStorage_;
     std::unique_ptr<LLMPool>     poolStorage_;
-    LLMProvider*                 provider_ = nullptr;
     LLMPool*                     pool_ = nullptr;
     AgentServices                services_;
     AgentConfig                  config_;

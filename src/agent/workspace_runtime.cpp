@@ -19,6 +19,7 @@
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/pty.hpp"
 #include "ymh/execution/resource_governor.hpp"
+#include "ymh/llm/llm_runtime.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -82,7 +83,6 @@ public:
          std::filesystem::path root,
          std::unique_ptr<SessionStore> store,
          SessionPersistence* persistence,
-         ProviderRegistry providers,
          LLMProviderConfig provider_config,
          std::unique_ptr<LLMProvider> provider,
          bool attach_permission_gate,
@@ -110,9 +110,7 @@ public:
                                           attach_permission_gate ||
                                               attach_permission_resolver)),
           assembler_(tools_, agent_config_.system_prompt),
-          providers_(std::move(providers)),
           provider_config_(std::move(provider_config)),
-          provider_(std::move(provider)),
           pool_(governor_.caps().max_llm_concurrency),
           ring_(governor_.caps().session_output_ring_bytes),
           sink_(ring_),
@@ -162,14 +160,23 @@ public:
         services_.logger          = &category_logger(LogCategory::Tool);
         services_.output          = &sink_;
         services_.estimator       = &estimator_;
-        services_.providers       = &providers_;
-        services_.provider_config = provider_config_;
-        services_.provider        = provider_.get();
-        services_.pool            = &pool_;
 
-        if (provider_ != nullptr) {
+        if (provider != nullptr) {
+            std::shared_ptr<LLMProvider> adapter = std::move(provider);
+            std::vector<ProviderId>      routes;
+            if (!provider_config_.provider.empty()) {
+                routes.push_back(provider_config_.provider);
+            } else {
+                routes.push_back(adapter->id());
+            }
+            adapter_handle_ = runtime_.register_adapter(std::move(routes), std::move(adapter));
+        }
+        services_.runtime = &runtime_;
+        services_.pool    = &pool_;
+
+        if (adapter_handle_.has_value()) {
             compactor_ = std::make_unique<ContextCompactor>(
-                *provider_, pool_, estimator_, to_compaction_policy(config));
+                runtime_, pool_, estimator_, to_compaction_policy(config));
             services_.context_compactor = compactor_.get();
         }
 
@@ -195,9 +202,9 @@ public:
     AgentConfig                        agent_config_;
     SessionContextAssembler            assembler_;
     DefaultTokenEstimator              estimator_;
-    ProviderRegistry                   providers_;
     LLMProviderConfig                  provider_config_;
-    std::unique_ptr<LLMProvider>       provider_;
+    LlmRuntime                         runtime_;
+    std::optional<AdapterHandle>       adapter_handle_;
     LLMPool                            pool_;
     std::unique_ptr<ContextCompactor>  compactor_;
     OutputRing                         ring_;
@@ -278,7 +285,7 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
 
     try {
         auto impl = std::make_unique<Impl>(std::move(options.config), std::move(options.root),
-                                           std::move(store), persistence, std::move(providers),
+                                           std::move(store), persistence,
                                            std::move(provider_config), std::move(provider),
                                            options.attach_permission_gate,
                                            options.attach_permission_resolver, options.executor,
@@ -312,7 +319,9 @@ SkillCatalog&         WorkspaceRuntime::skills() noexcept { return *impl_->skill
 const SkillCatalog&   WorkspaceRuntime::skills() const noexcept {
     return *impl_->skill_catalog_;
 }
-LLMProvider*          WorkspaceRuntime::provider() noexcept { return impl_->provider_.get(); }
+bool                  WorkspaceRuntime::has_provider() const noexcept {
+    return impl_->adapter_handle_.has_value();
+}
 LLMPool&              WorkspaceRuntime::pool() noexcept { return impl_->pool_; }
 ContextAssembler&     WorkspaceRuntime::context() noexcept { return impl_->assembler_; }
 PlanModeController&   WorkspaceRuntime::plan_mode() noexcept { return impl_->plan_mode_; }

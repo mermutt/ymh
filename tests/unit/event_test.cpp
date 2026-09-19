@@ -85,6 +85,22 @@ TEST(EventTest, FromJsonRejectsUnknownType) {
     EXPECT_THROW(static_cast<void>(json.get<ymh::Event>()), std::runtime_error);
 }
 
+TEST(EventTypeTest, LlmRequestHeaderWireNameAndVocabularySize) {
+    EXPECT_EQ(ymh::wire_name(ymh::EventType::LlmRequestHeader), "llm/request_header");
+    EXPECT_EQ(ymh::all_event_types().size(), 23u);
+}
+
+TEST(EventTest, TryDecodeSkipsUnknownTypeButDecodesKnown) {
+    nlohmann::json unknown = make_event(ymh::EventType::TurnStarted);
+    unknown["type"]        = "future/unknown_event";
+    EXPECT_FALSE(ymh::try_decode_event(unknown).has_value());
+
+    const nlohmann::json known = make_event(ymh::EventType::ToolResult);
+    const auto           decoded = ymh::try_decode_event(known);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->type, ymh::EventType::ToolResult);
+}
+
 TEST(TypedEventTest, EncodeDecodeRoundTrip) {
     const ymh::TypedEvent<ymh::TestPayload> typed{
         ymh::EventId{"evt-9"},

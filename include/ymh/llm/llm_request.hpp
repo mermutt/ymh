@@ -16,14 +16,15 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/agent/message.hpp"
+#include "ymh/core/event.hpp"
+#include "ymh/llm/llm_call_config.hpp"
 #include "ymh/tools/tool.hpp"
 
 namespace ymh {
 
 // Registry key and opaque model id (08 §2.1). Neither is a path and neither is
 // validated against a fixed list: a local endpoint may serve any model.
-using ProviderId = std::string;
-using ModelId    = std::string;
+// (Also declared identically in `llm_call_config.hpp`.)
 
 // Per-process monotonic correlation id used only for logs/diagnostics and to
 // correlate a request with its retries (08 §2.1). Never persisted.
@@ -58,6 +59,8 @@ struct LLMRequest {
     GenerationParameters     parameters;
     RequestId                request_id = 0;        // additive (08 §14.1(f))
     std::chrono::milliseconds deadline{0};          // 0 => provider default
+    SessionId                session_id;            // NEW (26-D3)
+    std::optional<CallPurpose> purpose;             // NEW; absent == conversation
 };
 
 } // namespace ymh

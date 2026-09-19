@@ -490,6 +490,50 @@ void from_json(const nlohmann::json& json, PlanMode& value) {
     value.active = json.value("active", false);
 }
 
+void to_json(nlohmann::json& json, const LlmRequestHeader& value) {
+    json = nlohmann::json::object();
+    json["turn"]       = value.turn;
+    json["step"]       = value.step;
+    json["session_id"] = value.session_id.value;
+    if (value.purpose.has_value()) {
+        json["purpose"] = std::string{call_purpose_name(*value.purpose)};
+    }
+    json["config"]              = value.config;
+    json["system_prompt_digest"] = value.system_prompt_digest;
+    if (value.system_prompt.has_value()) {
+        json["system_prompt"] = *value.system_prompt;
+    }
+    json["tool_names"]          = value.tool_names;
+    json["tool_schema_digests"] = value.tool_schema_digests;
+    json["template_digest"]     = value.template_digest;
+    json["starts_series"]       = value.starts_series;
+}
+
+void from_json(const nlohmann::json& json, LlmRequestHeader& value) {
+    value = LlmRequestHeader{};
+    value.turn       = json.value("turn", static_cast<TurnId>(0));
+    value.step       = json.value("step", static_cast<StepId>(0));
+    value.session_id = SessionId{json.value("session_id", std::string{})};
+    if (json.contains("purpose")) {
+        const std::string name = json.at("purpose").get<std::string>();
+        const std::optional<CallPurpose> purpose = parse_call_purpose(name);
+        if (!purpose.has_value()) {
+            throw std::runtime_error{"unknown call purpose: " + name};
+        }
+        value.purpose = purpose;
+    }
+    value.config = json.at("config").get<LlmCallConfig>();
+    value.system_prompt_digest = json.value("system_prompt_digest", std::string{});
+    if (json.contains("system_prompt")) {
+        value.system_prompt = json.at("system_prompt").get<std::string>();
+    }
+    value.tool_names = json.value("tool_names", std::vector<std::string>{});
+    value.tool_schema_digests =
+        json.value("tool_schema_digests", std::vector<std::string>{});
+    value.template_digest = json.value("template_digest", std::string{});
+    value.starts_series   = json.value("starts_series", true);
+}
+
 } // namespace payload
 
 } // namespace ymh
