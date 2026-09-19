@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -943,6 +944,78 @@ TEST(SessionAutoName, ConcurrentAppendAndAutoNameAppendsExactlyOnce) {
     }
     EXPECT_EQ(renames, 1u);
     EXPECT_EQ(session.header().title, "fix the flaky PTY test");
+}
+
+// 25 review F3: `ownEvents()`, `deriveMessages()`, and `snapshot()` must copy
+// the log under `appendMutex_`, exactly like `events()` (H2). 27-D9 extends
+// this to `header()`, which now returns a locked by-value copy. A reader thread
+// runs all five while the appender thread pushes; the pre-fix code races on
+// `log_`/`header_` (TSan-detectable) and the final size checks pin the
+// coherent outcome.
+TEST(SessionLogConcurrency, ReadersSeeConsistentLogWhileAppenderRuns) {
+    FakeStore    store;
+    EventBus     bus;
+    SessionHeader header = make_header(make_temp_dir());
+    store.create(header);
+    Session session(header, store, bus);
+
+    constexpr int     kAppends  = 200;
+    constexpr int     kReads    = 400;
+    constexpr std::size_t kBound = static_cast<std::size_t>(kAppends);
+    std::atomic<bool> start{false};
+    std::thread appender([&session, &start] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (int index = 0; index < kAppends; ++index) {
+            session.append(payload::ContextInjected{MessageId{"m" + std::to_string(index)},
+                                                    Role::System, "x"});
+        }
+    });
+    std::thread reader([&session, &start, kBound] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (int index = 0; index < kReads; ++index) {
+            const EventRange view = session.events();
+            const EventRange own  = session.ownEvents();
+            (void)session.deriveMessages();
+            (void)session.header();
+            const SessionSnapshot snapshot = session.snapshot();
+            EXPECT_LE(view.size(), kBound);
+            EXPECT_LE(own.size(), kBound);
+            EXPECT_LE(snapshot.eventCount, kBound);
+        }
+    });
+    start.store(true, std::memory_order_release);
+    appender.join();
+    reader.join();
+
+    EXPECT_EQ(session.ownEvents().size(), kBound);
+    EXPECT_EQ(session.snapshot().eventCount, kBound);
+}
+
+// 27-D9 / 27-T6: `header()` must return a by-value snapshot taken under
+// `appendMutex_`, never a reference into the live `header_`. The static_assert
+// is the compile-time guard (a revert to `const SessionHeader&` fails the
+// build); the runtime checks pin that a later append cannot mutate an earlier
+// read while the live value does advance.
+static_assert(std::is_same_v<decltype(std::declval<const Session&>().header()), SessionHeader>,
+              "Session::header() must return SessionHeader by value (27-D9)");
+
+TEST(Session, HeaderReturnsStableSnapshot) {
+    FakeStore    store;
+    EventBus     bus;
+    SessionHeader header = make_header(make_temp_dir());
+    header.title         = "before";
+    store.create(header);
+    Session session(header, store, bus);
+
+    const SessionHeader before = session.header();
+    session.append(payload::SessionRenamed{"after", payload::RenameOrigin::User});
+
+    EXPECT_EQ(before.title, "before");
+    EXPECT_EQ(before.updatedAt, 1000);
+    EXPECT_EQ(session.header().title, "after");
+    EXPECT_GT(session.header().updatedAt, before.updatedAt);
 }
 
 } // namespace

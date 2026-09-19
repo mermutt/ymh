@@ -288,6 +288,69 @@ TEST(PlanModeControllerTest, SetIsAtomicAcrossCommitInvalidationWindow) {
     EXPECT_FALSE(plan_mode_active(session->events()));
 }
 
+// 25 review F3: `erase()` must take `commit_mutex_` so it cannot interleave
+// with an in-flight `commit_locked_` (invalidate -> append -> record) and leave
+// a memo entry for a deleted session. The blocking append hook parks the commit
+// with the memo invalidated, exactly the window the bug needs.
+TEST(PlanModeControllerTest, EraseDoesNotResurrectMemoAcrossCommitWindow) {
+    ControllerEnv            env;
+    std::shared_ptr<Session> session = env.session();
+    std::mutex               gate_mutex;
+    std::condition_variable  gate;
+    bool                     append_entered = false;
+    bool                     release_append = false;
+    std::atomic<bool>        erase_done{false};
+    int                      folds = 0;
+
+    PlanModeController controller(
+        [&](const SessionId& id, payload::PlanMode mode) {
+            {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                append_entered = true;
+                gate.notify_all();
+                gate.wait(lock, [&] { return release_append; });
+            }
+            if (auto target = env.manager.sessionPtr(id)) {
+                target->append(mode);
+            }
+        },
+        [&folds](const EventRange& events) {
+            ++folds;
+            return plan_mode_active(events);
+        });
+
+    // Warm the memo; folds == 1.
+    ASSERT_FALSE(controller.active(*session));
+
+    ASSERT_EQ(controller.set(*session, /*turn_open=*/true, true), PlanModeSetResult::Queued);
+    std::thread worker([&] { (void)controller.apply_pending_at_step_start(*session); });
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        gate.wait(lock, [&] { return append_entered; });
+    }
+
+    // Attempt the delete inside the commit window. Pre-fix `erase` proceeds and
+    // the worker then records the memo; post-fix `erase` blocks on
+    // `commit_mutex_` until the record lands, then clears it.
+    std::thread eraser([&] {
+        controller.erase(env.id);
+        erase_done = true;
+    });
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        (void)gate.wait_for(lock, std::chrono::milliseconds(100),
+                            [&] { return erase_done.load(); });
+        release_append = true;
+        gate.notify_all();
+    }
+    worker.join();
+    eraser.join();
+
+    // Memo must be cold again: `active` re-folds the durable log (folds == 2).
+    EXPECT_TRUE(controller.active(*session));
+    EXPECT_EQ(folds, 2);
+}
+
 // UX-U31 (controller half): `flush_pending_at_turn_end` is idempotent,
 // null-safe, and `noexcept` — an append failure is absorbed and the pending
 // selection dropped, leaving the durable log authoritative.

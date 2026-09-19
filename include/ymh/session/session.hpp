@@ -230,7 +230,7 @@ public:
     Session(Session&& other) noexcept;
     Session& operator=(Session&& other) = delete;
 
-    [[nodiscard]] const SessionHeader& header() const noexcept { return header_; }
+    [[nodiscard]] SessionHeader header() const;  // locked copy; 27-D9/27-I1
     [[nodiscard]] SessionId            id() const noexcept { return header_.id; }
     [[nodiscard]] SessionKind          kind() const noexcept { return header_.kind; }
 
@@ -243,8 +243,14 @@ public:
     // so a re-entrant call would self-deadlock.
     [[nodiscard]] EventRange events() const;
     // This session's physical events only (excludes any inherited prefix).
+    // Takes `appendMutex_` and copies, like `events()` (25 review H2/F3): the
+    // log is mutated under that mutex by `appendEventLocked`/`appendBatch`.
+    // The same committed-handler re-entrancy restriction as `events()` applies.
     [[nodiscard]] EventRange ownEvents() const;
 
+    // Pure projection over a consistent copy of the log. Takes `appendMutex_`
+    // for the same reason as `events()` (25 review H2/F3); the same
+    // committed-handler re-entrancy restriction applies.
     [[nodiscard]] std::vector<Message> deriveMessages() const;
 
     template <class P>
@@ -278,6 +284,8 @@ public:
     // timestamp when unset.
     void emit(Event event);
 
+    // Coherent snapshot of header + log. Takes `appendMutex_` (25 review
+    // F3) so the fields and the derived messages all observe one log state.
     [[nodiscard]] SessionSnapshot snapshot() const;
 
     [[nodiscard]] TurnId nextTurnId() const noexcept { return nextTurn_; }

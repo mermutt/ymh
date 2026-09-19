@@ -394,6 +394,18 @@ TEST(UiRenderGolden, ContextBarGeometryAndUnknownWindow) {
     EXPECT_NE(rendered.find("[████████░░] 80.0%"), std::string::npos);
 }
 
+TEST(UiRenderGolden, ContextBarRendersWithKnownWindow) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->status.context_used_tokens   = 50'000;
+    state->status.context_window_tokens = 131'072;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{120, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("[███░░░░░░░] 38.1%"), std::string::npos);
+}
+
 TEST(UiRenderGolden, StatusNarrowDegradationDropsTpsBeforeNoteAndNotice) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);

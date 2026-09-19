@@ -125,6 +125,10 @@ bool PlanModeController::flush_pending_at_turn_end(Session& session) noexcept {
 }
 
 void PlanModeController::erase(const SessionId& session) noexcept {
+    // Take `commit_mutex_` first (pinned order: commit_mutex_ -> mutex_) so an
+    // in-flight `commit_locked_` cannot record `memo_[session]` after this
+    // erase and resurrect a deleted session's entry. Leaf call: no re-entry.
+    std::lock_guard<std::mutex> commit_lock(commit_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     pending_.erase(session);
     pending_exit_.erase(session);
