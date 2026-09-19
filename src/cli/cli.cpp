@@ -18,7 +18,6 @@
 #include <limits>
 #include <memory>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -28,6 +27,7 @@
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 
+#include "ymh/cli/assistant_stream_printer.hpp"
 #include "ymh/cli/headless.hpp"
 #include "ymh/cli/provider_factory.hpp"
 #include "ymh/cli/session_cli.hpp"
@@ -59,29 +59,10 @@ namespace ymh {
 namespace {
 
 StreamDisposition handle_session_event(const Event& event, std::ostream& out, std::ostream& err,
-                                       std::set<std::string>* streamed_messages) {
-    if (event.type == EventType::AssistantChunk) {
-        const auto chunk = event.payload.get<payload::AssistantChunk>();
-        if (chunk.kind == payload::AssistantChunkKind::Text) {
-            out << chunk.text << std::flush;
-            if (streamed_messages != nullptr) {
-                streamed_messages->insert(chunk.message);
-            }
-        }
-        return StreamDisposition::Continue;
-    }
-    if (event.type == EventType::AssistantMessage) {
-        const auto message = event.payload.get<payload::AssistantMessage>();
-        if (streamed_messages != nullptr &&
-            streamed_messages->find(message.id) != streamed_messages->end()) {
-            return StreamDisposition::Continue;
-        }
-        for (const ContentBlock& block : message.content) {
-            if (block.kind == ContentBlockKind::Text) {
-                out << block.text;
-            }
-        }
-        out << std::flush;
+                                       AssistantStreamPrinter* printer) {
+    AssistantStreamPrinter  local;
+    AssistantStreamPrinter& sink = printer != nullptr ? *printer : local;
+    if (sink.feed(event, out, err, false).handled) {
         return StreamDisposition::Continue;
     }
     if (event.type == EventType::TurnFailed) {
@@ -99,20 +80,20 @@ StreamDisposition handle_session_event(const Event& event, std::ostream& out, st
 
 StreamDisposition handle_stream_notification(const protocol::StreamNotification& stream,
                                              std::ostream& out, std::ostream& err,
-                                             std::set<std::string>* streamed_messages) {
+                                             AssistantStreamPrinter* printer) {
     if (stream.envelope.event_skipped) {
         return StreamDisposition::Skipped;
     }
-    return handle_session_event(stream.envelope.event, out, err, streamed_messages);
+    return handle_session_event(stream.envelope.event, out, err, printer);
 }
 
 StreamDisposition handle_live_notification(const protocol::LiveNotification& live,
                                            std::ostream& out, std::ostream& err,
-                                           std::set<std::string>* streamed_messages) {
+                                           AssistantStreamPrinter* printer) {
     if (live.envelope.event_skipped) {
         return StreamDisposition::Skipped;
     }
-    return handle_session_event(live.envelope.event, out, err, streamed_messages);
+    return handle_session_event(live.envelope.event, out, err, printer);
 }
 
 namespace {
@@ -601,7 +582,7 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
         static_cast<void>(connection.request(protocol::method::kAgentPrompt,
                                              {{"session", session.value}, {"message", task}}));
 
-        std::set<std::string> streamed_messages;
+        AssistantStreamPrinter assistant_printer;
         while (true) {
             const std::optional<protocol::Notification> notification =
                 connection.nextNotification(std::chrono::minutes{10});
@@ -613,11 +594,11 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
             if (notification->method == protocol::notify::kEventStream) {
                 const protocol::StreamNotification stream =
                     notification->params.get<protocol::StreamNotification>();
-                disposition = handle_stream_notification(stream, out, err, &streamed_messages);
+                disposition = handle_stream_notification(stream, out, err, &assistant_printer);
             } else if (notification->method == protocol::notify::kEventLive) {
                 const protocol::LiveNotification live =
                     notification->params.get<protocol::LiveNotification>();
-                disposition = handle_live_notification(live, out, err, &streamed_messages);
+                disposition = handle_live_notification(live, out, err, &assistant_printer);
             } else {
                 continue;
             }

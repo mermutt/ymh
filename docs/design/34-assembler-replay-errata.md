@@ -1,8 +1,13 @@
 # 34 — Assembler & Replay Errata (dsh alignment, Wave 2 prerequisite)
 
 ```
-Status: Rev 2 written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
-Revision: Rev 2 — fixes the Rev 1 gate's MEDIUM-1 (the §9.2 replay message
+Status: Rev 3 written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Revision: Rev 3 (2026-09-19). Pins the shipped `AssistantStreamPrinter`
+          contract (§15 item 1, decision 34-D13, invariants 34-I11–34-I16,
+          failure mode 34-F9), closing the Rev 2 open risk for the two `ymh run`
+          paths. Back-fills the owning spec for code already implemented and
+          green; no production surface changes. See §16.
+          Rev 2 — fixes the Rev 1 gate's MEDIUM-1 (the §9.2 replay message
           prefix was bounded by the header sequence; it is now bounded by the
           attempt's dispatch position, with a harness assertion that detects a
           wrong prefix) and its six LOWs. See §16.
@@ -875,6 +880,30 @@ compared across real process runs.
   (`prefix == log[0..k)` and `log[k]` is the attempt's settlement), never a
   header-bounded truncation; the harness rejects a wrong prefix with
   `ReplayMismatch{PrefixMismatch}` (§9.2).
+- **34-I11.** `AssistantStreamPrinter::feed` is the sole writer to `out`/`err`
+  for the three assistant stream/settlement events; `Commit::handled` is true iff
+  `event.type` is `AssistantChunk`, `AssistantMessage`, or `AssistantAttempt`,
+  and `Commit::text` is non-empty only for a committed `AssistantMessage`
+  (§15 item 1).
+- **34-I12.** Live `AssistantChunk` deltas are buffered by `chunk.message` and
+  are never printed before settlement; an id change clears the id and both
+  buffers first; `Text` deltas append to the text buffer, `Reasoning` deltas to
+  the reasoning buffer (§15 item 1 R1).
+- **34-I13.** On `AssistantMessage` the committed text is the durable settlement
+  text whenever that is non-empty and the live buffer only otherwise
+  (`durable.empty() ? text_ : durable`); the durable is the recovery path for a
+  missed live chunk (`26-D9`, `35 §3.6`; §15 item 1 R2).
+- **34-I14.** On `AssistantAttempt` the id and both buffers are discarded and
+  nothing is printed; because only a non-`Completed` settlement emits
+  `AssistantAttempt` (34-I3, 34-D6), a retried attempt's text cannot concatenate
+  into the retry under the per-step `messageId` (§6.1; §15 item 1 R3).
+- **34-I15.** Each live buffer is independently capped at `kMaxBufferedBytes`
+  (1 MiB); a crossing delta is truncated to the remaining room and later deltas
+  are dropped once full. The cap bounds only the live fallback; the durable
+  settlement path prints the full text (§15 item 1 R4).
+- **34-I16.** Buffered reasoning is written to `err` on commit only when
+  `print_reasoning` is set; text is written to `out` on commit; both buffers are
+  cleared after every commit or discard (§15 item 1 R5).
 
 ## 12. Failure modes (extending `08 §11.2`)
 
@@ -888,6 +917,7 @@ compared across real process runs.
 | **34-F6** | The prompt text is unknowable on disk-only replay | §9.4 | return `PromptUnavailable`; assert nothing prompt-dependent |
 | **34-F7** | A settled non-`Completed` attempt would commit a message | 34-D6 predicate | it cannot: only `Completed` reaches the `AssistantMessage` branch |
 | **34-F8** | A replay prefix is bounded at the header instead of the attempt's settlement | §9.2 prefix validation | throw `ReplayMismatch{PrefixMismatch}`; never rebuild over a truncated prefix |
+| **34-F9** | A live `AssistantChunk` is dropped, or a retried attempt re-streams under the same `messageId` | `AssistantStreamPrinter::feed` (§15 item 1) | the durable `AssistantMessage` prints the full text and wins (`DurableWinsOverLiveBuffer`); the failed attempt's buffer is discarded (`DiscardsBufferOnFailedAttempt`); a live-only stream falls back to the capped buffer (`FallsBackToLiveBufferWhenDurableEmpty`) |
 
 ## 13. Test plan
 
@@ -936,6 +966,21 @@ compared across real process runs.
     `prefix = {seq < settlement_seq}` and throws `PrefixMismatch` with the
     header-bounded `{seq <= header_seq}`.
 
+**Unit — `AssistantStreamPrinter` (34-D13).**
+21. `DurableWinsOverLiveBuffer` — a live delta prints nothing; the durable
+    settlement prints its own text and wins over the buffer.
+22. `FallsBackToLiveBufferWhenDurableEmpty` — an empty durable settlement
+    commits the live buffer.
+23. `DiscardsBufferOnFailedAttempt` — an `AssistantAttempt` discards the failed
+    text; only the retry's text is printed.
+24. `PrintsBufferedReasoningWhenEnabled` /
+    `SuppressesBufferedReasoningWhenDisabled` — reasoning reaches `err` iff
+    `print_reasoning`.
+25. `LiveBufferStaysBoundedWithoutSettlement` — with no settlement the buffer
+    stops at `kMaxBufferedBytes`.
+26. `FullDurableTextAfterBufferCapExceeded` — the durable settlement prints in
+    full past the cap.
+
 ## 14. Cross-spec reconciliation
 
 - **`26 §4.3.4`** — signatures unchanged; algorithms pinned here. The
@@ -959,21 +1004,77 @@ compared across real process runs.
 - **Sibling `33`** — the `StreamEvent` JSON codec (GAP 1) is owned by `33`; this
   errata references it (`<existing StreamEvent codec>`) and does not define it.
 
-## 15. Open items (what this errata does not pin)
+## 15. Open items and the pinned `AssistantStreamPrinter` contract (34-D13)
 
-1. **Consumer migration is `26` Wave 2's, not this errata's.** `headless.cpp`
-   (`:197-208`) and `ui_event_adapter.cpp` (`:90-110`) must keep the live delta
-   path and read `assistant/message` for durable text (`26 §5.2 :1434-1442`). The
-   exact de-duplication rule (live deltas + durable message must not double-print
-   in `ymh run`) is **not** pinned here; it belongs to the consumer migration and
-   is flagged to the lead as a Wave-2 implementation risk. **Cross-attempt live
-   case (named, not dropped).** The per-step `messageId` (§6.1) is unchanged
-   across a retry, and `ui_event_adapter.cpp:95-102` opens
-   `AssistantMessageStarted` only when the incoming `AssistantChunk.message`
-   changes, so a retried attempt's live deltas append to the failed attempt's
-   live text under the same id. This is not a regression — the shipped shared
-   coalescer already concatenates across attempts — but it is part of the same
-   de-duplication risk and must be handled with it.
+1. **`AssistantStreamPrinter` contract (pinned in Rev 3; formerly open).**
+   `headless.cpp:192-200` (in-process) and `cli.cpp:61-77, 585`
+   (daemon-connected) feed every session event through one shared
+   `AssistantStreamPrinter`, which owns the per-message live-delta buffer so live
+   deltas and the durable `assistant/message` cannot double-print in `ymh run`
+   (`26 §5.2 :1434-1442`). The contract is pinned as decision **34-D13** and
+   invariants **34-I11–34-I16**; `tests/unit/assistant_stream_printer_test.cpp`
+   enforces it (test plan §13 items 21-26).
+
+   *Interface* (`include/ymh/cli/assistant_stream_printer.hpp`):
+
+   ```cpp
+   struct Commit {
+       bool        handled = false;  // true iff event.type is one of
+                                     //   AssistantChunk, AssistantMessage,
+                                     //   AssistantAttempt
+       std::string text;             // assistant text committed to `out`;
+                                     //   non-empty only on AssistantMessage
+   };
+   Commit feed(const Event& event, std::ostream& out, std::ostream& err,
+               bool print_reasoning);
+   static constexpr std::size_t kMaxBufferedBytes = 1u << 20;  // 1 MiB / buffer
+   ```
+
+   Private state: `message_` (current live message id), `text_`, `reasoning_`.
+
+   *Rules.*
+   - **R1. Per-message-id buffering (34-I12).** A live `AssistantChunk` is
+     buffered and never printed. If `chunk.message != message_`, the id and both
+     buffers reset first. `kind == Text` appends to `text_`; `kind == Reasoning`
+     appends to `reasoning_`. Buffering-before-settlement is enforced by
+     `DurableWinsOverLiveBuffer`; the id-change reset is
+     `assistant_stream_printer.cpp:42-46` and has no dedicated test among the
+     seven.
+   - **R2. Durable wins (34-I13).** On `AssistantMessage`, `durable` is the
+     in-order concatenation of the settlement's `Text`-kind `content` blocks, and
+     `commit.text = durable.empty() ? text_ : durable`. `durable` wins whenever
+     non-empty; the live buffer is only the fallback for a settlement with no
+     durable text (resume/replay). Rationale (`26-D9` / `35 §3.6`): the durable
+     settlement is the recovery path for a missed live chunk, so the live channel
+     is never the source of truth. Enforced by `DurableWinsOverLiveBuffer` and
+     `FallsBackToLiveBufferWhenDurableEmpty`.
+   - **R3. Discard on `AssistantAttempt` (34-I14).** An `AssistantAttempt`
+     clears the id and both buffers and prints nothing. The event type is the
+     discriminator: only a non-`Completed` settlement emits `AssistantAttempt`
+     (34-I3, 34-D6), so no attempt status is inspected. Why: the per-step
+     `messageId` (§6.1) is unchanged across a retry, so without the discard the
+     failed attempt's streamed text would concatenate with the retry's under the
+     same id. Enforced by `DiscardsBufferOnFailedAttempt`.
+   - **R4. Bounded buffer (34-I15, F8).** Each buffer independently holds at
+     most `kMaxBufferedBytes`. A delta appends only up to the remaining room (a
+     crossing delta is truncated); once a buffer is full, further deltas for it
+     are dropped. The cap bounds only the live-only fallback: the durable path
+     prints the full settlement text regardless of the cap. Enforced by
+     `LiveBufferStaysBoundedWithoutSettlement` and
+     `FullDurableTextAfterBufferCapExceeded`.
+   - **R5. Reasoning output (34-I16).** On commit, text is written to `out` (and
+     flushed) always, and buffered reasoning is written to `err` (and flushed)
+     only when `print_reasoning` is set. Both buffers clear after every commit or
+     discard. Enforced by `PrintsBufferedReasoningWhenEnabled` and
+     `SuppressesBufferedReasoningWhenDisabled`.
+
+   *Remaining consumer item (TUI, not this class).* `ui_event_adapter.cpp:92-105`
+   is the separate TUI path: it opens `AssistantMessageStarted` only when the
+   incoming `AssistantChunk.message` changes, so a retried attempt's live deltas
+   append to the failed attempt's live text under the same id; the TUI's
+   replace-on-finish (`ui_model.cpp`) hides it. That is `26` Wave 2's consumer
+   migration, not the run-path printer contract; it stays named here, not
+   dropped.
 2. **The `06`/`31` amendment for `AgentServices::stream_clock`** (§5.2) is pinned
    here by reference; `31`'s and `06`'s own errata must record the new member.
 3. **`finish()` and `interrupted_blocks()` have no Wave-2 consumer** (§4.4, §4.6).
@@ -987,6 +1088,16 @@ compared across real process runs.
 
 ## 16. Revision log
 
+- **Rev 3 (2026-09-19).** Closes the Rev 2 §15 item 1 open risk by pinning the
+  shipped `AssistantStreamPrinter` contract: decision 34-D13, invariants
+  34-I11–34-I16, failure mode 34-F9, and test plan §13 items 21-26. The pin
+  records the per-message-id live buffer, the durable-wins precedence
+  (`26-D9`/`35 §3.6`), the discard-on-`AssistantAttempt` rule, the
+  `kMaxBufferedBytes` cap, and the reasoning-output rule, and cites
+  `tests/unit/assistant_stream_printer_test.cpp`. The TUI
+  `ui_event_adapter.cpp` cross-attempt case remains a `26` Wave 2 consumer item
+  (§15 item 1). No production surface changes: the code was already implemented
+  and green, and this revision back-fills its owning spec.
 - **Rev 2 (2026-09-19).** Repairs the Rev 1 independent gate
   (`/tmp/opencode/regate34.md`, GATE FAIL: 0 HIGH / 1 MEDIUM / 6 LOW).
   **MEDIUM-1:** §9.2 now bounds the replay message prefix by the **attempt's
@@ -1006,7 +1117,7 @@ compared across real process runs.
   `/tmp/opencode/wave2-gaps.md`. Pins 34-D1–34-D11, invariants 34-I1–34-I9,
   failure modes 34-F1–34-F7, and the test plan §13. Claims spec number 34.
 
-## 17. Decisions (34-D1–34-D12)
+## 17. Decisions (34-D1–34-D13)
 
 | ID | Decision | Rationale |
 |---|---|---|
@@ -1022,6 +1133,7 @@ compared across real process runs.
 | **34-D10** | `ReplayEnvelope` keys = `provider`/`version`/`state` | Matches the `26 §4.3.4 :529-533` struct; fills the `26 §4.3.9.1` omission |
 | **34-D11** | Durable usage = `BlockAssembler::usage()` | `26 §4.3.4 :549`; single authority |
 | **34-D12** | The replay prefix is bounded by the attempt's settlement (`prefix = {seq < settlement_seq}`), not the header; the harness validates it and throws `PrefixMismatch` | The header is a changed snapshot logged only on template change (`agent_loop.cpp:468-496`), so it cannot bound the attempt's messages (`28 §4.4 :501-512`) |
+| **34-D13** | The run-path de-duplication is `AssistantStreamPrinter`: per-message-id live buffer, durable-wins on `AssistantMessage`, discard on `AssistantAttempt`, `kMaxBufferedBytes` cap | `26-D9` / `35 §3.6` make the durable settlement the recovery path for a missed live chunk; one shared printer keeps both `ymh run` paths identical; closes the Rev 2 §15 item 1 open risk |
 
 ## 18. References
 

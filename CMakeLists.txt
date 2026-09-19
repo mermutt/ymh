@@ -695,6 +695,7 @@ add_library(ymh_cli STATIC
     src/cli/provider_factory.cpp
     src/cli/headless.cpp
     src/cli/session_cli.cpp
+    src/cli/assistant_stream_printer.cpp
     src/cli/cli.cpp
 )
 add_library(ymh::cli ALIAS ymh_cli)

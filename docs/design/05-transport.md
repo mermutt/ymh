@@ -571,10 +571,14 @@ carries **no** `Sequence` (01 §4.6) and no frontend type (T4, §54 D15):
   client (mirroring 01 S3) and are never silently skipped.
 - `payload`: the JSON encoding of the typed payload struct (01 §4.5).
 
-Live events (§8.1) are **not** durable and therefore are **not** carried as
-`Event` frames. The only live signals on the wire are the transport-level
-notifications this spec defines (`event.stream`, `permission.request`,
-`host.event`), none of which is a `UiEvent`.
+Live events (§8.1) are **not** durable and are therefore **not** carried on the
+durable `event.stream` subscription: they have no cursor, no replay, and no
+`SubscriptionId`, and a client must never advance its resume cursor from them
+(§7.7, T21). The server→client transport-level notifications this spec defines
+are `event.stream`, `event.live`, `event.unsubscribed`, `permission.request`,
+and `host.event`. `event.live` is the one that carries a live-only core `Event`
+inside a `SessionEnvelope`; the others are control notifications. None of them
+is a `UiEvent`.
 
 ### 5.2 `SessionEnvelope`
 
@@ -1001,6 +1005,7 @@ client -> server   event.subscribe    params: { session, from? }   result: { sub
 client -> server   event.unsubscribe  params: { subscription }     result: {}
 server -> client   event.stream       notification { subscription, replay, envelope, cursor }
 server -> client   event.unsubscribed notification { subscription, reason }
+server -> client   event.live         notification { envelope }
 ```
 
 ```cpp
@@ -1026,6 +1031,14 @@ struct StreamNotification {
     bool            replay;      // true while catching up from a cursor/beginning
     SessionEnvelope envelope;
     EventCursor     cursor;      // position AFTER `envelope.event` (T21)
+};
+
+// 29-D4/29-I7: a live-only session event. No subscription, no replay, no
+// cursor — a receiver must not advance its resume cursor from it. Delivered
+// to every connection subscribed to `envelope.session` (per session, not per
+// subscription).
+struct LiveNotification {
+    SessionEnvelope envelope;
 };
 
 struct UnsubscribedNotice {
@@ -1060,6 +1073,11 @@ Semantics (T6, T7, T8, T17):
   replaced the connection). On a delete the daemon drains the mailbox, delivers
   `SessionEnded`, then sends `event.unsubscribed{reason:"session_closed"}`
   followed by `HostNotice{SessionClosed}` (§8.4, F3).
+- `event.live` (35-D2–35-D10) carries a live-only event (today
+  `assistant/chunk`) that is never committed, so it is not replayed and carries
+  no `cursor`; it is delivered once per subscribed session regardless of
+  `SubscriptionId`, and a receiver must not use it to advance its resume cursor.
+  See `35-live-notification-errata.md` §3.
 
 **`cursor(E)` (pinned, T21).** For a delivered event `E`, `cursor(E)` is the
 opaque token for the position **immediately after** `E` in the session's
