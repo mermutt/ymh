@@ -120,7 +120,11 @@ before any Wave-1 code.
    (`include/ymh/agent/agent_loop.hpp:53`), `provider` (`:64`), and
    `provider_config` (`:65`) are replaced by a single `LlmRuntime* runtime`
    (`28 §3.4 :372-376`, the `AgentServices` change); `pool` and every other
-   field are retained.
+   field are retained. **ALSO:** spec 34 §5.2/§15.2 adds a `stream_clock` member
+   to `AgentServices` — an injectable steady-clock source used to stamp each
+   `TimedStreamEvent.at` from its per-attempt stream start. This errata records
+   it as REQUIRED so spec `06`'s owning `AgentServices` text carries it too (it
+   is pinned by 34, not here).
 2. The `AgentRegistry` construction path: the `ProviderRegistry&` convenience
    ctor parameter becomes `LlmRuntime&`; the fallback adapter construction
    (`src/agent/agent_registry.cpp:37-44`) and the provider injection
