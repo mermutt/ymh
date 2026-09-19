@@ -56,7 +56,7 @@ optional. **GATE** = component gate applies (spec must be `verified` first).
 | RB-18 | Cursor flicker when the tmux pane is unfocused | — (live testing, 2026-09-17) | NEW | P1 | S | Med | No (UI-local) |
 | RB-19 | Unprompted-session cleanup on exit + `ymh session prune` | — (user, 2026-09-18) | NEW | P0 | M–L | Med | **`23-session-lifecycle-errata.md` (written; not verified)** |
 | RB-20 | Hide placeholder titles (`tui`/`headless`/`main`) in the header | — (user, 2026-09-18) | NEW | P2 | XS | Low | No (UI-local, gate-free) |
-| RB-21 | Session/agent lifetime & teardown hardening (**independent of spec 23**) | — (spec 23 §13.1; audit) | NEW | P1 | M–L | High | No (independent; likely needs its own spec before code) |
+| RB-21 | Session/agent lifetime & teardown hardening (**independent of spec 23**) | — (spec 23 §13.1; audit) | **SPEC'D** | P1 | M–L | High | **`24-agent-lifetime-errata.md` — verified (independent adversarial gate: 5 rounds → PASS, 0 open HIGH/MEDIUM, 3 LOW documentation-only; Oracle unavailable, see the spec's status note). NOT yet implemented.** |
 
 **Shipped:** the five P0 UI items (RB-01/02/08/10/11) landed in commit `71dda4f16`
 per the verified errata `17-ui-transcript-errata.md`; verified live in a PTY
@@ -72,10 +72,11 @@ spec `21-config-jsonc-errata.md`, `9db17cd54`). RB-03 landed per the verified sp
 
 **No item is currently in a design gate.** Every item with a spec gate has passed
 and shipped. The open items are RB-12 (UI-local, P1), RB-14 and RB-15 (test
-infra / guard, P2), the new RB-16 to RB-18 below, and **RB-19** (P0) whose spec
-`23-session-lifecycle-errata.md` is written but **not yet verified** — per
-`AGENTS.md` it must pass an independent Oracle gate before any code. RB-20 is a
-gate-free UI-local item recorded in that spec's §8.
+infra / guard, P2), the new RB-16 to RB-18 below, and **RB-19** (P0), whose spec
+`23-session-lifecycle-errata.md` is **verified + implemented**. **RB-21** is now
+**SPEC'D**: `24-agent-lifetime-errata.md` is verified (independent adversarial
+gate, 5 rounds → PASS, 0 open HIGH/MEDIUM) and **not yet implemented**. RB-20 is
+a gate-free UI-local item recorded in spec 23's §8.
 
 ---
 
