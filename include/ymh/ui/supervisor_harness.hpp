@@ -66,7 +66,8 @@ public:
     // dialog through the same model fields the adapter writes, then drives FTXUI
     // events through the real handler so the swallow contract and the
     // Enter-only resolution are exercised end to end. `key` is a single
-    // printable character or one of "up", "down", "enter", "escape", "ctrl-c".
+    // printable character or one of "up", "down", "enter", "escape", "ctrl-c",
+    // "tab", "tab-reverse".
     virtual void open_permission_dialog(const SessionId& session,
                                         const PermissionRequestId& request,
                                         std::string tool, std::string summary) = 0;

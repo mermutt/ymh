@@ -126,6 +126,7 @@ void PlanModeController::erase(const SessionId& session) noexcept {
 }
 
 void PlanModeController::commit_(const SessionId& id, bool value) {
+    std::lock_guard<std::mutex> commit_lock(commit_mutex_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         memo_[id].valid = false;

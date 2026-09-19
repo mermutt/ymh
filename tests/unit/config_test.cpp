@@ -925,4 +925,39 @@ TEST(Config, LocalcodeConfigPathUsesHome) {
     EXPECT_EQ(localcode_config_path(), workspace.path() / "home" / ".localcode" / "config.json");
 }
 
+// 25 review M7 / UX-F14: a hand-written stdio server with no command must fail
+// at config load (ConfigError), not brick daemon start inside McpManager.
+TEST(Config, McpServersStdioRequiresNonEmptyCommand) {
+    const std::filesystem::path source{"test.jsonc"};
+    for (const nlohmann::json& entry :
+         std::vector<nlohmann::json>{{{"type", "stdio"}}, nlohmann::json::object()}) {
+        nlohmann::json table = {{"s", entry}};
+        McpSettings    mcp;
+        EXPECT_THROW(apply_mcp_servers_object(mcp, table, source), ConfigError);
+    }
+}
+
+// 25 review M5 / UX-F14: a non-string env/header value aborts the import with
+// an error naming the server and key, and no document is produced.
+TEST(Config, BuildLocalcodeImportRejectsNonStringEnvAndHeaders) {
+    const nlohmann::json localcode = nlohmann::json::parse(R"JSON({
+      "mcp_servers": {
+        "brave-search": { "command": "c", "env": { "PORT": 8080, "TOKEN": "x" } }
+      }
+    })JSON");
+    std::string                         error;
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    EXPECT_FALSE(document.has_value());
+    EXPECT_NE(error.find("mcp_servers.brave-search"), std::string::npos) << error;
+    EXPECT_NE(error.find("PORT"), std::string::npos) << error;
+
+    const nlohmann::json bad_headers = nlohmann::json::parse(R"JSON({
+      "mcp_servers": { "s": { "url": "https://x", "headers": { "Authorization": 5 } } }
+    })JSON");
+    error.clear();
+    EXPECT_FALSE(build_localcode_import(bad_headers, error).has_value());
+    EXPECT_NE(error.find("mcp_servers.s"), std::string::npos) << error;
+    EXPECT_NE(error.find("Authorization"), std::string::npos) << error;
+}
+
 } // namespace

@@ -177,6 +177,78 @@ TEST(PlanModeControllerTest, ProjectionMemoizedPerSession) {
     EXPECT_EQ(folds, 1);
 }
 
+// UX-U33: a fresh controller over a NON-empty log folds once, keeps the cache
+// across unrelated appends, folds once per other session, and re-folds after
+// `erase`. The cold-memo `set()` case is covered at the host layer (H1).
+TEST(PlanModeControllerTest, ProjectionMemoColdNonEmptyLogEraseAndOtherSessions) {
+    ControllerEnv env;
+    // Populate the durable log before the controller exists, so its memo is
+    // cold over a non-empty log.
+    env.session()->append(payload::PlanMode{true});
+    int folds = 0;
+    PlanModeController controller(
+        [&env](const SessionId& id, payload::PlanMode mode) {
+            if (auto session = env.manager.sessionPtr(id)) {
+                session->append(mode);
+            }
+        },
+        [&folds](const EventRange& events) {
+            ++folds;
+            return plan_mode_active(events);
+        });
+
+    EXPECT_TRUE(controller.active(*env.session()));
+    EXPECT_EQ(folds, 1);
+    EXPECT_TRUE(controller.active(*env.session()));
+    EXPECT_EQ(folds, 1);
+
+    // A non-`plan/mode` event must not invalidate the memo.
+    env.session()->append(payload::StepStarted{1, 1});
+    EXPECT_TRUE(controller.active(*env.session()));
+    EXPECT_EQ(folds, 1);
+
+    SessionOptions options;
+    options.cwd           = std::filesystem::temp_directory_path();
+    options.serverProfile = "interactive";
+    options.model         = "test-model";
+    options.title         = "plan-2";
+    const SessionId second = env.manager.createSession(options);
+    const std::shared_ptr<Session> second_session = env.manager.sessionPtr(second);
+    ASSERT_NE(second_session, nullptr);
+    EXPECT_FALSE(controller.active(*second_session));
+    EXPECT_EQ(folds, 2);
+
+    controller.erase(env.id);
+    EXPECT_TRUE(controller.active(*env.session()));
+    EXPECT_EQ(folds, 3);
+}
+
+// UX-U31 (controller half): `flush_pending_at_turn_end` is idempotent,
+// null-safe, and `noexcept` — an append failure is absorbed and the pending
+// selection dropped, leaving the durable log authoritative.
+TEST(PlanModeControllerTest, TurnEndFlushIsNoexceptAndDropsOnAppendFailure) {
+    ControllerEnv env;
+    int  appends         = 0;
+    bool append_failure  = false;
+    PlanModeController controller([&](const SessionId& id, payload::PlanMode mode) {
+        ++appends;
+        if (append_failure) {
+            throw LeaseLost("boom");
+        }
+        if (auto session = env.manager.sessionPtr(id)) {
+            session->append(mode);
+        }
+    });
+
+    EXPECT_EQ(controller.set(env.id, /*turn_open=*/true, true), PlanModeSetResult::Queued);
+    append_failure = true;
+    EXPECT_NO_THROW((void)controller.flush_pending_at_turn_end(*env.session()));
+    EXPECT_EQ(appends, 1);
+    EXPECT_NO_THROW((void)controller.flush_pending_at_turn_end(*env.session()));
+    EXPECT_EQ(appends, 1);
+    EXPECT_FALSE(plan_mode_active(env.session()->events()));
+}
+
 TEST(PlanModeControllerTest, RequestExitCommitsAtStepBoundary) {
     ControllerEnv env;
     PlanModeController controller([&env](const SessionId& id, payload::PlanMode mode) {

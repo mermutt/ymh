@@ -1154,6 +1154,11 @@ private:
             model_.dirty.markAggregate();
             if (state == SupervisorLinkState::Attached) {
                 refresh_sessions(workspace);
+                // 25 review M3: a plain re-attach does not re-activate, so
+                // refresh the status context for the already-active session.
+                if (!it->second.activeSessionId.value.empty()) {
+                    refresh_status_context(workspace, it->second.activeSessionId);
+                }
                 // 22 §5.1 (S3/S4, SW14/SW15): consume the pending resume exactly
                 // once per successful attach through the shared resume path.
                 const auto pending = pending_resume_.find(workspace);
@@ -1218,6 +1223,8 @@ private:
                     if (it->second.activeSessionId.value.empty()) {
                         if (!sessions.empty()) {
                             activate_session(workspace, sessions.front().first);
+                            // 25 review M3: plain attach must refresh the context.
+                            refresh_status_context(workspace, sessions.front().first);
                         } else {
                             // Attach (existing daemon) and spawn paths both
                             // converge here, so auto-create the first session.
@@ -1299,6 +1306,8 @@ private:
         }
         model_.ensureCellIn(workspace, session);
         activate_session(workspace, session);
+        // 25 review M3: a newly created session must refresh the context too.
+        refresh_status_context(workspace, session);
         if (!queued.empty()) {
             prompt(workspace, session, queued);
         }
@@ -2441,6 +2450,12 @@ public:
         }
         if (key == "escape") {
             return app_.handle_event(ftxui::Event::Escape);
+        }
+        if (key == "tab") {
+            return app_.handle_event(ftxui::Event::Tab);
+        }
+        if (key == "tab-reverse") {
+            return app_.handle_event(ftxui::Event::TabReverse);
         }
         if (key == "ctrl-c") {
             return app_.handle_event(ftxui::Event::CtrlC);

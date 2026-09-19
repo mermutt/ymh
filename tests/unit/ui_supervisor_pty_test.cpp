@@ -916,7 +916,7 @@ TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
 
     const std::size_t completion_mark = child.raw_size();
     child.write("/sk\t");
-    ASSERT_TRUE(child.wait_for_since(completion_mark, "/skill", 10s)) << child.text();
+    ASSERT_TRUE(child.wait_for_since(completion_mark, "/skills ", 10s)) << child.text();
     child.write("\x15");
 
     const std::size_t listing_mark = child.raw_size();
@@ -1461,6 +1461,49 @@ TEST(UiSupervisorPty, SwP2_UnknownResumeIdExitsOne) {
     EXPECT_TRUE(status->exited);
     EXPECT_EQ(status->code, 1);
     EXPECT_NE(read_text_file(root.path() / "err.log").find("unknown session"), std::string::npos);
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// UX-I2: Tab completes the draft to the highlighted command, and Enter then
+// executes that highlighted command (not a raw draft).
+TEST(UiSupervisorPty, UX_I2_TabThenEnterExecutesHighlightedCommand) {
+    ShortTempRoot root("ymh_pty_ux_i2");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "palette-ws";
+    std::filesystem::create_directories(workspace);
+
+    RegistryConfig registry_config;
+    registry_config.db_path = state / "ymh" / "registry.db";
+    registry_config.lock_path = state / "ymh" / "registry.lock";
+    registry_config.workspace_roots = {};
+
+    WorkspaceId workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
+        workspace_id = registry->registerWorkspace(workspace, "palette-ws").id;
+    }
+    HostDaemonGuard guard(workspace_id.value);
+
+    PtyChild child;
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = state.string();
+    env["XDG_CONFIG_HOME"] = (root.path() / ".config").string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    const std::size_t mark = child.raw_size();
+    child.write("/he\t\r");
+    ASSERT_TRUE(child.wait_for_since(mark, "list slash commands", 15s)) << child.text();
+
+    child.terminate();
+    guard.stop();
+
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 

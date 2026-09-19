@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -628,4 +629,76 @@ TEST(SupervisorHarnessTest, SW_U20_StopWakesParkedEnsureWorker) {
     // A lost wakeup hangs in `join()` (caught by the ctest timeout); a correct
     // mutex-serialized stop wakes every parked worker promptly.
     EXPECT_LT(elapsed, 30s) << "destructor join did not wake the parked ensure worker";
+}
+
+// UX-U14 (25-D8/UX24): after a completion the highlight names the candidate
+// that was inserted into the draft; repeated Tab and Shift+Tab stay in sync.
+TEST(SupervisorHarnessTest, UX_U14_TabHighlightTracksInsertedDraft) {
+    ShortTempRoot root("ymh_ux_u14");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity  = harness_identity();
+
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    const WorkspaceId workspace{"ws-palette"};
+    const SessionId   session{"session-palette"};
+    harness->seed_workspace(workspace_model(workspace));
+    harness->apply_resume_success(workspace, session);
+
+    const auto assert_synced = [&]() {
+        const SessionUiState* state = harness->model().session(session);
+        ASSERT_NE(state, nullptr);
+        ASSERT_FALSE(state->command_hints.empty());
+        const std::size_t selected =
+            std::min(state->command_hint_selected, state->command_hints.size() - 1);
+        EXPECT_EQ(state->input.draft, "/" + state->command_hints[selected].name);
+    };
+
+    ASSERT_TRUE(harness->dispatch_key("/"));
+    ASSERT_TRUE(harness->dispatch_key("tab"));
+    assert_synced();
+
+    ASSERT_TRUE(harness->dispatch_key("tab"));
+    assert_synced();
+
+    ASSERT_TRUE(harness->dispatch_key("tab-reverse"));
+    assert_synced();
+}
+
+// UX-U15 (25-D9/UX25): Enter accepts the highlighted candidate and dispatches
+// it (not the raw draft). `/he` + Enter runs `/help`.
+TEST(SupervisorHarnessTest, UX_U15_EnterAcceptsHighlightAndDispatches) {
+    ShortTempRoot root("ymh_ux_u15");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity  = harness_identity();
+
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    const WorkspaceId workspace{"ws-palette"};
+    const SessionId   session{"session-palette"};
+    harness->seed_workspace(workspace_model(workspace));
+    harness->apply_resume_success(workspace, session);
+
+    for (const char c : std::string("/he")) {
+        ASSERT_TRUE(harness->dispatch_key(std::string(1, c)));
+    }
+    const SessionUiState* before = harness->model().session(session);
+    ASSERT_NE(before, nullptr);
+    ASSERT_FALSE(before->command_hints.empty());
+    EXPECT_EQ(before->command_hints[0].name, "help");
+
+    ASSERT_TRUE(harness->dispatch_key("enter"));
+    const SessionUiState* after = harness->model().session(session);
+    ASSERT_NE(after, nullptr);
+    EXPECT_TRUE(after->input.draft.empty());
+    const bool help_ran =
+        std::any_of(after->conversation.entries.begin(), after->conversation.entries.end(),
+                    [](const ConversationEntry& entry) { return entry.text == "commands:"; });
+    EXPECT_TRUE(help_ran) << "Enter did not dispatch the highlighted /help";
 }

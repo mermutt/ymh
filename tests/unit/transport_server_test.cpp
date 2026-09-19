@@ -403,6 +403,27 @@ TEST(TransportServer, SessionRenameIsAllowedForAutomation) {
     EXPECT_EQ(frames[0].at("result").at("title").get<std::string>(), "auto ok");
 }
 
+// 25-D2/D5: `session.set_mode` echoes the effective selection. Exercises the
+// `FakeTransportHost::setSessionMode` double (previously dead code).
+TEST(TransportServer, SessionSetModeReturnsEchoAndRecordsCall) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+
+    harness.send(*peer, Harness::request(2, protocol::method::kSessionSetMode,
+                                         nlohmann::json{{"session", session.value},
+                                                        {"active", true}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].at("result").at("session").get<std::string>(), session.value);
+    EXPECT_TRUE(frames[0].at("result").at("active").get<bool>());
+    EXPECT_FALSE(frames[0].at("result").at("pending").get<bool>());
+    ASSERT_EQ(harness.host.calls.size(), 1u);
+    EXPECT_EQ(harness.host.calls[0], "session.set_mode");
+}
+
 TEST(TransportServer, DeleteRequiresConfirm) {
     Harness harness;
     Peer* peer = harness.open();
