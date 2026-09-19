@@ -1,6 +1,6 @@
 # 26 — dsh Alignment: Design-Copy of DeepSeek Harness Mechanics
 
-Status: **draft for review — Rev 3** (design only; no implementation).
+Status: **draft for review — Rev 6** (design only; no implementation).
 Scope owner: architecture.
 Supersedes/amends: none yet (this is a proposal; §4 pins the interfaces and names
 which verified specs it would amend).
@@ -16,7 +16,7 @@ written as `<pkg>/<path>`). Sources are `README.md`, `lib/types/*.d.ts`,
 `lib/index.js` files. This is the **prompt-prose-only exception** to the general
 rule: no other minified `lib/*.js` is used as evidence, and no `lib/index.js`
 control-flow/algorithm is inferred from it. Every load-bearing quote was re-checked
-against the package file named beside it in Rev 2. ymh facts are quoted from
+against the package file named beside it in Rev 4. ymh facts are quoted from
 `docs/design/` and the shipped C++ headers/sources with `file:line` hints.
 
 ---
@@ -1213,24 +1213,24 @@ Evidence is `file:line` or spec section. Where a prior draft overstated a
 
 | # | Mechanic | dsh | ymh today | Delta |
 |---|---|---|---|---|
-| G1 | **Provider-neutral call service** | `LlmRuntime` (`ctx.llm`) is the only path to adapters; adapters register routes | `LLMProvider` is the seam and is used directly by the loop; no service layer above adapters (`include/ymh/llm/llm_provider.hpp:61`; `AgentServices::provider` `include/ymh/agent/agent_loop.hpp:63`) | **Missing service layer.** The loop holds a raw `LLMProvider*`. Add a `LlmRuntime`-equivalent that owns route→adapter registration, model resolution, and the stream boundary. |
+| G1 | **Provider-neutral call service** | `LlmRuntime` (`ctx.llm`) is the only path to adapters; adapters register routes | `LLMProvider` is the seam and is used directly by the loop; no service layer above adapters (`include/ymh/llm/llm_provider.hpp:61`; `AgentServices::provider` `include/ymh/agent/agent_loop.hpp:64`) | **Missing service layer.** The loop holds a raw `LLMProvider*`. Add a `LlmRuntime`-equivalent that owns route→adapter registration, model resolution, and the stream boundary. |
 | G2 | **Request deep-frozen before dispatch** | "Requests are deep-frozen before dispatch" (`dsh-llm/README.md:12`); `PreparedLlmCall.config` is "Detached, deep-frozen" | `LLMRequest` is a plain value passed by const-ref; nothing freezes it (`llm_request.hpp:54`) | **Missing freeze.** Add immutable/frozen request envelope with a pinned canonical serialization (see §4). |
 | G3 | **Every request reconstructable from the log** | dsh logs the routed request header; `compaction/summary` logs the summarizer `provider`/`model` "so the one-shot request is reconstructable from log + code" | ymh logs `AssistantMessage`/`TokenUsage`/`ContextCompaction` (`events.hpp:103,167,159`) but **no request-header event**; grep of `events.hpp` for request/header finds none | **Missing logged header.** Without it a request cannot be reconstructed or compared. |
 | G4 | **Call-config as logged header state** | `LlmCallConfig` + `callConfigEquals`; loop builds from the logged header, "logs changed snapshots instead of allowing silent per-call drift" (`call-config.d.ts:1-6`) | `GenerationParameters` is per-request, mutable, not logged or compared (`llm_request.hpp:40-48`); `AgentConfig` carries `model`/`parameters` (`agent.hpp:94-104`) | **Missing `LlmCallConfig` + equality + logged snapshots.** |
 | G5 | **One provider attempt per stream; retry separate** | `LlmRuntime` "remains a single provider attempt"; `dsh-llm-retry` re-runs at durable step boundaries with `llm/retry`/`llm/retry-started` events | Retry lives **inside** the adapter; retryable only before first dispatched event (`llm_provider.hpp:39-47`, `stream.hpp:111`, `openai_adapter.cpp:983`) and is **not logged** | **Aligned in intent, missing durability.** ymh's "retry only before the first event" barrier matches dsh's one-attempt semantics, but there is no durable retry record and no separate executor. |
 | G6 | **Streams always end in a terminal result** | Every stream ends in exactly one terminal `finish`; adapter throw normalized to `error`/`aborted` | `LLMResponse` is the authoritative **loop-level** terminal value with `outcome`/`finish`/`usage`/`tool_calls`/`error` (`llm_provider.hpp:51-59`); `StreamOutcome::{Completed,Cancelled,Failed}` (`stream.hpp:33`). On cancellation the provider may emit no terminal **sink** event; the loop normalizes it (`agent_loop.cpp:742-746`) | **Aligned at the loop boundary, not at the sink.** State the guarantee where it actually holds (loop `LLMResponse`), not as an adapter-sink invariant. |
-| G7 | **Chunk protocol** | `StreamChunk` union incl. `block-start`/`block-end`/`reasoning-delta`/`tool-call-delta`/`usage`/`finish` | `StreamEvent` variant with `TextDelta`/`ReasoningDelta`/`ToolCallStarted`/`ToolCallDelta`/`ToolCallFinished`/`UsageEvent`/`Finished`/`StreamError` (`stream.hpp:169-176`) | **Mostly aligned.** ymh has no `block-start`/`block-end` (blocks are implicit); `ToolCallFinished` carries the assembled call rather than a `block-end`. Acceptable, but the assembler must be the single canonical one (see G10). |
+| G7 | **Chunk protocol** | `StreamChunk` union incl. `block-start`/`block-end`/`reasoning-delta`/`tool-call-delta`/`usage`/`finish` | `StreamEvent` variant with `TextDelta`/`ReasoningDelta`/`ToolCallStarted`/`ToolCallDelta`/`ToolCallFinished`/`UsageEvent`/`Finished`/`StreamError` (`stream.hpp:168-176`) | **Mostly aligned.** ymh has no `block-start`/`block-end` (blocks are implicit); `ToolCallFinished` carries the assembled call rather than a `block-end`. Acceptable, but the assembler must be the single canonical one (see G10). |
 | G8 | **Message/content model** | Immutable `Message`; tool result is a user-role message with one `tool-result` block; merge-extensible `ContentBlockMap`; `MessageSource` with semantic `ContextForm` | `Message{Role, content, tool_call_id}`; `ContentBlock{kind, text, tool_call_id, tool_name, arguments, media_type, data}` (`message.hpp:111-127`); no `source`/provenance; `ContentBlockKind` is a closed enum (`message.hpp:70`) | **Missing provenance + source model.** ymh cannot distinguish "instructions" vs "catalog" vs "snapshot" context, which §2.3/§2.4 rely on. |
 | G9 | **Usage accounting** | Disjoint `TokenUsage`: `inputTokens` is **uncached input only**; cache read/write and reasoning are separate (`types.d.ts:128-150`) | `Usage{input,output,cached,reasoning}` exists (`message.hpp:131-138`), but `parse_usage` assigns `input_tokens = prompt_tokens` **without subtracting cache hits**, and reads `cached_tokens`/`reasoning_tokens` independently (`openai_adapter.cpp:100-114`). No arithmetic enforces any subset relation | **NOT disjoint.** `cached ⊆ input` and `reasoning ⊆ output` are only provider conventions here; dsh's `inputTokens` excludes cache. Add `totalTokens?`/cache-write and the subtraction at the adapter boundary. This is a real delta, not "minor". |
 | G10 | **Incremental chunk→message assembler** | `BlockAssembler` single canonical algorithm; `interruptedBlocks()` drops tool calls; `finish` defaults to `stop` | `ToolCallAssembler` only assembles tool calls (`tool_call_assembler.hpp:24`); the loop coalesces text via `ChunkCoalescer` (`chunk_coalescer.hpp`) | **Partial.** Text/reasoning/tool blocks are not assembled by one canonical component; interrupted-stream handling is not a single policy. |
 | G11 | **Compact assistant-stream + replay envelope** | `AssistantStreamAccumulator` packs timed delta runs; `ReplayEnvelope` stored on the assistant message source | ymh persists `AssistantChunk{message,index,text,kind}` events (`events.hpp:96-101`); no packed runs, no replay envelope, no adapter-private replay state (`ReplayEnvelope`/`AssistantStreamRecord`/`TimedStreamEvent` do not exist in the tree) | **Missing replay envelope + compaction of stream records.** |
 | G12 | **Tool-call assembly** | Adapter yields raw JSON string deltas; assembler parses; `ToolCallBlock.arguments` stays a raw string | `ToolCallAssembler` parses fragments into a JSON object; `ToolCallAssembled.arguments` is an object (`stream.hpp:134-138`); protocol violations → `ProviderInternal` | **Already aligned**, with one design difference: dsh keeps the raw string on the block and parses later; ymh parses in the assembler. Keep ymh's, document the equivalence. |
-| G13 | **Tool result feeding / ordering** | `executeToolCalls`: exclusive calls form barriers, parallel-safe calls use a bounded pool (`maxParallelToolCalls` default 10); "policy, results, and result context remain model-ordered"; abort records synthetic results for skipped calls | `AgentLoop::executeToolCall` (singular) executes one call at a time (`agent_loop.hpp:138`); tool results appended as `ToolResult` events (`events.hpp:127`) | **Missing bounded parallel scheduling.** ymh is serial. Also missing: synthetic error results for skipped calls on abort (replay validity). |
+| G13 | **Tool result feeding / ordering** | `executeToolCalls`: exclusive calls form barriers, parallel-safe calls use a bounded pool (`maxParallelToolCalls` default 10); "policy, results, and result context remain model-ordered"; abort records synthetic results for skipped calls | `AgentLoop::executeToolCall` (singular) executes one call at a time (`agent_loop.hpp:141`); tool results appended as `ToolResult` events (`events.hpp:127`) | **Missing bounded parallel scheduling.** ymh is serial. Also missing: synthetic error results for skipped calls on abort (replay validity). |
 | G14 | **Stable tool catalog across modes** | Plan mode changes only `plan:policy`; `exit_plan_mode` stays registered; KV-cache prefix stable | No plan mode; tool set is whatever `ToolRegistry::schemas()` returns, frozen once (`tool_registry.hpp:81-82`, `context_assembler.cpp:52`); MCP tools can join (`15-mcp-adapter.md`) | **Missing mode/tool-catalog stability rule.** ymh has no mode concept, so the rule must be stated for any future mode and for MCP changes. |
 | G15 | **Bounded output (deque/chunked-list/retention)** | `Deque`, `ChunkedList`, `ItemRetainer`/`TextRetainer` with exact omission metadata and `formatRetentionNotice` | Only `clamp_tool_result` truncates a serialized result to `max_bytes` (`tool.hpp:79-82`); no item/text retainer, no omission notice, no persistent chunked list | **Missing retention library.** `ToolResult.truncated` is a bool (`events.hpp:132`); dsh reports exact omitted counts. |
 | G16 | **Replay-safe tool-result pruning** | `dsh-compaction-tool-result-pruner`: deterministic head/middle/tail (8192/4096/1024) **measured in Unicode code points**, replacement cites shadowed node, preceded by `compaction/prune` shadow-price | None. `clamp_tool_result` caps at execution time and is not a surface replacement | **Missing pruner.** |
 | G17 | **Compaction as projection** | `CompactionEngine` with `compactIfNeeded('pressure'|'context-overflow')`/`compactNow`; log-only `compaction/*` events; shadowed range/seqs/token count; summary `provider`/`model` logged | `CompactionPolicy` (`compactor.hpp:30-58`), `ContextCompactor`, `ContextCompaction` event with boundary/summary/tokenEstimate/model/createdAt (`events.hpp:159-165`); "projection over the append-only session log, never a deletion" (`compactor.hpp:1-7`) | **Already aligned in principle.** Delta: ymh has no trigger taxonomy (`pressure` vs `context-overflow`), no shadowed-seq accounting, no separate summary event family, and no `compactNow` vs `compactIfNeeded` split. Adding payload fields is **breaking** against spec 13 (see §4.4). |
-| G18 | **Ordered prompt sections + canonical order table** | `SECTION_ORDERS`/`CONTEXT_ORDERS`, `PromptSection{name,order,text,complete?}`, `PromptContext`, `PromptAssembly`, `system-prompt/assemble` waterfall, strict `{{var}}`, `complete` singleton, `toolOrder` + `TOOL_ORDER_REST` | ymh has **no section registry, order table, variables, or `complete`/`toolOrder` rule**. What it does have: `SessionContextAssembler` prepends one system message built from `AgentConfig::system_prompt` (`context_assembler.cpp:36-50`), and `make_agent_config` appends the skill catalog's `index_section()` to that string (`workspace_runtime.cpp:50-57`); the base prompt is config or a hardcoded fallback (`wiring.cpp:48-52`) | **Missing registry; not "one hardcoded string".** The structural gap (orders, registry, variables, strict interpolation, `complete`, `toolOrder`) is real and is the second-highest-leverage gap; the current prompt is config-driven and already has one dynamic append (skills), so the delta is the registry, not the existence of any assembly. |
+| G18 | **Ordered prompt sections + canonical order table** | `SECTION_ORDERS`/`CONTEXT_ORDERS`, `PromptSection{name,order,text,complete?}`, `PromptContext`, `PromptAssembly`, `system-prompt/assemble` waterfall, strict `{{var}}`, `complete` singleton, `toolOrder` + `TOOL_ORDER_REST` | ymh has **no section registry, order table, variables, or `complete`/`toolOrder` rule**. What it does have: `SessionContextAssembler` prepends one system message built from `AgentConfig::system_prompt` (`context_assembler.cpp:47-54`), and `make_agent_config` appends the skill catalog's `index_section()` to that string (`workspace_runtime.cpp:50-58`); the base prompt is config or a hardcoded fallback (`wiring.cpp:48-52`) | **Missing registry; not "one hardcoded string".** The structural gap (orders, registry, variables, strict interpolation, `complete`, `toolOrder`) is real and is the second-highest-leverage gap; the current prompt is config-driven and already has one dynamic append (skills), so the delta is the registry, not the existence of any assembly. |
 | G19 | **Persona prefix/suffix** | `dsh-persona` order 0/10200, shadowable per agent/preset, `complete` mode | None; the default prompt is a hardcoded English fallback (`wiring.cpp:48-52`) but is overridable by config | **Missing.** |
 | G20 | **Workspace instructions (AGENTS.md)** | Loader with `.git` root, candidates, required `maxBytes`, broad-to-specific, `<system-reminder>` framing, durable user-role message, change/removal notices | None (grep found no instructions loader; `20-skills.md` is about skills, not AGENTS.md) | **Missing entirely.** Note ymh's `AGENTS.md` exists as a repo convention but is not loaded into context. |
 | G21 | **Runtime-context snapshots** | Dynamic contexts become sourced user-role snapshots under "Current runtime context. This snapshot supersedes earlier runtime-context snapshots."; separate from sections | `ContextInjected` event with `role`/`text` (`events.hpp:153-157`); `role` **defaults to `Role::System`** and there is no snapshot/supersession or provenance model | **Partial.** ymh can inject context but has no sourced snapshot/supersede model and its default role is the opposite of dsh's user-role snapshot. |
@@ -1242,7 +1242,7 @@ Evidence is `file:line` or spec section. Where a prior draft overstated a
 | G27 | **Background jobs** | Owner-scoped registry, `job_output`/`job_list`/`job_kill`, completion wakeup/quiet, `maxConsecutiveWakes` | PTY capability (spec `14`) and shell tools run synchronously; no job registry | **Missing.** |
 | G28 | **Commands are not model messages** | `ctx.commands`, log-only `command/run`/`command/done`, agent-scoped shadowing | `ui/command_registry.hpp` exists for UI commands (e.g. `/context`, spec `18`) but the semantics are UI-local, not a durable log-only command surface | **Partial.** ymh has a command registry; it is not the dsh contract (no `command/run`/`command/done` events, no agent-scoped shadowing). |
 | G29 | **Repeat-tool / loop protection** | Repeat-tool reminder at thresholds `[3,5,8]`, plugin-sourced append-only; step/inbox steering | `AgentConfig::max_steps = 100` (`agent.hpp:97`) and `StepLimitExceeded` (`agent.hpp:68`); no repeat detection, no steering-specific reminder | **Partial.** ymh has a hard step cap; dsh has graduated in-session reminders plus steering. |
-| G30 | **Permissions / sandbox** | Host-plane sandbox + approval stack; `approvalPolicy: 'never'` for children | The `SandboxMode` enum exists (`environment.hpp:22-26`) with a `ReadOnly` value commented "inspection only: no writes, no subprocesses, no PTYs". But production hardcodes `SandboxMode::Workspace` at the only two wiring sites (`wiring.cpp:171`, `workspace_runtime.cpp:101`; also `supervisor.cpp:1487` default), and `ReadOnly` is **unreachable from production**. It is enforced **only** at the policy layer, as a hard deny of a fixed tool-name list (`permission_policy.cpp:204-207` → `tool_is_mutating` `:160-173`); `LocalEnvironment::resolve()` (`environment.cpp:60-91`) special-cases only `Unrestricted` (`:68`) and does not confine writes/subprocesses/PTYs for `ReadOnly`. `PermissionPolicy`/`PermissionGate`/`PermissionRequest`/durable `PermissionDecision` do exist (`permission_policy.hpp:54,116,191`; `events.hpp:145`) | **Not aligned as claimed.** The policy stack is real and richer than a denylist in other respects (glob rules, grant scopes, fail-closed gate), but `ReadOnly` is dead code in production and the environment does not enforce it. Any adoption of dsh's sandbox must either wire a real read-only environment or delete the mode; do not list it as "already aligned". |
+| G30 | **Permissions / sandbox** | Host-plane sandbox + approval stack; `approvalPolicy: 'never'` for children | The `SandboxMode` enum exists (`environment.hpp:22-26`) with a `ReadOnly` value commented "inspection only: no writes, no subprocesses, no PTYs". But production hardcodes `SandboxMode::Workspace` at both production wiring sites (`wiring.cpp:178`, `workspace_runtime.cpp:103`; also the defaults `agent.hpp:102`, `permission_policy.hpp:68`), and `ReadOnly` is **unreachable from production**. It is enforced **only** at the policy layer, as a hard deny of a fixed tool-name list (`permission_policy.cpp:205-207` → `tool_is_mutating` `:160-174`); `LocalEnvironment::resolve()` (`environment.cpp:60-91`) special-cases only `Unrestricted` (`:68`) and does not confine writes/subprocesses/PTYs for `ReadOnly`. `PermissionPolicy`/`PermissionGate`/`PermissionRequest`/durable `PermissionDecision` do exist (`permission_policy.hpp:54,120,195`; `events.hpp:145`) | **Not aligned as claimed.** The policy stack is real and richer than a denylist in other respects (glob rules, grant scopes, fail-closed gate), but `ReadOnly` is dead code in production and the environment does not enforce it. Any adoption of dsh's sandbox must either wire a real read-only environment or delete the mode; do not list it as "already aligned". |
 | G31 | **Event-sourced session log** | Append-only typed event log is the durable source of truth; all the above records live in it | `events.hpp` typed `SessionEventMap`; `deriveMessages()` (`session.cpp:362,551`); append-only log is the source of truth (`00 §9.1`) | **Already aligned — the keystone.** The migration is mostly "add event types + a projection", not "add a log". |
 | G32 | **Skills** | Skill catalog as a durable user-role `<system-reminder>` message; `skill` tool loads full instructions | Spec `20-skills.md` (verified): `SkillCatalog` with `model_visible_`, `SkillTool` (`include/ymh/skills/skill_catalog.hpp:34-60`) | **Already aligned in spirit.** Delta: ymh's catalog rendering/framing should match the verbatim dsh text (§2.3.4) and be logged as a `catalog`-form context. |
 
@@ -1391,4 +1391,100 @@ Evidence is `file:line` or spec section. Where a prior draft overstated a
     first-match-wins rule (N-L5).
   - **Consciously not changed.** `B-L1` (D10 still classified `Add.`) is left as
     the re-gate deemed it acceptable: `06` is gated in Wave 0.
+
+- **Rev 4 (2026-09-19).** Repair pass after the Rev-3 re-gate
+  (`/tmp/opencode/regate26-rev3.md`; open HIGH = 1, MEDIUM = 3, LOW = 6). Every
+  fix was re-verified against the packages and the ymh tree.
+  - **NEW-H1 (HIGH).** Chose option (b): the logged header is a *changed
+    snapshot* (per series start / on `config`/prompt/tool/`purpose` change), and
+    the digest is defined over the request **template** (envelope + config +
+    system prompt + tools), **not** over the messages. Added
+    `FrozenRequest::canonical_template()`/`template_digest()` and renamed the
+    header field `request_digest` → `template_digest`; `canonical_json()` remains
+    template + messages. `26-I2`, D2, §4.3.2, §4.5 (`26-F13`) and the §5.2
+    harness now all state the same two-part contract (template digest equality
+    for every header; byte-identical `canonical_json()` across two rebuilds per
+    attempt). Option (a) (a header per dispatch) was rejected because it
+    contradicts dsh's changed-snapshot model (`dsh-llm/lib/types/call-config.d.ts`)
+    and repeats the full prompt/tool block every step.
+  - **NEW-M1 (MEDIUM).** Added `session_id` and `purpose` to
+    `LlmRequestHeader`; both are now part of the template digest, so
+    purpose-bearing (compaction/session-title) requests are reconstructable.
+  - **NEW-M2 (MEDIUM).** Pinned the JSON key schemas for all ten new events and
+    the two changed payloads in §4.3.9.1, so the codec is no longer deferred.
+  - **NEW-M3 (MEDIUM).** Replaced `GoalChanged`/`goal/changed` with the durable
+    dsh event `goal/change` → `payload::GoalChange` (`GoalOperation` + snapshot
+    or clear), citing `dsh-goal/lib/types/domain.d.ts:12-32`; the live Cordis
+    `goal/changed` (`:68-73,86-90`) is explicitly not copied.
+  - **LOWs.** Removed D2's stale "header event's own seq" clause (NEW-L1);
+    corrected the ymh citation drift and deleted the unsupported
+    `supervisor.cpp:1487` (NEW-L2); made `replay_state` single-homed on the
+    assistant settlement event, not `MessageSource` (NEW-L3); removed the
+    zero-DDL schema bump (no structural change ⇒ `kSchemaVersion` stays 1) and
+    replaced the migration section with a compatibility section (NEW-L4); stated
+    the `push()` return-type divergence (NEW-L5); pinned `ContextFormed`
+    field/form coupling via `26-I7` (NEW-L6).
+
+- **Rev 5 (2026-09-19).** Repair pass after the Rev-4 re-gate
+  (`/tmp/opencode/regate26-rev4.md`; open HIGH = 0, MEDIUM = 5, LOW = 5). The
+  five MEDIUMs were **first identified by the adversarial planning panel**
+  (`/tmp/opencode/hyperplan-bundle.md`, `/tmp/opencode/hyperplan-r2.md`) as five
+  named blind spots, then independently confirmed by the re-gate; Rev 4 did not
+  address them. Every fix was re-verified against the packages at the durable
+  path and the ymh tree.
+  - **MEDIUM-1 — full-prompt persistence (policy).** New `26-I11` + `26-D23`:
+    the `llm/request_header` event always carries `system_prompt_digest`; the
+    full `system_prompt` text is persisted **only** under the explicit
+    `logging.log_prompts` opt-in (the existing key, `config.hpp:84-88`,
+    `config.cpp:787`), reconciling the header with `redaction.hpp:4-6`. `26-I2`
+    and the §4.3.2 reconstruction contract state the consequence: replay
+    re-derives the prompt and verifies the digest when the text is absent.
+  - **MEDIUM-2 — consumer surface + Wave-2 regression.** New §4.3.9.2 pins the
+    70-`case EventType::` consumer matrix (session.cpp 22, no `default` ⇒ build
+    gate; `ui_event_adapter` 25, `session_export` 9, `session_cli` 8,
+    `headless` 6) and the per-type obligations. D9/§4.6/Wave 2 now keep
+    `AssistantChunk` as a **live-only** publication (like `McpServerStatusChanged`,
+    `core/event.hpp:72-74`) so `ymh run` stdout and live UI deltas survive, with
+    an explicit headless/UI consumer migration to `assistant/message`.
+  - **MEDIUM-3 — protocol version.** New `26-I12` + `26-D24`: bump
+    `kProtocolVersion` 1→2 in Wave 1 (`protocol.hpp:153`,
+    `protocol_server.cpp:285-290`), so a spec-24 mixed-version pair fails loud
+    with `UnsupportedProtocol`; a §5.2 handshake test is added.
+  - **MEDIUM-4 — Wave 0 staging.** §5 Wave 0 is restaged: **Stage A** up-front
+    freezes only `00` + the `01` event-family contract + `08` (blocks Wave 1);
+    **Stage B** JIT-gates `05`/`27`/`28`/`29`/`30` and the per-wave payloads
+    before their own wave. Wave 1 is no longer blocked on spec `27`.
+  - **MEDIUM-5 — D1 reclassification.** D1 is now `Brk. (06, 08)` (it replaces
+    the pinned `AgentServices`/provider seam); §4.4 adds 00/06/08/05/04/16/07/13/15
+    rows and an explicit cascade-coverage note for the omitted specs.
+  - **LOWs.** Escalated the no-downgrade one-way door to an explicit product
+    sign-off item (§4.6); corrected Wave 4's rationale to the real Wave 3 → Wave 4
+    dependency; stated the `ReplayEnvelope` shape divergence vs dsh
+    (`types.d.ts:331-350`); fixed the `permission_policy.hpp:119` → `:120`
+    off-by-one.
+
+- **Rev 6 (2026-09-19).** Repair pass after the Rev-5 re-gate
+  (`/tmp/opencode/regate26-rev5.md`; open HIGH = 0, MEDIUM = 2, LOW = 4). Rev 6
+  resolves **M-3 → N-2** only; **M-1/N-1 is deliberately left open** (the prompt-
+  logging policy decision belongs to the user, not this revision). Every fix was
+  re-verified against the packages at the durable path and the ymh tree.
+  - **N-2 (MEDIUM) — `kProtocolVersion` decision replaced: decouple, do not bump.**
+    Rev 5 bumped `kProtocolVersion` 1→2 with an exact-match handshake. The gate
+    accepted the decision but flagged that a bump forces a supervisor/daemon
+    co-upgrade, and spec `24` establishes that a non-last supervisor's daemon
+    **outlives** the supervisor (`24` §1.3.3/`AL23`/`AL25`), so a mixed-version
+    pair is a real, reachable configuration — a loud exact-match failure would
+    stop a new supervisor from attaching to an existing daemon at all. Rev 6
+    adopts the gate's alternative (option (b)): `kProtocolVersion` stays `1`, the
+    event vocabulary is **decoupled** from the envelope version, and the wire
+    receiver **skips** an unknown event `type` (still advancing the per-session
+    cursor) while the **on-disk/replay** decode keeps its loud `CorruptionError`
+    fence (`session_persistence.cpp:228-232`, `01` S3). This also removes the
+    conflict the gate found with spec `24` `AL20`/§1.3.3 ("`kProtocolVersion`
+    unchanged"): with no bump those statements stay true, `24` remains
+    **Additive**, and **no spec-24 errata is required**. `26-I12`, `26-D24`,
+    §4.6 (the compat story), §4.4 (`00`/`05`/`04`/`16`/`24` rows), §5 Stage B and
+    the §5.2 harness are all reconciled in `26-dsh-alignment-part2.md`. No dsh
+    claim changes: the resolution is entirely about ymh's wire/DB versioning, and
+    the 18 load-bearing dsh claims re-verified in Rev 5 are untouched.
 
