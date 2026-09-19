@@ -18,7 +18,6 @@
 #include "ymh/session/events.hpp"
 #include "ymh/ui/command_registry.hpp"
 #include "ymh/ui/terminal_layer.hpp"
-#include "ymh/ui/ui_application.hpp"
 #include "ymh/ui/ui_event_adapter.hpp"
 #include "ymh/ui/ui_model.hpp"
 #include "ymh/ui/ui_render.hpp"
@@ -270,12 +269,6 @@ TEST(TerminalLayer, DisablesIxonAndRestores) {
 
     ::close(slave);
     ::close(master);
-}
-
-TEST(UiApplication, RejectsMissingWorkspace) {
-    UiRunOptions options;
-    options.workspace = "/definitely/not/a/workspace";
-    EXPECT_EQ(run_tui(options), 2);
 }
 
 TEST(UiModel, MultiWorkspaceSessionsRouteAndCount) {

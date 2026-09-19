@@ -14,8 +14,10 @@
 #include <sqlite3.h>
 
 #include "ymh/cli/wiring.hpp"
+#include "ymh/core/event_bus.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/session/session_manager.hpp"
 #include "ymh/session/session_persistence.hpp"
 
 namespace {
@@ -617,8 +619,36 @@ TEST(SessionStoreSeam, SL11_EraseWithEventRemovesAllRowsLeasesAndEvents) {
     EXPECT_EQ(after.snapshots, 0);
 }
 
-// 23 §5.4: the erase is lease-exempt -- it succeeds for a non-holder, while a
-// plain append is refused.
+// AL-U10/AL16/AL17: `eraseWithEvent` returns the store-assigned terminal
+// `Sequence`, and `SessionManager::deleteSession` publishes `{seq,
+// SessionEnded}` on the committed channel even though the row was erased.
+TEST(SessionStoreSeam, AL_U10_EraseWithEventReturnsSequenceAndManagerPublishesCommitted) {
+    TempWorkspace workspace;
+    auto          store        = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+    const Sequence prior =
+        store->append(header.id, make_event(header.id, std::chrono::system_clock::now()));
+
+    const Sequence terminal = store->eraseWithEvent(header.id, make_session_ended(header.id));
+    EXPECT_GT(terminal, prior);
+    EXPECT_FALSE(store->load(header.id).has_value());
+
+    const SessionHeader second = store->create(make_header(workspace.root()));
+    EventBus             bus;
+    SessionManager       manager(*store, bus);
+    std::vector<EventRecord> committed;
+    auto subscription = bus.subscribeCommitted(
+        [&committed](const EventRecord& record) { committed.push_back(record); });
+
+    manager.deleteSession(second.id, false);
+
+    ASSERT_EQ(committed.size(), 1u);
+    EXPECT_EQ(committed[0].event.type, EventType::SessionEnded);
+    EXPECT_EQ(committed[0].event.session_id.value, second.id.value);
+    EXPECT_EQ(committed[0].event.payload.get<payload::SessionEnded>().reason,
+              payload::SessionEndReason::Deleted);
+    EXPECT_GT(committed[0].seq, 0);
+}
 TEST(SessionStoreSeam, SL11_EraseWithEventIsLeaseExempt) {
     TempWorkspace workspace;
     auto          store        = SessionPersistence::open(workspace.config());

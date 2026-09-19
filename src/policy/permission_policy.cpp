@@ -281,23 +281,35 @@ PermissionGate::PermissionGate(PermissionPolicy& policy, PermissionConfig config
     : policy_(policy), config_(std::move(config)) {}
 
 void PermissionGate::set_attention_hook(AttentionHook hook) {
+    std::lock_guard<std::mutex> lock(hook_mutex_);
     attention_hook_ = std::move(hook);
 }
 
 void PermissionGate::set_decision_hook(DecisionHook hook) {
+    std::lock_guard<std::mutex> lock(hook_mutex_);
     decision_hook_ = std::move(hook);
+}
+
+PermissionGate::DecisionHook PermissionGate::decision_hook_for_test() const {
+    std::lock_guard<std::mutex> lock(hook_mutex_);
+    return decision_hook_;
 }
 
 void PermissionGate::emit_decision(const PermissionRequest& request,
                                    const PermissionOutcome& outcome) {
-    if (!decision_hook_) {
+    DecisionHook hook;
+    {
+        std::lock_guard<std::mutex> lock(hook_mutex_);
+        hook = decision_hook_;
+    }
+    if (!hook) {
         return;
     }
     payload::PermissionDecision decision;
     decision.call = request.call;
     decision.decision = outcome.decision;
     decision.reason = outcome.reason;
-    decision_hook_(decision);
+    hook(decision);
 }
 
 PermissionOutcome PermissionGate::resolve(const PermissionRequest& request,
@@ -324,8 +336,13 @@ PermissionOutcome PermissionGate::resolve(const PermissionRequest& request,
         pending_.emplace(id.value, std::move(pending));
     }
 
-    if (attention_hook_) {
-        attention_hook_(id, request);
+    AttentionHook attention;
+    {
+        std::lock_guard<std::mutex> lock(hook_mutex_);
+        attention = attention_hook_;
+    }
+    if (attention) {
+        attention(id, request);
     }
 
     const bool bounded =

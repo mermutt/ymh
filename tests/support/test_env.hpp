@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -63,12 +64,14 @@ private:
 class MemorySessionStore final : public SessionStore {
 public:
     SessionHeader create(SessionHeader header) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         headers_[header.id.value] = header;
         logs_[header.id.value] = {};
         return header;
     }
 
     std::optional<SessionHeader> load(SessionId id) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         const auto it = headers_.find(id.value);
         if (it == headers_.end()) {
             return std::nullopt;
@@ -77,6 +80,7 @@ public:
     }
 
     std::vector<SessionHeader> list() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         std::vector<SessionHeader> result;
         for (const auto& [key, header] : headers_) {
             result.push_back(header);
@@ -84,9 +88,14 @@ public:
         return result;
     }
 
-    void erase(SessionId id) override { headers_.erase(id.value); }
+    void erase(SessionId id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        headers_.erase(id.value);
+        logs_.erase(id.value);
+    }
 
     EventRange read(SessionId id, Sequence after = 0) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         EventRange result;
         for (const EventRecord& record : logs_.at(id.value)) {
             if (record.seq > after) {
@@ -97,6 +106,7 @@ public:
     }
 
     EventRange readRange(SessionId id, Sequence from, Sequence to) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         EventRange result;
         for (const EventRecord& record : logs_.at(id.value)) {
             if (record.seq >= from && record.seq <= to) {
@@ -107,6 +117,7 @@ public:
     }
 
     Sequence append(SessionId id, Event event) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!lease_) {
             throw LeaseLost("memory store is not the lease holder");
         }
@@ -118,16 +129,20 @@ public:
         return seq;
     }
 
-    bool isLeaseHolder(SessionId) const override { return lease_; }
+    bool isLeaseHolder(SessionId) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lease_;
+    }
 
     bool lease_ = true;
     // Test seam: when set, `append` rejects an event of this type (19 §4.3 L7).
     std::optional<EventType> throw_on_append_type;
 
 private:
+    mutable std::mutex                             mutex_;
     std::unordered_map<std::string, SessionHeader> headers_;
-    std::unordered_map<std::string, EventRange> logs_;
-    Sequence global_ = 0;
+    std::unordered_map<std::string, EventRange>    logs_;
+    Sequence                                       global_ = 0;
 };
 
 struct ToolEnv {

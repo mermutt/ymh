@@ -125,12 +125,13 @@ TEST(AgentInbox, SendStartsTurnWithUserOrigin) {
     auto             provider = std::make_unique<HookingProvider>(script_of({text_step("ok")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv         env("inbox_send", std::move(provider));
-    Agent&           agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
     EXPECT_EQ(providerPtr->requests.size(), 1u);
 
-    const std::vector<payload::TurnOrigin> origins = turn_origins(env.sessionOf(agent).events());
+    const std::vector<payload::TurnOrigin> origins = turn_origins(env.sessionOf(agent)->events());
     ASSERT_EQ(origins.size(), 1u);
     EXPECT_EQ(origins[0], payload::TurnOrigin::User);
 }
@@ -139,7 +140,8 @@ TEST(AgentInbox, FollowupQueuedWhileRunningUsesFollowUpOrigin) {
     auto             provider = std::make_unique<HookingProvider>(script_of({text_step("one"), text_step("two")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv         env("inbox_followup", std::move(provider));
-    Agent&           agent     = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     Agent*           agentPtr  = &agent;
 
     providerPtr->onStream = [agentPtr](int index, const LLMRequest&) {
@@ -150,7 +152,7 @@ TEST(AgentInbox, FollowupQueuedWhileRunningUsesFollowUpOrigin) {
 
     ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
 
-    const EventRange                        events  = env.sessionOf(agent).events();
+    const EventRange                        events  = env.sessionOf(agent)->events();
     const std::vector<payload::TurnOrigin>  origins = turn_origins(events);
     ASSERT_EQ(origins.size(), 2u);
     EXPECT_EQ(origins[0], payload::TurnOrigin::User);
@@ -169,7 +171,8 @@ TEST(AgentInbox, SteerFoldsIntoTheNextStepOnly) {
     AgentEnv         env("inbox_steer", std::move(provider), AgentConfig{},
                          allow_all_permission_config(), {}, true);
     env.workspace.write("a.txt", "x");
-    Agent& agent    = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     Agent* agentPtr = &agent;
 
     providerPtr->onStream = [agentPtr](int index, const LLMRequest&) {
@@ -184,7 +187,7 @@ TEST(AgentInbox, SteerFoldsIntoTheNextStepOnly) {
     EXPECT_FALSE(request_has_text(providerPtr->requests[0], Role::User, "steer-text"));
     EXPECT_TRUE(request_has_text(providerPtr->requests[1], Role::User, "steer-text"));
 
-    const std::vector<std::string> texts = user_texts(env.sessionOf(agent).events());
+    const std::vector<std::string> texts = user_texts(env.sessionOf(agent)->events());
     ASSERT_EQ(texts.size(), 2u);
     EXPECT_EQ(texts[1], "steer-text");
 }
@@ -193,7 +196,8 @@ TEST(AgentInbox, InjectIsContextOnlyAndFoldsIntoNextAssembly) {
     auto             provider = std::make_unique<HookingProvider>(script_of({text_step("ok")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv         env("inbox_inject", std::move(provider));
-    Agent&           agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     ContextMessage context;
     context.role       = Role::System;
@@ -205,7 +209,7 @@ TEST(AgentInbox, InjectIsContextOnlyAndFoldsIntoNextAssembly) {
     EXPECT_EQ(providerPtr->requests.size(), 0u);
 
     ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
-    EXPECT_EQ(count_type(env.sessionOf(agent).events(), EventType::ContextInjected), 1u);
+    EXPECT_EQ(count_type(env.sessionOf(agent)->events(), EventType::ContextInjected), 1u);
     ASSERT_EQ(providerPtr->requests.size(), 1u);
     EXPECT_TRUE(request_has_text(providerPtr->requests[0], Role::System, "injected-context"));
 }
@@ -215,7 +219,8 @@ TEST(AgentInbox, FollowupsAreConsumedInFifoOrder) {
         script_of({text_step("one"), text_step("two"), text_step("three")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv         env("inbox_fifo", std::move(provider));
-    Agent&           agent    = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     Agent*           agentPtr = &agent;
 
     providerPtr->onStream = [agentPtr](int index, const LLMRequest&) {
@@ -227,7 +232,7 @@ TEST(AgentInbox, FollowupsAreConsumedInFifoOrder) {
 
     ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
 
-    const std::vector<std::string> texts = user_texts(env.sessionOf(agent).events());
+    const std::vector<std::string> texts = user_texts(env.sessionOf(agent)->events());
     ASSERT_EQ(texts.size(), 3u);
     EXPECT_EQ(texts[0], "hi");
     EXPECT_EQ(texts[1], "A");
@@ -241,7 +246,8 @@ TEST(AgentInbox, OverflowIsRejectedAndNeverDropped) {
     auto             provider = std::make_unique<HookingProvider>(script_of({text_step("ok")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv         env("inbox_full", std::move(provider), config);
-    Agent&           agent    = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     Agent*           agentPtr = &agent;
 
     InboxResult first  = InboxResult::AgentDisposed;
@@ -261,7 +267,8 @@ TEST(AgentInbox, OverflowIsRejectedAndNeverDropped) {
 TEST(AgentInbox, OperationsAfterDisposeReturnAgentDisposed) {
     auto     provider = std::make_unique<HookingProvider>(script_of({text_step("ok")}));
     AgentEnv env("inbox_dispose", std::move(provider));
-    Agent&   agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     agent.dispose();
     EXPECT_TRUE(agent.disposed());
@@ -275,7 +282,8 @@ TEST(AgentInbox, WhenIdleFiresImmediatelyAndDeferred) {
     auto             provider = std::make_unique<HookingProvider>(script_of({text_step("ok")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv         env("inbox_idle", std::move(provider));
-    Agent&           agent    = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     Agent*           agentPtr = &agent;
 
     bool immediate = false;
@@ -296,7 +304,8 @@ TEST(AgentInbox, SuspendCancelsWithSupersededReason) {
     auto             provider = std::make_unique<HookingProvider>(script_of({text_step("abcdef")}));
     HookingProvider* providerPtr = provider.get();
     AgentEnv env("inbox_suspend", std::move(provider));
-    Agent&   agent    = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     const SessionId sessionId = agent.session();
 
     providerPtr->onStream = [&env, &sessionId](int index, const LLMRequest&) {
@@ -307,7 +316,7 @@ TEST(AgentInbox, SuspendCancelsWithSupersededReason) {
 
     ASSERT_EQ(agent.send(user_message("hi")), InboxResult::Accepted);
 
-    const EventRange events = env.sessionOf(agent).events();
+    const EventRange events = env.sessionOf(agent)->events();
     ASSERT_EQ(count_type(events, EventType::TurnCancelled), 1u);
     for (const EventRecord& record : events) {
         if (record.event.type == EventType::TurnCancelled) {

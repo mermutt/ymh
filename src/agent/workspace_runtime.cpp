@@ -1,5 +1,6 @@
 #include "ymh/agent/workspace_runtime.hpp"
 
+#include <chrono>
 #include <exception>
 #include <system_error>
 #include <utility>
@@ -312,6 +313,15 @@ const CompactionPolicy* WorkspaceRuntime::compaction_policy() const noexcept {
 std::vector<McpServerStatus> WorkspaceRuntime::mcp_statuses() const {
     return impl_->mcp_ != nullptr ? impl_->mcp_->statuses()
                                   : std::vector<McpServerStatus>{};
+}
+
+McpManager& WorkspaceRuntime::mcp() noexcept { return *impl_->mcp_; }
+
+void WorkspaceRuntime::shutdownChildren(std::chrono::milliseconds grace) {
+    impl_->environment_->pty().closeAll();
+    if (impl_->mcp_ != nullptr) {
+        mcp().shutdown(grace).get();
+    }
 }
 
 bool WorkspaceRuntime::acquireLease(const SessionId& id) {

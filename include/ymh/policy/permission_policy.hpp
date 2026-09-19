@@ -199,6 +199,11 @@ public:
     void set_attention_hook(AttentionHook hook);
     void set_decision_hook(DecisionHook hook);
 
+    // AL-U20 test seam: snapshot the installed decision hook under `hook_mutex_`
+    // so a test can invoke the real production capture after its owner is torn
+    // down. Not used on any production path.
+    [[nodiscard]] DecisionHook decision_hook_for_test() const;
+
     // Allow/Deny short-circuit; Ask waits up to permission_timeout (0 => wait
     // only when `subscribers_attached`). Never throws; failure is fail-closed.
     PermissionOutcome resolve(const PermissionRequest& request,
@@ -227,8 +232,13 @@ private:
     PermissionPolicy& policy_;
     PermissionConfig  config_;
 
-    AttentionHook attention_hook_;
-    DecisionHook  decision_hook_;
+    // 24-D16/AL34: the hooks are guarded by this leaf mutex (lock order §7.4
+    // #8). `set_*_hook` writes under it; `emit_decision` and `resolve` copy the
+    // hook under it and invoke the copy outside, so a concurrent clear can
+    // never race an in-flight invocation (AL-F24).
+    mutable std::mutex hook_mutex_;
+    AttentionHook      attention_hook_;
+    DecisionHook       decision_hook_;
 
     mutable std::mutex              mutex_;
     std::condition_variable         cv_;

@@ -231,4 +231,54 @@ TEST(EventBusTest, MailboxIsExposedForSessionWithSubscribers) {
     EXPECT_TRUE(bus.mailbox(session)->empty());
 }
 
+// AL-U8/AL16: `subscribeCommitted` receives the `EventRecord` with the store
+// `Sequence`, and `publishCommitted` still delivers the `Event` to the live
+// `subscribe` handlers and the per-session mailbox.
+TEST(EventBusTest, AL_U8_CommittedRecordReachesCommittedAndLiveHandlers) {
+    ymh::EventBus bus;
+    std::vector<ymh::EventRecord> committed;
+    std::vector<int>              live;
+    std::vector<int>              session;
+
+    const ymh::Subscription committed_sub = bus.subscribeCommitted(
+        [&committed](const ymh::EventRecord& record) { committed.push_back(record); });
+    const ymh::Subscription live_sub =
+        bus.subscribe([&live](const ymh::Event& event) { live.push_back(marker_of(event)); });
+    const ymh::Subscription session_sub = bus.subscribe(
+        ymh::SessionId{"s1"},
+        [&session](const ymh::Event& event) { session.push_back(marker_of(event)); });
+
+    bus.publishCommitted(ymh::EventRecord{ymh::Sequence{42}, make_event("s1", 7)});
+
+    ASSERT_EQ(committed.size(), 1u);
+    EXPECT_EQ(committed[0].seq, 42);
+    EXPECT_EQ(marker_of(committed[0].event), 7);
+    EXPECT_EQ(live, (std::vector<int>{7}));
+    EXPECT_EQ(session, (std::vector<int>{7}));
+}
+
+// AL-U16/AL29/AL-F20: a committed subscription carries a channel kind, so
+// `unsubscribe()` (and the destructor) removes the committed handler.
+TEST(EventBusTest, AL_U16_CommittedSubscriptionUnsubscribes) {
+    ymh::EventBus bus;
+    int          count = 0;
+
+    {
+        const ymh::Subscription subscription = bus.subscribeCommitted(
+            [&count](const ymh::EventRecord&) { ++count; });
+        bus.publishCommitted(ymh::EventRecord{ymh::Sequence{1}, make_event("s1", 1)});
+        EXPECT_EQ(count, 1);
+    }
+
+    bus.publishCommitted(ymh::EventRecord{ymh::Sequence{2}, make_event("s1", 2)});
+    EXPECT_EQ(count, 1);
+
+    ymh::Subscription manual = bus.subscribeCommitted(
+        [&count](const ymh::EventRecord&) { ++count; });
+    manual.unsubscribe();
+    bus.publishCommitted(ymh::EventRecord{ymh::Sequence{3}, make_event("s1", 3)});
+    EXPECT_EQ(count, 1);
+    EXPECT_FALSE(manual.active());
+}
+
 } // namespace

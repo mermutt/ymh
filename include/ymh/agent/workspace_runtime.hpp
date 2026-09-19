@@ -15,10 +15,11 @@
 //   * the resolved `LLMProvider`, the `LLMPool`, and the `ContextAssembler`
 //
 // This is a pure extraction of the Milestone-1 wiring that previously lived
-// inline in `src/cli/headless.cpp` and `src/ui/ui_application.cpp`; observable
-// behavior is unchanged. Callers create/resume sessions through `agents()` and
-// take/release the write lease through `acquireLease()` / `releaseLease()`.
+// inline in `src/cli/headless.cpp`; observable behavior is unchanged. Callers
+// create/resume sessions through `agents()` and take/release the write lease
+// through `acquireLease()` / `releaseLease()`.
 
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -47,6 +48,7 @@ class SessionPersistence;
 class Executor;
 class SkillCatalog;
 class TokenEstimator;
+class McpManager;
 struct AgentConfig;
 struct CompactionPolicy;
 struct LLMProviderConfig;
@@ -154,6 +156,15 @@ public:
     [[nodiscard]] const TokenEstimator&        estimator() const noexcept;
     [[nodiscard]] const CompactionPolicy*      compaction_policy() const noexcept;
     [[nodiscard]] std::vector<McpServerStatus> mcp_statuses() const;
+
+    // 24-D9/AL28: the owned MCP manager, so the coordinator can shut it down
+    // explicitly before `TransportServer::stop()` (mirrors `gate()`).
+    [[nodiscard]] McpManager& mcp() noexcept;
+
+    // 24-D9/AL28: ordered child teardown after quiesce and before transport
+    // stop — close every PTY session, then shut the MCP manager down within
+    // `grace`. Idempotent (`McpManager` guards its `shutdown_` flag).
+    void shutdownChildren(std::chrono::milliseconds grace);
 
     // Write-lease convenience: the durable store is the sole lease authority
     // (02 §5). `acquireLease` returns false when another writer holds the

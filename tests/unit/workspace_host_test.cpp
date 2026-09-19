@@ -9,9 +9,11 @@
 #include <cstring>
 #include <dirent.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -53,6 +55,50 @@ FakeScript hello_script() {
     script.steps.push_back(step);
     return script;
 }
+
+// A provider that blocks every call until released and counts concurrent
+// entries, so a test can hold one session's turn in flight while it deletes
+// another session.
+class GatedProvider final : public LLMProvider {
+public:
+    ProviderId id() const override { return "gated"; }
+    ProviderCapabilities capabilities() const override { return {}; }
+
+    Task<LLMResponse> stream(const LLMRequest&, StreamSink sink, CancellationToken cancel) override {
+        entered_.fetch_add(1);
+        for (int attempt = 0; attempt < 400 && !released_.load() && !cancel.cancelled(); ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        if (cancel.cancelled()) {
+            LLMResponse cancelled;
+            cancelled.outcome = StreamOutcome::Cancelled;
+            cancelled.finish  = FinishReason::Other;
+            return Task<LLMResponse>{cancelled};
+        }
+        sink(TextDelta{"hello"});
+        LLMResponse response;
+        response.outcome = StreamOutcome::Completed;
+        response.finish  = FinishReason::Stop;
+        return Task<LLMResponse>{response};
+    }
+
+    bool waitEntered(std::size_t count, std::chrono::milliseconds timeout = 2s) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (entered_.load() >= count) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return entered_.load() >= count;
+    }
+
+    void release() { released_.store(true); }
+
+private:
+    std::atomic<std::size_t> entered_{0};
+    std::atomic<bool>        released_{false};
+};
 
 RegistryConfig registry_config_for(const std::filesystem::path& root) {
     RegistryConfig config;
@@ -577,6 +623,63 @@ TEST(WorkspaceHostLease, FakeStoreDaemonSessionLifecycleDoesNotThrow) {
     EXPECT_EQ(daemon.stopAndJoin(), HostExitCode::Ok);
 }
 
+// AL-I7/AL6/AL7: two sessions, one turn in flight. Deleting the idle session
+// must succeed (the pending predicate is per-session, not a global executor
+// count) and must not cancel or otherwise affect the running session's turn.
+TEST(WorkspaceHostQueue, AL_I7_DeleteIdleWhileOtherRunsHasNoCrossSessionEffect) {
+    ShortTempRoot root("ymh-host-al-i7");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    const WorkspaceId workspace_id = register_workspace(canonical, "al-i7");
+    HostConfig config = base_config(canonical, workspace_id.value);
+    GatedProvider* provider = nullptr;
+    config.provider_factory =
+        [&provider](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        auto owned = std::make_unique<GatedProvider>();
+        provider   = owned.get();
+        return owned;
+    };
+
+    ForegroundHost daemon(config);
+    daemon.start();
+    ASSERT_TRUE(daemon.waitReady());
+    ASSERT_NE(daemon.connection(), nullptr);
+
+    const nlohmann::json a =
+        daemon.connection()->request(protocol::method::kSessionCreate, nlohmann::json::object());
+    const nlohmann::json b =
+        daemon.connection()->request(protocol::method::kSessionCreate, nlohmann::json::object());
+    const SessionId session_a{a.at("session").get<std::string>()};
+    const SessionId session_b{b.at("session").get<std::string>()};
+
+    static_cast<void>(daemon.connection()->request(
+        protocol::method::kAgentPrompt, {{"session", session_a.value}, {"message", "hi"}}));
+    ASSERT_NE(provider, nullptr);
+    ASSERT_TRUE(provider->waitEntered(1));
+
+    EXPECT_NO_THROW(static_cast<void>(daemon.connection()->request(
+        protocol::method::kSessionDelete, {{"session", session_b.value}, {"confirm", true}})));
+    EXPECT_FALSE(daemon.host().store().load(session_b).has_value());
+    EXPECT_TRUE(daemon.host().store().load(session_a).has_value());
+
+    provider->release();
+
+    const auto deadline   = std::chrono::steady_clock::now() + 10s;
+    bool       turn_ended = false;
+    while (!turn_ended && std::chrono::steady_clock::now() < deadline) {
+        const EventRange events = daemon.host().store().readAfter(session_a, 0, 1000);
+        for (const EventRecord& record : events) {
+            if (record.event.type == EventType::TurnEnded) {
+                turn_ended = true;
+            }
+        }
+        if (!turn_ended) {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+    EXPECT_TRUE(turn_ended);
+    EXPECT_EQ(daemon.stopAndJoin(), HostExitCode::Ok);
+}
+
 TEST(WorkspaceHostOwnership, WatchdogArmingTruthTable) {
     HostConfig config;
     config.require_owner     = true;
@@ -772,6 +875,32 @@ TEST(WorkspaceHostOwnership, WatchdogExceptionGuardPublishesEmptyAndContinues) {
     host->requestShutdown(ShutdownReason::Signal);
     runner.join();
     EXPECT_EQ(code, HostExitCode::Ok);
+}
+
+// AL-I12/AL28/AL-F19: the coordinator tears children (PTY sessions, MCP
+// servers) down before it stops the transport, so no child outlives the socket
+// that reports it. `TransportServer::stop()` has no test seam, so this pins the
+// call order in the shipped coordinator source; a reorder fails the assertion.
+TEST(WorkspaceHostTeardown, AL_I12_ChildTeardownPrecedesTransportStop) {
+    const std::filesystem::path source =
+        std::filesystem::path{YMH_SOURCE_DIR} / "src" / "host" / "workspace_host.cpp";
+    std::ifstream input(source);
+    ASSERT_TRUE(input.is_open()) << source;
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    const std::string text = buffer.str();
+
+    const std::size_t coordinator = text.find("WorkspaceHost::Impl::coordinator()");
+    ASSERT_NE(coordinator, std::string::npos);
+    const std::size_t body_end = text.find("\n}\n", coordinator);
+    ASSERT_NE(body_end, std::string::npos);
+    const std::string body = text.substr(coordinator, body_end - coordinator);
+
+    const std::size_t children = body.find("shutdownChildren(");
+    const std::size_t stop     = body.find("transport_->stop()");
+    ASSERT_NE(children, std::string::npos);
+    ASSERT_NE(stop, std::string::npos);
+    EXPECT_LT(children, stop);
 }
 
 } // namespace

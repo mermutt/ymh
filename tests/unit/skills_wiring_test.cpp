@@ -146,7 +146,7 @@ SessionId create_session(WorkspaceRuntime& runtime) {
     if (!created.has_value()) {
         throw std::runtime_error("create failed: " + created.error().detail);
     }
-    return runtime.agents().get(*created).session();
+    return runtime.agents().getShared(*created)->session();
 }
 
 class SkillsWiringTest : public ::testing::Test {
@@ -174,7 +174,8 @@ TEST_F(SkillsWiringTest, IndexReachesAssembledSystemPrompt) {
     EXPECT_NE(runtime.agent_config().system_prompt.find("git-commit"), std::string::npos);
 
     const SessionId session_id = create_session(runtime);
-    Session&        session    = runtime.sessions().session(session_id);
+    auto session_owner = runtime.sessions().sessionPtr(session_id);
+    Session& session = *session_owner;
     const std::vector<Message> messages = runtime.context().assemble(session, TurnContext{});
 
     ASSERT_FALSE(messages.empty());
@@ -195,7 +196,8 @@ TEST_F(SkillsWiringTest, IndexContributesTokens) {
     ASSERT_TRUE(created.has_value()) << created.error().detail;
     WorkspaceRuntime& runtime = **created;
     const SessionId   session_id = create_session(runtime);
-    Session&          session    = runtime.sessions().session(session_id);
+    auto session_owner = runtime.sessions().sessionPtr(session_id);
+    Session& session = *session_owner;
 
     SessionContextAssembler with_index(runtime.tools(), runtime.agent_config().system_prompt);
     SessionContextAssembler without_index(runtime.tools(), default_system_prompt());
@@ -284,10 +286,12 @@ TEST_F(SkillsWiringTest, ToolPathInjectsBodyIntoContext) {
     env.keeper.add(make_skill_tool(catalog));
     env.tools.freeze();
 
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
 
-    Session&         session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const EventRange events  = session.events();
     EXPECT_EQ(count_type(events, EventType::ToolCall), 1u);
     EXPECT_EQ(count_type(events, EventType::PermissionDecision), 1u);
@@ -330,10 +334,12 @@ TEST_F(SkillsWiringTest, UntrustedSkillNeverReachesContext) {
     env.keeper.add(make_skill_tool(catalog));
     env.tools.freeze();
 
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
     ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
 
-    Session& session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     for (const Message& message : session.deriveMessages()) {
         for (const ContentBlock& block : message.content) {
             EXPECT_EQ(block.text.find("Hostile."), std::string::npos);
@@ -345,7 +351,8 @@ TEST_F(SkillsWiringTest, CommandPathInjectsSystemMessage) {
     AgentEnv env("skills_cmd_path",
                  std::make_unique<FakeLLM>(script_of({text_step("done")})),
                  AgentConfig{}, allow_all_permission_config());
-    Agent& agent = env.createAgent();
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
 
     ContextMessage injection;
     injection.role       = Role::System;
@@ -356,7 +363,8 @@ TEST_F(SkillsWiringTest, CommandPathInjectsSystemMessage) {
 
     ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
 
-    Session&         session = env.sessionOf(agent);
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
     const EventRange events  = session.events();
     EXPECT_EQ(count_type(events, EventType::ContextInjected), 1u);
 

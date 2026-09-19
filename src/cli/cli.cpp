@@ -35,7 +35,6 @@
 #include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/supervisor.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
-#include "ymh/ui/ui_application.hpp"
 
 #ifndef YMH_VERSION
 #define YMH_VERSION "0.0.0"

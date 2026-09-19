@@ -577,7 +577,7 @@ Sequence Session::appendEventLocked(Event event) {
     } else if (event.type == EventType::StepStarted) {
         nextStep_ = std::max(nextStep_, event.payload.get<payload::StepStarted>().step + 1);
     }
-    bus_->publish(event);
+    bus_->publishCommitted(EventRecord{seq, event});
     return seq;
 }
 
@@ -637,8 +637,8 @@ std::vector<Sequence> Session::appendBatch(std::span<const Event> events) {
             nextStep_ = std::max(nextStep_, event.payload.get<payload::StepStarted>().step + 1);
         }
     }
-    for (const Event& event : events) {
-        bus_->publish(event);
+    for (std::size_t index = 0; index < events.size(); ++index) {
+        bus_->publishCommitted(EventRecord{sequences[index], events[index]});
     }
     return sequences;
 }

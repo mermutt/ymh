@@ -88,7 +88,7 @@ public:
 
     [[nodiscard]] bool isUnprompted(SessionId id) const override;
     [[nodiscard]] bool hasDependents(SessionId id) const override;
-    void               eraseWithEvent(SessionId id, Event event) override;
+    Sequence           eraseWithEvent(SessionId id, Event event) override;
 
     [[nodiscard]] Sequence   headSequence(SessionId id) const override;
     [[nodiscard]] EventRange readAfter(SessionId id, Sequence after,

@@ -24,8 +24,14 @@ payload::SubagentOutcome SubagentRunner::run(const std::string& task, std::strin
         return payload::SubagentOutcome::Failed;
     }
 
-    Agent&          child          = registry_.get(*created);
-    const SessionId childSessionId = child.session();
+    // C8: hold owning handles for the whole run so the child agent and its
+    // session cannot be freed by a concurrent dispose/close (AL2/AL35).
+    std::shared_ptr<AgentLoop> child = registry_.getShared(*created);
+    if (child == nullptr) {
+        summary = "subagent disposed before it could run";
+        return payload::SubagentOutcome::Failed;
+    }
+    const SessionId childSessionId = child->session();
 
     payload::SubagentSpawned spawned;
     spawned.subagent = childSessionId;
@@ -38,12 +44,12 @@ payload::SubagentOutcome SubagentRunner::run(const std::string& task, std::strin
     block.kind = ContentBlockKind::Text;
     block.text = task;
     message.content.push_back(std::move(block));
-    child.send(std::move(message));
-    child.whenIdle([]() {});
+    child->send(std::move(message));
+    child->whenIdle([]() {});
 
-    payload::SubagentOutcome outcome = payload::SubagentOutcome::Completed;
-    Session&                 childSession = sessions_.session(childSessionId);
-    const EventRange         events       = childSession.events();
+    payload::SubagentOutcome    outcome      = payload::SubagentOutcome::Completed;
+    std::shared_ptr<Session>    childSession = sessions_.sessionPtr(childSessionId);
+    const EventRange            events       = childSession->events();
     for (auto it = events.rbegin(); it != events.rend(); ++it) {
         if (it->event.type == EventType::TurnEnded) {
             outcome = payload::SubagentOutcome::Completed;

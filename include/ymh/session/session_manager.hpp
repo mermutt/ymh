@@ -4,14 +4,17 @@
 // owns the sessions of its daemon over the abstract `SessionStore` seam; the
 // focused/active session is supervisor-local state, not manager state.
 //
-// `env()` from the §9.6 sketch is deferred to the execution-environment wave.
-// `agent()` is a thin delegate to the daemon's `AgentRegistry` (06 §4.1), which
-// remains the single owner of agent lifetime; this layer holds no agent state.
+// 24-D1: `sessions_` owns each `Session` by `std::shared_ptr`, and the only
+// public handle-producing accessor is `sessionPtr` (owning). `session()` is
+// private and may be used only while `mutex_` is held or while the caller holds
+// a strong `sessionPtr` for the returned reference's whole use (24-D17). There
+// is no agent delegate: `AgentRegistry` is the single owner of agent lifetime
+// (06 §4.1) and `AgentLoop` anchors its own session via a strong `shared_ptr`.
 
 #include <cstddef>
 #include <filesystem>
-#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,8 +25,6 @@
 #include "ymh/session/session.hpp"
 
 namespace ymh {
-
-class Agent;
 
 struct SessionOptions {
     std::filesystem::path    cwd;
@@ -60,26 +61,31 @@ public:
     // the assigned Sequence when an event was appended.
     std::optional<Sequence> maybeAutoName(const SessionId& id, std::string_view firstUserText);
 
-    void closeSession(const SessionId& id);
+    // 24-D1: strong-reference accessor for the agent lifetime anchor. The
+    // returned `shared_ptr` keeps the `Session` alive after a concurrent
+    // `closeSession`/`deleteSession` erases the manager's reference. Throws
+    // UnknownSession when the id is not resident (24-D14/AL1).
+    [[nodiscard]] std::shared_ptr<Session> sessionPtr(const SessionId& id);
+
+    void closeSession(const SessionId& id);              // park: erase the manager ref
     void deleteSession(const SessionId& id, bool only_if_empty = false);
 
     [[nodiscard]] std::vector<SessionId> list() const;
 
-    Session& session(const SessionId& id);
-
-    // Installed by AgentRegistry; `agent()` then forwards to it (06 §4.1).
-    using AgentLookup = std::function<Agent*(const SessionId&)>;
-    void                 setAgentLookup(AgentLookup lookup);
-    [[nodiscard]] Agent* findAgent(const SessionId& id) const;
-    Agent&               agent(const SessionId& id) const;
-
 private:
+    // Requires `mutex_` held. 24-D13: returns the resident Session unchanged
+    // when present; never replaces a live object.
     Session& loadInto(const SessionHeader& header);
 
-    SessionStore* store_;
-    EventBus*     bus_;
-    AgentLookup   agent_lookup_;
-    std::unordered_map<std::string, std::unique_ptr<Session>> sessions_;
+    // Private: callers must hold `mutex_` (this is the raw map lookup) or a
+    // strong `sessionPtr` for the returned reference's whole use. External
+    // callers use `sessionPtr` (24-D17).
+    Session& session(const SessionId& id);
+
+    SessionStore*                                             store_ = nullptr;
+    EventBus*                                                 bus_   = nullptr;
+    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;   // 24-D1
+    mutable std::mutex                                        mutex_;      // 24-D11
 };
 
 } // namespace ymh

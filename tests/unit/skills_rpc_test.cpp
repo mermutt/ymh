@@ -144,6 +144,10 @@ TEST_F(SkillsRpcTest, ListAndShowReflectDaemonCatalog) {
     EXPECT_EQ(show.at("body"), "Body text.\n");
 
     EXPECT_THROW(host.showSkill("does-not-exist"), protocol::RpcException);
+
+    // 24-D3/AL10: the executor must be quiesced before its destructor (which
+    // hard-exits on a non-quiesced state), even when no turn was ever submitted.
+    (void)turns.drain(std::chrono::milliseconds{1000});
 }
 
 } // namespace

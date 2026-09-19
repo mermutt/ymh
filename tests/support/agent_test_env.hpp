@@ -101,7 +101,8 @@ struct AgentEnv {
         }
     }
 
-    Agent& createAgent() {
+    // X3: owning handle; callers bind `auto agent = env.createAgent();`.
+    std::shared_ptr<AgentLoop> createAgent() {
         SessionOptions options;
         options.cwd           = workspace.path();
         options.serverProfile = "interactive";
@@ -111,10 +112,13 @@ struct AgentEnv {
         if (!created.has_value()) {
             throw std::runtime_error("create failed: " + created.error().detail);
         }
-        return registry.get(*created);
+        return registry.getShared(*created);
     }
 
-    Session& sessionOf(const Agent& agent) { return sessions.session(agent.session()); }
+    // X4: owning handle; callers bind `auto session = env.sessionOf(*agent);`.
+    std::shared_ptr<Session> sessionOf(const Agent& agent) {
+        return sessions.sessionPtr(agent.session());
+    }
 
     TempWorkspace workspace;
     EventBus bus;

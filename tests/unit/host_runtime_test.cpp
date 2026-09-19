@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -95,6 +96,95 @@ private:
     std::vector<protocol::PermissionRequest>          broadcasts_;
 };
 
+// A provider whose stream() blocks until released, so a test can hold a turn
+// in flight while it exercises the detach / close / shutdown paths. It polls
+// the cancellation token (a CancellationToken does not notify an unrelated
+// condition variable) so the turn's own cancel path is observable.
+class BlockingProvider final : public LLMProvider {
+public:
+    ProviderId id() const override { return "blocking"; }
+    ProviderCapabilities capabilities() const override { return {}; }
+
+    Task<LLMResponse> stream(const LLMRequest&, StreamSink sink, CancellationToken cancel) override {
+        entered_.store(true);
+        for (int attempt = 0; attempt < 400 && !released_.load() && !cancel.cancelled(); ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        if (cancel.cancelled()) {
+            LLMResponse cancelled;
+            cancelled.outcome = StreamOutcome::Cancelled;
+            cancelled.finish  = FinishReason::Other;
+            return Task<LLMResponse>{cancelled};
+        }
+        sink(TextDelta{"hello"});
+        LLMResponse response;
+        response.outcome = StreamOutcome::Completed;
+        response.finish  = FinishReason::Stop;
+        return Task<LLMResponse>{response};
+    }
+
+    bool waitEntered(std::chrono::milliseconds timeout = 2s) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (entered_.load()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return entered_.load();
+    }
+
+    void release() { released_.store(true); }
+
+private:
+    std::atomic<bool> entered_{false};
+    std::atomic<bool> released_{false};
+};
+
+// A provider that counts concurrent entries and blocks every call until
+// released, so a test can occupy every executor worker and leave a later
+// prompt queued behind them.
+class GatedProvider final : public LLMProvider {
+public:
+    ProviderId id() const override { return "gated"; }
+    ProviderCapabilities capabilities() const override { return {}; }
+
+    Task<LLMResponse> stream(const LLMRequest&, StreamSink sink, CancellationToken cancel) override {
+        entered_.fetch_add(1);
+        for (int attempt = 0; attempt < 400 && !released_.load() && !cancel.cancelled(); ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        if (cancel.cancelled()) {
+            LLMResponse cancelled;
+            cancelled.outcome = StreamOutcome::Cancelled;
+            cancelled.finish  = FinishReason::Other;
+            return Task<LLMResponse>{cancelled};
+        }
+        sink(TextDelta{"hello"});
+        LLMResponse response;
+        response.outcome = StreamOutcome::Completed;
+        response.finish  = FinishReason::Stop;
+        return Task<LLMResponse>{response};
+    }
+
+    bool waitEntered(std::size_t count, std::chrono::milliseconds timeout = 2s) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (entered_.load() >= count) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return entered_.load() >= count;
+    }
+
+    void release() { released_.store(true); }
+
+private:
+    std::atomic<std::size_t> entered_{0};
+    std::atomic<bool>        released_{false};
+};
+
 PermissionRequest ask_request(const SessionId& session, std::string tool = "write_file") {
     PermissionRequest request;
     request.call = "call-1";
@@ -172,7 +262,9 @@ public:
     };
 
     explicit Bridge(const std::string& prefix, FakeScript script = FakeScript{},
-                    bool with_pty = false)
+                    bool with_pty = false,
+                    std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)>
+                        provider_factory = {})
         : workspace_(prefix), registry_dir_("host_runtime_registry_" + prefix) {
         root_ = std::filesystem::canonical(workspace_.path());
 
@@ -195,10 +287,14 @@ public:
         if (script.steps.empty()) {
             script.steps.push_back(text_step("hello"));
         }
-        options.provider_factory =
-            [script](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
-            return std::make_unique<FakeLLM>(script);
-        };
+        if (provider_factory) {
+            options.provider_factory = std::move(provider_factory);
+        } else {
+            options.provider_factory =
+                [script](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+                return std::make_unique<FakeLLM>(script);
+            };
+        }
         if (with_pty) {
             io_.start();
             options.executor = io_.executor.get();
@@ -237,7 +333,7 @@ public:
     }
 
     ~Bridge() {
-        turns_.drain(std::chrono::milliseconds{2000});
+        (void)turns_.drain(std::chrono::milliseconds{2000});
     }
 
     [[nodiscard]] WorkspaceRuntime&       runtime() { return *runtime_; }
@@ -248,6 +344,14 @@ public:
     [[nodiscard]] FakePermissionTransport&  permission_transport() { return *permission_transport_; }
     [[nodiscard]] const HostIdentity&     identity() const { return identity_; }
     [[nodiscard]] const std::filesystem::path& root() const { return root_; }
+
+    // AL-I13: tear the HostRuntime down (server first, so its `TransportHost&`
+    // never dangles) while the bus stays alive, so a later committed publish
+    // can prove the committed handler was unsubscribed.
+    void destroy_host_for_test() {
+        server_.reset();
+        host_.reset();
+    }
 
     void clear_forwarded() {
         std::lock_guard<std::mutex> lock(forwarded_mutex_);
@@ -266,7 +370,8 @@ public:
     }
 
     Sequence append_event(const SessionId& id, EventType type) {
-        Session& session = runtime_->sessions().session(id);
+        auto     session_owner = runtime_->sessions().sessionPtr(id);
+        Session& session       = *session_owner;
         Event event;
         event.id = make_event_id();
         event.session_id = id;
@@ -277,7 +382,8 @@ public:
     }
 
     void emit_live(const SessionId& id, EventType type) {
-        Session& session = runtime_->sessions().session(id);
+        auto     session_owner = runtime_->sessions().sessionPtr(id);
+        Session& session       = *session_owner;
         Event event;
         event.id = make_event_id();
         event.session_id = id;
@@ -517,7 +623,7 @@ TEST_F(HostRuntimeTest, SL_I22_DependentDeleteRefusalLeavesNoSideEffects) {
     bridge.clear_forwarded();
     bridge.host().agentPrompt(parent.session, message);
     ASSERT_TRUE(bridge.wait_for_turn_end(10s));
-    ASSERT_NE(bridge.runtime().agents().find(parent.session), nullptr);
+    ASSERT_NE(bridge.runtime().agents().findShared(parent.session), nullptr);
 
     PtyRequest request;
     request.executable = "/bin/sh";
@@ -536,7 +642,7 @@ TEST_F(HostRuntimeTest, SL_I22_DependentDeleteRefusalLeavesNoSideEffects) {
     EXPECT_EQ(refused.kind, "DependentSession");
 
     EXPECT_FALSE(bridge.runtime().environment().pty().list(parent.session).empty());
-    EXPECT_NE(bridge.runtime().agents().find(parent.session), nullptr);
+    EXPECT_NE(bridge.runtime().agents().findShared(parent.session), nullptr);
     EXPECT_TRUE(bridge.runtime().store().load(parent.session).has_value());
     EXPECT_TRUE(bridge.runtime().store().load(child).has_value());
     EXPECT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(),
@@ -551,6 +657,15 @@ TEST_F(HostRuntimeTest, SL_I23_DeleteResetsActiveSession) {
     bridge.host().activateSession(created.session);
     ASSERT_TRUE(bridge.host().hostStatus().active_session.has_value());
 
+    // 24-D5: the activate body is itself queued executor work, so the
+    // queue-aware mid-turn guard refuses until it has settled.
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (bridge.host().hasPendingWork(created.session) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_FALSE(bridge.host().hasPendingWork(created.session));
+
     bridge.host().deleteSession(created.session, false, /*force=*/true);
     EXPECT_FALSE(bridge.host().hostStatus().active_session.has_value());
     EXPECT_FALSE(bridge.host().sessionExists(created.session));
@@ -563,7 +678,8 @@ TEST_F(HostRuntimeTest, SL_I24_ManagerDeleteIsLeaseExemptForNonResidentSession) 
     const protocol::SessionCreated created =
         bridge.host().createSession(nlohmann::json::object());
     bridge.runtime().sessions().closeSession(created.session);
-    ASSERT_THROW(bridge.runtime().sessions().session(created.session), UnknownSession);
+    ASSERT_THROW(static_cast<void>(bridge.runtime().sessions().sessionPtr(created.session)),
+                 UnknownSession);
 
     EXPECT_NO_THROW(bridge.runtime().sessions().deleteSession(created.session, false));
     EXPECT_FALSE(bridge.runtime().store().load(created.session).has_value());
@@ -612,6 +728,200 @@ TEST_F(HostRuntimeTest, SL_I26_DeleteClosesPtyOnSuccess) {
 
     bridge.host().deleteSession(created.session);
     EXPECT_TRUE(bridge.runtime().environment().pty().list(created.session).empty());
+}
+
+// AL-I9/AL23/AL-F15: `session.close` on a running turn is a detach. It must not
+// cancel the turn, erase the agent, or close the resident session. The old
+// cancel-on-close failed every assertion below.
+TEST_F(HostRuntimeTest, AL_I9_CloseDetachesWithoutCancellingTheTurn) {
+    BlockingProvider* provider = nullptr;
+    Bridge            bridge(
+        "hr_detach_close", FakeScript{}, /*with_pty=*/false,
+        [&provider](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+            auto owned = std::make_unique<BlockingProvider>();
+            provider   = owned.get();
+            return owned;
+        });
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array(
+        {nlohmann::json{{"kind", "text"}, {"text", "hi"}}});
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(created.session, message);
+    ASSERT_NE(provider, nullptr);
+    ASSERT_TRUE(provider->waitEntered());
+
+    bridge.host().closeSession(created.session);
+
+    EXPECT_NE(bridge.runtime().agents().findShared(created.session), nullptr);
+    EXPECT_NO_THROW((void)bridge.runtime().sessions().sessionPtr(created.session));
+    EXPECT_FALSE(bridge.wait_for_turn_end(0ms));
+
+    provider->release();
+    EXPECT_TRUE(bridge.wait_for_turn_end(10s));
+
+    std::size_t ended = 0;
+    for (const EventRecord& record : bridge.forwarded()) {
+        if (record.event.type == EventType::SessionEnded) {
+            ++ended;
+        }
+    }
+    EXPECT_EQ(ended, 0u);
+    EXPECT_NE(bridge.runtime().agents().findShared(created.session), nullptr);
+}
+
+// AL-I2/AL7/AL-F14: a prompt submitted to the executor but not yet picked up by
+// the agent is pending work. Deleting its session must be refused with
+// InvalidParams "turn in progress", and the queued prompt must still run. The
+// old guard consulted only the agent inbox/state — blind to the executor queue
+// — so it deleted the session and dropped the just-acked prompt.
+TEST_F(HostRuntimeTest, AL_I2_DeleteRefusesWhilePromptIsQueued) {
+    GatedProvider* provider = nullptr;
+    Bridge         bridge(
+        "hr_al_i2", FakeScript{}, /*with_pty=*/false,
+        [&provider](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+            auto owned = std::make_unique<GatedProvider>();
+            provider   = owned.get();
+            return owned;
+        });
+    ASSERT_NE(provider, nullptr);
+
+    const protocol::SessionCreated first = bridge.host().createSession(nlohmann::json::object());
+    const protocol::SessionCreated second = bridge.host().createSession(nlohmann::json::object());
+    const protocol::SessionCreated queued = bridge.host().createSession(nlohmann::json::object());
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array({nlohmann::json{{"kind", "text"}, {"text", "hi"}}});
+
+    // Occupy both workers, so the third prompt stays in the executor queue and
+    // is invisible to the agent until a worker picks it up.
+    bridge.host().agentPrompt(first.session, message);
+    bridge.host().agentPrompt(second.session, message);
+    ASSERT_TRUE(provider->waitEntered(2));
+    bridge.host().agentPrompt(queued.session, message);
+    ASSERT_TRUE(bridge.host().hasPendingWork(queued.session));
+
+    try {
+        bridge.host().deleteSession(queued.session);
+        FAIL() << "delete must refuse while a prompt is queued";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::RpcCode::InvalidParams));
+        EXPECT_EQ(std::string{error.what()}, "turn in progress");
+    }
+    EXPECT_TRUE(bridge.host().sessionExists(queued.session));
+
+    provider->release();
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (bridge.host().hasPendingWork(queued.session) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_FALSE(bridge.host().hasPendingWork(queued.session));
+    EXPECT_TRUE(bridge.host().sessionExists(queued.session));
+    const EventRange queued_events = bridge.runtime().store().readAfter(queued.session, 0, 1000);
+    EXPECT_GE(count_type(queued_events, EventType::TurnStarted), 1u);
+}
+
+// AL-I15/AL25/AL33/AL-F23: last-exit finalizeAll parks each agent, explicitly
+// closes every resident session (the manager's map empties), and emits no
+// SessionEnded; the durable log still ends with exactly one terminal event.
+TEST_F(HostRuntimeTest, AL_I15_FinalizeAllClosesResidentSessionsWithoutSessionEnded) {
+    Bridge bridge("hr_finalize_idle");
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array(
+        {nlohmann::json{{"kind", "text"}, {"text", "hi"}}});
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(created.session, message);
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    ASSERT_NE(bridge.runtime().agents().findShared(created.session), nullptr);
+
+    const EventRange before = bridge.runtime().store().readAfter(created.session, 0, 1000);
+    const std::size_t before_terminal =
+        count_type(before, EventType::TurnEnded) + count_type(before, EventType::TurnCancelled);
+    ASSERT_EQ(before_terminal, 1u);
+
+    bridge.clear_forwarded();
+    bridge.runtime().agents().finalizeAll();
+
+    EXPECT_EQ(bridge.runtime().agents().findShared(created.session), nullptr);
+    EXPECT_THROW((void)bridge.runtime().sessions().sessionPtr(created.session), UnknownSession);
+
+    std::size_t ended = 0;
+    for (const EventRecord& record : bridge.forwarded()) {
+        if (record.event.type == EventType::SessionEnded) {
+            ++ended;
+        }
+    }
+    EXPECT_EQ(ended, 0u);
+
+    const EventRange events = bridge.runtime().store().readAfter(created.session, 0, 1000);
+    const std::size_t after_terminal =
+        count_type(events, EventType::TurnEnded) + count_type(events, EventType::TurnCancelled);
+    EXPECT_EQ(after_terminal, before_terminal);
+    EXPECT_EQ(after_terminal, 1u);
+}
+
+// AL-I10/AL25/AL-F16: last-exit finalizeAll finalizes an IN-FLIGHT turn — the
+// cancel path appends exactly one terminal event, the session is closed, and no
+// SessionEnded is emitted.
+TEST_F(HostRuntimeTest, AL_I10_FinalizeAllFinalizesInFlightTurn) {
+    BlockingProvider* provider = nullptr;
+    Bridge            bridge(
+        "hr_finalize_inflight", FakeScript{}, /*with_pty=*/false,
+        [&provider](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+            auto owned = std::make_unique<BlockingProvider>();
+            provider   = owned.get();
+            return owned;
+        });
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array(
+        {nlohmann::json{{"kind", "text"}, {"text", "hi"}}});
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(created.session, message);
+    ASSERT_NE(provider, nullptr);
+    ASSERT_TRUE(provider->waitEntered());
+
+    bridge.runtime().agents().finalizeAll();
+
+    EXPECT_EQ(bridge.runtime().agents().findShared(created.session), nullptr);
+    EXPECT_THROW((void)bridge.runtime().sessions().sessionPtr(created.session), UnknownSession);
+
+    // The cancelled turn's terminal event is appended by the worker's cancel
+    // path. Assert the specific terminal kind: a natural `TurnEnded` here would
+    // mean the turn was not cancelled and the test must fail.
+    auto cancelled_count = [&] {
+        const EventRange events = bridge.runtime().store().readAfter(created.session, 0, 1000);
+        return count_type(events, EventType::TurnCancelled);
+    };
+    for (int attempt = 0; attempt < 400 && cancelled_count() == 0; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    EXPECT_EQ(cancelled_count(), 1u);
+    const EventRange settled = bridge.runtime().store().readAfter(created.session, 0, 1000);
+    EXPECT_EQ(count_type(settled, EventType::TurnEnded), 0u);
+    EXPECT_EQ(count_type(settled, EventType::TurnCancelled) +
+                  count_type(settled, EventType::TurnEnded),
+              1u);
+
+    std::size_t ended = 0;
+    for (const EventRecord& record : bridge.forwarded()) {
+        if (record.event.type == EventType::SessionEnded) {
+            ++ended;
+        }
+    }
+    EXPECT_EQ(ended, 0u);
 }
 
 TEST_F(HostRuntimeTest, ListSessionsUsesJunctionOrderAndFlagsStoreOnly) {
@@ -706,6 +1016,119 @@ TEST_F(HostRuntimeTest, SingleForwarderPreservesOrderAndDropsLiveEvents) {
     EXPECT_EQ(forwarded[0].event.type, EventType::TokenUsage);
     EXPECT_EQ(forwarded[1].event.type, EventType::TokenUsage);
     EXPECT_LT(forwarded[0].seq, forwarded[1].seq);
+}
+
+// AL-U11/AL17/AL-F4: the delete's `SessionEnded` is forwarded with its real
+// store `Sequence` even though the row was erased in the same transaction. The
+// old re-read path (`readAfter`) found the row gone and dropped the event.
+TEST_F(HostRuntimeTest, AL_U11_ForwardsErasedRowSessionEndedWithSequence) {
+    Bridge bridge("hr_forward_deleted");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    bridge.append_event(created.session, EventType::TokenUsage);
+    bridge.clear_forwarded();
+
+    bridge.host().deleteSession(created.session);
+
+    const std::vector<EventRecord> forwarded = bridge.forwarded();
+    ASSERT_EQ(forwarded.size(), 1u);
+    EXPECT_EQ(forwarded[0].event.type, EventType::SessionEnded);
+    EXPECT_EQ(forwarded[0].event.session_id.value, created.session.value);
+    EXPECT_EQ(forwarded[0].event.payload.get<payload::SessionEnded>().reason,
+              payload::SessionEndReason::Deleted);
+    EXPECT_GT(forwarded[0].seq, 0);
+    EXPECT_FALSE(bridge.runtime().store().load(created.session).has_value());
+}
+
+// AL-U12/AL18/AL-F11: the per-session monotonic guard forwards only strictly
+// increasing sequences.
+TEST_F(HostRuntimeTest, AL_U12_MonotonicGuardDropsLowerAndEqualSequences) {
+    Bridge bridge("hr_monotonic");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    bridge.clear_forwarded();
+
+    Event event;
+    event.id         = make_event_id();
+    event.session_id = created.session;
+    event.timestamp  = std::chrono::system_clock::now();
+    event.type       = EventType::TokenUsage;
+    event.payload    = nlohmann::json::object();
+
+    bridge.runtime().bus().publishCommitted(EventRecord{10, event});
+    bridge.runtime().bus().publishCommitted(EventRecord{10, event});
+    bridge.runtime().bus().publishCommitted(EventRecord{9, event});
+    bridge.runtime().bus().publishCommitted(EventRecord{11, event});
+
+    const std::vector<EventRecord> forwarded = bridge.forwarded();
+    ASSERT_EQ(forwarded.size(), 2u);
+    EXPECT_EQ(forwarded[0].seq, 10);
+    EXPECT_EQ(forwarded[1].seq, 11);
+}
+
+// AL-I3/AL17: a subscribed client receives the delete's `SessionEnded` with a
+// minted cursor. `resolveCursor` on the erased id is `CursorInvalid` by design
+// (05 §8.5/T16), so validity here is the non-empty cursor minted from the
+// record's real sequence (AL-U11 covers the sequence itself).
+TEST_F(HostRuntimeTest, AL_I3_SubscribedClientReceivesDeletedSessionEndedWithCursor) {
+    Bridge bridge("hr_delete_cursor");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    bridge.clear_forwarded();
+
+    Bridge::Peer* peer = bridge.open_peer();
+    bridge.hello(*peer);
+    nlohmann::json subscribe_params;
+    protocol::to_json(subscribe_params,
+                      protocol::SubscribeParams{created.session, protocol::StreamFrom{}});
+    const nlohmann::json subscribed =
+        bridge.request(*peer, 2, protocol::method::kEventSubscribe, subscribe_params);
+    ASSERT_TRUE(subscribed.contains("cursor"));
+
+    bridge.host().deleteSession(created.session);
+
+    bool saw_ended = false;
+    for (const nlohmann::json& message : bridge.drain(*peer)) {
+        if (message.value("method", std::string{}) != "event.stream") {
+            continue;
+        }
+        const protocol::StreamNotification notification =
+            message.at("params").get<protocol::StreamNotification>();
+        if (notification.envelope.event.type != EventType::SessionEnded) {
+            continue;
+        }
+        saw_ended = true;
+        EXPECT_FALSE(notification.replay);
+        EXPECT_FALSE(notification.cursor.value.empty());
+        EXPECT_EQ(notification.envelope.event.session_id.value, created.session.value);
+        EXPECT_EQ(notification.envelope.event.payload.get<payload::SessionEnded>().reason,
+                  payload::SessionEndReason::Deleted);
+    }
+    EXPECT_TRUE(saw_ended);
+
+    const std::vector<EventRecord> forwarded = bridge.forwarded();
+    ASSERT_EQ(forwarded.size(), 1u);
+    EXPECT_GT(forwarded[0].seq, 0);
+}
+
+// AL-I13/AL29/AL-F20: `~HostRuntime` unsubscribes the committed handler, so a
+// later committed publish does not call into the destroyed runtime.
+TEST_F(HostRuntimeTest, AL_I13_DestructorUnsubscribesCommittedHandler) {
+    Bridge bridge("hr_dtor_committed");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    bridge.clear_forwarded();
+
+    bridge.append_event(created.session, EventType::TokenUsage);
+    ASSERT_EQ(bridge.forwarded().size(), 1u);
+
+    bridge.destroy_host_for_test();
+
+    Event event;
+    event.id         = make_event_id();
+    event.session_id = created.session;
+    event.timestamp  = std::chrono::system_clock::now();
+    event.type       = EventType::TokenUsage;
+    event.payload    = nlohmann::json::object();
+    bridge.runtime().bus().publishCommitted(EventRecord{9999, event});
+
+    EXPECT_EQ(bridge.forwarded().size(), 1u);
 }
 
 TEST_F(HostRuntimeTest, AgentPromptRunsOnExecutor) {
@@ -862,7 +1285,7 @@ TEST_F(HostRuntimeTest, CompactSessionSubmitsMaintenanceTurn) {
     for (int attempt = 0; attempt < 200 && !saw_terminal; ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
         for (const EventRecord& record :
-             bridge.runtime().sessions().session(created.session).events()) {
+             bridge.runtime().sessions().sessionPtr(created.session)->events()) {
             if (record.event.type == EventType::TurnEnded ||
                 record.event.type == EventType::TurnCancelled ||
                 record.event.type == EventType::TurnFailed) {
@@ -956,7 +1379,7 @@ TEST_F(HostRuntimeTest, RenameSessionValidatesNormalizesAndForwards) {
         nlohmann::json{{"session", session.value}, {"title", "  trimmed title  "}});
     EXPECT_EQ(result.session.value, session.value);
     EXPECT_EQ(result.title, "trimmed title");
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "trimmed title");
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "trimmed title");
 
     bool forwarded = false;
     for (const EventRecord& record : bridge.forwarded()) {
@@ -1007,26 +1430,26 @@ TEST_F(HostRuntimeTest, RenameSessionValidatesNormalizesAndForwards) {
     });
     EXPECT_EQ(unknown.code, protocol::code_value(protocol::AppCode::UnknownSession));
 
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "trimmed title");
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "trimmed title");
 }
 
 TEST_F(HostRuntimeTest, AgentPromptAutoNamesOnce) {
     Bridge bridge("hr_autoname");
     const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
     const SessionId              session = created.session;
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "");
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "");
 
     bridge.host().agentPrompt(session, nlohmann::json("fix the flaky PTY test"));
     ASSERT_TRUE(bridge.wait_for_turn_end(10s));
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "fix the flaky PTY test");
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "fix the flaky PTY test");
 
     bridge.clear_forwarded();
     bridge.host().agentPrompt(session, nlohmann::json("a second prompt"));
     ASSERT_TRUE(bridge.wait_for_turn_end(10s));
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "fix the flaky PTY test");
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "fix the flaky PTY test");
 
     std::size_t renames = 0;
-    for (const EventRecord& record : bridge.runtime().sessions().session(session).ownEvents()) {
+    for (const EventRecord& record : bridge.runtime().sessions().sessionPtr(session)->ownEvents()) {
         if (record.event.type == EventType::SessionRenamed) {
             ++renames;
         }
@@ -1046,11 +1469,11 @@ TEST_F(HostRuntimeTest, ManualRenameIsNotOverwrittenByAutoName) {
     bridge.clear_forwarded();
     bridge.host().agentPrompt(session, nlohmann::json("first prompt"));
     ASSERT_TRUE(bridge.wait_for_turn_end(10s));
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "manual name");
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "manual name");
 
     std::size_t user_renames = 0;
     std::size_t auto_renames = 0;
-    for (const EventRecord& record : bridge.runtime().sessions().session(session).ownEvents()) {
+    for (const EventRecord& record : bridge.runtime().sessions().sessionPtr(session)->ownEvents()) {
         if (record.event.type != EventType::SessionRenamed) {
             continue;
         }
@@ -1077,8 +1500,8 @@ TEST_F(HostRuntimeTest, AutoNameAppendFailureIsSwallowed) {
     EXPECT_NO_THROW(bridge.host().agentPrompt(session, nlohmann::json("first prompt")));
     ASSERT_TRUE(bridge.wait_for_turn_end(10s));
 
-    EXPECT_EQ(bridge.runtime().sessions().session(session).header().title, "");
-    for (const EventRecord& record : bridge.runtime().sessions().session(session).ownEvents()) {
+    EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "");
+    for (const EventRecord& record : bridge.runtime().sessions().sessionPtr(session)->ownEvents()) {
         EXPECT_NE(record.event.type, EventType::SessionRenamed);
     }
 }
