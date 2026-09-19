@@ -1,6 +1,6 @@
 # 26 — dsh Alignment: Design-Copy of DeepSeek Harness Mechanics
 
-Status: **draft for review — Rev 6** (design only; no implementation).
+Status: **draft for review — Rev 7** (design only; no implementation).
 Scope owner: architecture.
 Supersedes/amends: none yet (this is a proposal; §4 pins the interfaces and names
 which verified specs it would amend).
@@ -1487,4 +1487,32 @@ Evidence is `file:line` or spec section. Where a prior draft overstated a
     the §5.2 harness are all reconciled in `26-dsh-alignment-part2.md`. No dsh
     claim changes: the resolution is entirely about ymh's wire/DB versioning, and
     the 18 load-bearing dsh claims re-verified in Rev 5 are untouched.
+
+- **Rev 7 (2026-09-19).** Repair pass for finding **M-1 → N-1** (durable
+  full-prompt persistence). Rev 6 left M-1 open as a user policy decision; Rev 7
+  pins the *mechanism* so the default is unambiguously safe while leaving the
+  policy decision to the user.
+  - **`logging.log_prompts` is no longer reused as the durable opt-in.** The
+    reuse conflated the spdlog concern with session-DB persistence and
+    contradicted `config.hpp:84-86` / `21` §7.6 ("prompt bodies are redacted
+    even when it is on"): that key is wired only into spdlog
+    (`logging.cpp:97`, `cli.cpp:1137`) and redacts (`logging.cpp:176`,
+    `redaction.cpp:52`).
+  - **New dedicated key: `session.persist_prompt_text`** (bool, default
+    `false`, new `[session]` section, **global layer only** — a workspace-layer
+    occurrence is a `ConfigError`). It gates the session-DB copy only and is
+    distinct from `logging.log_prompts` (spdlog only). The `llm/request_header`
+    event always carries `system_prompt_digest` + the invariant
+    config/envelope/tool fields; the opt-in adds the full rendered
+    `system_prompt` text, byte-for-byte (no redaction).
+  - **Reconciliation.** `26-I11`, `26-I2`, D2, D23, the `LlmRequestHeader`
+    struct and its §4.3.9.1 JSON key row, §4.3.2 (reconstruction contract +
+    mechanism-vs-policy note), §4.9 (new key table row; no reuse), and the §5.2
+    harness (default asserts no stored text; global-only negative test) are
+    reconciled in `26-dsh-alignment-part2.md`.
+  - **dsh claims unchanged.** dsh has no durable prompt-persistence config; the
+    changed-snapshot `callConfigEquals` model (`call-config.d.ts:1-23`) is
+    untouched. The policy question — whether to ever enable durable full-prompt
+    persistence — remains a product decision for the user; the default persists
+    the digest only.
 
