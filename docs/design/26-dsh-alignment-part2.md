@@ -1,6 +1,6 @@
 # 26 — dsh Alignment, Part 2: Target Design, Migration, Open Questions
 
-Status: **draft for review — Rev 6**.
+Status: **draft for review — Rev 7**.
 Companion to `26-dsh-alignment.md` (§1 purpose, §2 dsh mechanics, §3 gap
 analysis, §7 revision log). This file contains §4 (target design), §5 (migration
 plan and test strategy), §6 (open questions), and the Appendix.
@@ -33,8 +33,8 @@ These hold for every decision below.
     `system_prompt`, and the canonical tool schemas. `template_digest()` is its
     lowercase SHA-256 hex. The rendered prompt is **always** an input to the
     digest; its *text* is persisted in the header only under the explicit
-    `logging.log_prompts` opt-in (`26-I11`), and the default durable record is
-    `system_prompt_digest`.
+    `session.persist_prompt_text` opt-in (`26-I11`), and the default durable
+    record is `system_prompt_digest`.
   - `canonical_json()` is `canonical_template()` plus the ordered `messages` of
     one concrete dispatch.
 
@@ -44,14 +44,17 @@ These hold for every decision below.
   reconstructs the messages for the attempt from the logged message events. The
   header is therefore a **changed-snapshot** record (dsh's `callConfigEquals`
   model, `dsh-llm/lib/types/call-config.d.ts:1-23`), not a per-request digest: it
-  carries the **full rendered system prompt**, the tool **names** in canonical
-  order, and a per-tool **schema digest**, and the schema bodies are re-derived
-  from code and verified against those digests. This is dsh's own contract — the
-  summarizer request is "reconstructable from log + code"
-  (`dsh-compaction/lib/types/types.d.ts:49-51`) — and it is deliberately weaker
-  than "reconstructable from pinned data alone": a replay against a changed tool
-  registry fails the digest and is reported as a registry mismatch, never
-  fabricated. Provider wire bytes are not the target; the canonical form is.
+  carries the rendered prompt's **digest** (the full text only under the
+  `session.persist_prompt_text` opt-in), the tool **names** in canonical order,
+  and a per-tool **schema digest**, and the schema bodies are re-derived from
+  code and verified against those digests. A prompt change still forces a new
+  header because the prompt is always an input to `template_digest`. This is
+  dsh's own contract — the summarizer request is "reconstructable from log +
+  code" (`dsh-compaction/lib/types/types.d.ts:49-51`) — and it is deliberately
+  weaker than "reconstructable from pinned data alone": a replay against a
+  changed tool registry fails the digest and is reported as a registry mismatch,
+  never fabricated. Provider wire bytes are not the target; the canonical form
+  is.
   No extension, adapter, or UI may mutate a request after dispatch.
 - **26-I3 — One provider attempt per stream; retry is a separate, durable
   executor.** `LLMProvider::stream` remains one attempt; retry is a listener at
@@ -85,16 +88,26 @@ These hold for every decision below.
   its shadow-price event.
 - **26-I10 — UI is a consumer.** No prompt/LLM/collaboration type may appear in
   the UI layer, and no UI type may enter these seams (`00 §4.1`, `06 A17`).
-- **26-I11 — Prompt text is durable only under explicit consent.** The session
-  event log is the authoritative trace, but the rendered system prompt embeds
-  `AGENTS.md`, the skill catalog, and possibly file content, so it is subject to
-  the shipped no-prompt-logging policy (`include/ymh/llm/redaction.hpp:4-6`;
-  `include/ymh/config/config.hpp:84-86`). The `llm/request_header` event always
-  carries `system_prompt_digest` (SHA-256 hex of the rendered prompt); the full
-  `system_prompt` text is written **only** when `logging.log_prompts` is
-  explicitly enabled — the same opt-in that gates prompt bodies in the logging
-  subsystem. Absent the opt-in, replay re-derives the prompt from the live
-  registries and verifies it against the digest, and never fabricates it.
+- **26-I11 — Prompt text is durable only under a separate, explicitly-named
+  opt-in.** The session event log is the authoritative trace, but the rendered
+  system prompt embeds `AGENTS.md`, the skill catalog, and possibly file content,
+  so it is subject to the shipped no-prompt-logging policy
+  (`include/ymh/llm/redaction.hpp:4-6`; `include/ymh/config/config.hpp:84-86`).
+  The `llm/request_header` event **always** carries `system_prompt_digest`
+  (SHA-256 hex of the rendered prompt) plus the invariant config/envelope/tool
+  fields (`config`, `turn`, `step`, `session_id`, `purpose`, `tool_names`,
+  `tool_schema_digests`, `template_digest`); the full rendered `system_prompt`
+  text is written **only** when the dedicated `session.persist_prompt_text` key
+  is explicitly set (bool, default `false`, new `[session]` section, **global
+  layer only** — a workspace-layer occurrence is a `ConfigError`, so a
+  repo-controlled file cannot silently enable durable prompt capture). This key
+  governs the **session-DB copy only** and is deliberately **distinct from
+  `logging.log_prompts`** (`config.hpp:84-88`), which governs the spdlog/log
+  surface and never touches the session DB. Absent the opt-in, replay re-derives
+  the prompt from the live registries and verifies it against the digest, and
+  never fabricates it. Whether to *ever* enable durable full-prompt persistence
+  is a product decision for the user; the mechanism's default is unambiguously
+  safe (digest only).
 - **26-I12 — The event vocabulary is decoupled from the wire envelope version.**
   A durable event type that crosses the daemon↔supervisor socket is **not** an
   envelope-shape change, so the first wave that emits a new type does **not** bump
@@ -124,7 +137,7 @@ called it additive.
 | ID | Decision | Add./Brk. | Owning spec | Wave |
 |---|---|---|---|---|
 | 26-D1 | Introduce a provider-neutral `LlmRuntime` service above `LLMProvider`; the loop no longer holds a raw provider. | **Brk. (06, 08)** — replaces the pinned `AgentServices`/provider seam, not an addition beside it | 06, 08 | 1 |
-| 26-D2 | Introduce `LlmCallConfig` + `call_config_equals`; log a durable **request-header** event as a *changed snapshot* — at each request-series start and whenever `config`, the rendered prompt, the tool catalog (names or schemas), or `purpose` changes (not on every dispatch); the loop builds requests from the logged header. **Does not persist `RequestId`** (spec 08: "Never persisted", `llm_request.hpp:28-30`); retries correlate by `retryId` + `(turn, step)` and the header is found positionally (last header before the attempt), so no self-referential sequence field is stored. Always carries `system_prompt_digest`; persists the full prompt text only under the explicit `logging.log_prompts` opt-in (D23, `26-I11`). | Add. | 01, 08, 21 | 1 |
+| 26-D2 | Introduce `LlmCallConfig` + `call_config_equals`; log a durable **request-header** event as a *changed snapshot* — at each request-series start and whenever `config`, the rendered prompt, the tool catalog (names or schemas), or `purpose` changes (not on every dispatch); the loop builds requests from the logged header. **Does not persist `RequestId`** (spec 08: "Never persisted", `llm_request.hpp:28-30`); retries correlate by `retryId` + `(turn, step)` and the header is found positionally (last header before the attempt), so no self-referential sequence field is stored. Always carries `system_prompt_digest`; persists the full prompt text only under the dedicated `session.persist_prompt_text` opt-in (D23, `26-I11`). | Add. | 01, 08, 21 | 1 |
 | 26-D3 | Freeze the request envelope before dispatch; add `session_id` and an optional `purpose` (`Compaction`/`SessionTitle`; absent = ordinary conversation) to `LLMRequest`, and log both in the request header so the template digest's `envelope` is reconstructable; `prepare_call` binds one adapter generation; pin `FrozenRequest::canonical_template()`/`canonical_json()`. | Add. | 08 | 1 |
 | 26-D4 | Introduce the ordered **prompt registry**: `PromptSection`, `PromptContext`, `PromptAssembly`, `assemble()`, `render_prompt()`, and the canonical `SECTION_ORDERS`/`CONTEXT_ORDERS` tables (verbatim). | New | new `27-system-prompt.md` | 3 |
 | 26-D5 | Introduce **persona** as sections 0/10200 with `complete` mode; default persona mirrors dsh's shipped text. | Add. | 27 | 3 |
@@ -145,7 +158,7 @@ called it additive.
 | 26-D20 | Add the **log-only command surface** (`command/run`/`command/done`, agent-scoped shadowing). | Add. | 30, 01 | 6 |
 | 26-D21 | Add **repeat-tool reminders** (thresholds `[3,5,8]`) and formalize step steering. | Add. | 06 | 4 |
 | 26-D22 | **Deferred:** PTC `run_code` presentation + generated SDK. Not implemented; the `Ptc`/`Both` enum values exist only to fail loud. | New (deferred) | new `27` | — |
-| 26-D23 | **Prompt-text persistence policy:** the `llm/request_header` event always carries `system_prompt_digest`; the full rendered `system_prompt` text is stored **only** when `logging.log_prompts` is explicitly enabled. Reconciles the header with the shipped no-prompt-logging policy; reconstruction re-derives the prompt and verifies the digest when the text is absent (`26-I11`). | Add. | 01, 08, 21 | 1 |
+| 26-D23 | **Prompt-text persistence policy:** the `llm/request_header` event always carries `system_prompt_digest`; the full rendered `system_prompt` text is stored **only** under the dedicated `session.persist_prompt_text` key (bool, default `false`, new `[session]` section, **global layer only**) — a session-DB opt-in deliberately distinct from `logging.log_prompts` (which governs spdlog only and never the session DB). The default durable record is the digest; reconstruction re-derives the prompt and verifies the digest when the text is absent (`26-I11`). Whether to ever enable it is a user product decision; the mechanism is safe by default. | Add. (new `21` key) | 01, 08, 21 | 1 |
 | 26-D24 | **Event-vocabulary decoupling (no version bump):** keep `kProtocolVersion` at `1`; the wire receiver skips an unknown event `type` (cursor still advances) instead of failing the connection, while the on-disk/replay decode keeps its loud `CorruptionError` fence. A `kProtocolVersion` bump is reserved for an envelope-shape or handshake change, not for a new event type (`26-I12`). | Add. (`01` wire-vocabulary rule) | 01 | 1 |
 
 ### 4.3 Interface sketches (C++23)
@@ -304,7 +317,7 @@ struct LlmRequestHeader {
     std::optional<CallPurpose> purpose;        // envelope half; absent == ordinary conversation
     LlmCallConfig            config;           // provider/model/effort/sampling
     std::string              system_prompt_digest; // SHA-256 hex of the rendered prompt (always)
-    std::optional<std::string> system_prompt;  // full text ONLY when logging.log_prompts (26-I11)
+    std::optional<std::string> system_prompt;  // full text ONLY under session.persist_prompt_text (26-I11)
     std::vector<std::string> tool_names;       // canonical order
     std::vector<std::string> tool_schema_digests;  // per-tool SHA-256 of canonical schema JSON
     std::string              template_digest;  // SHA-256 of FrozenRequest::canonical_template()
@@ -332,8 +345,8 @@ may map both to transport metadata, so they are covered by the digest),
 `config` (every `LlmCallConfig` field that can reach the
 provider wire, including the `top_p`/`seed`/`tool_choice` extensions; §4.9),
 `system_prompt` (the full rendered text held in memory — always hashed into
-`template_digest`, but persisted in the header only when the opt-in is set;
-`26-I11`/D23), and `tools` (each schema's
+`template_digest`, but persisted in the header only when
+`session.persist_prompt_text` is set; `26-I11`/D23), and `tools` (each schema's
 `name`, `description`, `parameters` with recursively sorted keys).
 `canonical_json()` is the same object plus `messages` (role + ordered content
 blocks; tool-call arguments as their raw JSON string). No
@@ -349,18 +362,32 @@ and a replay whose re-derived schemas do not match the digests fails loud rather
 than guessing.
 
 **Prompt-text policy (D23, `26-I11`).** The header always records
-`system_prompt_digest`. The full `system_prompt` text is present only when
-`logging.log_prompts` is explicitly enabled; otherwise replay re-derives the
-prompt from the live registries, asserts `sha256(rendered) ==
+`system_prompt_digest` plus the invariant config/envelope/tool fields. The full
+`system_prompt` text is present only when `session.persist_prompt_text` — a
+dedicated, explicitly-named session-DB opt-in (bool, default `false`, new
+`[session]` section, **global layer only**) — is set; otherwise replay
+re-derives the prompt from the live registries, asserts `sha256(rendered) ==
 header.system_prompt_digest`, and fails loud on a mismatch. When the text is
-present it must be byte-identical to the in-memory rendered prompt. This keeps
-the reconstruction contract sound (`template_digest` always covers the prompt)
-while honouring the shipped policy that prompt bodies are never persisted
-implicitly (`redaction.hpp:4-6`, `config.hpp:84-86`, `config.cpp:787`). The
-opt-in governs the **session-DB copy only**: `config.hpp`'s "redacted even when
-it is on" clause describes the spdlog path, which keeps its own redaction and
-does not share a code path with the event log. The header text, when present, is
-the rendered prompt byte-for-byte, not a redacted variant.
+present it must be byte-identical to the in-memory rendered prompt, and replay
+additionally asserts that equality; the digest check still runs, so the
+reconstruction contract is unchanged whether or not the text is stored.
+
+This opt-in governs the **session-DB copy only** and is deliberately **distinct
+from `logging.log_prompts`** (`config.hpp:84-88`, `config.cpp:787`), whose
+shipped contract is (a) off by default and (b) prompt bodies redacted even when
+on (`redact_secrets`, `logging.cpp:176`, `redaction.cpp:52`); that key governs
+the spdlog/log surface only (`logging.cpp:97`, `cli.cpp:1137`), shares no code
+path with the event log, and is **not** reused here. Keeping the two keys
+separate means the config comment's "redacted even when it is on" promise is
+never contradicted: the session-DB key has its own name and its own documented
+semantics (store the rendered text byte-for-byte; no redaction).
+
+**Mechanism vs policy.** This pins the *mechanism* for durable prompt
+persistence; whether to ever enable it remains a product decision for the user
+(the same class of decision as the no-downgrade one-way door, §4.6). The
+mechanism's default is unambiguously safe: a default install persists only
+`system_prompt_digest`, so the no-prompt-logging rule (`redaction.hpp:4-6`;
+`config.hpp:84-86`) is honoured without a second thought.
 
 #### 4.3.3 The prompt registry (26-D4, D5, D6, D7, D15)
 
@@ -915,7 +942,7 @@ timestamps/ids beyond the fields listed (the core event envelope already carries
 
 | Payload | JSON object keys |
 |---|---|
-| `payload::LlmRequestHeader` | `turn` int, `step` int, `session_id` string, `purpose` string (`"compaction"｜"session_title"`, omitted when unset), `config` object, `system_prompt_digest` string, `system_prompt` string (**omitted unless `logging.log_prompts`**), `tool_names` string[], `tool_schema_digests` string[], `template_digest` string, `starts_series` bool |
+| `payload::LlmRequestHeader` | `turn` int, `step` int, `session_id` string, `purpose` string (`"compaction"｜"session_title"`, omitted when unset), `config` object, `system_prompt_digest` string, `system_prompt` string (**omitted unless `session.persist_prompt_text`; default off, global layer only**), `tool_names` string[], `tool_schema_digests` string[], `template_digest` string, `starts_series` bool |
 | `LlmCallConfig` (nested) | `provider` string, `model` string, `reasoning_effort` string (omitted when unset), `temperature` number (omitted), `max_tokens` int (omitted), `stop` string[], `top_p` number (omitted), `seed` int (omitted), `tool_choice` string (omitted) |
 | `payload::LlmRetry` | `retry_id` int, `turn` int, `step` int, `provider` string, `mode` string (`"normal"｜"always"`), `policy_key` string, `retry` int, `max_retries` int (**only** when `mode=="normal"`), `delay_ms` int, `failure` `LLMError` object (existing spec-08 codec) |
 | `payload::LlmRetryStarted` | `retry_id` int, `turn` int, `step` int, `retry` int |
@@ -1296,6 +1323,7 @@ New JSONC keys, all optional except where noted (spec `21` errata, additive):
 | `jobs.max_wait_timeout_ms` | int | 600000 | |
 | `jobs.completion_delivery` | `"wakeup"｜"quiet"` | `"wakeup"` | |
 | `jobs.max_consecutive_wakes` | int | 3 | |
+| `session.persist_prompt_text` | bool | `false` | new `[session]` section; **global layer only**; durable full-prompt opt-in (D23), distinct from `logging.log_prompts` |
 
 `GenerationParameters` and `LlmCallConfig` are not two sources of truth:
 `buildRequest` maps `GenerationParameters` into `LlmCallConfig` exactly once,
@@ -1311,9 +1339,13 @@ later decision removes them from the wire, they are removed from both the
 config and the digest together (open question 3).
 
 `logging.log_prompts` is an **existing** key (`include/ymh/config/config.hpp:84-88`,
-`src/config/config.cpp:787`), not a new one; D23 reuses it as the durable-prompt
-opt-in. No new config key is introduced for the header, and the default
-(`false`) keeps prompt text out of the session DB (`26-I11`).
+`src/config/config.cpp:787`) and is **not** reused: it governs the spdlog/log
+surface only, and its shipped contract is that prompt bodies are redacted even
+when it is on (`logging.cpp:176`, `redaction.cpp:52`). Durable prompt
+persistence gets its own key, `session.persist_prompt_text` (bool, default
+`false`, new `[session]` section, **global layer only**), so the two concerns
+are never conflated. The default (`false`) keeps prompt text out of the session
+DB entirely (`26-I11`).
 
 ---
 
@@ -1351,7 +1383,7 @@ risk reduction.
 
 | Wave | Specs verified before its code |
 |---|---|
-| 1 | none new — the Stage-A A1 `01` errata already pins the D24 wire-vocabulary rule; no `05` change |
+| 1 | `21` errata — the new `session.persist_prompt_text` key (D23); the Stage-A A1 `01` errata already pins the D24 wire-vocabulary rule; no `05` change |
 | 2 | `01` assistant-stream payloads; `08` assembler/replay errata |
 | 3 | `27-system-prompt.md` (new); `01` provenance payloads; `17`/`21` errata |
 | 4 | `28-output-retention.md` (new); `06`/`07`/`13` errata |
@@ -1370,8 +1402,10 @@ two-gate rule; Stage B defers the *verification date*, not the requirement.
   `llm/stream` interceptor registration, and
   the `payload::LlmRequestHeader` event.
 - Point `AgentLoop::buildRequest` at the runtime; derive the header from the log.
-- Header prompt policy (D23): always write `system_prompt_digest`; write the full
-  `system_prompt` only when `logging.log_prompts` is explicitly enabled.
+- Header prompt policy (D23): always write `system_prompt_digest` + the invariant
+  config/envelope/tool fields; write the full `system_prompt` only when
+  `session.persist_prompt_text` is explicitly enabled (default `false`,
+  global-layer only).
 - Do **not** bump `kProtocolVersion` (D24): `llm/request_header` is a vocabulary
   addition, handled by the receiver-skip rule pinned in the `01` errata; the
   envelope version stays `1`.
@@ -1495,12 +1529,15 @@ Additions required by this spec:
    `ToolRegistry`) and assert
    `rebuild.template_digest() == header.template_digest`; for every dispatched
    attempt, rebuild `canonical_json()` twice and assert the two are
-   byte-identical. When `logging.log_prompts` is off, the harness asserts
+   byte-identical. When `session.persist_prompt_text` is off (the default), the
+   harness asserts the header carries **no** `system_prompt` key and that
    `sha256(rendered) == header.system_prompt_digest`; when it is on, it also
    asserts the stored text is byte-identical. This is the executable form of
    `26-I2`/`26-F13`/`26-I11`. A companion negative test mutates one tool schema
    and asserts the template rebuild fails loud as a registry mismatch; a second
-   negative test perturbs the prompt and asserts the prompt-digest check fails.
+   negative test perturbs the prompt and asserts the prompt-digest check fails;
+   a third asserts a workspace-layer `session.persist_prompt_text` raises
+   `ConfigError` (the key is global-only).
 2. **Fixture provenance.** Hermetic fixtures are generated by `FakeLLM` runs and
    checked in under `tests/fixtures/` with a generator test that regenerates and
    diffs them; no real-LLM transcript is a hermetic fixture. Live tests remain
@@ -1702,3 +1739,17 @@ gate's N-2 conflict is dissolved by removing the bump); updated the §5 Stage-B
 Wave-1 row and the Wave-1 task list; replaced §5.2 test 5/6 with the two-axis
 compatibility harness (mixed-version attach, wire skip + cursor advance, loud
 on-disk decode). No dsh claim changes.*
+
+*Rev 7 (2026-09-19): repair pass for finding M-1 → N-1 (durable full-prompt
+persistence). `logging.log_prompts` is no longer reused as the durable opt-in
+(that reuse conflated the spdlog surface with session-DB persistence and
+contradicted `config.hpp:84-86` / `21` §7.6). A dedicated
+`session.persist_prompt_text` key (bool, default `false`, new `[session]`
+section, **global layer only**) now gates the session-DB copy and is distinct
+from `logging.log_prompts` (spdlog only). Reconciled `26-I11`, `26-I2`, D2, D23,
+the `LlmRequestHeader` struct and its §4.3.9.1 JSON key row, §4.3.2
+(reconstruction contract + mechanism-vs-policy note), §4.9 (new key row; no
+reuse) and the §5.2 harness (default asserts no stored text; global-only
+negative test). No dsh claim changes — dsh has no durable prompt-persistence
+config and the changed-snapshot `callConfigEquals` model is untouched. The
+policy decision remains the user's; the mechanism defaults to digest-only.*
