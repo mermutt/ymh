@@ -59,7 +59,7 @@ Amends: `29-event-family-errata.md` §3.2 :176-187 — the dangling
 > (`32-compaction-errata.md`). The Wave-3+ specs that `26-dsh-alignment-part2.md`
 > §5 reserved as `27-system-prompt.md`, `28-output-retention.md`,
 > `29-agent-presets.md`, `30-goals-jobs-commands.md` are therefore **renumbered
-> to 34+** when their errata are written (31, 32, and this 33 are taken). This
+> to 35+** when their errata are written (31, 32, 33, and 34 are taken). This
 > errata does not reserve a number for them.
 
 > **Status of the tree (truthful).** Wave 1 has shipped: `EventType::

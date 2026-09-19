@@ -90,7 +90,7 @@ free numbers. The actual allocation is:
 | 30 | `30-architecture-cascade-errata.md` | Wave-0 A0 — this file |
 
 **Consequence (pinned).** The four Wave-3+ specs that spec 26 §5 named as
-`27`/`28`/`29`/`30` must be **renumbered to 31+** when their errata are written:
+`27`/`28`/`29`/`30` must be **renumbered to 35+** when their errata are written (31–34 are now taken):
 the prompt-registry spec (reserved `27-system-prompt.md`), the output-retention
 spec (reserved `28-output-retention.md`), the presets spec (reserved
 `29-agent-presets.md`), and the goals/jobs/commands spec (reserved
