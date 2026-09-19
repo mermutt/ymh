@@ -30,6 +30,7 @@
 #include "ymh/cli/headless.hpp"
 #include "ymh/cli/provider_factory.hpp"
 #include "ymh/cli/session_cli.hpp"
+#include "ymh/cli/stream_receiver.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/host/workspace_host.hpp"
@@ -53,6 +54,31 @@
 #endif
 
 namespace ymh {
+
+StreamDisposition handle_stream_notification(const protocol::StreamNotification& stream,
+                                             std::ostream& out, std::ostream& err) {
+    if (stream.envelope.event_skipped) {
+        return StreamDisposition::Skipped;
+    }
+    const Event& event = stream.envelope.event;
+    if (event.type == EventType::AssistantChunk) {
+        const auto chunk = event.payload.get<payload::AssistantChunk>();
+        if (chunk.kind == payload::AssistantChunkKind::Text) {
+            out << chunk.text << std::flush;
+        }
+        return StreamDisposition::Continue;
+    }
+    if (event.type == EventType::TurnFailed) {
+        err << "ymh: turn failed\n";
+        return StreamDisposition::TurnFailed;
+    }
+    if (event.type == EventType::TurnEnded || event.type == EventType::TurnCancelled) {
+        out << '\n';
+        return StreamDisposition::TurnFinished;
+    }
+    return StreamDisposition::Continue;
+}
+
 namespace {
 
 void add_common(CLI::App& app, CliInvocation& invocation) {
@@ -551,17 +577,12 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
             }
             const protocol::StreamNotification stream =
                 notification->params.get<protocol::StreamNotification>();
-            const Event& event = stream.envelope.event;
-            if (event.type == EventType::AssistantChunk) {
-                const auto chunk = event.payload.get<payload::AssistantChunk>();
-                if (chunk.kind == payload::AssistantChunkKind::Text) {
-                    out << chunk.text << std::flush;
-                }
-            } else if (event.type == EventType::TurnFailed) {
-                err << "ymh: turn failed\n";
+            const StreamDisposition disposition =
+                handle_stream_notification(stream, out, err);
+            if (disposition == StreamDisposition::TurnFailed) {
                 return 1;
-            } else if (event.type == EventType::TurnEnded || event.type == EventType::TurnCancelled) {
-                out << '\n';
+            }
+            if (disposition == StreamDisposition::TurnFinished) {
                 return 0;
             }
         }

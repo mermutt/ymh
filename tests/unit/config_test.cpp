@@ -642,6 +642,37 @@ TEST(Config, WorkspaceLayerOptional) {
     EXPECT_TRUE(same_config(load_config(paths), expected));
 }
 
+TEST(Config, SessionPersistPromptTextDefaultsOffAndParsesGlobally) {
+    Config defaults;
+    EXPECT_FALSE(defaults.session.persist_prompt_text);
+
+    test::TempWorkspace workspace("config_session_prompt");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc", "{ \"session\": { \"persist_prompt_text\": true } }\n");
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace.path() / "absent.jsonc";
+    EXPECT_TRUE(load_config(paths).session.persist_prompt_text);
+}
+
+TEST(Config, SessionSectionRejectedInWorkspaceLayer) {
+    test::TempWorkspace workspace("config_session_workspace");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"session\": { \"persist_prompt_text\": true } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError for a workspace-layer [session] section";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("global-layer only"), std::string::npos)
+            << error.what();
+    }
+}
+
 TEST(Config, ApplyJsoncRequiredFlag) {
     test::TempWorkspace workspace("config_required_flag");
     const std::filesystem::path absent = workspace.path() / "absent.jsonc";
