@@ -1,11 +1,17 @@
 # 25 — UI/UX Errata: Status Line, Command Palette, Exit, Skills, Plan Mode, and Localcode Import
 
 ```
-Status: draft (Rev 5) — NOT verified. No implementation until the re-gate passes
+Status: draft (Rev 6) — NOT verified. No implementation until the re-gate passes
         with zero open HIGH/MEDIUM findings. Rev 5 is intended to be
         verification-complete (0 HIGH, 0 MEDIUM open); only the gate may declare
-        it verified.
-Revision: Rev 5 (re-gate round 3: M-1 memo re-keyed on the controller's own
+        it verified. Rev 6 is a traceability-only amendment that aligns the
+        pinned interfaces and lock discipline with the shipped, verified
+        implementation; it changes no decision, invariant, or 25-D2 semantics.
+Revision: Rev 6 (F1 traceability amendment: pinned `set(const Session&, …)`,
+        documented the `commit_mutex_` lock order and the load-bearing
+        re-entrancy invariant, recorded the F3 follow-up; the spec catches up
+        with the shipped, verified implementation — not a design change). Rev 5
+        (re-gate round 3: M-1 memo re-keyed on the controller's own
         commits, NEW-1 malformed-plan exit review closed, NEW-2 plan preview
         line/height-bounded, NEW-3 force-ask dialog offers no dead persistent
         grant; plus the cheap LOWs in §15)
@@ -38,7 +44,11 @@ Scope: the eight user requirements below, resolved into pinned decisions
        (replacing the unimplementable "loop forces Ask"), forces `required=false` on
        every imported MCP server (closing the last import brick path), and runs the
        queued-plan flush from an all-exit scope guard so error/cancel cannot lose a
-       selection. No persistence schema change, no `kProtocolVersion` bump. Plan mode
+        selection. Rev 6 is a traceability-only amendment: it aligns the pinned
+        `PlanModeController::set` signature and the `commit_mutex_` lock discipline
+        with the shipped, verified implementation, and records the F3 follow-up; it
+        changes no decision, invariant, or 25-D2 semantics. No persistence schema
+        change, no `kProtocolVersion` bump. Plan mode
        follows the DeepSeek Harness (dsh) design: it is logged collaboration state,
        not a capability restriction.
 ```
@@ -450,6 +460,11 @@ public:
     // the only source of truth (UX13). Cleared by `erase`.
     [[nodiscard]] bool active(const Session& session) const;
 
+    // `session` (not just its id) is required so the logged-state read, the
+    // comparison, and the append all run under `commit_mutex_` (Rev 6, F1): the
+    // comparison is then always against the durable log — even when the memo is
+    // cold on a resumed/forked session — and a concurrent `commit_` cannot
+    // invalidate the projection in between (25 review H1 TOCTOU).
     // `turn_open` is supplied by the caller (RPC: agent status != "Idle"; agent
     // loop: true). Idle => append now; open => queue. Any `set()` first drops a
     // pending model-requested exit (L-2): the user's explicit selection
@@ -458,7 +473,7 @@ public:
     // selection is dropped) — checked before the `Unchanged` case (L-1). If the
     // requested value equals the logged state and nothing is pending, the result
     // is `Unchanged`.
-    PlanModeSetResult set(const SessionId& session, bool turn_open, bool active);
+    PlanModeSetResult set(const Session& session, bool turn_open, bool active);
 
     // Queues a model-requested exit (the approved `exit_plan_mode` review). The
     // append happens at the next accepted step boundary; no prompt section change
@@ -482,14 +497,24 @@ private:
         bool active = false;   // the folded (or last committed) value
     };
 
-    // The single append path: invalidate the memo, append after releasing
-    // `mutex_` (N12), then record the committed value. Never throws past its
-    // caller's append failure handling.
+    // The single append path: takes `commit_mutex_`, then (under it) invalidates
+    // the memo, appends after releasing `mutex_` (N12), and records the committed
+    // value. Never throws past its caller's append failure handling.
     void commit_(const SessionId& id, bool value);
+
+    // `commit_` body; the caller must hold `commit_mutex_`.
+    void commit_locked_(const SessionId& id, bool value);
 
     AppendFn                              append_;
     ProjectionFn                          project_;
     mutable std::mutex                    mutex_;
+    // Serializes the whole commit (invalidate -> append -> record) so the memo
+    // write cannot land in the opposite order to the log append when `commit_`
+    // runs concurrently on the io thread and a TurnExecutor worker (25 review
+    // M8). `set()` also holds it across the logged-state read and the append, so
+    // the compare-and-append is atomic (25 review H1 TOCTOU). Distinct from
+    // `mutex_` so a committed handler calling `active()` cannot deadlock (N12).
+    std::mutex                            commit_mutex_;
     std::map<SessionId, bool>             pending_;   // uncommitted selection
     std::map<SessionId, bool>             pending_exit_;
     // Non-authoritative projection memo (N10/M-1 Rev 5). **Exact key:
@@ -507,12 +532,51 @@ private:
 } // namespace ymh
 ```
 
-**Lock discipline (N12).** `mutex_` guards only the `pending_`/`pending_exit_`
-maps. `append_` is invoked **after** releasing `mutex_`, because
-`Session::append` → `EventBus::publishCommitted` runs committed handlers
-**synchronously** (`src/session/session.cpp:580`; `src/core/event_bus.cpp:262-267`)
-and a handler that calls `active()` would otherwise self-deadlock. The controller
-never re-enters itself and no committed handler calls back into it.
+**Lock discipline (N12; Rev 6, F1).** Two controller mutexes are in play, plus the
+session's own `appendMutex_`:
+
+- `mutex_` guards only the `pending_`/`pending_exit_` maps and the `memo_` map.
+- `commit_mutex_` serializes **the whole commit** — memo invalidate → `append_` →
+  memo record — and, in `set()`, is additionally held across the logged-state read
+  (the cold-memo `active()` fold) and the comparison, so the compare-and-append is
+  atomic (this closes the 25 review **H1 TOCTOU**: a concurrent `commit_` cannot
+  invalidate the projection between the read and the append, and a cold memo on a
+  resumed/forked session is folded from the durable log before the comparison).
+  It is deliberately **distinct** from `mutex_` so a committed handler that calls
+  `active()` cannot self-deadlock.
+- `append_` is invoked **after** releasing `mutex_` (but still under
+  `commit_mutex_`), because `Session::append` → `EventBus::publishCommitted` runs
+  committed handlers **synchronously** (`src/session/session.cpp:580`;
+  `src/core/event_bus.cpp:262-267`), and `active()`'s cold-memo fold calls
+  `Session::events()`, which copies the durable log under `Session::appendMutex_`
+  (`src/session/session.cpp:537-540`).
+
+**Pinned lock order: `commit_mutex_ → mutex_` and `commit_mutex_ → appendMutex_`,
+and never `mutex_` together with `appendMutex_`.** Every multi-lock path acquires
+`commit_mutex_` first (`set()`, `commit_()`); `active()` and `commit_locked_` each
+release `mutex_` before touching the session, and `set()` releases `mutex_` before
+`commit_locked_`. `apply_pending_at_step_start` and `flush_pending_at_turn_end`
+release `mutex_` before calling `commit_`/`active`. `request_exit` and `erase` take
+`mutex_` alone. A multi-lock path that violates this order risks a deadlock
+against a concurrent `set()`/`commit_`.
+
+**Load-bearing re-entrancy invariant (Rev 6, F2).** `set()` holds `commit_mutex_`
+across `append_` → `Session::appendEventLocked` → `bus_->publishCommitted`, which
+invokes handlers synchronously **while `appendMutex_` is held**
+(`src/session/session.cpp:582`; `src/core/event_bus.cpp:262-267`), and also across
+the cold-memo `active()` → `Session::events()` → `appendMutex_`. This is
+deadlock-free **only because** no committed handler, global live subscriber, or
+injected `ProjectionFn` re-enters the controller or calls
+`Session::events()`/`append()`. If one ever did, the consequence is a **recursive
+`commit_mutex_` self-deadlock** (a handler calling `set()`/`commit_` while the
+caller already holds the non-recursive `commit_mutex_`) or an **`appendMutex_` →
+`commit_mutex_` inversion** (a handler calling `active()` with a cold memo while a
+concurrent `set()` holds `commit_mutex_` and waits on `appendMutex_`). On the
+shipped paths the only production committed subscriber
+(`HostRuntime::handleCommittedRecord`) merely forwards to the transport, and the
+two global live subscribers (MCP status; headless print) never touch the
+controller, so the invariant currently holds. See the F2 hardening candidate
+(debug assert / regression test) and the F3 follow-up in §14.1.
 
 **Memoization (N10/M-1 Rev 5).** `active(session)` folds the log **at most once
 per session**:
@@ -525,10 +589,14 @@ per session**:
 - **Where stored:** the private `mutable std::map<SessionId, ProjectionMemo>
   memo_`, guarded by `mutex_`.
 - **Invalidation rule:** the controller is the **sole writer** of `plan/mode`.
-  Every append goes through one private helper `commit_(id, value)` which
+  Every append goes through one private helper `commit_(id, value)` which takes
+  `commit_mutex_` and then calls `commit_locked_(id, value)`, which
   (a) sets `memo_[id].valid = false` under `mutex_` **before** calling `append_`,
-  (b) calls `append_` after releasing `mutex_` (N12), and (c) on success sets
-  `memo_[id] = {true, value}` under `mutex_`. If `append_` throws
+  (b) calls `append_` after releasing `mutex_` (N12) — still under
+  `commit_mutex_` — and (c) on success sets `memo_[id] = {true, value}` under
+  `mutex_`. The invalidate → append → record sequence is atomic under
+  `commit_mutex_` (Rev 6, F1), so a concurrent `set()`/`commit_` cannot observe or
+  write the memo out of order. If `append_` throws
   (`LeaseLost`/`StoreError`), the entry stays invalid and the next `active()`
   re-folds the durable log, so the memo can never disagree with the log.
   `active()` stores a fold result only if the entry is still invalid
@@ -1877,7 +1945,7 @@ Numbered `UX1`–`UX47`; testable and cited. Rev-1 invariants that described the
 withdrawn tool-denial design (Rev-1 UX7–UX9, UX-F2/F3) are retired; see §15.
 Rev 3 amends UX5, UX12, UX18, UX19, UX34 and adds UX42–UX43. Rev 4 amends UX12,
 UX18, UX19, UX41–UX43 and adds UX44–UX45. Rev 5 amends UX12, UX18, UX19, UX45 and
-adds UX46–UX47.
+adds UX46–UX47. Rev 6 changes no invariant (traceability amendment only).
 
 | ID | Invariant |
 |---|---|
@@ -2177,6 +2245,15 @@ correction.
 | Q20 | A forced review offers no persistent decision: the dialog shows only `Allow once`/`Deny` (default `Deny`), and a `force_ask` decision is never recorded as a grant. The user is not offered an "Always allow" that the policy would ignore; a raw client sending `scope=Always` still gets the decision for that one review. | 25-D4, UX44/UX46, NEW-3 Rev 5 |
 | Q21 | The plan projection memo is keyed by `SessionId` and invalidated by the controller's own commits (the controller is the sole `plan/mode` writer), **not** by the session's last `Sequence`; the first `active()` per session folds, and a step that appends no `plan/mode` never folds. The memo is process-local and never read as truth. | 25-D2, UX12, N10/M-1 Rev 5 |
 
+### 14.1 Known gaps / follow-ups (recorded; out of scope for Rev 6)
+
+These are **not** part of the Rev 6 traceability amendment and no code was changed
+for them. They are recorded so they are not lost.
+
+| ID | Gap | Why deferred |
+|---|---|---|
+| F3 | **Pre-existing plan-mode data races — the same data-race/lock-ordering class as the H1/H2 findings closed by `commit_mutex_`, but not covered by it.** (a) `PlanModeController::erase()` (`src/agent/plan_mode_controller.cpp:127-132`) takes only `mutex_`, so a `deleteSession` can interleave with an in-flight `commit_locked_` (`:139-149`) and resurrect a memo entry for the deleted id (benign leak: the projection is re-folded from the durable log if the id ever reappears, and `erase` is only called on session teardown). (b) `Session::ownEvents()`/`deriveMessages()` read `log_` **without** `appendMutex_` while `events()` locks it (`src/session/session.cpp:542-555`). | Not introduced by `1393902e6`; fixing it requires its own review — in particular a decision on whether `erase()` must take `commit_mutex_` (which would add a `commit_mutex_ → mutex_` acquisition from the `deleteSession` side and must be checked against the N12 order). |
+
 ---
 
 ## 15. Revision log
@@ -2188,3 +2265,4 @@ correction.
 | Rev 3 | 2026-09-18 | **Re-gate fixes.** (1) **H1/N1 — the exit review now shows the plan.** Removed the non-existent `PermissionRequest.summary` field from the design; pinned a `bounded_summary` `exit_plan_mode` branch in `src/permission/permission_broker.cpp:50-80` (new `kMaxPlanSummary = 4096`, ASCII `"..."` marker, reads `arguments["plan"]` from the core request so it is independent of `arguments_max_bytes`), and traced the full daemon→wire→supervisor→dialog path (`protocol_server.cpp:893-908` → `supervisor.cpp:751` → `ui_event_adapter.cpp:297-310` → `ui_model.cpp:741-750` → `ui_render.cpp:391-399`). Added UX-U6/UX-G7/UX-I3 dialog-content assertions (N14). (2) **M1/N4 — controller ownership/injection pinned.** `PlanModeController` now lives in `WorkspaceRuntime::Impl` (not `HostRuntime`), matching the real construction order (`workspace_host.cpp:503` before `:543`); the loop reaches it via a new `AgentServices::plan_mode` field; the assembler provider is `std::function<std::string(const Session&)>` (no id lookup); the `AppendFn` uses `SessionManager::sessionPtr`; `HostRuntime` reaches it via `WorkspaceRuntime::plan_mode()` and calls `erase` in close/delete. (3) **M2/N9 — dedupe terminates.** §8.2 rule 1 now truncates the base **before** appending `_2…`, bounded by `kMaxMcpDedupeAttempts = 10000`, with a loud `ConfigError` on exhaustion, so 32-char ids can never collide. (4) **N2/N8 (critic-only HIGH/MEDIUM, oracle missed) — the import can no longer brick the daemon.** New 25-D16: per-server `validate_mcp_server` + whole-document `validate_mcp_config` (extracted from `McpManager::validate()`, `src/mcp/mcp_manager.cpp:70-103`) run **before** any write; a failing server is omitted with one stderr note; §9.3 step 4 names `apply_jsonc_file(candidate, tmp, /*required=*/true)` explicitly (not `load_config`). (5) **N3 — ReadOnly-safe review.** `exit_plan_mode` is `destructive=false` and the loop forces `PolicyVerdict::Ask`, so `SandboxMode::ReadOnly` does not pre-rule deny the review (UX42). (6) **N5/N6/L4 — no phantom mode.** The `session.set_mode` reply never writes `plan_active` (the log is the only writer); a `flush_pending_at_turn_end` call guarantees a queued selection/exit is committed before the terminal event. (7) **N7 — width algorithm made literal:** `model` is reserved with `mode` and is not in the optional priority list; the fit test uses its ellipsized width. (8) **LOWs:** L1 `render_status` documented as file-local and test-driven via `render_to_ansi`; L2 `src/mcp/mcp_transport.cpp` path corrected; L3 `agentStatus(...) != "Idle"` literal; L5/N10 memo note; N11 KV-cache note; N12 lock released before `append_`; N13 `header_env` unconsumed note; N14 test-plan additions. Status **draft** — pending re-gate. |
 | Rev 4 | 2026-09-18 | **Re-gate round 2 — the critic's residual findings, re-verified against the tree.** (1) **N2 (HIGH) — the import can still brick via `required`.** Rev 3 validated MCP servers but asserted "the import never sets `required`", which is false: the importer copies the whole localcode object through the 25-D13 key set, so a localcode `"required": true` server is written, and a required server that fails to start rethrows from `McpManager::start` (`src/mcp/mcp_manager.cpp:228-230,244-246`) during `WorkspaceRuntime::Impl` construction (`src/agent/workspace_runtime.cpp:129-135`) — bricking every start. §9.3 now forces `required=false` on every copied server (with one note), pins the validation predicate (`validate_mcp_server`/`validate_mcp_config`, extracted from `McpManager::validate()` at `src/mcp/mcp_manager.cpp:70-103`; §8.3), the omission-reason precedence (non-`stdio` first), the `ToolConfig{}` equivalence to the daemon's default-constructed `tool_config_` (`src/agent/workspace_runtime.cpp:93`), the "only MCP can throw at create" sufficiency argument, and the no-previous-config/no-rename-unless-valid guarantee. UX41/UX43, UX-F15/UX-F19, UX-U29, UX-I18, Q18 updated. (2) **N3 (MEDIUM) — the forced review had no hook.** Rev 3 said "the loop forces `PolicyVerdict::Ask`", but `PermissionGate::resolve` evaluates the policy itself (`src/policy/permission_policy.cpp:318`) and the loop only calls `gate->resolve`/`policy->evaluate` — there is no way to force Ask, so `default_verdict == Allow` or a broad rule would auto-approve the review. Rev 4 adds the non-mutating `PermissionRequest::force_ask` (additive, `include/ymh/policy/permission_policy.hpp:54-70`) and a `RulePermissionPolicy::evaluate` short-circuit returning `Ask` after the ReadOnly deny and before rules/`tool_defaults`/`default_verdict`/grants (`src/policy/permission_policy.cpp:204`); `tool_is_mutating` never reads it, so ReadOnly still reaches the review. The inactive-plan case now short-circuits **before** the permission block so "no permission request" is true. §3.5/§3.9, 25-A7/25-A11, UX18/UX42/UX44, UX-U30 updated. (3) **N5 (MEDIUM) — the flush missed error/cancel exits.** Rev 3 pinned `flush_pending_at_turn_end` "after the step loop", but `runTurn` returns directly from ~11 terminal sites (normal end `:796-804`, cancellation `:783-787`/`:819-823`, failure `:788-794`, step limit `:824-827`, context-assembly `:642-653,666-669,736-739`, no provider `:697-700`, lease/store `:748-756`), so those paths would silently lose a queued selection. Rev 4 installs the flush as a scope guard after `TurnStarted` (`:612`) so it runs on every exit (idempotent, null-safe; the append may follow the terminal event), and pins the interim display (`"plan change queued"`/`"plan exit queued"` notice, never an optimistic mode flip) and the reconciliation on end/error/cancel. §3.3/§3.6, UX19/UX45, UX-F2/UX-F20, UX-U31, Q19 updated. (4) **N4 residual — `closeSession` must not erase.** Rev 3 claimed `erase` runs from `closeSession`, but `HostRuntime::closeSession` (`src/host/host_runtime.cpp:665-669`) is an explicit detach-only no-op (24-D10); Rev 4 moves the `erase` call to `deleteSession` (`:681-737`) only. (5) **N10 (LOW) — memo made mandatory.** The controller must keep a `(SessionId, last Sequence)`-keyed memo (UX12). (6) **N14 — tests added/refined** for the `force_ask` bypass, the error/cancel flush, and the `required` strip. Status **draft** — pending re-gate. |
 | Rev 5 | 2026-09-18 | **Re-gate round 3 — the remaining MEDIUMs and the cheap LOWs.** Intended to be verification-complete (0 HIGH, 0 MEDIUM open); **NOT** declared verified — the gate does that. (1) **Oracle M-1 — the N10 memo was keyed wrong.** The Rev-4 memo keyed on the session's last `Sequence`, which advances on every appended event, so `active()` re-folded the whole log every step. §3.3 now keys the memo by `SessionId` alone with a `valid` bit, written by the first fold and by every controller commit (invalidate-before-append, set-after), and dropped by `erase`; the controller is the sole `plan/mode` writer, so a valid entry cannot go stale and a step that appends no `plan/mode` never folds. Adds a `ProjectionFn` test seam. UX12 amended; UX-U33, Q21 added. (2) **Critic NEW-1 — blind review / exit on a malformed plan.** §3.5 adds a pre-Ask argument gate (missing/empty/whitespace/non-string `plan` ⇒ error `ToolResult`, no permission request) and gates `request_exit` on `ToolOutcome::Ok`; `bounded_summary` emits `"exit_plan_mode (no plan provided)"` if ever reached. UX18/UX19/UX47, UX-F21, UX-U6/UX-U34 updated/added. (3) **Critic NEW-2 — an unbounded multi-line preview pushed the option rows off-screen.** §3.5 adds `kMaxPlanSummaryLines = 12` alongside the 4096-byte cap and a height-bounded frame (`kMaxPlanPreviewRows = 12`) in `render_dialog`; the forced-review default selection is `Deny`. UX-G7 updated; UX-G8 added. (4) **Critic NEW-3 — `AllowAlways` was a dead no-op on a forced review.** The forced dialog now renders/accepts only `{Allow once, Deny}`; `PermissionBroker::onDecision` and the loop's direct-policy path skip `remember` for a `force_ask` request. Adds one additive wire/event field `force_ask` (JSON `value("force_ask", false)`), `PermissionDialogModel::force_ask`, and the two-option render/handle branch. UX44/UX46, UX-F22, UX-U30/UX-U35 updated/added. (5) **Oracle LOWs:** L-1 `Cancelled`-vs-`Unchanged` precedence pinned; L-2 `set()` clears `pending_exit_`; L-3 `"plan exit queued"` source pinned to the forwarded Allow at `resolve_dialog`; L-4 sufficiency now covers the non-throwing `base_url` ⇒ `StartupRejected` path; L-5 `normalize_mcp_server_id`/`kMaxMcpDedupeAttempts` moved to `mcp_types.hpp`; L-6 `workspace_runtime.cpp:189→190`; L-7 folded into NEW-1. (6) **Critic LOWs:** LOW-1 `HostRuntime::setSessionMode`/`SetModeResult` pinned; LOW-2 `to_mcp_config` named in the import validation step; LOW-3 UX-U6 now drives `PermissionBroker` + `FakeTransport`; LOW-4 guard/flush `noexcept`; LOW-5 guard also installed in `runMaintenanceTurn`; LOW-6 §4.3 pseudocode now shows `return true`. **Consciously left:** none — every LOW was cheap and real. Status **draft** — intended verification-complete (0 HIGH, 0 MEDIUM); pending re-gate. |
+| Rev 6 | 2026-09-19 | **F1 traceability amendment — the spec catches up with the shipped, verified implementation. This is NOT a design change: no decision, invariant, failure mode, or 25-D2 semantic changes.** (1) **Pinned signature corrected.** §3.3's `PlanModeController::set` was pinned as `PlanModeSetResult set(const SessionId& session, bool turn_open, bool active);` but the shipped, verified interface (`include/ymh/agent/plan_mode_controller.hpp:42`) is `PlanModeSetResult set(const Session& session, bool turn_open, bool active);`. The `Session&` (not just its id) is load-bearing: it lets the logged-state read, the comparison, and the append all run under `commit_mutex_`, so a cold memo on a resumed/forked session is folded from the durable log before the comparison and a concurrent `commit_` cannot invalidate the projection in between. A future implementer following the old pin would pass only an id and silently reintroduce the H1 TOCTOU. (2) **N12 lock discipline completed.** §3.3 now documents `commit_mutex_` (introduced by the earlier M8 fix and used by the H1 atomicity fix) and pins the order `commit_mutex_ → mutex_` and `commit_mutex_ → appendMutex_`, never `mutex_` together with `appendMutex_`; plus the load-bearing re-entrancy invariant — no committed handler, global live subscriber, or `ProjectionFn` may re-enter the controller or call `Session::events()`/`append()`, else a recursive `commit_mutex_` self-deadlock or an `appendMutex_ → commit_mutex_` inversion. (3) **F3 recorded, not fixed.** The pre-existing `erase()` interleave and the unlocked `ownEvents()`/`deriveMessages()` `log_` reads are recorded as follow-up **F3** in §14.1. Closes verification finding F1 (`/tmp/opencode/verify-harden.md`); F2/F3 remain hardening candidates. |
