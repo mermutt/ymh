@@ -824,8 +824,10 @@ struct ReplayReport {
 nested `ReplayEnvelope`. This errata pins them (adding one row to that table by
 reference; a `26` re-gate is required to record it):
 
-> `ReplayEnvelope` object: `provider` string, `version` int, `state` object
-> (adapter-private, JSON-serializable).
+> `ReplayEnvelope` object: `provider` string, `version` int, `state` **any JSON
+> (including null)** — adapter-private, JSON-serializable. NOTE: this corrects an
+> earlier "object" wording; spec 33 §3.3 and the shipped codec (`stream.hpp:270`,
+> the codec) pin `state` as any JSON including null, and they win.
 
 This matches the struct at `26 §4.3.4 :529-533`; `state` is opaque to ymh. The
 sibling `33` codec consumes this key set; it is pinned here because

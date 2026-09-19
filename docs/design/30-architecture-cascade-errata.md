@@ -317,7 +317,7 @@ Stage A.**
 | Wave | Specs verified before its code |
 |---|---|
 | 1 | `21` errata — the new `session.persist_prompt_text` key (D23); the Stage-A A1 `01` errata already pins the D24 wire-vocabulary rule; no `05` change |
-| 2 | `01` assistant-stream payloads; `08` assembler/replay errata |
+| 2 | `01` assistant-stream payloads; the `08` assembler/replay errata — now `34-assembler-replay-errata.md` (Rev 2, verified), with the `StreamEvent` codec in `33-stream-event-codec-errata.md` (verified) |
 | 3 | the prompt-registry spec (reserved `27-system-prompt.md`, renumbered `31+`); `01` provenance payloads; `17`/`21` errata |
 | 4 | the output-retention spec (reserved `28-output-retention.md`, renumbered `31+`); `06`/`07`/`13` errata |
 | 5 | the presets spec (reserved `29-agent-presets.md`, renumbered `31+`); `23` errata; `01` preset event |

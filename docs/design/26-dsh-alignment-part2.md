@@ -532,7 +532,10 @@ struct ReplayEnvelope {
     nlohmann::json state;              // adapter-private; must be JSON-serializable
 };
 
-// A stream event with the wall-clock offset at which the sink received it.
+// A stream event with its offset from the per-attempt stream start. NOTE: this
+// is a STEADY-clock delta (ms since that provider attempt's stream began), NOT a
+// wall-clock time — spec 34 §5.1 pins it (34-D2), superseding the earlier
+// "wall-clock" wording here.
 struct TimedStreamEvent {
     std::chrono::milliseconds at{0};
     StreamEvent               event;
@@ -954,6 +957,7 @@ timestamps/ids beyond the fields listed (the core event envelope already carries
 | `payload::GoalChange` | `operation` string (`"create"｜"edit"｜"pause"｜"resume"｜"complete"｜"block"｜"clear"`), `goal` `GoalSnapshot` object (omitted on clear), `cleared` object `{id int, revision int}` (omitted on non-clear), `rounds_started` int |
 | `GoalSnapshot` (nested) | `id` int, `revision` int, `objective` string, `phase` string (`"active"｜"paused"｜"blocked"｜"complete"`), `blocked` object `{code string, message string}` (omitted unless blocked), `max_goal_rounds` int |
 | `payload::JobChanged` | `owner` string, `kind` string, `ordinal` int, `status` string (`"running"｜"stopping"｜"completed"｜"killed"｜"failed"`), `label` string |
+| `ReplayEnvelope` (nested) | `provider` string, `version` int, `state` any JSON (adapter-private, JSON-serializable; emitted even when null) |
 | `payload::AssistantMessage` (D9 additions) | existing `id`, `content`, `usage` (omitted) **plus** `stream` `AssistantStreamRecord[]` and `replay_state` object (omitted when none) |
 | `payload::ContextCompaction` (D13 additions) | existing `boundary`, `summary`, `token_estimate`, `model`, `created_at` **plus** `provider` string, `shadowed_start` int, `shadowed_end` int, `shadowed_seqs` int[], `shadowed_token_count` int |
 
