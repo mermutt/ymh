@@ -540,6 +540,7 @@ EventRange Session::events() const {
 }
 
 EventRange Session::ownEvents() const {
+    std::lock_guard<std::mutex> lock(appendMutex_);
     if (header_.kind == SessionKind::Fork && header_.seedLength.has_value()) {
         const std::size_t prefix = *header_.seedLength;
         if (prefix >= log_.size()) {
@@ -551,6 +552,7 @@ EventRange Session::ownEvents() const {
 }
 
 std::vector<Message> Session::deriveMessages() const {
+    std::lock_guard<std::mutex> lock(appendMutex_);
     return ymh::deriveMessages(header_, log_);
 }
 
@@ -656,11 +658,12 @@ void Session::emit(Event event) {
 }
 
 SessionSnapshot Session::snapshot() const {
+    std::lock_guard<std::mutex> lock(appendMutex_);
     SessionSnapshot snapshot;
     snapshot.session    = header_.id;
     snapshot.at         = log_.empty() ? 0 : log_.back().seq;
     snapshot.header     = header_;
-    snapshot.messages   = deriveMessages();
+    snapshot.messages   = ymh::deriveMessages(header_, log_);
     snapshot.eventCount = log_.size();
     return snapshot;
 }
@@ -704,6 +707,11 @@ Session Session::fork(const Session& parent, std::size_t seedLength, SessionStor
         .title         = child.title,
     });
     return childSession;
+}
+
+SessionHeader Session::header() const {
+    std::lock_guard<std::mutex> lock(appendMutex_);
+    return header_;
 }
 
 } // namespace ymh

@@ -268,7 +268,7 @@ std::string format_skills_listing(const nlohmann::json& result) {
             const std::string tier = trust == "trusted" ? "[user]" : "[workspace]";
             out += "  " + pad_field(name, 18) + pad_field(tier, 13) + description + "\n";
         }
-        out += "activate with /skill <name>; detail with /skills --show <name>\n";
+        out += "skills are offered to the model automatically; detail with /skills --show <name>\n";
     }
     if (warnings.is_array() && !warnings.empty()) {
         out += std::to_string(warnings.size()) + " skills skipped:\n";

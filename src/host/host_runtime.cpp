@@ -513,6 +513,10 @@ nlohmann::json HostRuntime::showContext(const SessionId& id) {
             mcp_available = false;
         }
 
+        // 25-D7 Rev 8: the window comes only from a truthful source — the
+        // compaction policy's configured window. With no configured window the
+        // bar stays inert (percentage "—"); the provider advertises no
+        // model-aware window today, so there is no daemon-side fallback.
         const ContextBudget budget{
             policy != nullptr ? policy->context_window_tokens : 0,
             policy != nullptr ? policy->reserve_output_tokens : 0,
