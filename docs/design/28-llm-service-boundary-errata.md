@@ -2,6 +2,18 @@
 
 ```
 Status: written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Revision: Rev 2 — closes the gate28 MEDIUMs and LOWs. (1) `PreparedCall::retry_policy()`
+          is sourced from `LLMProvider::retry_policy()`, captured by
+          `register_adapter` (signature unchanged) — §3.1, §6.1. (2)
+          `canonical_template()`'s `system_prompt` and `system_prompt_digest` basis
+          is pinned to the frozen request's `Role::System` message text, and §5.4 is
+          reconciled so a plan-mode turn's digest matches replay — §4.2, §5.4.
+          LOWs: (3) `to_string(InvalidPreparedCall)` = `"invalid_prepared_call"` and
+          the exhaustive-switch audit — §7; (4) the loop's dispatch path is
+          `prepare_call`→`PreparedCall::stream` — §3.1; (5) adapter ownership stated
+          once (the runtime owns registered adapters) — §3.3, §3.4, 28-D2; (6)
+          `schema_version` constant/lifecycle pinned — §4.2, 28-D4. Rev 0 is retained
+          below.
 Component: 28 (errata) — amends 08-llm-provider.md by reference; also pins
            changes owned by 06-agent-loop.md §4/§5 and 13-context-compaction.md
            §5.2 (each owned by its own errata)
@@ -244,6 +256,44 @@ public:
 } // namespace ymh
 ```
 
+**Retry-policy source (gate28 MEDIUM-1 pin).** `PreparedCall::retry_policy()` is
+sourced from the adapter, captured at registration — not from a config held by
+the executor. `LLMProvider` gains **one non-pure virtual accessor** (an additive
+amendment to the 08 §3.4 adapter contract):
+
+```cpp
+// include/ymh/llm/llm_provider.hpp:61 (current) → target: one added method.
+class LLMProvider {
+    // … id()/stream()/capabilities()/models() unchanged …
+    // The provider's configured retry/backoff policy (08 §3.7). Non-pure so test
+    // doubles need not override; OpenAICompatibleProvider returns its stored
+    // LLMProviderConfig::retry.
+    [[nodiscard]] virtual RetryPolicy retry_policy() const { return {}; }
+};
+```
+
+`register_adapter`'s signature is **unchanged** (`std::vector<ProviderId>,
+std::shared_ptr<LLMProvider>`, §3.1 :236-237; 26 §4.3.1 :278-279): it captures
+`adapter->retry_policy()` into the registration record. This is chosen over a
+`RetryPolicy` parameter on `register_adapter` because it leaves the frozen 26
+§4.3.1 signature byte-for-byte and keeps a single source of truth: the adapter's
+stored `LLMProviderConfig::retry` (`include/ymh/llm/provider_registry.hpp:34`),
+which the daemon holds (`src/agent/workspace_runtime.cpp:199`), populates via
+`to_provider_config` (`src/cli/wiring.cpp:70-74`), and passes through the factory
+into `OpenAICompatibleProvider::config_` (`include/ymh/llm/openai_adapter.hpp:87`).
+`prepare_call` binds the captured policy into the `PreparedCall`; a policy change
+therefore requires a re-registration (a new adapter generation), consistent with
+26-D3's one-generation binding.
+
+**Dispatch path (gate28 LOW-2 pin).** The loop uses `prepare_call` →
+`PreparedCall::stream` (one-shot, one bound adapter generation), as 26-D3
+requires; the loop never calls the direct `LlmRuntime::stream`. The direct
+`LlmRuntime::stream(const FrozenRequest&, …)` remains the public
+interceptor-chain entry for callers that already hold a `FrozenRequest` and need
+no one-shot generation binding (it copies the currently-selected adapter under
+the lock, §3.3). `ContextCompactor` (§8) likewise uses `prepare_call` →
+`PreparedCall::stream`.
+
 ### 3.2 `LLMRequest` extension (26-D3)
 
 `LLMRequest` (`include/ymh/llm/llm_request.hpp:54-61`) gains two fields, additively:
@@ -269,14 +319,18 @@ sequence field is stored.
 ### 3.3 Ownership and lifetime (26 §4.8)
 
 - **One `LlmRuntime` per workspace daemon**, alongside the existing
-  `ProviderRegistry providers_` and `LLMProvider` owner
-  (`src/agent/workspace_runtime.cpp:198,200`). The runtime replaces the loop's
-  direct handle, not the daemon's ownership of the adapter objects.
-- **Adapters are `shared_ptr`-owned by the runtime.** `register_adapter` stores
-  the `shared_ptr`; `AdapterHandle`'s destructor erases the routes but the
-  adapter is destroyed only when the last in-flight dispatch releases it. A
-  `PreparedCall` holds the `shared_ptr` it bound at `prepare_call`, so its
-  adapter generation survives through `stream` (26 §4.8 :1259-1270).
+  `ProviderRegistry providers_` (`src/agent/workspace_runtime.cpp:198`). The
+  daemon **owns the runtime**; the runtime replaces the loop's direct handle.
+- **Ownership stated once: the runtime owns the registered adapters**, via the
+  `shared_ptr` it stores. The daemon constructs adapter instances through the
+  factory at boot and calls `register_adapter`, but keeps **no owning reference**
+  to them (`src/agent/workspace_runtime.cpp:199-200` today holds the config and a
+  single `unique_ptr`; Wave 1 moves that handle into the runtime).
+  `AdapterHandle`'s destructor erases the routes, but the adapter object is
+  destroyed only when the last `shared_ptr` — the registration or an in-flight
+  dispatch — is released. A `PreparedCall` holds the `shared_ptr` it bound at
+  `prepare_call`, so its adapter generation survives through `stream`
+  (26 §4.8 :1259-1270).
 - **Mutex discipline.** Registry mutation and interceptor registration take an
   internal mutex; `stream`/`prepare_call` copy the selected adapter's
   `shared_ptr` and the interceptor chain under the lock, then release it before
@@ -304,7 +358,8 @@ sequence field is stored.
   no longer creates adapters. This is 06-owned.
 - **Ownership supersession.** `08 §5.1 :656-659` and `08 §14.1(n) :1340-1343`
   ("spec 06 owns the resolved `LLMProvider` instance") are superseded: the
-  daemon owns the runtime and its registered adapters; the loop owns neither.
+  daemon owns the runtime; the runtime owns its registered adapters (§3.3); the
+  loop owns neither.
 - `ProviderRegistry` has no `unregister` today; route removal is the runtime's
   `AdapterHandle`. Whether the factory stays the only construction path or the
   runtime also exposes `list_providers`-backed discovery is pinned by the
@@ -326,15 +381,33 @@ interceptor nor an adapter can rewrite it (26-I2).
 
 `canonical_template()` is a deterministic JSON object:
 
-- `schema_version`
+- `schema_version` — the canonical-serialization schema version, an integer
+  constant `kTemplateSchemaVersion = 1` at introduction (gate28 LOW-4 pin). It is
+  **independent of** the session-DB `kSchemaVersion` (stays `1`, §13.6) and the
+  wire `kProtocolVersion` (stays `1`, 26-D24). It changes only when the template
+  field set or the canonicalization rules change in a way that re-bases every
+  `template_digest`; that is a breaking change to the reconstruction contract and
+  must be recorded (pre-existing digests are no longer comparable).
 - `envelope` — `session_id` + optional `purpose` (D3: an adapter may map both to
   transport metadata, so they are covered by the digest)
 - `config` — every `LlmCallConfig` field that can reach the provider wire,
   including the `top_p`/`seed`/`tool_choice` extensions
-- `system_prompt` — the full rendered text held in memory; **always hashed** into
-  `template_digest`, persisted in the header only under the opt-in (§5.4)
+- `system_prompt` — the **text of the frozen request's `Role::System` message**
+  (`messages[0]`; the assembler inserts at most one, at index 0 —
+  `src/agent/context_assembler.cpp:44-63`). This is the *assembled* text, not the
+  bare `AgentConfig::system_prompt`: in plan mode the assembler appends
+  `AgentConfig::plan_section` (`:46-53`; wired at
+  `src/agent/workspace_runtime.cpp:149-152`). When no `Role::System` message
+  exists, it is the empty string (still serialized, so the field is always
+  present). **Always hashed** into `template_digest`; persisted in the header only
+  under the opt-in (§5.4).
 - `tools` — each schema's `name`, `description`, `parameters` with recursively
   sorted object keys
+
+`canonical_template()` extracts `system_prompt` from `messages[0]` while
+excluding the remaining `messages`; `canonical_json()` adds the full ordered
+`messages` (§4.3). This extraction rule is the single definition of the prompt
+input and of `system_prompt_digest`.
 
 `canonical_json()` is the same object plus `messages` (role + ordered content
 blocks; tool-call arguments as their raw JSON string). Rules (26 §4.3.2
@@ -373,9 +446,11 @@ do not match the digests **fails loud** rather than guessing (26-F6, 26-F13).
 
 A tool-catalog change (names **or** schemas) or a rendered-prompt change forces a
 new header and a **new series** (`starts_series = true`), because the tool
-schemas and the prompt are inputs to `template_digest`. This is the direct
-analogue of dsh `call-config.d.ts:1-6` "logs changed snapshots instead of
-allowing silent per-call drift" (26 §4.3.2 :330-339, 26-I6).
+schemas and the prompt are inputs to `template_digest`. Because the prompt is the
+assembled `Role::System` text (§4.2), toggling plan mode changes the digest and
+therefore starts a new series. This is the direct analogue of dsh
+`call-config.d.ts:1-6` "logs changed snapshots instead of allowing silent
+per-call drift" (26 §4.3.2 :330-339, 26-I6).
 
 ---
 
@@ -437,20 +512,28 @@ found positionally at replay; `RequestId` is never persisted (26-D2 :140).
 - The full `system_prompt` text is present **only** when
   `session.persist_prompt_text` — a bool, default `false`, new `[session]`
   section, **global layer only** — is set. When absent, replay re-derives the
-  prompt from the live registries, asserts
-  `sha256(rendered) == header.system_prompt_digest`, and fails loud on mismatch.
-  When present, the text must be byte-identical to the in-memory rendered prompt
-  and the digest check still runs (26 §4.3.2 :364-373).
+  system text (Wave 1: `AgentConfig::system_prompt` + the active plan section,
+  §4.2; Wave 3+: the prompt registry), asserts
+  `sha256(re-derived) == header.system_prompt_digest`, and fails loud on mismatch.
+  When present, the text must be byte-identical to the in-memory assembled
+  `Role::System` text and the digest check still runs (26 §4.3.2 :364-373).
 - This key is **distinct from `logging.log_prompts`**
   (`include/ymh/config/config.hpp:83-88`), whose shipped contract is off by
   default and redacts prompt bodies even when on
   (`include/ymh/llm/redaction.hpp:4-6`). The session-DB key has its own name and
   semantics (store byte-for-byte; no redaction) and shares no code path with
   spdlog. The key itself is owned by `21`.
-- **Wave-1 scope.** The Wave-1 header carries the **current**
-  `AgentConfig::system_prompt` (config override or `default_system_prompt()`,
-  `src/cli/wiring.cpp:48-52`; effective assignment `:180`), which exists before
-  Wave 3; it is not a rendered-registry hash (26 §5 Wave 1 :1414-1418). No
+- **Wave-1 scope and digest basis (gate28 MEDIUM-2 reconciliation).** The
+  header's `system_prompt_digest` is SHA-256 of the assembled `Role::System`
+  message text (§4.2): the `AgentConfig::system_prompt` (config override or
+  `default_system_prompt()`, `src/cli/wiring.cpp:48-52`; effective assignment
+  `:179-180`) **plus the active plan-mode paragraph** when
+  `plan_mode_.active(session)` is true (`src/agent/context_assembler.cpp:46-53`;
+  provider wired at `src/agent/workspace_runtime.cpp:149-152`). Wave 1 writes the
+  digest of that assembled text; it is not a rendered-registry hash (26 §5 Wave 1
+  :1414-1418). The shorthand "the Wave-1 header carries
+  `AgentConfig::system_prompt`" is therefore read through this rule, so a
+  plan-mode turn's digest matches replay's re-derived system text. No
   model-visible behaviour changes.
 
 ---
@@ -464,8 +547,9 @@ found positionally at replay; `RequestId` is never persisted (26-D2 :140).
 - **Retry is a separate, durable executor** at the step boundary; it records
   `llm/retry` before each wait and `llm/retry_started` after the wait succeeds
   (part 1 §2.1.7 :418-436; event payloads pinned by `29`, keys in `26` §4.3.9.1
-  :947-948). The executor has no config of its own: providers own
-  `retry_policy`, captured at registration and surfaced as
+  :947-948). The executor has no config of its own: `register_adapter` captures
+  `adapter->retry_policy()` at registration (§3.1), and `prepare_call` binds the
+  captured policy into the `PreparedCall`, surfaced as
   `PreparedCall::retry_policy()`.
 - **The pre-first-event barrier is retained** (L7; `stream.hpp:111`). Retry is
   allowed only before any `StreamEvent` — including `UsageEvent` — is dispatched
@@ -535,6 +619,17 @@ Mapping (26 §4.7 :1247-1250): at the loop boundary it maps to
 `call_config_equals(request.config(), config())` before dispatch and consumes
 the one-shot flag; a second call or mismatch is a programming error and is
 never silently retried.
+
+**Wire/diagnostic string and switch audit (gate28 LOW-1 pin).**
+`to_string(LLMErrorCode::InvalidPreparedCall)` returns exactly
+`"invalid_prepared_call"` (snake_case, matching the existing values). Because
+`to_string` is the only exhaustive, `default:`-less switch over `LLMErrorCode`
+(`include/ymh/llm/stream.hpp:69-87`), adding the enumerator requires adding
+`case LLMErrorCode::InvalidPreparedCall: return "invalid_prepared_call";` in the
+same change — otherwise the build breaks under `-Wswitch`/`-Werror`, which
+`AGENTS.md` forbids suppressing. No event codec serializes `LLMErrorCode` today
+(no reference under `src/session/`), so the string is diagnostic-only; it is
+pinned now so a future codec has a stable value.
 
 The `LLMError`/`LlmFailure` shapes are reused verbatim by the `llm/retry` and
 `llm/request_header` payloads; no other error code is added (26 §4.7 :1243-1246).
@@ -732,6 +827,7 @@ Wave 1 lands.
 
 | Rev | Change |
 |---|---|
+| 2 | Closes the gate28 findings. **MEDIUM-1:** `PreparedCall::retry_policy()` is sourced from a new non-pure `LLMProvider::retry_policy()` accessor captured by `register_adapter` (signature unchanged; `LLMProviderConfig::retry` stays the single source of truth) — §3.1, §6.1. **MEDIUM-2:** `canonical_template()`'s `system_prompt` and `system_prompt_digest` basis is pinned to the frozen request's `Role::System` message text, and §5.4 is reconciled so the plan-mode divergence is removed — §4.2, §4.5, §5.4. **LOW-1:** `to_string(InvalidPreparedCall)` = `"invalid_prepared_call"` plus the exhaustive-switch audit — §7. **LOW-2:** the loop's dispatch path is pinned to `prepare_call`→`PreparedCall::stream` — §3.1. **LOW-3:** adapter ownership is stated once (the runtime owns the registered adapters) — §3.3, §3.4, 28-D2. **LOW-4:** `kTemplateSchemaVersion = 1` and its change rule are pinned — §4.2, 28-D4. |
 | 0 | Initial Wave-0 A2 errata. Pins `LlmRuntime`/`PreparedCall`/`AdapterHandle`/`InterceptorHandle`/`ProviderInfo`, `LlmCallConfig`/`call_config_equals`/`CallPurpose`, `FrozenRequest` + canonical serialization/reconstruction, `payload::LlmRequestHeader` as a changed snapshot, one-attempt-per-stream with the separate-retry end state and the no-double-retry constraint, the `ContextCompactor` re-seam, `LLMErrorCode::InvalidPreparedCall`, `L18–L25`, `L-F19–L-F26`, and the `28-D1–28-D8` decisions. Records three ownership gaps (06 errata, retry-executor wave, 13 errata) without inventing a resolution. Claims number 28; supersedes the stale 27–30 reservation. |
 
 ---
@@ -741,13 +837,15 @@ Wave 1 lands.
 - **28-D1** — `LlmRuntime` is the loop's only LLM handle; `AgentServices` carries
   `LlmRuntime*` and no `LLMProvider*`. (26-D1; L18)
 - **28-D2** — `ProviderRegistry`/factory are retained as the boot construction
-  path; adapters are registered into the runtime and owned by `shared_ptr`.
-  (26 §4.8)
+  path; adapters are registered into the runtime and owned by it via
+  `shared_ptr` (the daemon keeps no owning reference, §3.3). (26 §4.8)
 - **28-D3** — Requests are deep-frozen before dispatch; `FrozenRequest` is
   immutable by type. (26-D3; L19)
 - **28-D4** — The canonical serialization is `schema_version` + `envelope` +
   `config` + `system_prompt` + `tools`; `canonical_json()` adds ordered
-  `messages`; no ids/timestamps/iteration order. (26 §4.3.2)
+  `messages`; no ids/timestamps/iteration order. `schema_version` is
+  `kTemplateSchemaVersion = 1` and `system_prompt` is the frozen request's
+  `Role::System` message text. (26 §4.3.2; §4.2)
 - **28-D5** — The header is a changed snapshot, appended on config/prompt/tools/
   purpose change, never per dispatch; `call_config_equals` is the only change
   test; `RequestId` is never persisted. (26-D2; L21)
@@ -775,16 +873,18 @@ Wave 1 lands.
 - Tree anchors: `include/ymh/agent/agent_loop.hpp:53,64,65`;
   `src/agent/agent_loop.cpp:410-419,771-809`; `include/ymh/agent/compactor.hpp:
   113-117,140`; `src/agent/compactor.cpp:117-126,252`;
-  `src/agent/workspace_runtime.cpp:165-172,198-200`;
+  `src/agent/workspace_runtime.cpp:149-152,165-172,198-200`;
   `src/agent/agent_registry.cpp:37-44,111`;
-  `include/ymh/llm/llm_provider.hpp:41-47,51-59,71-73`;
+  `include/ymh/llm/llm_provider.hpp:41-47,51-59,61-79`;
   `include/ymh/llm/llm_request.hpp:28-30,40-48,54-61`;
-  `include/ymh/llm/stream.hpp:33-56,111-123,160-167`;
+  `include/ymh/llm/stream.hpp:33-56,69-87,111-123,160-167`;
   `include/ymh/llm/provider_registry.hpp:25-37,43-57,60-63`;
+  `include/ymh/llm/openai_adapter.hpp:87`;
   `src/llm/openai_adapter.cpp:736-752,923-1000`;
+  `src/agent/context_assembler.cpp:44-63`;
   `include/ymh/agent/llm_pool.hpp`; `include/ymh/llm/fake_llm.hpp`;
   `include/ymh/llm/redaction.hpp:4-6`; `include/ymh/config/config.hpp:83-88`;
-  `src/cli/wiring.cpp:48-52,180`; `include/ymh/session/events.hpp:117`;
+  `src/cli/wiring.cpp:48-52,70-74,179-180`; `include/ymh/session/events.hpp:117`;
   `src/session/session_persistence.cpp:228-232`.
 - Conventions: `21-config-jsonc-errata.md` §15 (revision log),
   `23-session-lifecycle-errata.md` (amends-by-reference).

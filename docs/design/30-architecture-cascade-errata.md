@@ -2,10 +2,17 @@
 
 ```
 Status: written · verified: — · reviewer: —
-Revision: Rev 1 — initial write. Pins the architecture-level seam changes that
-          spec 26 (verified Rev 7) forces on `00-architecture.md`, the §4.4
-          cascade classification, the Wave-0 Stage A/B restaging, and the
-          migration-program prerequisites. Amends `00` **by reference only**:
+Revision: Rev 2 — closes the gate30 HIGH-1 staging defect. Stage A now records
+          the `06` agent-loop errata AND the `13` context-compaction errata as
+          **Wave-1 blocking prerequisites** (both are pulled forward from
+          `26 §5`'s Stage-B Wave 4, because Wave 1 changes
+          `AgentLoop::buildRequest` and re-seams `ContextCompactor`), and records
+          the **retry executor** as a named ownership gap (no item in `26 §5`
+          Waves 1–6). AC-I4 and the §10 test plan are reconciled; Rev 1 is
+          retained below. Rev 1 — initial write. Pins the architecture-level seam
+          changes that spec 26 (verified Rev 7) forces on `00-architecture.md`,
+          the §4.4 cascade classification, the Wave-0 Stage A/B restaging, and
+          the migration-program prerequisites. Amends `00` **by reference only**:
           no line of `00` is edited here. Claims spec number 30 and supersedes
           spec 26 §5's stale reservation of numbers 27–30 for the Wave-3+
           specs.
@@ -261,16 +268,38 @@ Three items, in order, each requiring Oracle PASS and zero open HIGH/MEDIUM:
 | **A1** | `29-event-family-errata.md` | the `EventType`/`wire_name` extension rule, the two-axis compatibility rule (§4.6), the live-only vs durable split, the consumer matrix (§4.3.9.2), and the `llm/request_header` event + codec |
 | **A2** | `28-llm-service-boundary-errata.md` | `LlmRuntime`/`PreparedCall`/`FrozenRequest`, freeze/serialization/digest, and `LLMErrorCode::InvalidPreparedCall` |
 
-**Only Stage A blocks Wave 1** — with one addition that the verified spec 26 §5
-understates: the **`06` agent-loop errata is ALSO a Wave-1 prerequisite.** Wave 1
-changes `AgentLoop::buildRequest` and re-seams `ContextCompactor`
-(`26-dsh-alignment-part2.md` §5, Wave 1), and both are owned by spec `06`;
-§4.1 of this errata classifies the `06` agent-loop seam as `Brk. (D1)`.
-Scheduling the `06` errata in Wave 4 (as `26 §5` does) is a **sequencing defect**:
-Wave 1 would start without its owning spec. The `06` errata must therefore join
-Stage A (or be gated immediately before Wave 1). This gap was independently
-confirmed by `28-llm-service-boundary-errata.md` §13.1 and by an independent
-gate of this document (F-1).
+**Only Stage A blocks Wave 1** — with two additions that the verified spec 26 §5
+understates. Both are **Wave-1 blocking prerequisites**: they must be verified
+before any Wave-1 code, even though `26 §5` schedules them in Stage-B Wave 4
+(`26p2:1389`):
+
+1. **The `06` agent-loop errata.** Wave 1 changes `AgentLoop::buildRequest`
+   (`26-dsh-alignment-part2.md` §5 Wave 1 :1404) and re-seams `ContextCompactor`
+   (`:1412-1413`), and both are owned by spec `06`; §4.1 of this errata
+   classifies the `06` seam as `Brk. (D1)` (`26p2:1092`). Scheduling the `06`
+   errata in Wave 4 is a **sequencing defect**: Wave 1 would start without its
+   owning spec. Independently confirmed by
+   `28-llm-service-boundary-errata.md` §13.1 and by an independent gate of this
+   document (F-1).
+2. **The `13` context-compaction errata.** The same Wave-1 compactor re-seam
+   changes the constructor pinned by `13-context-compaction.md §5.2
+   :604-610,633` from `LLMProvider&` to `LlmRuntime&`; the 13 spec must be
+   amended before that code lands. `26 §5` also schedules the `13` errata in
+   Stage-B Wave 4 — the same sequencing conflict. Independently confirmed by
+   `28-llm-service-boundary-errata.md` §13.3.
+
+The `06` and `13` errata therefore join the Wave-1 gate (as Stage-A items A3/A4,
+or as Stage-A-adjacent prerequisites gated immediately before Wave 1). Stage A's
+three up-front *freezes* (A0/A1/A2) are unchanged; AC-I4 is read accordingly.
+
+**Named ownership gap (recorded, not resolved): the retry executor has no wave.**
+`26-I3` and the `llm/retry`/`llm/retry-started` events (`26p2 §4.3.9.1
+:947-948`) require a separate durable retry executor, but `26 §5` Waves 1–6
+(`:1397-1498`) contain **no retry-executor item**. This is a genuine ownership
+gap: no wave owns the executor. The one-attempt contract and the no-double-retry
+migration constraint are pinned by `28-llm-service-boundary-errata.md`
+§6.2/§13.2, but the implementing wave is unassigned. This errata records the gap
+rather than inventing a wave.
 
 Nothing is coded until its owning spec is verified.
 
@@ -384,9 +413,11 @@ To keep the top-level gate's invariants intact, the following are explicitly
 - **AC-I3 — Completeness is gated here.** If a later wave discovers a touched
   spec missing from §4.1/§4.2, that is an open finding against this errata, and
   the top-level gate does not pass until it is resolved.
-- **AC-I4 — Stage A is exactly three items.** `00` (this errata), the `01`
-  event-family errata (`29`), and the `08` service-boundary errata (`28`). The
-  prompt-registry spec is not in Stage A.
+- **AC-I4 — Stage A's up-front freezes are exactly three items, plus the Wave-1
+  blocking component errata.** The three freezes are `00` (this errata), the
+  `01` event-family errata (`29`), and the `08` service-boundary errata (`28`);
+  additionally the `06` and `13` errata are Wave-1 blocking prerequisites
+  (§5.1). The prompt-registry spec is not in Stage A.
 - **AC-I5 — No in-place rewrite.** This errata amends `00` by reference; the
   affected `00` sections keep their text and are read through §3/§7.
 - **AC-I6 — Numbering is authoritative.** `27`/`28`/`29`/`30` are the
@@ -424,8 +455,9 @@ code tests. The gate checks:
    `26 §4.2`/`§4.4`, with the cited line range. (AC-I1)
 2. **Completeness.** §4.1/§4.2 cover every spec named in `26 §4.4`'s two tables
    and its unaffected list, and no spec is claimed "all of 01–24". (AC-I2/AC-I3)
-3. **Stage A discipline.** §5.1 is exactly the three items A0/A1/A2; §5.2 pins
-   Wave 1 off the prompt registry. (AC-I4)
+3. **Stage A discipline.** §5.1 pins the three up-front freezes A0/A1/A2 and the
+   `06`/`13` Wave-1 blocking prerequisites; §5.2 pins Wave 1 off the prompt
+   registry. (AC-I4)
 4. **Numbering.** §2's table matches the files on disk; the Wave-3+ renumbering
    is stated. (AC-I6)
 5. **Non-amendment.** §7 lists every surface this program leaves untouched; the
@@ -436,6 +468,13 @@ code tests. The gate checks:
 
 ## 11. Revision log
 
+- **Rev 2 (2026-09-19).** Closes the gate30 HIGH-1 staging defect. §5.1 now
+  records the `06` agent-loop errata and the `13` context-compaction errata as
+  **Wave-1 blocking prerequisites** (pulled forward from `26 §5`'s Stage-B Wave 4,
+  because Wave 1 changes `AgentLoop::buildRequest` and re-seams
+  `ContextCompactor`), and records the **retry executor** as a named ownership gap
+  (`26 §5` Waves 1–6 contain no retry-executor item). AC-I4 and the §10 test plan
+  are reconciled. Rev 1 is retained below.
 - **Rev 1 (2026-09-19).** Initial write. Pins the four architecture-level seams
   (S1 provider `LlmRuntime`; S2 event family; S3 session header; S4
   presets/goals/jobs/commands) with the `26 §4.4` classification; the cascade
