@@ -1,6 +1,6 @@
 # 26 — dsh Alignment: Design-Copy of DeepSeek Harness Mechanics
 
-Status: **draft for review — Rev 7** (design only; no implementation).
+Status: **verified — Rev 7** (GATE PASS: 0 HIGH / 0 MEDIUM / 5 LOW; design only, no implementation).
 Scope owner: architecture.
 Supersedes/amends: none yet (this is a proposal; §4 pins the interfaces and names
 which verified specs it would amend).
