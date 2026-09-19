@@ -7,6 +7,7 @@ add_executable(ymh_tests
     unit/llm_types_test.cpp
     unit/stream_event_codec_test.cpp
     unit/assistant_stream_test.cpp
+    unit/assistant_stream_printer_test.cpp
     unit/replay_harness_test.cpp
     unit/llm_runtime_test.cpp
     unit/tool_call_assembler_test.cpp

@@ -3,7 +3,6 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -53,6 +52,37 @@ public:
         }
         return Task<LLMResponse>{std::move(response)};
     }
+};
+
+// Emits text and then a ContextLengthExceeded failure on the first call, and a
+// completed text on the second: the retried attempt's text must not be
+// concatenated with the failed attempt's (34 §15 item 1).
+class OverflowAfterTextProvider final : public LLMProvider {
+public:
+    ProviderId id() const override { return "overflow-after-text"; }
+    ProviderCapabilities capabilities() const override { return {}; }
+
+    Task<LLMResponse> stream(const LLMRequest&, StreamSink sink, CancellationToken) override {
+        ++calls;
+        if (calls == 1) {
+            sink(StreamEvent{TextDelta{"attempt-zero-text"}});
+            LLMResponse failed;
+            failed.outcome      = StreamOutcome::Failed;
+            failed.finish       = FinishReason::Error;
+            failed.error.code   = LLMErrorCode::ContextLengthExceeded;
+            failed.error.detail = "overflow";
+            sink(StreamEvent{StreamError{failed.error}});
+            return Task<LLMResponse>{failed};
+        }
+        sink(StreamEvent{TextDelta{"attempt-one-text"}});
+        sink(StreamEvent{Finished{FinishReason::Stop, std::nullopt, std::nullopt}});
+        LLMResponse done;
+        done.outcome = StreamOutcome::Completed;
+        done.finish  = FinishReason::Stop;
+        return Task<LLMResponse>{done};
+    }
+
+    int calls = 0;
 };
 
 class HeadlessTest : public ::testing::Test {
@@ -143,6 +173,30 @@ TEST_F(HeadlessTest, ProviderFailureSetsNonZeroExit) {
     EXPECT_EQ(result.exit_code, 1);
     EXPECT_EQ(result.terminal, "turn/fail");
     EXPECT_NE(err.str().find("turn failed"), std::string::npos);
+}
+
+TEST_F(HeadlessTest, RetriedAttemptTextIsNotDoublePrinted) {
+    test::TempWorkspace workspace("headless_retry_dedup");
+    std::ostringstream out;
+    std::ostringstream err;
+
+    HeadlessOptions options;
+    options.workspace = workspace.path();
+    options.task      = "go";
+    options.out       = &out;
+    options.err       = &err;
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        return std::make_unique<OverflowAfterTextProvider>();
+    };
+
+    const HeadlessResult result = run_headless(options);
+    EXPECT_EQ(result.exit_code, 0);
+    EXPECT_EQ(result.terminal, "turn/end");
+    EXPECT_EQ(result.assistant_text, "attempt-one-text");
+
+    const std::string stdout_text = out.str();
+    EXPECT_NE(stdout_text.find("attempt-one-text"), std::string::npos) << stdout_text;
+    EXPECT_EQ(stdout_text.find("attempt-zero-text"), std::string::npos) << stdout_text;
 }
 
 TEST_F(HeadlessTest, CancellationProducesTurnCancelled) {
@@ -289,7 +343,7 @@ TEST(StreamReceiver, KnownEventTypesDispatch) {
 }
 
 TEST(StreamReceiver, LiveChunkSuppressesDurableDuplicateText) {
-    std::set<std::string> streamed;
+    AssistantStreamPrinter printer;
     std::ostringstream    out;
     std::ostringstream    err;
 
@@ -301,8 +355,8 @@ TEST(StreamReceiver, LiveChunkSuppressesDurableDuplicateText) {
     chunk.text    = "hello";
     chunk.kind    = payload::AssistantChunkKind::Text;
     live.envelope.event.payload = chunk;
-    EXPECT_EQ(handle_live_notification(live, out, err, &streamed), StreamDisposition::Continue);
-    EXPECT_EQ(out.str(), "hello");
+    EXPECT_EQ(handle_live_notification(live, out, err, &printer), StreamDisposition::Continue);
+    EXPECT_TRUE(out.str().empty());
 
     protocol::StreamNotification stream;
     stream.envelope.session    = SessionId{"s"};
@@ -314,8 +368,52 @@ TEST(StreamReceiver, LiveChunkSuppressesDurableDuplicateText) {
     block.text = "hello";
     message.content.push_back(block);
     stream.envelope.event.payload = message;
-    EXPECT_EQ(handle_stream_notification(stream, out, err, &streamed), StreamDisposition::Continue);
+    EXPECT_EQ(handle_stream_notification(stream, out, err, &printer), StreamDisposition::Continue);
     EXPECT_EQ(out.str(), "hello");
+}
+
+TEST(StreamReceiver, RetriedAttemptTextIsNotDoublePrinted) {
+    AssistantStreamPrinter printer;
+    std::ostringstream    out;
+    std::ostringstream    err;
+
+    const auto live_text = [&](std::string text) {
+        protocol::LiveNotification live;
+        live.envelope.session    = SessionId{"s"};
+        live.envelope.event.type = EventType::AssistantChunk;
+        payload::AssistantChunk chunk;
+        chunk.message = "m1";
+        chunk.text    = std::move(text);
+        chunk.kind    = payload::AssistantChunkKind::Text;
+        live.envelope.event.payload = chunk;
+        return handle_live_notification(live, out, err, &printer);
+    };
+
+    EXPECT_EQ(live_text("attempt-zero-text"), StreamDisposition::Continue);
+    protocol::StreamNotification failed;
+    failed.envelope.session    = SessionId{"s"};
+    failed.envelope.event.type = EventType::AssistantAttempt;
+    payload::AssistantAttempt attempt;
+    attempt.turn = 1;
+    attempt.step = 1;
+    failed.envelope.event.payload = attempt;
+    EXPECT_EQ(handle_stream_notification(failed, out, err, &printer), StreamDisposition::Continue);
+
+    EXPECT_EQ(live_text("attempt-one-text"), StreamDisposition::Continue);
+    protocol::StreamNotification done;
+    done.envelope.session    = SessionId{"s"};
+    done.envelope.event.type = EventType::AssistantMessage;
+    payload::AssistantMessage message;
+    message.id = "m1";
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "attempt-one-text";
+    message.content.push_back(block);
+    done.envelope.event.payload = message;
+    EXPECT_EQ(handle_stream_notification(done, out, err, &printer), StreamDisposition::Continue);
+
+    EXPECT_EQ(out.str().find("attempt-zero-text"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("attempt-one-text"), std::string::npos) << out.str();
 }
 
 TEST(StreamReceiver, DurableAssistantMessagePrintsAssembledText) {

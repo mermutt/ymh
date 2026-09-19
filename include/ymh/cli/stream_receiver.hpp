@@ -11,9 +11,8 @@
 // live daemon.
 
 #include <iosfwd>
-#include <set>
-#include <string>
 
+#include "ymh/cli/assistant_stream_printer.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace ymh {
@@ -28,18 +27,18 @@ enum class StreamDisposition {
 
 // Handles one `event.stream` notification, writing assistant text / failures to
 // `out` / `err` and reporting the loop action. A skipped envelope writes nothing
-// and must not be dispatched. When `streamed_messages` is non-null it records
-// every live-streamed message id and suppresses the durable `assistant/message`
-// text for those ids, so a retried attempt's live text is not double-printed
-// (34 §15 item 1).
+// and must not be dispatched. `printer` carries the per-message live-delta buffer
+// across calls: a retried attempt's live text is discarded on its
+// `AssistantAttempt` settlement so it cannot concatenate with the retry's text
+// (34 §15 item 1). When null, a per-call printer is used (single-event callers).
 [[nodiscard]] StreamDisposition handle_stream_notification(
     const protocol::StreamNotification& stream, std::ostream& out, std::ostream& err,
-    std::set<std::string>* streamed_messages = nullptr);
+    AssistantStreamPrinter* printer = nullptr);
 
 // Handles one `event.live` notification (the live-only delta channel, 29 §4.2),
-// recording live-streamed message ids in `streamed_messages` when non-null.
+// feeding it through the same `printer`.
 [[nodiscard]] StreamDisposition handle_live_notification(
     const protocol::LiveNotification& live, std::ostream& out, std::ostream& err,
-    std::set<std::string>* streamed_messages = nullptr);
+    AssistantStreamPrinter* printer = nullptr);
 
 } // namespace ymh
