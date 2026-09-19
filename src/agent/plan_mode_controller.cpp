@@ -26,15 +26,21 @@ bool PlanModeController::active(const Session& session) const {
     return entry.active;
 }
 
-PlanModeSetResult PlanModeController::set(const SessionId& session, bool turn_open, bool active) {
+PlanModeSetResult PlanModeController::set(const Session& session, bool turn_open, bool active) {
+    const SessionId id = session.id();
+    // Hold `commit_mutex_` across the logged-state read, the comparison, and the
+    // append so a concurrent `commit_` cannot invalidate the projection in
+    // between (25 review H1 TOCTOU). `active()` folds the durable log when the
+    // memo is cold, so the comparison is against the logged state even on the
+    // first `/plan` after resume/fork. Lock order: commit_mutex_ -> mutex_ and
+    // commit_mutex_ -> appendMutex_ (never mutex_ and appendMutex_ together).
+    std::lock_guard<std::mutex> commit_lock(commit_mutex_);
+    const bool logged = this->active(session);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        pending_exit_.erase(session);
+        pending_exit_.erase(id);
 
-        const auto memo = memo_.find(session);
-        const bool logged =
-            (memo != memo_.end() && memo->second.valid) ? memo->second.active : false;
-        const auto pending = pending_.find(session);
+        const auto pending = pending_.find(id);
 
         if (logged == active) {
             if (pending != pending_.end() && pending->second != active) {
@@ -45,13 +51,13 @@ PlanModeSetResult PlanModeController::set(const SessionId& session, bool turn_op
         }
 
         if (turn_open) {
-            pending_[session] = active;
+            pending_[id] = active;
             return PlanModeSetResult::Queued;
         }
 
-        pending_.erase(session);
+        pending_.erase(id);
     }
-    commit_(session, active);
+    commit_locked_(id, active);
     return PlanModeSetResult::Committed;
 }
 
@@ -127,6 +133,10 @@ void PlanModeController::erase(const SessionId& session) noexcept {
 
 void PlanModeController::commit_(const SessionId& id, bool value) {
     std::lock_guard<std::mutex> commit_lock(commit_mutex_);
+    commit_locked_(id, value);
+}
+
+void PlanModeController::commit_locked_(const SessionId& id, bool value) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         memo_[id].valid = false;

@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -120,11 +124,11 @@ TEST(PlanModeControllerTest, IdleSetCommitsOnce) {
         }
     });
 
-    EXPECT_EQ(controller.set(env.id, false, true), PlanModeSetResult::Committed);
+    EXPECT_EQ(controller.set(*env.session(), false, true), PlanModeSetResult::Committed);
     EXPECT_EQ(env.appends, 1);
     EXPECT_TRUE(controller.active(*env.session()));
 
-    EXPECT_EQ(controller.set(env.id, false, true), PlanModeSetResult::Unchanged);
+    EXPECT_EQ(controller.set(*env.session(), false, true), PlanModeSetResult::Unchanged);
     EXPECT_EQ(env.appends, 1);
 }
 
@@ -137,16 +141,16 @@ TEST(PlanModeControllerTest, OpenTurnQueuesAndFlushes) {
         }
     });
 
-    EXPECT_EQ(controller.set(env.id, true, true), PlanModeSetResult::Queued);
+    EXPECT_EQ(controller.set(*env.session(), true, true), PlanModeSetResult::Queued);
     EXPECT_EQ(env.appends, 0);
     EXPECT_TRUE(controller.apply_pending_at_step_start(*env.session()));
     EXPECT_EQ(env.appends, 1);
 
-    EXPECT_EQ(controller.set(env.id, true, false), PlanModeSetResult::Queued);
-    EXPECT_EQ(controller.set(env.id, true, true), PlanModeSetResult::Cancelled);
+    EXPECT_EQ(controller.set(*env.session(), true, false), PlanModeSetResult::Queued);
+    EXPECT_EQ(controller.set(*env.session(), true, true), PlanModeSetResult::Cancelled);
     EXPECT_EQ(env.appends, 1);
 
-    EXPECT_EQ(controller.set(env.id, true, false), PlanModeSetResult::Queued);
+    EXPECT_EQ(controller.set(*env.session(), true, false), PlanModeSetResult::Queued);
     EXPECT_FALSE(controller.flush_pending_at_turn_end(*env.session()));
     EXPECT_EQ(env.appends, 2);
     EXPECT_FALSE(controller.flush_pending_at_turn_end(*env.session()));
@@ -171,7 +175,7 @@ TEST(PlanModeControllerTest, ProjectionMemoizedPerSession) {
     EXPECT_FALSE(controller.active(*env.session()));
     EXPECT_EQ(folds, 1);
 
-    EXPECT_EQ(controller.set(env.id, false, true), PlanModeSetResult::Committed);
+    EXPECT_EQ(controller.set(*env.session(), false, true), PlanModeSetResult::Committed);
     EXPECT_EQ(folds, 1);
     EXPECT_TRUE(controller.active(*env.session()));
     EXPECT_EQ(folds, 1);
@@ -223,6 +227,67 @@ TEST(PlanModeControllerTest, ProjectionMemoColdNonEmptyLogEraseAndOtherSessions)
     EXPECT_EQ(folds, 3);
 }
 
+// 25 review H1 residual: `set()` must read the logged state and append under
+// the same lock that guards `commit_`, so a commit's invalidation window cannot
+// make it compare against a cold projection and silently drop the request. The
+// blocking append hook parks the worker's `commit_` with the memo invalidated
+// (`commit_` invalidates before `append_`), reproducing the exact window.
+TEST(PlanModeControllerTest, SetIsAtomicAcrossCommitInvalidationWindow) {
+    ControllerEnv            env;
+    std::shared_ptr<Session> session = env.session();
+    std::mutex               gate_mutex;
+    std::condition_variable  gate;
+    bool                     append_entered = false;
+    bool                     release_append = false;
+    std::atomic<bool>        io_done{false};
+    int                      appends = 0;
+
+    PlanModeController controller([&](const SessionId& id, payload::PlanMode mode) {
+        {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            ++appends;
+            if (appends == 1) {
+                append_entered = true;
+                gate.notify_all();
+                gate.wait(lock, [&] { return release_append; });
+            }
+        }
+        if (auto target = env.manager.sessionPtr(id)) {
+            target->append(mode);
+        }
+    });
+
+    // Log starts inactive; queue `plan on` and let a worker commit it.
+    ASSERT_FALSE(controller.active(*session));
+    ASSERT_EQ(controller.set(*session, /*turn_open=*/true, true), PlanModeSetResult::Queued);
+    std::thread worker([&] { (void)controller.apply_pending_at_step_start(*session); });
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        gate.wait(lock, [&] { return append_entered; });
+    }
+
+    // With the worker parked (memo invalid), race `/plan off`. The fixed `set()`
+    // blocks on commit_mutex_ until the worker records, reads the committed
+    // `true`, and appends `false`; a non-atomic `set()` reads the cold default
+    // `false`, returns Unchanged, and loses the request.
+    std::thread io([&] {
+        (void)controller.set(*session, /*turn_open=*/false, false);
+        io_done = true;
+    });
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        (void)gate.wait_for(lock, std::chrono::milliseconds(200),
+                            [&] { return io_done.load(); });
+        release_append = true;
+        gate.notify_all();
+    }
+    worker.join();
+    io.join();
+
+    EXPECT_FALSE(controller.active(*session));
+    EXPECT_FALSE(plan_mode_active(session->events()));
+}
+
 // UX-U31 (controller half): `flush_pending_at_turn_end` is idempotent,
 // null-safe, and `noexcept` — an append failure is absorbed and the pending
 // selection dropped, leaving the durable log authoritative.
@@ -240,7 +305,7 @@ TEST(PlanModeControllerTest, TurnEndFlushIsNoexceptAndDropsOnAppendFailure) {
         }
     });
 
-    EXPECT_EQ(controller.set(env.id, /*turn_open=*/true, true), PlanModeSetResult::Queued);
+    EXPECT_EQ(controller.set(*env.session(), /*turn_open=*/true, true), PlanModeSetResult::Queued);
     append_failure = true;
     EXPECT_NO_THROW((void)controller.flush_pending_at_turn_end(*env.session()));
     EXPECT_EQ(appends, 1);
@@ -257,7 +322,7 @@ TEST(PlanModeControllerTest, RequestExitCommitsAtStepBoundary) {
         }
     });
 
-    EXPECT_EQ(controller.set(env.id, false, true), PlanModeSetResult::Committed);
+    EXPECT_EQ(controller.set(*env.session(), false, true), PlanModeSetResult::Committed);
     controller.request_exit(env.id);
     EXPECT_FALSE(controller.apply_pending_at_step_start(*env.session()));
     EXPECT_FALSE(plan_mode_active(env.session()->events()));

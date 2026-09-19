@@ -32,7 +32,14 @@ public:
 
     [[nodiscard]] bool active(const Session& session) const;
 
-    PlanModeSetResult set(const SessionId& session, bool turn_open, bool active);
+    // `session` (not just its id) is required so the logged-state read, the
+    // comparison, and the append all run under `commit_mutex_`: the comparison
+    // is then always against the durable log — even when the memo is cold on a
+    // resumed/forked session — and a concurrent `commit_` cannot invalidate the
+    // projection in between (25 review H1 TOCTOU). `turn_open` is supplied by
+    // the caller; idle => append now, open => queue (25-D2/L-1/L-2 semantics
+    // unchanged).
+    PlanModeSetResult set(const Session& session, bool turn_open, bool active);
 
     void request_exit(const SessionId& session);
 
@@ -50,14 +57,18 @@ private:
 
     void commit_(const SessionId& id, bool value);
 
+    // `commit_` body; the caller must hold `commit_mutex_`.
+    void commit_locked_(const SessionId& id, bool value);
+
     AppendFn                              append_;
     ProjectionFn                          project_;
     mutable std::mutex                    mutex_;
     // Serializes the whole commit (invalidate -> append -> record) so the memo
     // write cannot land in the opposite order to the log append when `commit_`
     // runs concurrently on the io thread and a TurnExecutor worker (25 review
-    // M8). Distinct from `mutex_` so a committed handler calling `active()`
-    // cannot deadlock (N12).
+    // M8). `set()` also holds it across the logged-state read and the append, so
+    // the compare-and-append is atomic (25 review H1 TOCTOU). Distinct from
+    // `mutex_` so a committed handler calling `active()` cannot deadlock (N12).
     std::mutex                            commit_mutex_;
     std::map<SessionId, bool>             pending_;
     std::map<SessionId, bool>             pending_exit_;

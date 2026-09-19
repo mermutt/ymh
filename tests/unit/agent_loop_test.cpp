@@ -659,7 +659,7 @@ TEST(AgentLoop, UX_U34_MalformedPlanMakesNoReview) {
         Agent& agent     = *agent_owner;
         auto session_owner = env.sessionOf(agent);
         ASSERT_TRUE(env.plan_mode_controller.has_value());
-        EXPECT_EQ(env.plan_mode_controller->set(session_owner->id(), false, true),
+        EXPECT_EQ(env.plan_mode_controller->set(*session_owner, false, true),
                   PlanModeSetResult::Committed);
         ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
 
@@ -689,7 +689,7 @@ TEST(AgentLoop, UX_U6_ApprovedExitCommitsOffDeniedStaysActive) {
         auto agent_owner = env.createAgent();
         Agent& agent     = *agent_owner;
         auto session_owner = env.sessionOf(agent);
-        EXPECT_EQ(env.plan_mode_controller->set(session_owner->id(), false, true),
+        EXPECT_EQ(env.plan_mode_controller->set(*session_owner, false, true),
                   PlanModeSetResult::Committed);
         EXPECT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
         return session_owner->events();
@@ -724,7 +724,7 @@ TEST(AgentLoop, UX_U31_TurnEndFlushOnNormalErrorAndCancel) {
         auto session_owner = env.sessionOf(agent);
         std::thread turn([&] { (void)agent.send(user_message("go")); });
         EXPECT_TRUE(raw->wait_entered(std::chrono::seconds{2}));
-        EXPECT_EQ(env.plan_mode_controller->set(session_owner->id(), /*turn_open=*/true, true),
+        EXPECT_EQ(env.plan_mode_controller->set(*session_owner, /*turn_open=*/true, true),
                   PlanModeSetResult::Queued);
         if (exit_kind == Exit::Cancel) {
             agent.cancel();
