@@ -11,12 +11,14 @@
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
+#include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/tools/builtin_tools.hpp"
+#include "ymh/tools/plan_tools.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
 #include "test_env.hpp"
@@ -43,7 +45,8 @@ inline AgentServices make_agent_services(SessionManager& sessions,
                                          TokenEstimator& estimator,
                                          AgentServices::PermissionResolver resolver,
                                          Compactor* compactor,
-                                         ContextCompactor* context_compactor = nullptr) {
+                                         ContextCompactor* context_compactor = nullptr,
+                                         PlanModeController* plan_mode = nullptr) {
     AgentServices services;
     services.sessions            = &sessions;
     services.governor            = &governor;
@@ -60,6 +63,7 @@ inline AgentServices make_agent_services(SessionManager& sessions,
     services.compactor           = compactor;
     services.context_compactor   = context_compactor;
     services.permission_resolver = std::move(resolver);
+    services.plan_mode           = plan_mode;
     return services;
 }
 
@@ -74,7 +78,8 @@ struct AgentEnv {
              Compactor* compactor = nullptr,
              bool use_permission_gate = false,
              std::optional<CompactionPolicy> compaction = std::nullopt,
-             WallClock wall_clock = std::chrono::system_clock::now)
+             WallClock wall_clock = std::chrono::system_clock::now,
+             bool enable_plan_mode = false)
         : workspace(prefix),
           sessions(store, bus),
           env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
@@ -89,13 +94,25 @@ struct AgentEnv {
                                                                      *compaction,
                                                                      std::move(wall_clock))
                                 : nullptr),
+          plan_mode_controller(enable_plan_mode
+                                   ? std::optional<PlanModeController>(std::in_place,
+                                         [this](const SessionId& id, payload::PlanMode mode) {
+                                             if (auto session = sessions.sessionPtr(id)) {
+                                                 session->append(mode);
+                                             }
+                                         })
+                                   : std::nullopt),
           registry(make_agent_services(sessions, governor, tools, policy, gate.get(), assembler, env,
                                         logger, sink, *this->provider, pool, estimator,
-                                        std::move(resolver), compactor, context_compactor.get()),
+                                        std::move(resolver), compactor, context_compactor.get(),
+                                        plan_mode_controller ? &*plan_mode_controller : nullptr),
                    std::move(config)) {
         if (register_builtins) {
             for (std::unique_ptr<Tool>& tool : make_builtin_tools()) {
                 keeper.add(std::move(tool));
+            }
+            if (plan_mode_controller.has_value()) {
+                keeper.add(make_exit_plan_mode_tool());
             }
             tools.freeze();
         }
@@ -138,6 +155,7 @@ struct AgentEnv {
     DefaultTokenEstimator estimator;
     LLMPool pool;
     std::unique_ptr<ContextCompactor> context_compactor;
+    std::optional<PlanModeController> plan_mode_controller;
     AgentRegistry registry;
 };
 

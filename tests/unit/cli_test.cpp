@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include "support/test_env.hpp"
+#include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/cli.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/logging.hpp"
@@ -518,6 +519,37 @@ TEST(CliImport, SemanticValidationSkipsAndNotes) {
     ASSERT_TRUE(written["mcp_servers"].contains("needed"));
     EXPECT_FALSE(written["mcp_servers"]["needed"]["required"].get<bool>());
     EXPECT_TRUE(written["mcp_servers"].contains("good"));
+}
+
+// 25 review M6 / UX-I18: the anti-brick guarantee. An imported config with an
+// unusable http server, an unset-${VAR} stdio server, and a required server must
+// still start a workspace runtime (the unusable servers are erased / forced
+// non-required before the write).
+TEST(CliImport, ImportedConfigStartsRuntime) {
+    ::unsetenv("YMH_IMPORT_MISSING_VAR");
+    test::TempWorkspace workspace("cli_import_starts_runtime");
+    const std::string   body = R"JSON({
+      "mcp_servers": {
+        "net": { "type": "http", "url": "https://x.test/sse" },
+        "badref": { "command": "c", "env": { "K": "${YMH_IMPORT_MISSING_VAR}" } },
+        "needed": { "command": "c", "required": true },
+        "good": { "command": "c" }
+      }
+    })JSON";
+    const ImportRun run = run_import(workspace, body, "\n", true);
+    ASSERT_TRUE(run.result) << run.err;
+    ASSERT_TRUE(std::filesystem::is_regular_file(run.global));
+
+    ConfigPaths paths;
+    paths.global = run.global;
+    WorkspaceRuntimeOptions options;
+    options.config  = load_config(paths);
+    options.root    = workspace.path();
+    options.boot_id = BootId{"import-runtime-boot"};
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
 }
 
 TEST(CliImport, LoaderRejectedDocumentIsNotWritten) {

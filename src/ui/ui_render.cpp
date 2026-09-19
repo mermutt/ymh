@@ -450,8 +450,15 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     if (theme.color && model.aggregate.flash.isFlashing()) {
         aggregate = aggregate | ftxui::inverted;
     }
+    const std::string notice =
+        model.notices.empty() ? std::string{} : model.notices.back().text;
     if (active == nullptr) {
-        return ftxui::hbox({ftxui::text(""), ftxui::filler(), aggregate});
+        // The global notice ring is workspace-independent (22-A8): it must stay
+        // visible even with no active session (25 review M2).
+        if (notice.empty()) {
+            return ftxui::hbox({ftxui::text(""), ftxui::filler(), aggregate});
+        }
+        return ftxui::hbox({ftxui::text(notice), ftxui::filler(), aggregate});
     }
 
     const StatusModel& status = active->status;
@@ -489,37 +496,31 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     const std::string state = status.agent_state == AgentState::Idle
                                   ? std::string{}
                                   : std::string{state_name(status.agent_state)};
-    const std::string notice =
-        model.notices.empty() ? std::string{} : model.notices.back().text;
 
+    // Inclusion priority is counters > context > note > notice > tps > state
+    // (25-D1 step 4); a strict prefix, so a lower-priority segment is never
+    // included after a higher-priority one failed (25 review M1).
+    bool prefix_ok = true;
     const auto fits = [&](int text_width) {
         return used + kSeparatorWidth + text_width <= avail;
     };
+    const auto try_include = [&](int text_width) {
+        if (!prefix_ok || !fits(text_width)) {
+            prefix_ok = false;
+            return false;
+        }
+        used += kSeparatorWidth + text_width;
+        return true;
+    };
 
-    const bool include_counters = fits(ftxui::string_width(counters));
-    if (include_counters) {
-        used += kSeparatorWidth + ftxui::string_width(counters);
-    }
-    const bool include_context = fits(context_width);
-    if (include_context) {
-        used += kSeparatorWidth + context_width;
-    }
-    const bool include_note = !status.note.empty() && fits(ftxui::string_width(status.note));
-    if (include_note) {
-        used += kSeparatorWidth + ftxui::string_width(status.note);
-    }
-    const bool include_notice = !notice.empty() && fits(ftxui::string_width(notice));
-    if (include_notice) {
-        used += kSeparatorWidth + ftxui::string_width(notice);
-    }
-    const bool include_tps = fits(ftxui::string_width(tps));
-    if (include_tps) {
-        used += kSeparatorWidth + ftxui::string_width(tps);
-    }
-    const bool include_state = !state.empty() && fits(ftxui::string_width(state));
-    if (include_state) {
-        used += kSeparatorWidth + ftxui::string_width(state);
-    }
+    const bool include_counters = try_include(ftxui::string_width(counters));
+    const bool include_context  = try_include(context_width);
+    const bool include_note =
+        !status.note.empty() && try_include(ftxui::string_width(status.note));
+    const bool include_notice = !notice.empty() && try_include(ftxui::string_width(notice));
+    const bool include_tps    = try_include(ftxui::string_width(tps));
+    const bool include_state =
+        !state.empty() && try_include(ftxui::string_width(state));
 
     Elements left_cells;
     const auto append_segment = [&](Element element) {
@@ -1127,7 +1128,11 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
         rows.push_back(render_command_hints(active, theme));
     }
     rows.push_back(render_input(model, theme));
-    rows.push_back(render_status(model, active, theme, size.width));
+    // The vbox below is wrapped in `ftxui::border`, so the row content has
+    // `size.width - 2` columns available; the status fit math must use that
+    // inner width or the right-aligned aggregate is clipped (25 review H3).
+    const int status_width = size.width > 2 ? size.width - 2 : 1;
+    rows.push_back(render_status(model, active, theme, status_width));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
     if (model.exitConfirm.open) {

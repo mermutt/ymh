@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -27,6 +28,13 @@ namespace ymh {
 namespace {
 
 using Json = nlohmann::json;
+
+// Raised by the localcode import mapper when a copied value has the wrong
+// shape (UX-F14: a non-string env/header value must abort the import, never be
+// silently dropped). `build_localcode_import` turns it into the out-`error`.
+struct LocalcodeImportError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 constexpr std::string_view kGlobalDir  = "ymh";
 constexpr std::string_view kConfigFile = "config.jsonc";
@@ -629,6 +637,9 @@ void apply_mcp_servers_entry(McpServerSettings& server, const Json& entry, const
     if (server.transport != "stdio" && server.url.empty()) {
         fail(source, "'" + table + "': non-stdio transport requires a non-empty 'url'");
     }
+    if (server.transport == "stdio" && server.command.empty()) {
+        fail(source, "'" + table + "': stdio transport requires a non-empty 'command'");
+    }
 }
 
 void apply_skills(Config& config, const Json& table, const std::filesystem::path& source) {
@@ -1154,7 +1165,7 @@ void copy_mcp_string_array(const Json& entry, std::string_view key, Json& out) {
     Json array = Json::array();
     for (const Json& element : *node) {
         if (!element.is_string()) {
-            return;
+            throw LocalcodeImportError("'" + std::string{key} + "' entries must be strings");
         }
         array.push_back(escape_localcode_reference(element.get<std::string>()));
     }
@@ -1168,9 +1179,11 @@ void copy_mcp_string_object(const Json& entry, std::string_view key, Json& out) 
     }
     Json object = Json::object();
     for (auto it = node->begin(); it != node->end(); ++it) {
-        if (it.value().is_string()) {
-            object[it.key()] = escape_localcode_reference(it.value().get<std::string>());
+        if (!it.value().is_string()) {
+            throw LocalcodeImportError("'" + std::string{key} + "." + it.key() +
+                                       "' must be a string");
         }
+        object[it.key()] = escape_localcode_reference(it.value().get<std::string>());
     }
     out[std::string{key}] = std::move(object);
 }
@@ -1224,7 +1237,12 @@ std::optional<Json> build_localcode_import(const Json& localcode, std::string& e
             Json mapped = Json::object();
             for (auto it = servers->begin(); it != servers->end(); ++it) {
                 if (it.value().is_object()) {
-                    mapped[it.key()] = map_localcode_mcp_server(it.value());
+                    try {
+                        mapped[it.key()] = map_localcode_mcp_server(it.value());
+                    } catch (const LocalcodeImportError& failure) {
+                        error = "mcp_servers." + it.key() + ": " + failure.what();
+                        return std::nullopt;
+                    }
                 }
             }
             if (!mapped.empty()) {

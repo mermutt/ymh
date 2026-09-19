@@ -53,6 +53,12 @@ private:
     AppendFn                              append_;
     ProjectionFn                          project_;
     mutable std::mutex                    mutex_;
+    // Serializes the whole commit (invalidate -> append -> record) so the memo
+    // write cannot land in the opposite order to the log append when `commit_`
+    // runs concurrently on the io thread and a TurnExecutor worker (25 review
+    // M8). Distinct from `mutex_` so a committed handler calling `active()`
+    // cannot deadlock (N12).
+    std::mutex                            commit_mutex_;
     std::map<SessionId, bool>             pending_;
     std::map<SessionId, bool>             pending_exit_;
     mutable std::map<SessionId, ProjectionMemo> memo_;

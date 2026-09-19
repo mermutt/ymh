@@ -415,6 +415,23 @@ TEST(UiRenderGolden, StatusNarrowDegradationDropsTpsBeforeNoteAndNotice) {
     EXPECT_NE(rendered.find("build · test-model"), std::string::npos);
 }
 
+// 25 review H3: the status row is inside the 2-column border, so the fit math
+// must use the inner width; otherwise the right-aligned aggregate is clipped.
+TEST(UiRenderGolden, StatusAggregateNotClippedByBorder) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->status.context_used_tokens   = 50;
+    state->status.context_window_tokens = 100;
+
+    for (const int width : {73, 80, 100}) {
+        const std::string rendered =
+            normalize(render_to_ansi(model, TerminalSize{width, 20}, Theme{false}));
+        SCOPED_TRACE(width);
+        EXPECT_NE(rendered.find("0 active · 0 waiting"), std::string::npos) << rendered;
+    }
+}
+
 TEST(UiRenderGolden, SubagentPanelRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
@@ -586,6 +603,30 @@ TEST(UiRenderGolden, SlashCommandCompletionSelectionHighlighted) {
     EXPECT_NE(rendered.find("  /help"), std::string::npos);
     EXPECT_NE(rendered.find("  /model"), std::string::npos);
     EXPECT_EQ(rendered.find("> /help"), std::string::npos);
+}
+
+// UX-G4 (25-D8): the highlighted `>` palette row and the composer draft are the
+// same command. The live Tab->state sync is covered by
+// SupervisorHarnessTest.UX_U14; this pins the render contract.
+TEST(UiRenderGolden, PaletteHighlightAndDraftAgreeGolden) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->command_hints = {CommandHint{"help", "list slash commands"},
+                            CommandHint{"skills", "list available skills"},
+                            CommandHint{"new", "create and activate a new session"}};
+    state->command_hint_selected = 1;
+    state->input.draft = "/skills";
+    state->input.cursor = state->input.draft.size();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("> /skills"), std::string::npos);
+    EXPECT_NE(rendered.find("  /help"), std::string::npos);
+    EXPECT_NE(rendered.find("  /new"), std::string::npos);
+    EXPECT_EQ(rendered.find("> /help"), std::string::npos);
+    EXPECT_EQ(rendered.find("> /new"), std::string::npos);
 }
 
 TEST(UiRenderGolden, SlashCommandSelectionUsesThemeAccent) {

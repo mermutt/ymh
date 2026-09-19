@@ -235,6 +235,9 @@ public:
     [[nodiscard]] SessionKind          kind() const noexcept { return header_.kind; }
 
     // Resolved logical view (fork prefix ++ own), ascending by Sequence.
+    // Takes `appendMutex_` and copies the log, so it is safe to call from a
+    // thread other than the one appending (25 review H2: the plan-mode fold
+    // runs on the transport io thread while a TurnExecutor worker appends).
     [[nodiscard]] EventRange events() const;
     // This session's physical events only (excludes any inherited prefix).
     [[nodiscard]] EventRange ownEvents() const;
@@ -296,7 +299,9 @@ private:
     EventRange    log_;
     TurnId        nextTurn_ = 1;
     StepId        nextStep_ = 1;
-    std::mutex    appendMutex_;
+    // Guards `log_`/`header_`/`nextTurn_`/`nextStep_` mutations and the
+    // `events()` copy; mutable so the const snapshot accessor can take it.
+    mutable std::mutex appendMutex_;
 };
 
 } // namespace ymh

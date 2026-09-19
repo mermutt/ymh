@@ -145,6 +145,21 @@ TEST(UiModel, PlanModeChangedSetsStatusAndDirty) {
     EXPECT_FALSE(state->status.plan_active);
 }
 
+// UX-U32 (N6/L4): a `session.set_mode` reply is never authoritative. A pending
+// notice must not change the status; only a log-derived PlanModeChanged flips it.
+TEST(UiModel, UX_U32_SetModeReplyIsNotAuthoritative) {
+    UiModel model = make_model();
+    static_cast<void>(model.dirty.takeDirtySessions());
+
+    model.pushNotice("plan change queued");
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    EXPECT_FALSE(state->status.plan_active);
+
+    model.apply(UiEvent{PlanModeChanged{kSession, true}});
+    EXPECT_TRUE(model.session(kSession)->status.plan_active);
+}
+
 TEST(UiModel, ForceAskDialogDefaultsToDenyWithTwoOptions) {
     UiModel model = make_model();
     PermissionRequested requested;

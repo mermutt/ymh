@@ -39,6 +39,7 @@
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/session/plan_mode.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/transport/frame_codec.hpp"
@@ -597,6 +598,27 @@ TEST_F(HostRuntimeTest, CreateResumeForkDeleteWriteJunction) {
     bridge.host().deleteSession(forked.session);
     EXPECT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(), 1u);
     EXPECT_FALSE(bridge.host().sessionExists(forked.session));
+}
+
+// 25 review H1: a restarted daemon's controller memo is cold, but the durable
+// log already carries `plan/mode{active:true}`. `/plan off` must append
+// `plan/mode{false}` rather than return Unchanged off a false default.
+TEST_F(HostRuntimeTest, SetModeSeesLoggedStateWithColdMemo) {
+    Bridge bridge("hr_set_mode_cold");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+    const protocol::SessionResumed resumed = bridge.host().resumeSession(created.session);
+    ASSERT_EQ(resumed.status, "Idle");
+
+    std::shared_ptr<Session> session = bridge.runtime().sessions().sessionPtr(created.session);
+    ASSERT_NE(session, nullptr);
+    session->append(payload::PlanMode{true});
+
+    const protocol::SetModeResult result = bridge.host().setSessionMode(
+        nlohmann::json{{"session", created.session.value}, {"active", false}});
+    EXPECT_FALSE(result.active);
+    EXPECT_FALSE(result.pending);
+    EXPECT_FALSE(plan_mode_active(bridge.runtime().sessions().sessionPtr(created.session)->events()));
 }
 
 // 23-D55 / SL-I22: all guards precede all side effects. A delete refused by the

@@ -18,6 +18,7 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/session/plan_mode.hpp"
 
 namespace {
 
@@ -84,8 +85,8 @@ FakeResponseStep tool_step(std::string name, nlohmann::json args) {
 // AL-U14 probe); `entered_` is published only after it returns.
 class LatchProvider final : public LLMProvider {
 public:
-    explicit LatchProvider(std::function<void()> on_entered = {})
-        : on_entered_(std::move(on_entered)) {}
+    explicit LatchProvider(std::function<void()> on_entered = {}, bool fail_on_release = false)
+        : on_entered_(std::move(on_entered)), fail_on_release_(fail_on_release) {}
 
     ProviderId id() const override { return "latch"; }
     ProviderCapabilities capabilities() const override { return {}; }
@@ -106,6 +107,13 @@ public:
             cancelled.outcome = StreamOutcome::Cancelled;
             cancelled.finish  = FinishReason::Other;
             return Task<LLMResponse>{cancelled};
+        }
+        if (fail_on_release_) {
+            LLMResponse failed;
+            failed.outcome = StreamOutcome::Failed;
+            failed.error   = LLMError{LLMErrorCode::ProviderInternal, 0, "injected", "injected",
+                                      false};
+            return Task<LLMResponse>{failed};
         }
         sink(TextDelta{"hi"});
         LLMResponse response;
@@ -133,6 +141,7 @@ private:
     bool                    entered_  = false;
     bool                    released_ = false;
     std::function<void()>   on_entered_;
+    bool                    fail_on_release_ = false;
 };
 
 class CancellingProvider : public LLMProvider {
@@ -569,6 +578,168 @@ TEST(AgentLoop, AL_U20_RealDecisionHookCaptureIsWeak) {
     EXPECT_TRUE(weak_session.expired());
 
     hook(recorded);
+}
+
+namespace {
+
+std::size_t error_tool_results(const EventRange& events) {
+    std::size_t count = 0;
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::ToolResult &&
+            record.event.payload.get<payload::ToolResult>().outcome ==
+                payload::ToolOutcome::Error) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t ok_tool_results(const EventRange& events) {
+    std::size_t count = 0;
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::ToolResult &&
+            record.event.payload.get<payload::ToolResult>().outcome ==
+                payload::ToolOutcome::Ok) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+} // namespace
+
+// UX-U5: `exit_plan_mode` outside plan mode fails closed — one error ToolResult
+// and no permission request.
+TEST(AgentLoop, UX_U5_ExitPlanModeFailsClosedWhenInactive) {
+    AgentEnv env("agent_plan_u5a",
+                 std::make_unique<FakeLLM>(script_of(
+                     {tool_step("exit_plan_mode", {{"plan", "do it"}}), text_step("ok")})),
+                 AgentConfig{}, allow_all_permission_config(), {}, true, 4, nullptr, false,
+                 std::nullopt, std::chrono::system_clock::now, /*enable_plan_mode=*/true);
+    auto agent_owner = env.createAgent();
+    Agent& agent     = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner      = env.sessionOf(agent);
+    const EventRange events = session_owner->events();
+    EXPECT_EQ(count_type(events, EventType::PermissionDecision), 0u);
+    EXPECT_EQ(count_type(events, EventType::PlanMode), 0u);
+    EXPECT_EQ(error_tool_results(events), 1u);
+}
+
+// UX-U5: an active plan with no controller still fails closed.
+TEST(AgentLoop, UX_U5_ExitPlanModeFailsClosedWithoutController) {
+    AgentEnv env("agent_plan_u5b",
+                 std::make_unique<FakeLLM>(script_of(
+                     {tool_step("exit_plan_mode", {{"plan", "do it"}}), text_step("ok")})),
+                 AgentConfig{}, allow_all_permission_config(), {}, true);
+    auto agent_owner = env.createAgent();
+    Agent& agent     = *agent_owner;
+    auto session_owner = env.sessionOf(agent);
+    session_owner->append(payload::PlanMode{true});
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    const EventRange events = session_owner->events();
+    EXPECT_EQ(count_type(events, EventType::PermissionDecision), 0u);
+    EXPECT_EQ(count_type(events, EventType::PlanMode), 1u);
+    EXPECT_EQ(error_tool_results(events), 1u);
+}
+
+// UX-U34: a malformed `plan` argument makes no review and cannot exit plan mode.
+TEST(AgentLoop, UX_U34_MalformedPlanMakesNoReview) {
+    const std::vector<nlohmann::json> malformed = {
+        nlohmann::json::object(), {{"plan", ""}}, {{"plan", "   "}}, {{"plan", 5}}};
+    for (const nlohmann::json& args : malformed) {
+        AgentEnv env("agent_plan_u34",
+                     std::make_unique<FakeLLM>(
+                         script_of({tool_step("exit_plan_mode", args), text_step("ok")})),
+                     AgentConfig{}, allow_all_permission_config(), {}, true, 4, nullptr, false,
+                     std::nullopt, std::chrono::system_clock::now, /*enable_plan_mode=*/true);
+        auto agent_owner = env.createAgent();
+        Agent& agent     = *agent_owner;
+        auto session_owner = env.sessionOf(agent);
+        ASSERT_TRUE(env.plan_mode_controller.has_value());
+        EXPECT_EQ(env.plan_mode_controller->set(session_owner->id(), false, true),
+                  PlanModeSetResult::Committed);
+        ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+        const EventRange events = session_owner->events();
+        SCOPED_TRACE(args.dump());
+        EXPECT_EQ(count_type(events, EventType::PermissionDecision), 0u);
+        EXPECT_EQ(error_tool_results(events), 1u);
+        EXPECT_TRUE(plan_mode_active(events));
+        EXPECT_EQ(count_type(events, EventType::PlanMode), 1u);
+    }
+}
+
+// UX-U6: an approved review exits plan mode (Allow => Ok + pending exit, then
+// `plan/mode{false}` at the next step boundary); a denied review keeps it active.
+TEST(AgentLoop, UX_U6_ApprovedExitCommitsOffDeniedStaysActive) {
+    const auto run = [](payload::PermissionDecisionKind decision) {
+        AgentEnv env("agent_plan_u6",
+                     std::make_unique<FakeLLM>(script_of(
+                         {tool_step("exit_plan_mode", {{"plan", "step 1"}}), text_step("ok")})),
+                     AgentConfig{}, allow_all_permission_config(), {}, true, 4, nullptr, true,
+                     std::nullopt, std::chrono::system_clock::now, /*enable_plan_mode=*/true);
+        EXPECT_NE(env.gate, nullptr);
+        env.gate->set_attention_hook(
+            [&env, decision](const PermissionRequestId& id, const PermissionRequest&) {
+                env.gate->decide(id, decision, GrantScope::Once, "reviewed");
+            });
+        auto agent_owner = env.createAgent();
+        Agent& agent     = *agent_owner;
+        auto session_owner = env.sessionOf(agent);
+        EXPECT_EQ(env.plan_mode_controller->set(session_owner->id(), false, true),
+                  PlanModeSetResult::Committed);
+        EXPECT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+        return session_owner->events();
+    };
+
+    const EventRange allowed = run(payload::PermissionDecisionKind::AllowAlways);
+    EXPECT_EQ(count_type(allowed, EventType::PermissionDecision), 1u);
+    EXPECT_EQ(ok_tool_results(allowed), 1u);
+    EXPECT_EQ(count_type(allowed, EventType::PlanMode), 2u);
+    EXPECT_FALSE(plan_mode_active(allowed));
+
+    const EventRange denied = run(payload::PermissionDecisionKind::Deny);
+    EXPECT_EQ(count_type(denied, EventType::PermissionDecision), 1u);
+    EXPECT_EQ(ok_tool_results(denied), 0u);
+    EXPECT_EQ(count_type(denied, EventType::PlanMode), 1u);
+    EXPECT_TRUE(plan_mode_active(denied));
+}
+
+// UX-U31 (N5/UX45): a selection queued after the step boundary is committed by
+// the turn-exit scope guard on normal end, provider error, and cancellation.
+TEST(AgentLoop, UX_U31_TurnEndFlushOnNormalErrorAndCancel) {
+    enum class Exit { Normal, Error, Cancel };
+    const auto run = [](Exit exit_kind) {
+        auto provider = std::make_unique<LatchProvider>(std::function<void()>{},
+                                                        exit_kind == Exit::Error);
+        LatchProvider* raw = provider.get();
+        AgentEnv       env("agent_plan_u31", std::move(provider), AgentConfig{},
+                           allow_all_permission_config(), {}, false, 4, nullptr, false,
+                           std::nullopt, std::chrono::system_clock::now, /*enable_plan_mode=*/true);
+        auto agent_owner = env.createAgent();
+        Agent& agent     = *agent_owner;
+        auto session_owner = env.sessionOf(agent);
+        std::thread turn([&] { (void)agent.send(user_message("go")); });
+        EXPECT_TRUE(raw->wait_entered(std::chrono::seconds{2}));
+        EXPECT_EQ(env.plan_mode_controller->set(session_owner->id(), /*turn_open=*/true, true),
+                  PlanModeSetResult::Queued);
+        if (exit_kind == Exit::Cancel) {
+            agent.cancel();
+        }
+        raw->release();
+        turn.join();
+        return session_owner->events();
+    };
+
+    for (const Exit exit_kind : {Exit::Normal, Exit::Error, Exit::Cancel}) {
+        const EventRange events = run(exit_kind);
+        EXPECT_EQ(count_type(events, EventType::PlanMode), 1u);
+        EXPECT_TRUE(plan_mode_active(events));
+        EXPECT_EQ(terminal_count(events), 1u);
+    }
 }
 
 } // namespace

@@ -535,6 +535,7 @@ void Session::reload() {
 }
 
 EventRange Session::events() const {
+    std::lock_guard<std::mutex> lock(appendMutex_);
     return log_;
 }
 
