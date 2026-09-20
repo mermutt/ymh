@@ -84,6 +84,9 @@ add_executable(ymh_tests
     unit/prompt_instructions_test.cpp
     unit/prompt_runtime_context_test.cpp
     unit/prompt_presentation_test.cpp
+    unit/provenance_test.cpp
+    unit/provenance_producer_test.cpp
+    unit/provenance_ui_test.cpp
     unit/global_test_env_test.cpp
     support/global_test_env.cpp
     support/replay_harness.cpp

@@ -140,6 +140,7 @@ Message make_synthetic_tool_message(const ToolCallId& id, payload::ToolOutcome o
     Message message;
     message.role         = Role::Tool;
     message.tool_call_id = id;
+    message.source       = tool_message_source(id);
     ContentBlock block;
     block.kind = ContentBlockKind::Text;
     block.text = outcome == payload::ToolOutcome::Cancelled ? "tool call cancelled"
@@ -416,6 +417,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 Message message;
                 message.role    = Role::User;
                 message.content = value.content;
+                message.source  = value.source;
                 push(std::move(message), record.seq);
                 break;
             }
@@ -428,6 +430,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 Message message;
                 message.role    = Role::Assistant;
                 message.content = value.content;
+                message.source  = value.source;
                 push(std::move(message), record.seq);
                 for (const ContentBlock& block : value.content) {
                     if (block.kind == ContentBlockKind::ToolUse && !block.tool_call_id.empty() &&
@@ -446,10 +449,15 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             }
             case EventType::ToolResult: {
                 const auto& value = event.payload.get<payload::ToolResult>();
+                if (value.source.call.has_value() && *value.source.call != value.id) {
+                    throw CorruptionError("tool result provenance call does not match its id");
+                }
                 erase_tool_id(pending, value.id);
                 Message message;
                 message.role         = Role::Tool;
                 message.tool_call_id = value.id;
+                message.source       = value.source;
+                message.context      = value.context;
                 ContentBlock block;
                 block.kind = ContentBlockKind::Text;
                 block.text = value.output;
@@ -461,7 +469,10 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 break;
             case EventType::ContextInjected: {
                 const auto& value = event.payload.get<payload::ContextInjected>();
-                push(make_text_message(value.role, value.text), record.seq);
+                Message message = make_text_message(value.role, value.text);
+                message.source  = value.source;
+                message.context = value.context;
+                push(std::move(message), record.seq);
                 break;
             }
             case EventType::ContextCompaction: {

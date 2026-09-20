@@ -190,6 +190,9 @@ Element render_tool_entry(const ConversationEntry& entry, const ToolModel* tools
         header += " (expanded)";
     }
     rows.push_back(paint(ftxui::text(header), ftxui::Color::Yellow, theme));
+    if (call != nullptr && call->notice.has_value() && !call->notice->summary.empty()) {
+        rows.push_back(ftxui::text("notice: " + call->notice->summary) | ftxui::dim);
+    }
     if (!expanded) {
         return ftxui::vbox(std::move(rows));
     }
@@ -239,6 +242,24 @@ Element render_reasoning_entry(const ConversationEntry& entry, bool expand_all_f
     return ftxui::vbox(std::move(rows));
 }
 
+const char* context_form_label(ContextForm form) {
+    switch (form) {
+        case ContextForm::Instructions:
+            return "instructions";
+        case ContextForm::Catalog:
+            return "catalog";
+        case ContextForm::Snapshot:
+            return "runtime context";
+        case ContextForm::Notice:
+            return "notice";
+        case ContextForm::None:
+        case ContextForm::Relay:
+        case ContextForm::Recall:
+            return "context";
+    }
+    return "context";
+}
+
 Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
                      bool expand_all_folds, const RenderContext& context) {
     const Theme& theme = context.theme;
@@ -262,6 +283,28 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
         case ConversationRole::System:
             rows.push_back(ftxui::paragraph(entry.text) | ftxui::dim);
             break;
+        case ConversationRole::Context: {
+            const ContextForm form =
+                entry.context.has_value() ? entry.context->form : ContextForm::None;
+            std::string header = context_form_label(form);
+            if (entry.source.has_value() && !entry.source->plugin.empty()) {
+                header += " (" + entry.source->plugin + ")";
+            }
+            rows.push_back(ftxui::text(header) | ftxui::dim);
+            if (!expand_all_folds) {
+                break;
+            }
+            if (entry.context.has_value() && entry.context->form == ContextForm::Snapshot &&
+                !entry.context->sections.empty()) {
+                for (const ContextSnapshotSection& section : entry.context->sections) {
+                    rows.push_back(ftxui::text(section.name) | ftxui::dim);
+                    rows.push_back(ftxui::paragraph(section.text));
+                }
+            } else if (!entry.text.empty()) {
+                rows.push_back(markdown.render(MarkdownBlock{entry.text}, context));
+            }
+            break;
+        }
     }
     return ftxui::vbox(std::move(rows));
 }

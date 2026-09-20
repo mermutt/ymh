@@ -379,9 +379,17 @@ void AgentLoop::appendUserMessage(const Message& message) {
 
 void AgentLoop::appendContextInjected(const ContextMessage& context) {
     payload::ContextInjected injected;
-    injected.id   = make_event_id().value;
-    injected.role = context.role;
-    injected.text = context.text;
+    injected.id      = make_event_id().value;
+    injected.role    = context.role;
+    injected.text    = context.text;
+    injected.source  = context.source;
+    injected.context = context.context;
+    if (injected.source.kind == MessageSource::Kind::Plugin) {
+        if (injected.source.plugin.empty()) {
+            injected.source.plugin = "agent";
+        }
+        injected.source.context = injected.context;
+    }
     session_.append(injected);
 }
 
@@ -396,8 +404,10 @@ void AgentLoop::materializeInstructions() {
         return;
     }
     ContextMessage context;
-    context.role = Role::User;
-    context.text = *message;
+    context.role    = Role::User;
+    context.text    = *message;
+    context.context = ContextFormed{ContextForm::Instructions};
+    context.source  = plugin_message_source("agent-instructions", context.context);
     appendContextInjected(context);
 }
 
@@ -424,8 +434,12 @@ void AgentLoop::materializeContexts(const PromptAssembly& assembly) {
             continue;
         }
         ContextMessage message;
-        message.role = Role::User;
-        message.text = context.text;
+        message.role    = Role::User;
+        message.text    = context.text;
+        message.context = ContextFormed{
+            ContextForm::Snapshot,
+            std::vector<ContextSnapshotSection>{{context.name, context.text}}};
+        message.source = plugin_message_source("runtime-context", message.context);
         appendContextInjected(message);
     }
 }
@@ -587,6 +601,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         rejected.outcome = payload::ToolOutcome::Error;
         rejected.output  = std::move(message);
         rejected.error   = rejected.output;
+        rejected.source.call = rejected.id;
         session_.append(rejected);
         return false;
     };
@@ -687,6 +702,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         denied.outcome = payload::ToolOutcome::Denied;
         denied.output  = reason.empty() ? std::string{"permission denied"} : reason;
         denied.error   = denied.output;
+        denied.source.call = denied.id;
         session_.append(denied);
         return false;
     }
@@ -700,6 +716,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         result.outcome = payload::ToolOutcome::Error;
         result.output  = "tool runtime unavailable";
         result.error   = result.output;
+        result.source.call = result.id;
         session_.append(result);
         return false;
     }
@@ -716,6 +733,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         result.output  = error.what();
         result.error   = std::string{error.what()};
     }
+    result.source.call = result.id;
     session_.append(result);
     if (call.name == "exit_plan_mode" && result.outcome == payload::ToolOutcome::Ok &&
         services_.plan_mode != nullptr) {
@@ -967,6 +985,7 @@ void AgentLoop::runTurn() {
                 assistant.usage        = assembler.usage();
                 assistant.stream       = accumulator.snapshot();
                 assistant.replay_state = assembler.replay_state();
+                assistant.source       = model_message_source(config_.provider, config_.model);
                 session_.append(assistant);
                 settledUsage = assembler.usage();
             } else {

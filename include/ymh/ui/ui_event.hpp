@@ -75,9 +75,10 @@ struct WorkspaceEvent {
 // triggered without a second encoding of the same state (§5.1, §20.5).
 
 struct UserMessage {
-    SessionId   session;
-    MessageId   id;
-    std::string text;
+    SessionId     session;
+    MessageId     id;
+    std::string   text;
+    MessageSource source{};
 };
 
 struct AssistantMessageStarted {
@@ -97,6 +98,7 @@ struct AssistantMessageFinished {
     MessageId         message;
     std::string       text;
     std::optional<Usage> usage;
+    MessageSource     source{};
 };
 
 struct ToolStarted {
@@ -120,6 +122,17 @@ struct ToolFinished {
     std::string                output;
     bool                       truncated = false;
     std::optional<std::string> error;
+    MessageSource              source{};
+    ContextFormed              context{};
+};
+
+struct ContextInjected {
+    SessionId     session;
+    MessageId     id;
+    Role          role = Role::User;
+    std::string   text;
+    MessageSource source;
+    ContextFormed context;
 };
 
 struct FileChanged {
@@ -221,7 +234,8 @@ struct UiEvent {
         CompactionMarker,
         CompactionOutcomeNotice,
         SessionTitleChanged,
-        PlanModeChanged>
+        PlanModeChanged,
+        ContextInjected>
         value;
 };
 

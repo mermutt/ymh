@@ -25,6 +25,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/agent/provenance.hpp"
+
 namespace ymh {
 
 // The role a projected message assumes (01 §6.3, §12).
@@ -116,14 +118,22 @@ struct ContentBlock {
     nlohmann::json   arguments = nlohmann::json::object();  // ToolUse
     std::string      media_type;                   // Image
     std::string      data;                         // Image (opaque, provider-encoded)
+
+    bool operator==(const ContentBlock&) const = default;
 };
 
 // The LLM message (00 §12). `tool_call_id` is set only for Role::Tool and is the
-// `tool_use` block id the message answers (01 I12).
+// `tool_use` block id the message answers (01 I12). Wave 3 adds optional
+// provenance (37-A5): `source` is who produced it, `context` is what kind of
+// thing it is (36 §3.2).
 struct Message {
     Role                     role = Role::User;
     std::vector<ContentBlock> content;
     std::string              tool_call_id;
+    std::optional<MessageSource> source  = std::nullopt;
+    std::optional<ContextFormed> context = std::nullopt;
+
+    bool operator==(const Message&) const = default;
 };
 
 // Token accounting (00 §33). `TokenUsage` is the canonical durable carrier
@@ -174,6 +184,12 @@ inline void to_json(nlohmann::json& json, const Message& message) {
         {"content", message.content},
         {"tool_call_id", message.tool_call_id},
     };
+    if (message.source.has_value()) {
+        json["source"] = *message.source;
+    }
+    if (message.context.has_value()) {
+        json["context"] = *message.context;
+    }
 }
 
 inline void from_json(const nlohmann::json& json, Message& message) {
@@ -185,6 +201,16 @@ inline void from_json(const nlohmann::json& json, Message& message) {
     message.role         = *role;
     message.content      = json.value("content", std::vector<ContentBlock>{});
     message.tool_call_id = json.value("tool_call_id", std::string{});
+    if (json.contains("source") && !json.at("source").is_null()) {
+        message.source = json.at("source").get<MessageSource>();
+    } else {
+        message.source = std::nullopt;
+    }
+    if (json.contains("context") && !json.at("context").is_null()) {
+        message.context = json.at("context").get<ContextFormed>();
+    } else {
+        message.context = std::nullopt;
+    }
 }
 
 inline void to_json(nlohmann::json& json, const Usage& usage) {

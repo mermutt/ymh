@@ -21,6 +21,12 @@ using payload::TurnOrigin;
     throw std::runtime_error("unknown " + std::string{field} + ": " + std::string{value});
 }
 
+bool source_is_default(const MessageSource& source, MessageSource::Kind kind) {
+    MessageSource canonical;
+    canonical.kind = kind;
+    return source == canonical;
+}
+
 std::int64_t to_epoch_ms(std::chrono::system_clock::time_point point) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(point.time_since_epoch()).count();
 }
@@ -293,11 +299,17 @@ void from_json(const nlohmann::json& json, StepEnded& value) {
 
 void to_json(nlohmann::json& json, const UserMessage& value) {
     json = nlohmann::json{{"id", value.id}, {"content", value.content}};
+    if (!source_is_default(value.source, MessageSource::Kind::User)) {
+        json["source"] = value.source;
+    }
 }
 
 void from_json(const nlohmann::json& json, UserMessage& value) {
     value.id      = json.at("id").get<MessageId>();
     value.content = json.value("content", std::vector<ContentBlock>{});
+    if (json.contains("source") && !json.at("source").is_null()) {
+        value.source = json.at("source").get<MessageSource>();
+    }
 }
 
 void to_json(nlohmann::json& json, const AssistantChunk& value) {
@@ -325,6 +337,9 @@ void to_json(nlohmann::json& json, const AssistantMessage& value) {
     if (value.replay_state.has_value()) {
         json["replay_state"] = *value.replay_state;
     }
+    if (!source_is_default(value.source, MessageSource::Kind::Model)) {
+        json["source"] = value.source;
+    }
 }
 
 void from_json(const nlohmann::json& json, AssistantMessage& value) {
@@ -340,6 +355,9 @@ void from_json(const nlohmann::json& json, AssistantMessage& value) {
         value.replay_state = json.at("replay_state").get<ReplayEnvelope>();
     } else {
         value.replay_state = std::nullopt;
+    }
+    if (json.contains("source") && !json.at("source").is_null()) {
+        value.source = json.at("source").get<MessageSource>();
     }
 }
 
@@ -389,6 +407,12 @@ void to_json(nlohmann::json& json, const ToolResult& value) {
     if (value.error.has_value()) {
         json["error"] = *value.error;
     }
+    if (!source_is_default(value.source, MessageSource::Kind::Tool)) {
+        json["source"] = value.source;
+    }
+    if (value.context != ContextFormed{}) {
+        json["context"] = value.context;
+    }
 }
 
 void from_json(const nlohmann::json& json, ToolResult& value) {
@@ -402,6 +426,12 @@ void from_json(const nlohmann::json& json, ToolResult& value) {
         value.error = json.at("error").get<std::string>();
     } else {
         value.error = std::nullopt;
+    }
+    if (json.contains("source") && !json.at("source").is_null()) {
+        value.source = json.at("source").get<MessageSource>();
+    }
+    if (json.contains("context") && !json.at("context").is_null()) {
+        value.context = json.at("context").get<ContextFormed>();
     }
 }
 
@@ -425,6 +455,12 @@ void to_json(nlohmann::json& json, const ContextInjected& value) {
         {"role", std::string{role_name(value.role)}},
         {"text", value.text},
     };
+    if (!source_is_default(value.source, MessageSource::Kind::Plugin)) {
+        json["source"] = value.source;
+    }
+    if (value.context != ContextFormed{}) {
+        json["context"] = value.context;
+    }
 }
 
 void from_json(const nlohmann::json& json, ContextInjected& value) {
@@ -435,6 +471,12 @@ void from_json(const nlohmann::json& json, ContextInjected& value) {
     }
     value.role = *role;
     value.text = json.value("text", std::string{});
+    if (json.contains("source") && !json.at("source").is_null()) {
+        value.source = json.at("source").get<MessageSource>();
+    }
+    if (json.contains("context") && !json.at("context").is_null()) {
+        value.context = json.at("context").get<ContextFormed>();
+    }
 }
 
 void to_json(nlohmann::json& json, const ContextCompaction& value) {

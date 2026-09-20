@@ -1312,4 +1312,109 @@ TEST(UiRenderGolden, HistoryOverlayDegradationNotesRender) {
     EXPECT_NE(rendered.find("kept · root · m"), std::string::npos);
 }
 
+UiModel provenance_model() {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel workspace;
+    workspace.id              = model.activeWorkspaceId;
+    workspace.cwd             = "/work";
+    workspace.daemonStatus    = DaemonStatus::Attached;
+    workspace.live            = true;
+    workspace.activeSessionId = kSession;
+    model.workspaces.emplace(workspace.id, workspace);
+    model.ensureSession(kSession);
+    return model;
+}
+
+payload::ContextInjected context_payload(ContextForm form, std::string plugin,
+                                         std::string text,
+                                         std::vector<ContextSnapshotSection> sections = {}) {
+    payload::ContextInjected payload;
+    payload.id   = "ctx-" + std::string{context_form_name(form)};
+    payload.role = Role::User;
+    payload.text = text;
+    if (form == ContextForm::Snapshot) {
+        payload.context = ContextFormed{ContextForm::Snapshot, std::move(sections)};
+    } else if (form == ContextForm::Notice) {
+        payload.context = ContextFormed{ContextForm::Notice, {}, text};
+    } else {
+        payload.context = ContextFormed{form};
+    }
+    payload.source.kind    = MessageSource::Kind::Plugin;
+    payload.source.plugin  = std::move(plugin);
+    payload.source.context = payload.context;
+    return payload;
+}
+
+TEST(UiRenderGolden, ContextRowsUseFormLabels) {
+    UiModel model = provenance_model();
+    UiEventAdapter adapter(model);
+    adapter.onEvent(typed_event(EventType::ContextInjected,
+                                context_payload(ContextForm::Instructions, "agent-instructions",
+                                                "instruction body")));
+    adapter.onEvent(typed_event(EventType::ContextInjected,
+                                context_payload(ContextForm::Catalog, "skill-catalog",
+                                                "catalog body")));
+    adapter.onEvent(typed_event(EventType::ContextInjected,
+                                context_payload(ContextForm::Snapshot, "runtime-context",
+                                                "snapshot body",
+                                                {{"runtime-context", "snapshot section"}})));
+    adapter.onEvent(typed_event(EventType::ContextInjected,
+                                context_payload(ContextForm::Notice, "notice-plugin",
+                                                "notice body")));
+    adapter.onEvent(typed_event(EventType::ContextInjected,
+                                context_payload(ContextForm::Relay, "relay-plugin",
+                                                "relay body")));
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("instructions (agent-instructions)"), std::string::npos);
+    EXPECT_NE(rendered.find("catalog (skill-catalog)"), std::string::npos);
+    EXPECT_NE(rendered.find("runtime context (runtime-context)"), std::string::npos);
+    EXPECT_NE(rendered.find("notice (notice-plugin)"), std::string::npos);
+    EXPECT_NE(rendered.find("context (relay-plugin)"), std::string::npos);
+    EXPECT_EQ(rendered.find("instruction body"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ExpandedContextRowRevealsBody) {
+    UiModel model = provenance_model();
+    UiEventAdapter adapter(model);
+    adapter.onEvent(typed_event(EventType::ContextInjected,
+                                context_payload(ContextForm::Snapshot, "runtime-context",
+                                                "snapshot body",
+                                                {{"runtime-context", "snapshot section"}})));
+    model.session(kSession)->expand_all_folds = true;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    EXPECT_NE(rendered.find("runtime context (runtime-context)"), std::string::npos);
+    EXPECT_NE(rendered.find("snapshot section"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ToolNoticeSuffixRendered) {
+    UiModel model = provenance_model();
+    UiEventAdapter adapter(model);
+    adapter.onEvent(typed_event(EventType::ToolCall, [] {
+        payload::ToolCall call;
+        call.id   = "t1";
+        call.name = "read_file";
+        return call;
+    }()));
+    adapter.onEvent(typed_event(EventType::ToolResult, [] {
+        payload::ToolResult result;
+        result.id      = "t1";
+        result.name    = "read_file";
+        result.output  = "body";
+        result.source.kind = MessageSource::Kind::Tool;
+        result.source.call = result.id;
+        result.context = ContextFormed{ContextForm::Notice, {}, "retention notice"};
+        return result;
+    }()));
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    EXPECT_NE(rendered.find("tool: read_file"), std::string::npos);
+    EXPECT_NE(rendered.find("notice: retention notice"), std::string::npos);
+}
+
 } // namespace
