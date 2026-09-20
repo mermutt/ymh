@@ -53,6 +53,11 @@ struct SessionHeader {
     std::optional<SessionId>   parentSession;
     std::optional<std::size_t> seedLength;
     std::optional<std::string> metadata;
+    // 42 §4.1 / 43 §1.1: the preset the session STARTED with (frozen at
+    // creation; nullopt for a pre-preset session) and the monotone delegation
+    // depth (root 0, spawn parent+1, fork inherits).
+    std::optional<std::string> agent_preset;
+    std::uint32_t              depth = 0;
 
     bool operator==(const SessionHeader&) const = default;
 };

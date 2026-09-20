@@ -281,6 +281,9 @@ void to_json(nlohmann::json& json, const SessionHeader& header) {
         {"seed_length", header.seedLength ? nlohmann::json(*header.seedLength)
                                           : nlohmann::json(nullptr)},
         {"metadata", header.metadata ? nlohmann::json(*header.metadata) : nlohmann::json(nullptr)},
+        {"agent_preset", header.agent_preset ? nlohmann::json(*header.agent_preset)
+                                             : nlohmann::json(nullptr)},
+        {"depth", header.depth},
     };
 }
 
@@ -309,6 +312,12 @@ void from_json(const nlohmann::json& json, SessionHeader& header) {
     } else {
         header.metadata = std::nullopt;
     }
+    if (json.contains("agent_preset") && !json.at("agent_preset").is_null()) {
+        header.agent_preset = json.at("agent_preset").get<std::string>();
+    } else {
+        header.agent_preset = std::nullopt;
+    }
+    header.depth = json.value("depth", std::uint32_t{0});
 }
 
 void validateHeader(const SessionHeader& header) {
@@ -379,6 +388,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::SessionRenamed:
             case EventType::PlanMode:
             case EventType::LlmRequestHeader:
+            case EventType::AgentPresetSelected:
             case EventType::McpServerStatusChanged:
             case EventType::ContextPrune:
                 break;
@@ -725,6 +735,7 @@ Session Session::fork(const Session& parent, std::size_t seedLength, SessionStor
     child.kind          = SessionKind::Fork;
     child.parentSession = parent.id();
     child.seedLength    = seedLength;
+    child.depth         = parent.header().depth;
     validateHeader(child);
 
     store.create(child);

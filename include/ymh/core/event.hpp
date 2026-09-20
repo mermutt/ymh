@@ -73,6 +73,7 @@ enum class EventType : std::uint16_t {
     SessionRenamed,      // wire: session/renamed  (19 §5.1)
     PlanMode,            // wire: plan/mode       (25-D2)
     LlmRequestHeader,    // wire: llm/request_header (28 §5.2, 29 §3.2)
+    AgentPresetSelected, // wire: agent_preset/selected (42 §5.1, 43 §1.3)
     // Live-only (15 §4.7, AM-1): never in the durable SessionEventMap, never
     // appended to the session log. Delivered to global EventBus subscribers.
     McpServerStatusChanged,  // wire: mcp/server_status_changed

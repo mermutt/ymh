@@ -673,6 +673,31 @@ void apply_skills(Config& config, const Json& table, const std::filesystem::path
         static_cast<std::int64_t>(skills.max_frontmatter_bytes), source));
 }
 
+void apply_presets(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "presets",
+                   {"root", "default", "include_shipped_root", "include_user_root", "max_depth"},
+                   source);
+    PresetsSettings& presets = config.presets;
+    if (member(table, "root") != nullptr) {
+        const std::string value = read_string(table, "root", "presets", std::string{}, source);
+        if (value.empty()) {
+            fail(source, "'presets.root' must be a non-empty path");
+        }
+        presets.root = std::filesystem::path{value};
+    }
+    presets.default_id = read_optional_string(table, "default", "presets", source);
+    presets.include_shipped_root =
+        read_bool(table, "include_shipped_root", "presets", presets.include_shipped_root, source);
+    presets.include_user_root =
+        read_bool(table, "include_user_root", "presets", presets.include_user_root, source);
+    const std::int64_t depth = read_int64(table, "max_depth", "presets",
+                                          static_cast<std::int64_t>(presets.max_depth), source);
+    if (depth > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+        fail(source, "value out of range for 'presets.max_depth'");
+    }
+    presets.max_depth = static_cast<std::uint32_t>(depth);
+}
+
 void apply_prompt(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "prompt", {"instructions"}, source);
     const Json* instructions = member(table, "instructions");
@@ -756,7 +781,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
                     bool global_layer) {
     reject_unknown(table, "",
                    {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "session", "prompt", "tools", "mcp_servers"},
+                    "session", "prompt", "tools", "presets", "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -820,6 +845,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     }
     if (const Json* tools = section("tools"); tools != nullptr) {
         apply_tools(config, *tools, source);
+    }
+    if (const Json* presets = section("presets"); presets != nullptr) {
+        apply_presets(config, *presets, source);
     }
     if (mcp_servers != nullptr) {
         apply_mcp_servers_object(config.mcp, *mcp_servers, source);

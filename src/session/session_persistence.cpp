@@ -239,6 +239,102 @@ Event decode_event(std::string_view session, std::int64_t timestamp, std::string
     return event;
 }
 
+// 42 §4.3 / 43 §1.2: the `sessions.metadata` column is a JSON object whose
+// reserved keys carry the typed header fields; the opaque user string rides
+// under the `metadata` key. A reserved key inside the user bag is corruption
+// (43-F1). A pre-Wave-5 row (no envelope) is read back verbatim.
+constexpr std::string_view kMetadataKey    = "metadata";
+constexpr std::string_view kAgentPresetKey = "agent_preset";
+constexpr std::string_view kDepthKey       = "depth";
+
+std::optional<std::string> encode_metadata_column(const SessionHeader& header) {
+    if (!header.metadata.has_value() && !header.agent_preset.has_value() && header.depth == 0) {
+        return std::nullopt;
+    }
+    nlohmann::json object = nlohmann::json::object();
+    object[std::string{kMetadataKey}] =
+        header.metadata.has_value() ? nlohmann::json(*header.metadata) : nlohmann::json(nullptr);
+    if (header.agent_preset.has_value()) {
+        object[std::string{kAgentPresetKey}] = *header.agent_preset;
+    }
+    object[std::string{kDepthKey}] = header.depth;
+    return object.dump();
+}
+
+bool bag_carries_reserved_key(const std::string& bag) {
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(bag);
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    if (!parsed.is_object()) {
+        return false;
+    }
+    return parsed.contains(std::string{kAgentPresetKey}) || parsed.contains(std::string{kDepthKey});
+}
+
+void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader& header) {
+    header.metadata     = std::nullopt;
+    header.agent_preset = std::nullopt;
+    header.depth        = 0;
+    if (!raw.has_value()) {
+        return;
+    }
+    nlohmann::json object;
+    try {
+        object = nlohmann::json::parse(*raw);
+    } catch (const nlohmann::json::exception&) {
+        header.metadata = *raw;
+        return;
+    }
+    if (!object.is_object()) {
+        header.metadata = *raw;
+        return;
+    }
+    const bool has_envelope = object.contains(std::string{kMetadataKey});
+    const bool has_reserved =
+        object.contains(std::string{kAgentPresetKey}) || object.contains(std::string{kDepthKey});
+    if (!has_envelope) {
+        if (has_reserved) {
+            throw CorruptionError(
+                "sessions.metadata carries a reserved key without the opaque envelope");
+        }
+        header.metadata = *raw;
+        return;
+    }
+    const nlohmann::json& bag = object.at(std::string{kMetadataKey});
+    if (bag.is_null()) {
+        header.metadata = std::nullopt;
+    } else if (bag.is_string()) {
+        const std::string value = bag.get<std::string>();
+        if (bag_carries_reserved_key(value)) {
+            throw CorruptionError("sessions.metadata opaque bag carries a reserved key");
+        }
+        header.metadata = value;
+    } else {
+        throw CorruptionError("sessions.metadata opaque bag must be a string or null");
+    }
+    if (object.contains(std::string{kAgentPresetKey})) {
+        const nlohmann::json& preset = object.at(std::string{kAgentPresetKey});
+        if (!preset.is_string()) {
+            throw CorruptionError("sessions.metadata agent_preset must be a string");
+        }
+        header.agent_preset = preset.get<std::string>();
+    }
+    if (object.contains(std::string{kDepthKey})) {
+        const nlohmann::json& depth = object.at(std::string{kDepthKey});
+        if (!depth.is_number_unsigned()) {
+            throw CorruptionError("sessions.metadata depth must be a non-negative integer");
+        }
+        const std::uint64_t value = depth.get<std::uint64_t>();
+        if (value > std::numeric_limits<std::uint32_t>::max()) {
+            throw CorruptionError("sessions.metadata depth is out of range");
+        }
+        header.depth = static_cast<std::uint32_t>(value);
+    }
+}
+
 } // namespace
 
 class SessionPersistence::Impl {
@@ -305,7 +401,7 @@ public:
         if (const auto seed = statement.columnOptionalInt64(9)) {
             header.seedLength = static_cast<std::size_t>(*seed);
         }
-        header.metadata = statement.columnOptionalText(10);
+        decode_metadata_column(statement.columnOptionalText(10), header);
         return header;
     }
 
@@ -744,7 +840,7 @@ SessionHeader SessionPersistence::create(SessionHeader header) {
             10, header.seedLength.has_value()
                     ? std::optional<std::int64_t>{static_cast<std::int64_t>(*header.seedLength)}
                     : std::nullopt);
-        insert.bindOptionalText(11, header.metadata);
+        insert.bindOptionalText(11, encode_metadata_column(header));
         insert.step();
 
         if (!impl_->acquire_locked(header.id)) {

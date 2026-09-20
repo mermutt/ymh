@@ -62,6 +62,8 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
     header.serverProfile = options.serverProfile;
     header.kind          = options.kind;
     header.parentSession = options.parentSession;
+    header.depth         = options.depth;
+    header.agent_preset  = options.agent_preset;
     validateHeader(header);
 
     store_->create(header);

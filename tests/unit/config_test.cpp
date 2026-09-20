@@ -991,4 +991,58 @@ TEST(Config, BuildLocalcodeImportRejectsNonStringEnvAndHeaders) {
     EXPECT_NE(error.find("Authorization"), std::string::npos) << error;
 }
 
+TEST(Config, PresetsKeysParseWithDefaults) {
+    Config defaults;
+    EXPECT_EQ(defaults.presets.max_depth, 3u);
+    EXPECT_TRUE(defaults.presets.include_shipped_root);
+    EXPECT_TRUE(defaults.presets.include_user_root);
+    EXPECT_FALSE(defaults.presets.root.has_value());
+    EXPECT_FALSE(defaults.presets.default_id.has_value());
+
+    test::TempWorkspace workspace("config_presets");
+    workspace.write("global.jsonc",
+                    "{ \"presets\": { \"root\": \"/tmp/presets\", \"default\": \"standard\", "
+                    "\"include_shipped_root\": false, \"include_user_root\": false, "
+                    "\"max_depth\": 5 } }\n");
+    ConfigPaths paths;
+    paths.global    = workspace.path() / "global.jsonc";
+    paths.workspace = workspace.path() / "absent.jsonc";
+    const Config config = load_config(paths);
+
+    ASSERT_TRUE(config.presets.root.has_value());
+    EXPECT_EQ(config.presets.root->string(), "/tmp/presets");
+    ASSERT_TRUE(config.presets.default_id.has_value());
+    EXPECT_EQ(*config.presets.default_id, "standard");
+    EXPECT_FALSE(config.presets.include_shipped_root);
+    EXPECT_FALSE(config.presets.include_user_root);
+    EXPECT_EQ(config.presets.max_depth, 5u);
+}
+
+TEST(Config, PresetsNegativeMaxDepthRejected) {
+    test::TempWorkspace workspace("config_presets_negative");
+    workspace.write(".ymh/config.jsonc", "{ \"presets\": { \"max_depth\": -1 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, PresetsNonIntegerMaxDepthRejected) {
+    test::TempWorkspace workspace("config_presets_type");
+    workspace.write(".ymh/config.jsonc", "{ \"presets\": { \"max_depth\": \"deep\" } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, PresetsUnknownKeyRejected) {
+    test::TempWorkspace workspace("config_presets_unknown");
+    workspace.write(".ymh/config.jsonc", "{ \"presets\": { \"bogus\": 1 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
 } // namespace

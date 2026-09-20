@@ -185,6 +185,15 @@ struct SkillsSettings {
     std::size_t max_frontmatter_bytes = 4u * 1024u;
 };
 
+// [presets] — agent presets (42 §2.5, 43 §3). Additive.
+struct PresetsSettings {
+    std::optional<std::filesystem::path> root;
+    std::optional<std::string>           default_id;
+    bool                                 include_shipped_root = true;
+    bool                                 include_user_root    = true;
+    std::uint32_t                        max_depth = 3;
+};
+
 struct Config {
     UiConfig           ui;
     AgentDefaults      agent;
@@ -197,6 +206,7 @@ struct Config {
     SessionSettings    session;
     PromptSettings     prompt;
     ToolsSettings      tools;
+    PresetsSettings    presets;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

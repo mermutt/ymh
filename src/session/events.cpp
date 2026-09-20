@@ -641,6 +641,14 @@ void from_json(const nlohmann::json& json, LlmRequestHeader& value) {
     value.starts_series   = json.value("starts_series", true);
 }
 
+void to_json(nlohmann::json& json, const AgentPresetSelected& value) {
+    json = nlohmann::json{{"agent_preset", value.agent_preset}};
+}
+
+void from_json(const nlohmann::json& json, AgentPresetSelected& value) {
+    value.agent_preset = json.at("agent_preset").get<std::string>();
+}
+
 } // namespace payload
 
 } // namespace ymh

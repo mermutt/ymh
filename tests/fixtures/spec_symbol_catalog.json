@@ -147,6 +147,12 @@
       "section": "5.2"
     },
     {
+      "symbol": "EventType::AgentPresetSelected",
+      "category": "event_type",
+      "spec": "42-agent-presets.md",
+      "section": "5.1"
+    },
+    {
       "symbol": "EventType::McpServerStatusChanged",
       "category": "event_type",
       "spec": "15-mcp-adapter.md",
@@ -783,6 +789,12 @@
       "section": "5.2"
     },
     {
+      "symbol": "payload::AgentPresetSelected",
+      "category": "durable_payload",
+      "spec": "42-agent-presets.md",
+      "section": "5.1"
+    },
+    {
       "symbol": "cli::AssistantStreamPrinter",
       "category": "cli_contract",
       "spec": "34-assembler-replay-errata.md",
@@ -1393,6 +1405,36 @@
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
       "section": "7.5"
+    },
+    {
+      "symbol": "config::presets.default",
+      "category": "config_key",
+      "spec": "43-wave5-dependency-errata.md",
+      "section": "3"
+    },
+    {
+      "symbol": "config::presets.include_shipped_root",
+      "category": "config_key",
+      "spec": "43-wave5-dependency-errata.md",
+      "section": "3"
+    },
+    {
+      "symbol": "config::presets.include_user_root",
+      "category": "config_key",
+      "spec": "43-wave5-dependency-errata.md",
+      "section": "3"
+    },
+    {
+      "symbol": "config::presets.max_depth",
+      "category": "config_key",
+      "spec": "43-wave5-dependency-errata.md",
+      "section": "3"
+    },
+    {
+      "symbol": "config::presets.root",
+      "category": "config_key",
+      "spec": "43-wave5-dependency-errata.md",
+      "section": "3"
     },
     {
       "symbol": "config::prompt.instructions",
