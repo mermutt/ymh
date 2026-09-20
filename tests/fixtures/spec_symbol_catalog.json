@@ -105,6 +105,12 @@
       "section": "4.3"
     },
     {
+      "symbol": "EventType::ContextPrune",
+      "category": "event_type",
+      "spec": "32-compaction-errata.md",
+      "section": "5.1"
+    },
+    {
       "symbol": "EventType::TokenUsage",
       "category": "event_type",
       "spec": "01-session.md",
@@ -721,6 +727,12 @@
       "category": "durable_payload",
       "spec": "13-context-compaction.md",
       "section": "4.1"
+    },
+    {
+      "symbol": "payload::ContextPrune",
+      "category": "durable_payload",
+      "spec": "32-compaction-errata.md",
+      "section": "5.1"
     },
     {
       "symbol": "payload::TokenUsage",

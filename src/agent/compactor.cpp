@@ -260,8 +260,10 @@ CompactionResult ContextCompactor::compact(const Session& session,
         };
 
         LLMResponse response;
+        std::string serving_provider;
         try {
             PreparedCall call = runtime_.prepare_call(config, cancel).get();
+            serving_provider  = call.config().provider;
             response          = call.stream(std::move(frozen), collect, cancel).get();
         } catch (const NoProviderRouteError& error) {
             result.outcome    = CompactionOutcome::Failed;
@@ -321,6 +323,15 @@ CompactionResult ContextCompactor::compact(const Session& session,
         payload.tokenEstimate = estimator_.estimate(compacted);
         payload.model         = model;
         payload.createdAt     = clock_();
+        payload.provider      = serving_provider;
+        payload.shadowedStart = prefix_events.empty() ? current.boundary
+                                                      : prefix_events.front().seq;
+        payload.shadowedEnd   = current.boundary;
+        payload.shadowedSeqs.reserve(prefix_events.size());
+        for (const EventRecord& record : prefix_events) {
+            payload.shadowedSeqs.push_back(record.seq);
+        }
+        payload.shadowedTokenCount = static_cast<std::uint64_t>(estimator_.estimate(prefix));
 
         result.outcome    = CompactionOutcome::Compacted;
         result.compaction = std::move(payload);
@@ -340,6 +351,28 @@ std::optional<payload::ContextCompaction> ContextCompactor::run(
         return result.compaction;
     }
     return std::nullopt;
+}
+
+Task<std::optional<CompactionResult>> ContextCompactor::compact_if_needed(
+    CompactionTrigger trigger,
+    const Session& session,
+    const std::vector<Message>& messages,
+    CancellationToken cancel) {
+    if (!policy_.is_enabled()) {
+        return Task<std::optional<CompactionResult>>{std::optional<CompactionResult>{}};
+    }
+    if (trigger == CompactionTrigger::Pressure &&
+        estimator_.estimate(messages) <= policy_.effective_threshold_tokens()) {
+        return Task<std::optional<CompactionResult>>{std::optional<CompactionResult>{}};
+    }
+    return Task<std::optional<CompactionResult>>{
+        std::optional<CompactionResult>{compact(session, messages, cancel)}};
+}
+
+Task<CompactionResult> ContextCompactor::compact_now(const Session& session,
+                                                     const std::vector<Message>& messages,
+                                                     CancellationToken cancel) {
+    return Task<CompactionResult>{compact(session, messages, cancel)};
 }
 
 } // namespace ymh

@@ -380,6 +380,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::PlanMode:
             case EventType::LlmRequestHeader:
             case EventType::McpServerStatusChanged:
+            case EventType::ContextPrune:
                 break;
             case EventType::TurnStarted: {
                 const auto& value = event.payload.get<payload::TurnStarted>();
@@ -462,7 +463,21 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 block.kind = ContentBlockKind::Text;
                 block.text = value.output;
                 message.content.push_back(std::move(block));
-                push(std::move(message), record.seq);
+                // 32 C26: a same-`id` replacement (the pruner's) replaces the
+                // projected Tool message in place, so exactly one is counted.
+                bool replaced = false;
+                for (std::size_t index = 0; index < messages.size(); ++index) {
+                    if (messages[index].role == Role::Tool &&
+                        messages[index].tool_call_id == value.id) {
+                        messages[index] = std::move(message);
+                        origins[index]  = record.seq;
+                        replaced        = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    push(std::move(message), record.seq);
+                }
                 break;
             }
             case EventType::PermissionDecision:

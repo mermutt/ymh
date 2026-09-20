@@ -27,6 +27,8 @@
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/llm_pool.hpp"
+#include "ymh/agent/repeat_tool_reminder.hpp"
+#include "ymh/agent/tool_result_pruner.hpp"
 #include "ymh/core/cancellation.hpp"
 #include "ymh/core/task.hpp"
 #include "ymh/llm/llm_runtime.hpp"
@@ -156,7 +158,10 @@ private:
     void                      materializeContexts(const PromptAssembly& assembly);
     void                      materializeInstructions();
     void                      appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message);
-    CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn);
+    CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn,
+                                            CompactionTrigger trigger);
+    CompactionOutcome         runCompactionNow(const std::vector<Message>& messages, TurnId turn);
+    CompactionOutcome         commitCompactionResult(const CompactionResult& result, TurnId turn);
     [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,
                                              TurnId turn, StepId step);
     bool                      executeToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
@@ -183,6 +188,8 @@ private:
     std::optional<std::vector<std::string>> held_tool_digests_;     // worker-only
     bool                                instructions_loaded_ = false;  // worker-only
     CancellationSource                  turn_cancel_;
+    ToolResultPruner                    pruner_;
+    RepeatToolReminder                  reminder_;
 };
 
 } // namespace ymh

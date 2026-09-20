@@ -90,7 +90,7 @@ TEST(EventTest, FromJsonRejectsUnknownType) {
 TEST(EventTypeTest, LlmRequestHeaderWireNameAndVocabularySize) {
     EXPECT_EQ(ymh::wire_name(ymh::EventType::LlmRequestHeader), "llm/request_header");
     EXPECT_EQ(ymh::wire_name(ymh::EventType::AssistantAttempt), "assistant/attempt");
-    EXPECT_EQ(ymh::all_event_types().size(), 24u);
+    EXPECT_EQ(ymh::all_event_types().size(), 25u);
 }
 
 TEST(EventTest, TryDecodeSkipsUnknownTypeButDecodesKnown) {
