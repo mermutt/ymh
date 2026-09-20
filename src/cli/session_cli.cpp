@@ -139,6 +139,7 @@ std::string event_detail(const Event& event) {
             return "reason=" + cancelled.reason;
         }
         case EventType::AssistantAttempt:
+        case EventType::GoalChange:
             return {};
         default:
             return {};

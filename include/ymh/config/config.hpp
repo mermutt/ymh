@@ -194,6 +194,12 @@ struct PresetsSettings {
     std::uint32_t                        max_depth = 3;
 };
 
+// [goals] — the goal domain (44 §10.2, 26 §4.9). Additive.
+struct GoalsSettings {
+    std::uint32_t max_rounds = 256;
+    std::uint32_t blocked_after_consecutive_rounds = 3;
+};
+
 struct Config {
     UiConfig           ui;
     AgentDefaults      agent;
@@ -207,6 +213,7 @@ struct Config {
     PromptSettings     prompt;
     ToolsSettings      tools;
     PresetsSettings    presets;
+    GoalsSettings      goals;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

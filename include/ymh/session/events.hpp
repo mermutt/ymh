@@ -17,6 +17,7 @@
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/omission.hpp"
+#include "ymh/goal/goal.hpp"
 #include "ymh/llm/assistant_stream.hpp"
 #include "ymh/llm/llm_call_config.hpp"
 #include "ymh/session/ids.hpp"
@@ -273,6 +274,29 @@ struct AgentPresetSelected {
     std::string agent_preset;
 };
 
+// ---- goal (44 §5.7, 26 §4.3.9.1) -------------------------------------------
+
+// dsh GoalChangeMeta (dsh-goal/lib/types/domain.d.ts:12-32), lower-snake ymh
+// form. The envelope owns id/timestamp; the payload carries the operation, the
+// whole snapshot (non-clear) or the tombstone ref (clear), and the admitted
+// round count at the mutation (44 §6.2).
+enum class GoalOperation : std::uint8_t {
+    Create,
+    Edit,
+    Pause,
+    Resume,
+    Complete,
+    Block,
+    Clear,
+};
+
+struct GoalChange {
+    GoalOperation               operation = GoalOperation::Create;
+    std::optional<GoalSnapshot> goal;                 // present for non-Clear
+    std::optional<GoalRef>      cleared;              // present for Clear
+    std::uint32_t               rounds_started = 0;   // non-Clear
+};
+
 } // namespace payload
 
 // ---------------------------------------------------------------------------
@@ -374,6 +398,10 @@ struct SessionEventMap<EventType::LlmRequestHeader> {
 template <>
 struct SessionEventMap<EventType::AgentPresetSelected> {
     using type = payload::AgentPresetSelected;
+};
+template <>
+struct SessionEventMap<EventType::GoalChange> {
+    using type = payload::GoalChange;
 };
 
 // Payload type -> EventType (01 §4.4).
@@ -477,6 +505,10 @@ template <>
 struct EventTraits<payload::AgentPresetSelected> {
     static constexpr EventType type = EventType::AgentPresetSelected;
 };
+template <>
+struct EventTraits<payload::GoalChange> {
+    static constexpr EventType type = EventType::GoalChange;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -548,5 +580,7 @@ void to_json(nlohmann::json& json, const LlmRequestHeader& value);
 void from_json(const nlohmann::json& json, LlmRequestHeader& value);
 void to_json(nlohmann::json& json, const AgentPresetSelected& value);
 void from_json(const nlohmann::json& json, AgentPresetSelected& value);
+void to_json(nlohmann::json& json, const GoalChange& value);
+void from_json(const nlohmann::json& json, GoalChange& value);
 
 } // namespace ymh::payload

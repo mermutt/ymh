@@ -445,6 +445,9 @@ add_library(ymh_agent STATIC
     src/agent/repeat_tool_reminder.cpp
     src/agent/subagent.cpp
     src/agent/tool_result_pruner.cpp
+    src/commands/goal_command.cpp
+    src/goal/goal_service.cpp
+    src/goal/round_driver.cpp
 )
 add_library(ymh::agent ALIAS ymh_agent)
 

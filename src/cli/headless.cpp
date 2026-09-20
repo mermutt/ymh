@@ -225,6 +225,8 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
                 terminal = "turn/end";
                 break;
             }
+            case EventType::GoalChange:
+                break;
             default:
                 break;
         }
