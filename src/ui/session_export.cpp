@@ -271,6 +271,9 @@ std::string render_session_markdown(const SessionHeader& header, const EventRang
             }
             case EventType::AssistantAttempt:
             case EventType::GoalChange:
+            case EventType::CommandRun:
+            case EventType::CommandDone:
+            case EventType::JobChanged:
                 break;
             default:
                 break;

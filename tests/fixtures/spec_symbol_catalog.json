@@ -153,7 +153,25 @@
       "section": "5.1"
     },
     {
+      "symbol": "EventType::CommandDone",
+      "category": "event_type",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "6.1"
+    },
+    {
+      "symbol": "EventType::CommandRun",
+      "category": "event_type",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "6.1"
+    },
+    {
       "symbol": "EventType::GoalChange",
+      "category": "event_type",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "6.1"
+    },
+    {
+      "symbol": "EventType::JobChanged",
       "category": "event_type",
       "spec": "44-goals-jobs-commands.md",
       "section": "6.1"
@@ -801,6 +819,24 @@
       "section": "5.1"
     },
     {
+      "symbol": "payload::CommandDone",
+      "category": "durable_payload",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "5.7"
+    },
+    {
+      "symbol": "payload::CommandDoneKind",
+      "category": "durable_payload",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "5.7"
+    },
+    {
+      "symbol": "payload::CommandRun",
+      "category": "durable_payload",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "5.7"
+    },
+    {
       "symbol": "payload::GoalChange",
       "category": "durable_payload",
       "spec": "44-goals-jobs-commands.md",
@@ -808,6 +844,12 @@
     },
     {
       "symbol": "payload::GoalOperation",
+      "category": "durable_payload",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "5.7"
+    },
+    {
+      "symbol": "payload::JobChanged",
       "category": "durable_payload",
       "spec": "44-goals-jobs-commands.md",
       "section": "5.7"
@@ -1432,6 +1474,30 @@
     },
     {
       "symbol": "config::goals.max_rounds",
+      "category": "config_key",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::jobs.completion_delivery",
+      "category": "config_key",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::jobs.max_consecutive_wakes",
+      "category": "config_key",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::jobs.max_wait_timeout_ms",
+      "category": "config_key",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::jobs.wait_timeout_ms",
       "category": "config_key",
       "spec": "44-goals-jobs-commands.md",
       "section": "10.2"

@@ -92,7 +92,10 @@ TEST(EventTypeTest, LlmRequestHeaderWireNameAndVocabularySize) {
     EXPECT_EQ(ymh::wire_name(ymh::EventType::AssistantAttempt), "assistant/attempt");
     EXPECT_EQ(ymh::wire_name(ymh::EventType::AgentPresetSelected), "agent_preset/selected");
     EXPECT_EQ(ymh::wire_name(ymh::EventType::GoalChange), "goal/change");
-    EXPECT_EQ(ymh::all_event_types().size(), 27u);
+    EXPECT_EQ(ymh::wire_name(ymh::EventType::CommandRun), "command/run");
+    EXPECT_EQ(ymh::wire_name(ymh::EventType::CommandDone), "command/done");
+    EXPECT_EQ(ymh::wire_name(ymh::EventType::JobChanged), "job/changed");
+    EXPECT_EQ(ymh::all_event_types().size(), 30u);
 }
 
 TEST(EventTest, TryDecodeSkipsUnknownTypeButDecodesKnown) {

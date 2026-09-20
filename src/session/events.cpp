@@ -151,6 +151,26 @@ payload::GoalOperation parse_goal_operation(std::string_view value) {
     reject_enum("goal operation", value);
 }
 
+payload::CommandDoneKind parse_command_done_kind(std::string_view value) {
+    if (value == "success") {
+        return payload::CommandDoneKind::Success;
+    }
+    if (value == "error") {
+        return payload::CommandDoneKind::Error;
+    }
+    reject_enum("command done kind", value);
+}
+
+std::string_view command_done_kind_name(payload::CommandDoneKind kind) noexcept {
+    switch (kind) {
+        case payload::CommandDoneKind::Success:
+            return "success";
+        case payload::CommandDoneKind::Error:
+            return "error";
+    }
+    return {};
+}
+
 } // namespace
 
 std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept {
@@ -720,6 +740,90 @@ void from_json(const nlohmann::json& json, GoalChange& value) {
     } else {
         value.cleared = std::nullopt;
     }
+}
+
+void to_json(nlohmann::json& json, const CommandRun& value) {
+    json = nlohmann::json{
+        {"command_id", value.command_id},
+        {"name", value.name},
+        {"source", std::string{command_source_name(value.source)}},
+    };
+    if (value.args.has_value()) {
+        json["args"] = *value.args;
+    }
+}
+
+void from_json(const nlohmann::json& json, CommandRun& value) {
+    value.command_id = json.at("command_id").get<CommandId>();
+    value.name       = json.at("name").get<std::string>();
+    const std::string source = json.at("source").get<std::string>();
+    const std::optional<CommandSource> parsed = parse_command_source(source);
+    if (!parsed.has_value()) {
+        reject_enum("command source", source);
+    }
+    value.source = *parsed;
+    if (json.contains("args") && !json.at("args").is_null()) {
+        value.args = json.at("args").get<std::string>();
+    } else {
+        value.args = std::nullopt;
+    }
+}
+
+void to_json(nlohmann::json& json, const CommandDone& value) {
+    json = nlohmann::json{
+        {"command_id", value.command_id},
+        {"kind", std::string{command_done_kind_name(value.kind)}},
+    };
+    if (value.text.has_value()) {
+        json["text"] = *value.text;
+    }
+    if (value.source_event_seq.has_value()) {
+        json["source_event_seq"] = *value.source_event_seq;
+    }
+}
+
+void from_json(const nlohmann::json& json, CommandDone& value) {
+    value.command_id = json.at("command_id").get<CommandId>();
+    value.kind       = parse_command_done_kind(json.at("kind").get<std::string>());
+    if (json.contains("text") && !json.at("text").is_null()) {
+        value.text = json.at("text").get<std::string>();
+    } else {
+        value.text = std::nullopt;
+    }
+    if (json.contains("source_event_seq") && !json.at("source_event_seq").is_null()) {
+        value.source_event_seq = json.at("source_event_seq").get<Sequence>();
+    } else {
+        value.source_event_seq = std::nullopt;
+    }
+}
+
+void to_json(nlohmann::json& json, const JobChanged& value) {
+    json = nlohmann::json{
+        {"kind", value.kind},
+        {"ordinal", value.ordinal},
+        {"status", std::string{job_status_name(value.status)}},
+        {"label", value.label},
+    };
+    if (value.owner.has_value()) {
+        json["owner"] = value.owner->value;
+    }
+}
+
+void from_json(const nlohmann::json& json, JobChanged& value) {
+    if (json.contains("owner") && !json.at("owner").is_null()) {
+        value.owner = AgentId{json.at("owner").get<std::string>()};
+    } else {
+        value.owner = std::nullopt;
+    }
+    value.kind    = json.at("kind").get<std::string>();
+    value.ordinal = json.at("ordinal").get<std::uint64_t>();
+    const std::string status = json.at("status").get<std::string>();
+    const std::optional<JobStatus> parsed = parse_job_status(status);
+    if (!parsed.has_value()) {
+        reject_enum("job status", status);
+    }
+    value.status = *parsed;
+    value.label  = json.at("label").get<std::string>();
 }
 
 } // namespace payload

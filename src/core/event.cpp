@@ -15,7 +15,7 @@ struct WireEntry {
     std::string_view name;
 };
 
-constexpr std::array<WireEntry, 27> kWireNames{{
+constexpr std::array<WireEntry, 30> kWireNames{{
     {SessionStarted, "session/start"},
     {SessionEnded, "session/end"},
     {TurnStarted, "turn/start"},
@@ -42,6 +42,9 @@ constexpr std::array<WireEntry, 27> kWireNames{{
     {LlmRequestHeader, "llm/request_header"},
     {AgentPresetSelected, "agent_preset/selected"},
     {GoalChange, "goal/change"},
+    {CommandRun, "command/run"},
+    {CommandDone, "command/done"},
+    {JobChanged, "job/changed"},
     {McpServerStatusChanged, "mcp/server_status_changed"},
 }};
 

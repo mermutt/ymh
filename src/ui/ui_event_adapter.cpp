@@ -175,6 +175,9 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
         }
         case EventType::AssistantAttempt:
         case EventType::GoalChange:
+        case EventType::CommandRun:
+        case EventType::CommandDone:
+        case EventType::JobChanged:
             break;
         default:
             break;
@@ -268,6 +271,9 @@ std::vector<UiEvent> UiEventAdapter::adapt_maintenance(const Event& event) {
         }
         case EventType::AssistantAttempt:
         case EventType::GoalChange:
+        case EventType::CommandRun:
+        case EventType::CommandDone:
+        case EventType::JobChanged:
             break;
         default:
             break;

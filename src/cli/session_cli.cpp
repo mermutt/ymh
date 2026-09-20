@@ -140,6 +140,9 @@ std::string event_detail(const Event& event) {
         }
         case EventType::AssistantAttempt:
         case EventType::GoalChange:
+        case EventType::CommandRun:
+        case EventType::CommandDone:
+        case EventType::JobChanged:
             return {};
         default:
             return {};

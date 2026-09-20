@@ -390,6 +390,9 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::LlmRequestHeader:
             case EventType::AgentPresetSelected:
             case EventType::GoalChange:
+            case EventType::CommandRun:
+            case EventType::CommandDone:
+            case EventType::JobChanged:
             case EventType::McpServerStatusChanged:
             case EventType::ContextPrune:
                 break;

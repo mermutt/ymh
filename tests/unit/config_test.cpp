@@ -1082,4 +1082,54 @@ TEST(Config, GoalsUnknownKeyRejected) {
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
 
+TEST(Config, JobsDefaults) {
+    const Config config;
+    EXPECT_EQ(config.jobs.wait_timeout_ms, 30'000);
+    EXPECT_EQ(config.jobs.max_wait_timeout_ms, 600'000);
+    EXPECT_EQ(config.jobs.completion_delivery, CompletionDelivery::Wakeup);
+    EXPECT_EQ(config.jobs.max_consecutive_wakes, 3u);
+}
+
+TEST(Config, JobsKeysParse) {
+    test::TempWorkspace workspace("config_jobs_keys");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"jobs\": { \"wait_timeout_ms\": 500, \"max_wait_timeout_ms\": 9000, "
+                    "\"completion_delivery\": \"quiet\", \"max_consecutive_wakes\": 7 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    EXPECT_EQ(config.jobs.wait_timeout_ms, 500);
+    EXPECT_EQ(config.jobs.max_wait_timeout_ms, 9000);
+    EXPECT_EQ(config.jobs.completion_delivery, CompletionDelivery::Quiet);
+    EXPECT_EQ(config.jobs.max_consecutive_wakes, 7u);
+}
+
+TEST(Config, JobsUnknownDeliveryRejected) {
+    test::TempWorkspace workspace("config_jobs_delivery");
+    workspace.write(".ymh/config.jsonc", "{ \"jobs\": { \"completion_delivery\": \"bogus\" } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, JobsNegativeWaitRejected) {
+    test::TempWorkspace workspace("config_jobs_negative");
+    workspace.write(".ymh/config.jsonc", "{ \"jobs\": { \"wait_timeout_ms\": -1 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, JobsUnknownKeyRejected) {
+    test::TempWorkspace workspace("config_jobs_unknown");
+    workspace.write(".ymh/config.jsonc", "{ \"jobs\": { \"bogus\": 1 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
 } // namespace
