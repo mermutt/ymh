@@ -48,7 +48,7 @@ deterministic registry and keeps the digest contract intact.
 - `07-tools-execution.md` owns `ToolSchema` and the tool registry. This spec
   consumes `ToolRegistry::schemas()` for `PromptAssembly.tools`.
 - `20-skills.md` owns the skill catalog. This spec changes where its index lives
-  (§2.6) per `26 §4.4`.
+  (§2.6) per `26-dsh-alignment-part2.md` §4.4 (the spec-20 row).
 
 Where this spec and a prior verified spec disagree, the prior spec wins and the
 disagreement is recorded as an open question (§12), per the task rule.
@@ -76,7 +76,7 @@ disagreement is recorded as an open question (§12), per the task rule.
 11. The provenance and prompt effect on `template_digest` /
     `system_prompt_digest` and the replay contract.
 12. The skill catalog's move from a system-prompt append to a catalog-form
-    context (`26 §4.4` row 20).
+    context (`26-dsh-alignment-part2.md` §4.4, the spec-20 row).
 
 ### 1.4 Out of scope
 
@@ -101,6 +101,13 @@ providers, and a tool provider. Registration returns a move-only RAII handle
 whose destructor unregisters; this is ymh's C++ spelling of dsh's
 `() => void` disposer (`26-dsh-alignment.md:656-671`). Duplicate names in one
 layer throw; scoped sections and variables shadow globals of the same name.
+**Wave 3 registers the global layer only:** `AssembleContext.scope` is reserved
+and always absent, so no scope id is recorded for replay (§4.2) and the
+deployment persona is a normal global registration (§2.3). Presets and scopes
+arrive in Wave 5. A context's `ContextForm` is selected by its registered name
+(the canonical names are `runtime-context` → `Snapshot` and `skill-catalog` →
+`Catalog`; §2.5, §2.6), because the pinned `PromptContext` carries no form field
+(`26-dsh-alignment-part2.md:410-414`).
 
 ```cpp
 // include/ymh/prompt/system_prompt.hpp
@@ -132,9 +139,9 @@ struct AssembledContext { std::string name; std::string text; };
 struct PromptAssembly {
     std::vector<AssembledSection> sections;
     std::vector<AssembledContext> contexts;
-    std::vector<ToolSchema>       tools;        // canonical order
+    std::vector<ToolSchema>       tools;        // final request order (§2.6)
     std::map<std::string, std::optional<std::string>> variables;
-    std::vector<std::string>      tool_order;   // exactly one "<unlisted-tools>" rest
+    std::vector<std::string>      tool_order;   // optional permutation; one "<unlisted-tools>" rest iff non-empty
 };
 
 // Move-only RAII registrations. The registry owns the storage; a handle must
@@ -173,8 +180,10 @@ public:
 
 `assemble()` is the loop's input path (`26-dsh-alignment-part2.md:457-460`):
 the loop takes `assemble(ctx).tools` for the request tool list, `.variables`
-for rendering, and `render(ctx)` for the system message. A registry returning
-only a string could not drive a request.
+for rendering, `render(ctx)` for the system message, and `.contexts` to
+materialize the sourced snapshots/catalog as durable user-role messages before
+the request messages are derived (§2.5, §2.7). A registry returning only a
+string could not drive a request.
 
 **Assembly rules (pinned, from `26-dsh-alignment.md:680-694`).**
 
@@ -187,9 +196,16 @@ only a string could not drive a request.
    joins the rest with blank lines. Malformed, unknown, or undefined references
    throw. A lone `{{` is literal. Substituted values are not rescanned.
 5. Contexts join ascending by `order`; an empty context contributes nothing.
-6. `tool_order` contains the model-facing tool names in order with
-   `<unlisted-tools>` exactly once. Unknown names fail at assembly; omitted means
-   lexicographic order.
+6. `tool_order` is an optional presentation permutation over the provider's
+   canonical tool list; `.tools` is the **final request order**, not a second
+   list. When `tool_order` is non-empty it contains each model-facing name at
+   most once and `<unlisted-tools>` exactly once; the rest token expands to the
+   remaining provider tools in lexicographic name order, and an unknown name
+   fails assembly. When `tool_order` is empty/omitted, `.tools` is the provider
+   list sorted lexicographically by name (the dsh default,
+   `26-dsh-alignment.md:959`) and no rest token is present. The consumer is
+   `AgentLoop::buildRequest`: `.tools` is exactly `LLMRequest.tools` and its
+   names are `header.tool_names`; `tool_order` itself never reaches the wire.
 
 ### 2.2 The canonical order tables
 
@@ -212,6 +228,7 @@ enum class SectionOrder : std::int32_t {
     PtcOnly                    =   800,   // reserved (D22 deferred)
     FileReference              =   900,   // reserved
     ToolShell                  =  1000,   // dsh TOOL_BASH; ymh `shell`
+    ToolPwsh                   =  1010,   // reserved (dsh TOOL_PWSH; no ymh equivalent)
     ToolRead                   =  1100,   // ymh `read_file`
     ToolWrite                  =  1200,   // ymh `write_file`
     ToolEdit                   =  1300,   // ymh `edit_file`
@@ -265,8 +282,12 @@ provider (`src/agent/context_assembler.cpp:36-54`).
 
 Deployment persona is two sections: `deployment:persona-prefix` at order 0
 (`complete` iff configured) and `deployment:persona-suffix` at order 10200
-(`26-dsh-alignment.md:750-794`). A per-scope persona shadows the deployment
-defaults for that scope. Mounting a persona globally is a load error.
+(`26-dsh-alignment.md:750-794`). Wave 3 has one layer (global), and the
+deployment persona is a normal registration there. Per-scope personas and their
+shadowing rule are Wave 5 (`26-dsh-alignment-part2.md:471-473`), which owns the
+scope-mount contract; Wave 3 defines no scope API, so it has no global-mount
+rejection. `PersonaConfig.prefix` is required: an explicitly empty prefix fails
+load (`36-I5`).
 
 ```cpp
 struct PersonaConfig {
@@ -289,7 +310,32 @@ suffix: Your working directory is {{cwd}}.
 session start and the daemon chdirs to its workspace root once at startup
 (`AGENTS.md`, path-safety rule). They are therefore safe in the rendered prompt
 (§4). `include_runtime_context = true` means the registry contributes the
-runtime-context snapshot of §2.5; setting it false suppresses it for that scope.
+runtime-context snapshot of §2.5; setting it false suppresses it for that
+assembly.
+
+**Variable providers (pinned).** Strict interpolation (`36-I3`) throws on an
+unknown name, so the default prefix/suffix require two providers registered at
+the same site that registers `harness:identity` and the persona: the
+`SystemPrompt` built by `WorkspaceRuntime` (it replaces the current
+`SessionContextAssembler` construction seam, `src/agent/workspace_runtime.cpp:112`).
+
+- `variable("model", …)` → `AgentConfig::model`, the effective model;
+- `variable("cwd", …)` → the daemon workspace root (the environment root the
+  daemon chdirs to once at startup).
+
+Both read session-invariant state only; neither reads the clock, filesystem, or
+environment (§2.7). A custom persona may use another name only if the
+implementer registers a provider for it.
+
+**Harness identity (pinned, ymh wording).** `harness:identity` (order −1000)
+renders ymh's shipped identity text verbatim, `default_system_prompt()`
+(`src/cli/wiring.cpp:48-52`), not the dsh sentence. This honours the recorded
+recommendation at `26-dsh-alignment-part2.md:1588-1595` ("ymh keeps its own
+`harness:identity` wording … Recommendation: keep ymh's identity, copy dsh's
+structure and tool guidance"). The dsh sentence ("You are an AI agent powered by
+DeepSeek Harness.", `26-dsh-alignment.md:798-802`) is recorded as the
+alternative in Q3, not adopted here. A non-empty `agent.system_prompt` still
+overrides only this section (`36-I12`).
 
 The `minimal` preset (`26-dsh-alignment.md:780-788`) is out of Wave 3 scope
 because presets are Wave 5. The `PersonaConfig.complete` mechanism is still
@@ -413,13 +459,31 @@ Current runtime context. This snapshot supersedes earlier runtime-context snapsh
 ```
 
 They are **not** sections and **not** part of `render()`. They are
-`PromptAssembly.contexts` with `ContextForm::Snapshot`, materialized as a
-durable `payload::ContextInjected` with `role = Role::User` and a non-empty
-`context.sections` (one named section per source). The snapshot body names its
-sources, at minimum: the working directory, the effective model, and the current
-date. Because a new snapshot supersedes earlier ones without deleting them, the
-projection keeps them in order; the header text tells the model the latest one
-wins.
+`PromptAssembly.contexts` with `ContextForm::Snapshot` (the name→form mapping of
+§2.1), materialized as a durable `payload::ContextInjected` with
+`role = Role::User` and a non-empty `context.sections` (one named section per
+source). The snapshot body names its sources, at minimum: the working directory,
+the effective model, and the current date. Because a new snapshot supersedes
+earlier ones without deleting them, the projection keeps them in order; the
+header text tells the model the latest one wins.
+
+**Producer, caller, timing (pinned).** The producer is the `runtime-context`
+`PromptContext` registered on the `SystemPrompt` registry; its provider reads
+only session-invariant state (the daemon workspace root, the effective model,
+and the current date) and returns the framed body. `SystemPrompt::assemble(ctx)`
+exposes it as a `PromptAssembly.contexts` entry. The caller is `AgentLoop`:
+immediately after `assemble(ctx)` and **before**
+`SessionContextAssembler::assemble()` derives the request messages, the loop
+materializes each non-empty context through the existing durable append
+(`AgentLoop::appendContextInjected`, `src/agent/agent_loop.cpp:373-379`) as a
+`ContextInjected{role = Role::User, source = Kind::Plugin, context.form =
+Snapshot}`. Timing: materialized at the first request that observes it, and
+re-materialized only when its rendered text differs from the most recent one
+already in the log (an identical snapshot is not re-appended). In Wave 3 cwd and
+model are session-invariant, so in practice the snapshot is materialized once at
+the first request of the session; a changed date appends one more. This is the
+contexts→message path the render pipeline draws in §2.7, and it is why the
+durable append is the loop's, not the registry's.
 
 This is why `26-D7` reclassifies `ContextInjected.role`: the existing default is
 `Role::System` (`include/ymh/session/events.hpp:168`; the part2 text cites
@@ -441,14 +505,21 @@ the tool is restricted away**. This is the tool-presentation half of `26-I6`:
 the tool catalog is stable across modes, so plan mode changes only
 `PlanPolicy` (order 500) and never adds or removes a tool. `assemble().tools`
 comes from the registered tool provider (backed by `ToolRegistry::schemas()`),
-already in canonical order; `tool_order` canonicalizes the model-facing list and
-inserts unlisted tools lexicographically at the single `<unlisted-tools>` rest.
+in the provider's canonical order; `assemble()` then applies `tool_order` as a
+presentation permutation to produce `PromptAssembly.tools` in final request
+order: named entries in order, `<unlisted-tools>` expanding to the remaining
+provider tools lexicographically, and an empty `tool_order` selecting the
+lexicographic-by-name default (no rest token). `tool_order` is validated at
+assembly and never sent as a wire field; `AgentLoop::buildRequest` consumes
+`.tools` (§2.1 rule 6).
 
 **Skill catalog relocation.** Spec `20`'s catalog index is currently appended to
 `AgentConfig::system_prompt` in `make_agent_config`
 (`src/agent/workspace_runtime.cpp:48-63`). Wave 3 relocates it to a durable
-user-role `<system-reminder>` message with `ContextForm::Catalog`, matching the
-verbatim dsh text (`26-dsh-alignment.md:878-892`) and `26 §4.4` row 20. This
+user-role `<system-reminder>` message with `ContextForm::Catalog` (the
+`skill-catalog` context of §2.1, materialized like the snapshot), matching the
+verbatim dsh text (`26-dsh-alignment.md:878-892`) and
+`26-dsh-alignment-part2.md` §4.4 (the spec-20 row). This
 removes the last non-registry writer to `system_prompt` and keeps the rendered
 prompt deterministic.
 
@@ -457,13 +528,21 @@ prompt deterministic.
 ```text
 InstructionLoader (opt-in) ──► ContextInjected(User, Instructions)   [durable]
 SystemPrompt::assemble(ctx) ──► PromptAssembly
-    .sections ──► render_prompt ──► system text ──► header.system_prompt_digest
-    .contexts ──► ContextInjected(User, Snapshot/Catalog)            [durable]
-    .tools    ──► LLMRequest.tools
+AgentLoop::materializeContexts(assembly, session)  // before deriving messages
+    for each non-empty .contexts entry whose text changed:
+        ──► ContextInjected(User, Snapshot/Catalog)                  [durable]
 SessionContextAssembler::assemble:
-    messages := deriveMessages(session)
+    messages := deriveMessages(session)   // includes the materialized contexts
     if system text non-empty: prepend SystemMessage{text, digest}   [projection only]
+AgentLoop::buildRequest:
+    .sections ──► render_prompt ──► system text ──► header.system_prompt_digest
+    .tools    ──► LLMRequest.tools
 ```
+
+The producer of `PromptAssembly.contexts` is the registered `PromptContext`; the
+caller and timing are `AgentLoop::materializeContexts` (immediately after
+`assemble(ctx)`, before the messages are derived; §2.5). `render()` never sees
+`.contexts`, so runtime material cannot enter the digest.
 
 `render()` is a pure function of `(registry state, AssembleContext, variables)`.
 It does not read the clock, the filesystem, or the environment. The runtime
@@ -529,12 +608,15 @@ member layout: no existing field is renamed or reordered.
 struct Message {
     Role                      role = Role::User;
     std::vector<ContentBlock> content;
-    std::optional<ToolCallId> tool_call_id;
+    std::string               tool_call_id;  // pinned type, unchanged
     // 36 additions:
     std::optional<MessageSource> source;    // who produced it (36 §3.1)
     std::optional<ContextFormed> context;   // what kind of thing it is
 };
 ```
+
+The sketch matches the pinned layout exactly (`std::string tool_call_id`,
+`include/ymh/agent/message.hpp:126`); Wave 3 adds only the two optional fields.
 
 ### 3.3 `SystemMessage` and `ToolResultMessage`
 
@@ -545,6 +627,22 @@ text under the opt-in) and prepended by `SessionContextAssembler::assemble`
 (`src/agent/context_assembler.cpp:41-65`); a tool result is already a durable
 `payload::ToolResult` and is projected into a `Role::Tool` message by
 `deriveMessages()` (`01-session.md:766-770`).
+
+`deriveMessages()` still returns `std::vector<Message>`; `SystemMessage` /
+`ToolResultMessage` are typed helpers over that stream, **not** its return type.
+The producer/consumer pair for each is pinned:
+
+| Type | Producer | Consumer | Durable carrier |
+|---|---|---|---|
+| `SystemMessage` | `SessionContextAssembler::assemble` builds the prepended system `Message` and its `SystemMessage` view (`src/agent/context_assembler.cpp:55-63`) | `AgentLoop::buildRequest` sends the message; the `17` transcript renders the system row | `LlmRequestHeader.system_prompt_digest` (full text only under `session.persist_prompt_text`) |
+| `ToolResultMessage` | `deriveMessages()` for each `payload::ToolResult` (`01-session.md:766-770`) | `AgentLoop` (request messages); the `17` transcript renders the tool row and any `context` notice | `payload::ToolResult` |
+
+**`17` errata obligation.** The `17` errata must (a) add transcript row kinds
+for `ContextForm::{Instructions,Catalog,Snapshot,Notice}` and for the projected
+`SystemMessage`, (b) render `Message.source` / `source.form`, and (c) preserve
+the verified `17` render contracts (fixed chrome budget, generation guard,
+`has_error`). This spec supplies the types; `17` owns the rendering
+(`26-dsh-alignment-part2.md:1084`).
 
 ```cpp
 // include/ymh/agent/provenance.hpp (continued)
@@ -660,8 +758,18 @@ live registries and verify `sha256(render()) == header.system_prompt_digest`,
 exactly as `34 §9.2` step 3 describes (`34-assembler-replay-errata.md:686-692`):
 `header.system_prompt` when the opt-in stored it, else the caller-supplied
 rendered prompt, else empty. Wave 3 makes the "caller-supplied" path
-**reproducible**: the harness calls `SystemPrompt::render()` with the recorded
-`AssembleContext` and compares.
+**reproducible**: the harness calls `SystemPrompt::render()` with the canonical
+global-only `AssembleContext` and compares.
+
+**What replay records for the assembly (pinned).** Wave 3 registers the global
+layer only (§2.1), so every assembly uses the default
+`AssembleContext{scope = nullopt, signal = nullptr}`, and `render()` reads only
+`scope` (always absent) plus the registered variables, never `signal`
+(cancellation only). Replay therefore reconstructs that canonical
+global-only `AssembleContext`; **no** scope id or signal is recorded in the
+`LlmRequestHeader`, because neither varies in Wave 3. If a later wave introduces
+scoped registrations, the header must gain a durable scope id before replay can
+reconstruct a scoped assembly (Q8).
 
 The registries that replay re-derives from are: the section/context/variable
 registry, the tool registry (`ToolRegistry::schemas()`), the persona config, and
@@ -687,7 +795,7 @@ digest is computed over.
 | `system_prompt_digest` | SHA-256 of that text | unchanged contract, new source |
 | `template_digest` | includes rendered prompt | unchanged |
 | Full prompt persisted | only under opt-in | only under opt-in |
-| Replay prompt re-derivation | `ReplayEnv.rendered_system_prompt` | `SystemPrompt::render(ctx)` |
+| Replay prompt re-derivation | `ReplayEnv.rendered_system_prompt` | `SystemPrompt::render(AssembleContext{})` (global-only, §4.2) |
 | Messages | `deriveMessages(prefix)` | unchanged, provenance carried |
 | Runtime snapshot / instructions | n/a | durable user-role messages in the prefix |
 | New durable event types | none | none |
@@ -703,8 +811,8 @@ All are optional except where noted. The global-layer-only rule applies only to
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `agent.system_prompt` | string | built-in | existing key; when non-empty it **overrides** `harness:identity` (backward compatible) |
-| `prompt.persona.prefix` | string | built-in | required when persona enabled; overrides the shipped prefix |
+| `agent.system_prompt` | string | built-in | existing key; when non-empty it **overrides** `harness:identity` only. The key contract is unchanged, but the **default rendered text is Brk.** because the default persona is added (`36-D12`) |
+| `prompt.persona.prefix` | string | built-in | overrides the shipped prefix; absent uses the shipped default. Wave 3 always registers the persona; there is no `prompt.persona.enabled` key (suppression is Wave 5). An explicitly empty value fails load (`36-I5`) |
 | `prompt.persona.suffix` | string | `""` | |
 | `prompt.persona.complete` | bool | `false` | |
 | `prompt.persona.include_runtime_context` | bool | `true` | |
@@ -715,7 +823,7 @@ All are optional except where noted. The global-layer-only rule applies only to
 | `prompt.instructions.local_candidates` | string[] | `["AGENTS.local.md","CLAUDE.local.md"]` | |
 | `prompt.instructions.load_local` | bool | `false` | |
 | `tools.presentation` | `"native"` | `"native"` | `ptc`/`both` fail loud (D22) |
-| `tools.tool_order` | string[] | lexicographic | exactly one `<unlisted-tools>` rest |
+| `tools.tool_order` | string[] | lexicographic | optional; a non-empty list requires exactly one `<unlisted-tools>` rest |
 
 Config load order is unchanged (`21` §6): global then workspace, workspace
 overrides. `agent.system_prompt` is read from the existing `[agent]` table
@@ -737,12 +845,17 @@ These extend `26-I1`–`26-I12`. `36-I*` are local to this spec.
 - **36-I3 (strict variables).** `render_prompt` throws on an unknown, malformed,
   or undefined `{{variable}}`. A lone `{{` with no later `}}` is literal. A
   substituted value is never rescanned.
-- **36-I4 (tool order).** `tool_order` contains each model-facing name at most
-  once and `<unlisted-tools>` exactly once. Unknown names fail at assembly.
-  Omitting `tool_order` means lexicographic order.
-- **36-I5 (persona singleton).** `deployment:persona-prefix` is registered at
-  most once per effective scope; mounting it globally is a load error. `complete`
-  makes the prefix the sole section (the `minimal` preset semantics).
+- **36-I4 (tool order).** `PromptAssembly.tools` is the final request order. A
+  non-empty `tool_order` contains each model-facing name at most once and
+  `<unlisted-tools>` exactly once; an unknown name fails at assembly. An
+  empty/omitted `tool_order` selects the lexicographic-by-name default with no
+  rest token. The consumer is `AgentLoop::buildRequest` (`.tools` →
+  `LLMRequest.tools`).
+- **36-I5 (persona singleton).** `deployment:persona-prefix` is registered
+  exactly once in the global layer (Wave 3's only layer); a duplicate throws.
+  `PersonaConfig.prefix` is required, and an explicitly empty prefix fails load.
+  `complete` makes the prefix the sole section (the `minimal` preset semantics).
+  Per-scope shadowing and any scope-mount rule are Wave 5.
 - **36-I6 (instructions are messages).** Workspace instructions and runtime
   contexts never enter `render()`. They are durable user-role messages. A change
   to either never forces a new request series; it appends after the reusable
@@ -767,9 +880,10 @@ These extend `26-I1`–`26-I12`. `36-I*` are local to this spec.
   adapter, or UI mutates a registered section after a request is frozen
   (`26-I2`).
 - **36-I12 (identity migration).** With `agent.system_prompt` empty,
-  `harness:identity` renders the shipped identity text and the default persona
-  supplies the prefix/suffix. With it non-empty, the configured text replaces
-  `harness:identity`; no other section changes.
+  `harness:identity` renders ymh's shipped `default_system_prompt()` text (not
+  the dsh sentence; Q3) and the default persona supplies the prefix/suffix. With
+  it non-empty, the configured text replaces `harness:identity`; no other section
+  changes.
 - **36-I13 (tool presentation).** Only `Native` loads. `Ptc`/`Both` fail loud at
   load (`26-F14`). A restricted-away tool suppresses its guidance section and
   drops its schema, and the resulting catalog change starts a new series
@@ -784,10 +898,26 @@ These extend `26-I1`–`26-I12`. `36-I*` are local to this spec.
 
 ### 7.1 Shared findings (`F1`–`F12`, `§54`)
 
-The applicable shared findings are inherited by reference: the prompt system is
-part of the agent loop and the session projection, so the loop's terminal
-guarantee (`26-I4`) and the session's event-sourcing invariant (`01` §12) apply.
-This spec adds no shared-finding exception.
+The applicable shared findings, with this spec's specific obligation:
+
+- **F1 (path/process isolation).** Every instruction-file path (discovery,
+  refresh, truncation) resolves through `ExecutionEnvironment::resolve()`
+  root-relative; the daemon chdirs once at startup. Applies to §2.4.
+- **F3 (late event after close).** A materialized `ContextInjected` is a durable
+  append and must be rejected once the session handle is terminal; the registry
+  never writes after close. Applies to §2.5/§2.7.
+- **F9 (cancellation scoping).** `AssembleContext.signal` is per-assembly; a
+  cancelled request materializes no context and freezes no header. Applies to
+  §2.7/§4.1.
+- **F10 (resume-suspended).** A resumed session re-derives the prompt from the
+  live registries and verifies the digest; it never fabricates a stored prompt.
+  Applies to §4.2/§4.3.
+
+The remaining shared findings are out of scope for this component:
+F2/F4/F5/F6/F7/F8/F11/F12 are supervisor/TUI, scheduling, or resource-cap
+concerns owned by `04`/`06`/`09`/`10`. The loop's terminal guarantee (`26-I4`)
+and the session's event-sourcing invariant (`01` §12) apply by reference. This
+spec adds no shared-finding exception.
 
 ### 7.2 Component-local failure modes
 
@@ -801,10 +931,12 @@ This spec adds no shared-finding exception.
   (`36-I2`).
 - **36-F4 (unknown variable).** A `{{var}}` with no provider renders literally.
   Guard: `render_prompt` throws (`36-I3`).
-- **36-F5 (bad `tool_order`).** A missing or duplicated `<unlisted-tools>` rest,
-  or an unknown name, is silently ignored. Guard: `assemble()` fails (`36-I4`).
-- **36-F6 (persona mounted globally).** A persona registers a global prefix and
-  leaks into every scope. Guard: load error (`36-I5`).
+- **36-F5 (bad `tool_order`).** A non-empty `tool_order` with a missing or
+  duplicated `<unlisted-tools>` rest, or an unknown name, is silently ignored.
+  Guard: `assemble()` fails (`36-I4`).
+- **36-F6 (persona prefix missing).** An explicitly empty or absent
+  `PersonaConfig.prefix` renders a suffix-only or empty prompt. Guard: load fails
+  (`36-I5`).
 - **36-F7 (instruction budget overflow).** A large `AGENTS.md` exceeds
   `max_bytes` or is truncated silently. Guard: the drop-broader-first rule and
   the verbatim budget marker (`36-I7`).
@@ -844,13 +976,13 @@ This spec adds no shared-finding exception.
 | `renderPrompt()` | `render_prompt()` | `26 §2.3.1:683-686` |
 | `SECTION_ORDERS` / `CONTEXT_ORDERS` | `SectionOrder` / `ContextOrder` | `26 §2.3.2:696-748` |
 | `dsh-persona` (`prefix`/`suffix`/`complete`) | `PersonaConfig` + orders 0/10200 | `26 §2.3.3:750-794` |
-| harness identity (order −1000) | `harness:identity` section | `26 §2.3.4:798-802` |
+| harness identity (order −1000) | `harness:identity` section (ymh wording kept; the dsh sentence is the Q3 alternative) | `26 §2.3.4:798-802`; `26 part2 §6:1588-1595` |
 | runtime-context header | `RuntimeContextSnapshot` user-role message | `26 §2.3.4:804-811` |
 | `dsh-agent-instructions` | `InstructionLoader` + `ContextForm::Instructions` | `26 §2.3.5:900-950` |
 | `dsh-agent-tool-presentation` (`native`) | `ToolPresentationMode::Native` | `26 §2.3.6:952-961` |
 | `MessageSourceMap` / `ContextForm` | `MessageSource` / `ContextForm` / `ContextFormed` | `26 part2 §4.3.10:1023-1068` |
 | `SystemMessage` / `ToolResultMessage` | projection structs (§3.3) | `26-D14:152` |
-| skill catalog `<system-reminder>` | `ContextForm::Catalog` message | `26 §2.3.4:878-892`; `26 §4.4` row 20 |
+| skill catalog `<system-reminder>` | `ContextForm::Catalog` message | `26 §2.3.4:878-892`; `26 part2 §4.4` (spec-20 row) |
 
 **Deliberate divergences (stated).** (a) ymh uses `std::string` and RAII handles
 where dsh uses TypeScript closures and disposers. (b) ymh's `ContextFormed` is a
@@ -871,7 +1003,7 @@ union. (c) ymh keeps replay state on the assistant settlement event, not on
 | `26-dsh-alignment-part2.md` | pinned interfaces, wave scope | reference |
 | `01-session.md` errata | provenance fields on payloads, `ContextInjected.role` default, projection bodies | **required** |
 | `08-llm-provider.md` / `28` errata | `LlmRequestHeader`, `FrozenRequest`, digest contract | verified (Wave 1) |
-| `34-assembler-replay-errata.md` | replay harness reconstruction rule | verified (Wave 2) |
+| `34-assembler-replay-errata.md` | replay harness reconstruction rule | Rev 4 written, pending re-gate (Rev 3 verified; `DESIGN_STATUS.md:51`) |
 | `07-tools-execution.md` | `ToolSchema`, `ToolRegistry::schemas()` | verified |
 | `21-config-jsonc-errata.md` errata | new prompt keys, `session.persist_prompt_text` (P2) | **required** |
 | `17-transcript` errata | provenance row kinds (`26-D14` names `17`) | **required** |
@@ -899,14 +1031,14 @@ union. (c) ymh keeps replay state on the assistant settlement event, not on
 | **36-D2** | Order tables preserve every dsh numeric value for a shared name; ymh-local names use unused gap values (`ToolGit=1050`, `ToolSkill=1800`, `ToolPlan=1900`) and never reuse a dsh value. | New | 36 |
 | **36-D3** | Persona is sections at orders 0 and 10200; the default prefix/suffix are the shipped dsh texts; `complete` is implemented now for Wave 5. | Add. | 36 |
 | **36-D4** | The instructions loader is opt-in, requires `max_bytes`, uses every-present-candidate (not first-match), drops broader files before truncating the most-specific, and appends a `<system-reminder>`-wrapped user-role message. | New | 36 |
-| **36-D5** | Runtime contexts are `PromptAssembly.contexts` with `ContextForm::Snapshot`, materialized as sourced user-role `ContextInjected`; they are never render inputs. | New | 36 |
+| **36-D5** | Runtime contexts are `PromptAssembly.contexts` with `ContextForm::Snapshot`, materialized by `AgentLoop::materializeContexts` as sourced user-role `ContextInjected` (changed-only, §2.5); they are never render inputs. | New | 36 |
 | **36-D6** | Tool presentation ships `Native` only; `Ptc`/`Both` fail loud at load; guidance sections are suppressed when the tool is restricted away. | Add. | 07, 36 |
 | **36-D7** | `SystemMessage`/`ToolResultMessage` are **projection-level** structs, not durable payloads; the durable payloads gain additive provenance fields. | Brk. (`01` struct/codec) | 01, 36 |
 | **36-D8** | `payload::ContextInjected.role` default changes `System` → `User`; explicit roles are preserved. | Brk. (default) | 01, 36 |
 | **36-D9** | `render()` is pure over registry state and session-invariant variables; clock/cwd/filesystem never enter it. | New | 36 |
 | **36-D10** | `system_prompt_digest = sha256(render())`; `template_digest` continues to include the rendered prompt; the header shape is unchanged. | Add. | 28, 36 |
 | **36-D11** | `session.persist_prompt_text` stays `false` (P2). No change to the key, its layer rule, or its semantics. | None | 21, 30 |
-| **36-D12** | `default_system_prompt()` migrates to `harness:identity` + the default persona; a non-empty `agent.system_prompt` overrides `harness:identity` only. | Brk. (text) | 36 |
+| **36-D12** | `default_system_prompt()` migrates to `harness:identity` **unchanged in wording** (ymh text kept, Q3) plus the dsh default persona; a non-empty `agent.system_prompt` overrides `harness:identity` only. | Brk. (rendered text: the persona is added) | 36 |
 | **36-D13** | The skill catalog index moves from `AgentConfig::system_prompt` to a `ContextForm::Catalog` user-role message. | Brk. (spec 20 text) | 20, 36 |
 | **36-D14** | The registry is single-threaded, owned by `WorkspaceRuntime`, called only on the agent executor thread. | New | 36 |
 | **36-D15** | `InstructionLoader` loads on first request and is not watched; nested files are discovered on a successful `read`/`write`/`edit` reaching a deeper directory. | New | 36 |
@@ -925,9 +1057,10 @@ fixtures come from `FakeLLM` runs; live tests stay opt-in (`YMH_LIVE_LLM=1`).
   scope shadowing; duplicate-name rejection; `getSectionOrder` /
   `getContextOrder` name lookup.
 - **Variables.** Strict `{{var}}`; unknown/malformed throws; lone `{{` literal;
-  substituted value not rescanned; `complete` restoration.
+  substituted value not rescanned; the default `{{model}}`/`{{cwd}}` providers
+  registered; `complete` restoration.
 - **Persona.** Prefix at 0, suffix at 10200; `complete` makes the prefix the sole
-  section; global mount rejected; `include_runtime_context = false` suppresses
+  section; empty prefix rejected; `include_runtime_context = false` suppresses
   the snapshot.
 - **Instructions.** Root discovery via `.git`; every-present-candidate order;
   `load_local` append; `max_bytes` required; broader-file drop before
@@ -940,7 +1073,7 @@ fixtures come from `FakeLLM` runs; live tests stay opt-in (`YMH_LIVE_LLM=1`).
   gating; projection carries source/context; `ContextInjected` default role.
 - **Tool presentation.** `Native` only; `Ptc`/`Both` load failure; `tool_order`
   validation; guidance suppression on restriction.
-- **Identity migration.** Empty `agent.system_prompt` → shipped identity +
+- **Identity migration.** Empty `agent.system_prompt` → ymh's shipped identity +
   persona; non-empty → override only; no other section changes.
 
 ### 11.2 Golden rendered-prompt hashes
@@ -963,7 +1096,8 @@ Each fixture is generated by `FakeLLM` and checked in under
 the wire bytes.
 
 **Negative goldens:** duplicate section name; more than one `complete`; unknown
-`{{var}}`; missing/duplicated `<unlisted-tools>`; unknown `tool_order` name.
+`{{var}}`; a non-empty `tool_order` missing or duplicating
+`<unlisted-tools>`; unknown `tool_order` name.
 Each must fail `assemble()`/`render_prompt` with the specific error.
 
 ### 11.3 Digest and replay tests
@@ -1008,7 +1142,7 @@ Every `36-F*` maps to at least one test above. The matrix is:
 | 36-F3 | 11.2 negative (`>1 complete`) |
 | 36-F4 | 11.2 negative (unknown var) |
 | 36-F5 | 11.2 negative (`tool_order`) |
-| 36-F6 | 11.1 persona (global mount) |
+| 36-F6 | 11.1 persona (empty prefix) |
 | 36-F7 | 11.1 instructions (budget) |
 | 36-F8 | 11.4 replay with instructions |
 | 36-F9 | 11.2 `prompt_instructions_on` hash equals default |
@@ -1034,12 +1168,18 @@ Every `36-F*` maps to at least one test above. The matrix is:
   the tool result is already a durable payload. If the `01` errata instead
   introduces them as durable payloads, this spec's §3.3 must be re-cut. Recorded
   as an interpretation, not a contradiction.
-- **Q3 (identity text).** `26-D5` says the default persona mirrors dsh's shipped
-  text and Wave 3 migrates `default_system_prompt()`. This spec retires the ymh
-  text in favour of the dsh identity plus persona. The ymh-specific guidance
-  ("prefer reading files before editing") is covered by the `tool:read` /
-  `tool:write` guidance sections. If the user wants the ymh identity text kept,
-  it becomes a `harness:identity` override, not a registry change.
+- **Q3 (identity text, OPEN).** `26-D5` says the default persona mirrors dsh's
+  shipped text and Wave 3 migrates `default_system_prompt()`.
+  `26-dsh-alignment-part2.md:1588-1595` records the recommendation to **keep
+  ymh's identity wording** and copy dsh's structure and tool guidance; this spec
+  follows that: `harness:identity` keeps the `default_system_prompt()` text
+  (`src/cli/wiring.cpp:48-52`) and only the persona prefix/suffix are copied from
+  dsh. The alternative, switching `harness:identity` to the literal dsh sentence
+  ("You are an AI agent powered by DeepSeek Harness.",
+  `26-dsh-alignment.md:798-802`), is a one-line change if the user prefers it;
+  it is recorded here rather than reversed silently. The ymh-specific guidance
+  ("prefer reading files before editing") stays in the identity text; the
+  `tool:read` / `tool:write` guidance sections are additive.
 - **Q4 (`ToolGit` / `ToolPlan` orders).** dsh has no git or plan-tool guidance
   sections, so `1050` and `1900` are ymh-local allocations in dsh gaps. If dsh
   later allocates those values, ymh must move its local orders, which is a
@@ -1057,12 +1197,17 @@ Every `36-F*` maps to at least one test above. The matrix is:
   key is `max_bytes`; this spec treats both as UTF-8 byte counts, matching the
   existing size parsing in `src/config/config.cpp`. If a later spec pins code
   points, the marker text changes with it.
+- **Q8 (scoped replay).** Wave 3 has one layer, so replay reconstructs the
+  canonical `AssembleContext{}` and records no scope (§4.2). If Wave 5 adds
+  scoped registrations, `LlmRequestHeader` must gain a durable scope id so replay
+  can reconstruct a scoped assembly; that is a Wave-5 erratum, not a Wave-3
+  change.
 
 ---
 
 ## 13. References
 
-- `docs/design/26-dsh-alignment.md` §1.2, §2.3 (prompt system), §3.2, §4.4.
+- `docs/design/26-dsh-alignment.md` §1.2, §2.3 (prompt system), §3.2.
 - `docs/design/26-dsh-alignment-part2.md` §4.1 (principles), §4.2 (register),
   §4.3.3 (registry), §4.3.10 (provenance), §4.4, §4.5, §4.9, §5 (waves), §5.2.
 - `docs/design/01-session.md` §4.4, §4.5, §6.3, §14.
@@ -1084,4 +1229,5 @@ Every `36-F*` maps to at least one test above. The matrix is:
 | Rev | Date | Change |
 |---|---|---|
 | 1 | 2026-09-19 | Initial owning spec for Wave 3. Re-numbers the reserved `27-system-prompt.md` to 36 because 27-35 are taken. Pins the registry, order tables, persona, instructions loader, runtime contexts, tool presentation, provenance, identity migration, and the digest/replay contract. |
+| 2 | 2026-09-19 | Gate fixes (1 HIGH / 7 MEDIUM / 5 LOW). Pin the runtime-context producer/caller/timing and reconcile §2.1/§2.5/§2.7; keep ymh's `harness:identity` text as the default and record the dsh sentence as Q3 (per `26 part2 §6:1588-1595`); match the pinned `Message.tool_call_id` type; register the `{{model}}`/`{{cwd}}` providers; drop the inapplicable global-persona-mount rule and repoint `36-F6` to the empty-prefix load failure; pin `SystemMessage`/`ToolResultMessage` producers/consumers and the `17` errata obligation; pin `tool_order` semantics and its consumer; pin the recorded/reconstructed `AssembleContext` (Q8); reconcile the `agent.system_prompt` Brk. classification; add `TOOL_PWSH=1010`; correct the `26 part2 §4.4` and `34` citations; drop the stale `prompt.persona.enabled` phrasing; enumerate the applicable shared findings in §7.1. |
 
