@@ -214,6 +214,47 @@ std::vector<pid_t> host_processes_under_root(const std::filesystem::path& root) 
     return pids;
 }
 
+// SIGSTOP is delivered asynchronously: `kill` returns once the stop signal is
+// queued, before the target reaches the group-stop state. A probe issued right
+// after `kill` can therefore still observe a fully responsive daemon. Wait for
+// the real precondition — every thread of the target reporting the kernel's
+// stopped state ('T'/'t') in `/proc/<pid>/task/<tid>/stat` — so the assertions
+// run against a genuinely stopped process. This is a condition wait, not a
+// fixed sleep.
+bool wait_until_process_stopped(pid_t pid, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        std::error_code                    error;
+        std::filesystem::directory_iterator threads{
+            "/proc/" + std::to_string(pid) + "/task", error};
+        bool any_thread  = false;
+        bool all_stopped = true;
+        if (!error) {
+            for (const std::filesystem::directory_entry& entry : threads) {
+                any_thread = true;
+                std::ifstream state_file(entry.path() / "stat");
+                std::string   line;
+                std::getline(state_file, line);
+                const std::size_t name_end = line.rfind(')');
+                const bool        readable = name_end != std::string::npos &&
+                                             name_end + 2 < line.size();
+                const char state = readable ? line[name_end + 2] : '\0';
+                if (state != 'T' && state != 't') {
+                    all_stopped = false;
+                    break;
+                }
+            }
+        }
+        if (any_thread && all_stopped) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+}
+
 class DaemonGuard {
 public:
     explicit DaemonGuard(std::string workspace_id) : workspace_id_(std::move(workspace_id)) {}
@@ -912,6 +953,8 @@ TEST_F(TwoProcess, SigstopNeverStolen) {
     const pid_t daemon_pid = harness.pid();
     ASSERT_GT(daemon_pid, 0);
     ASSERT_EQ(::kill(daemon_pid, SIGSTOP), 0);
+    ASSERT_TRUE(wait_until_process_stopped(daemon_pid, 30s))
+        << "the daemon never reached the stopped state";
 
     std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config);
     EXPECT_EQ(registry->probeLiveness(WorkspaceId{workspace_id}), HostLiveness::Live);

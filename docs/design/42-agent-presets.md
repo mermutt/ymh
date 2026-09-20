@@ -1,7 +1,7 @@
 # 42 — Agent Presets (Wave 5)
 
 ```
-Status: Rev 2 written · verified: — · reviewer: —
+Status: Rev 3 written · verified: — · reviewer: —
 Authority: owning spec for `26-dsh-alignment-part2.md` §5 Wave 5 (decisions
            `26-D16`, `26-D17`). The reserved filename `29-agent-presets.md`
            named in `26-dsh-alignment-part2.md` §5 Stage B (line 1394) is
@@ -137,8 +137,9 @@ supplies the missing composition seam.
 6. **`apply_child_composition`** and `ChildComposition`.
 7. The **depth limit** (`presets.max_depth`, default 3; 0 forbids delegation;
    carried on `PresetConfig` — 42-D18).
-8. The **fixed delegation scope** (fixed approval policy plus the fixed
-   runtime-context statement).
+8. The **fixed delegation scope** (fixed execution root plus the fixed
+   runtime-context statement; the approval-`never` clause is dsh-pinned but its
+   enforcement seam is open — OQ-6, §12).
 9. The **session header preset id**, the `23` contract break.
 10. The `presets.*` config keys (`26-dsh-alignment-part2.md:1320-1323`) plus
     the Wave-5 `presets.max_depth` key (42-D18).
@@ -742,10 +743,20 @@ Rules (42-I6, 42-D8, 42-D18):
 A delegated child receives, at composition time, a scope that **cannot be
 widened from inside** (`26-I8`: "A child's scope is fixed and non-widenable"):
 
-- **Approval policy `never`.** The child's permission policy is fixed to the
-  deny-requiring-approval behavior (`26-dsh-alignment.md:1095`). An operation
-  that would need approval is rejected automatically; the child cannot retry
-  its way to a grant.
+- **Approval policy `never` (target behavior; enforcement seam unassigned —
+  OQ-6).** The dsh-pinned target is the deny-requiring-approval behavior: an
+  operation that would need approval is rejected automatically and the child
+  cannot retry its way to a grant (`26-dsh-alignment.md:1095`). ymh's v1
+  permission model, however, is host-wide: one `PermissionPolicy` and one
+  `PermissionGate` per daemon (`09-permissions.md` §3.1; `09` §10 records "no
+  permission delegation to subagents beyond their own policy" among the
+  accepted v1 omissions), and no pinned interface carries a per-session or
+  per-child approval override (`include/ymh/policy/permission_policy.hpp:120-133`;
+  `include/ymh/agent/agent_loop.hpp:57-58`; `SessionOptions` has no approval
+  field). This spec therefore does **not** pin an enforcement seam for this
+  clause; the requirement and its alternatives are recorded as **OQ-6** (§12).
+  Until a `09` errata pins the seam, Wave-5 code must not claim to enforce
+  approval-`never`.
 - **Fixed sandbox/execution scope.** The child's `ExecutionEnvironment` root is
   the same workspace root as the parent's, resolved once through
   `ExecutionEnvironment::resolve()` (`AGENTS.md` path-safety rule). The child
@@ -965,10 +976,13 @@ spec.
   spawn `parent + 1`, fork inherits. It never decreases. Delegation is refused
   when the child depth would exceed `max_depth`; `max_depth == 0` forbids
   delegation. Guard: the pre-flight in §3.4 and the persisted value (42-F6).
-- **42-I7 (fixed delegation scope).** A child's permission scope is fixed
-  (approval `never`), its execution root is the parent's workspace root, and
-  the fixed delegation statement is present in its rendered prompt. A child can
-  only **narrow** a tool restriction, never widen it (`26-I8`). Guard: the
+- **42-I7 (fixed delegation scope).** A child's execution root is the parent's
+  workspace root, the fixed delegation statement is present in its rendered
+  prompt, and a child can only **narrow** a tool restriction, never widen it
+  (`26-I8`). The approval-`never` clause is the dsh-pinned target but has **no
+  assigned enforcement seam** in ymh's host-wide v1 permission model
+  (OQ-6, §12); until a `09` errata pins it, this invariant is asserted only for
+  the execution root, the statement, and the narrowing rule. Guard: the
   intersection rule in §3.3 and the statement registration (42-F7).
 - **42-I8 (deterministic composition).** Two mounts of the same preset with
   identical inputs register identical sections/tools/skills. Rows sort
@@ -1033,9 +1047,10 @@ instance of.
   over-depth delegation, depth is persisted and never decreases. Instance of
   F7, F11.
 - **42-F7: child widens its scope.** A child retries a denied operation, or
-  acquires an approval the parent did not have. **Guard:** 42-I7; approval is
-  fixed to `never`, the execution root is fixed, the delegation statement is
-  present, and tool restrictions only narrow (`26-I8`). Instance of F9.
+  acquires an approval the parent did not have. **Guard:** 42-I7; the execution
+  root is fixed, the delegation statement is present, and tool restrictions
+  only narrow (`26-I8`). The approval-`never` half of the guard is not yet
+  seamed (OQ-6, §12). Instance of F9.
 - **42-F8: duplicate or unknown preset row.** Two roots define the same preset
   id, or a preset file carries an unknown key / a missing or duplicate
   `rows[].id`, and the loader silently keeps one. **Guard:** 42-I8 and the
@@ -1088,7 +1103,7 @@ instance of.
 | `apply_child_composition` | `applyChildComposition` (`dsh-subagent/lib/types/child-agent.d.ts:84-106`; `26-dsh-alignment.md:1070-1077`) | one call; join + persona + filter; roster member (42-D15) |
 | `ChildComposition` | dsh `ChildComposition { persona?, toolFilter? }` (`26-dsh-alignment.md:1073-1076`) | identical shape |
 | `max_depth` | `maxDepth` (default 3; 0 forbids) (`26-dsh-alignment.md:1094`) | 42-I6, 42-D18; ymh key `presets.max_depth` |
-| fixed delegation scope | `approvalPolicy: 'never'` + fixed runtime statement (`26-dsh-alignment.md:1095-1101`) | source wording is authoritative |
+| fixed delegation scope | `approvalPolicy: 'never'` + fixed runtime statement (`26-dsh-alignment.md:1095-1101`) | statement wording authoritative; approval enforcement seam open (OQ-6, §12) |
 | child skill inheritance | D17 (`26-dsh-alignment-part2.md:1085`) | via the join; no separate field |
 | `SessionHeader.agent_preset` | creation header names the start preset (`26-dsh-alignment.md:1056-1057`) | the `23` break; typed field persisted as a `metadata` reserved key (42-D19) |
 
@@ -1158,7 +1173,7 @@ contract is pinned in `43`, not merely referenced here.
 | 42-D6 | **`agent_preset/selected` only; no `tools/change`.** The next `LlmRequestHeader` records the catalog change. | New | `26-D2`/`26-I6`; avoids two sources of truth. |
 | 42-D7 | **`apply_child_composition` is atomic** and reads the parent's live chain. | New | `26-F9` (`:1141-1142`), `26-dsh-alignment.md:1080-1089`. |
 | 42-D8 | **Depth is monotone**: root 0, spawn parent+1, fork inherits; default `max_depth` 3; 0 forbids. | Add. | `26-dsh-alignment.md:1094`; `26 §4.4` (`:1089`). |
-| 42-D9 | **Fixed delegation scope**: approval `never`, fixed execution root, and the verbatim source statement as a leaf-scoped runtime context. | New | `26-I8`, `26-dsh-alignment.md:1095-1105`. |
+| 42-D9 | **Fixed delegation scope**: fixed execution root and the verbatim source statement as a leaf-scoped runtime context. The approval-`never` clause is the dsh-pinned target but its enforcement seam is **open** (OQ-6, §12): ymh's v1 permission model is host-wide, so no seam is pinned here. | New (partial) | `26-I8`, `26-dsh-alignment.md:1095-1105`; `09-permissions.md` §3.1/§10. |
 | 42-D10 | **Tools are selected by a scope-scoped `ToolRestriction` over the host registry**, not by preset-owned registrations. | New | `26-dsh-alignment.md:1000-1003`, `:1013-1015`. |
 | 42-D11 | **Children inherit the parent's skill set** via the join; no child skill field. | Add. | D17 (`26-dsh-alignment-part2.md:1085`). |
 | 42-D12 | **`presets.root`/`default`/`include_shipped_root`/`include_user_root`** are the config surface. | Add. (`21`) | `26 §4.9` (`:1320-1323`). |
@@ -1219,8 +1234,9 @@ no live LLM is required.
    filter) and the child's rendered prompt contains the parent's standing
    sections (42-I5, 42-F3).
 2. **Fixed delegation statement.** The child's first request's rendered prompt
-   contains the verbatim statement from §3.5; the child's approval path rejects
-   an approval-requiring operation without a grant (42-I7, 42-F7).
+   contains the verbatim statement from §3.5; the execution root matches the
+   parent's (42-I7). The approval-`never` assertion is **deferred** until its
+   seam is pinned (OQ-6, §12); no Wave-5 test asserts it.
 3. **Switch while blank.** Create a session, `select` a second preset, then
    prompt: the `LlmRequestHeader` reflects the second preset's tool set, and the
    log carries one `agent_preset/selected` before the header (42-I9).
@@ -1265,7 +1281,7 @@ no live LLM is required.
 | 42-F4 | 11.1(8), 11.2(4) |
 | 42-F5 | 11.2(5) |
 | 42-F6 | 11.1(10), 11.2(6) |
-| 42-F7 | 11.2(2) |
+| 42-F7 | 11.2(2) (approval-`never` half deferred, OQ-6) |
 | 42-F8 | 11.1(2), 11.1(12) |
 | 42-F9 | 11.3(1) |
 | 42-F10 | 11.1(5) |
@@ -1282,6 +1298,8 @@ no live LLM is required.
 Rev 2 resolves the five questions Rev 1 recorded. Each is now pinned; the
 resolution and the rejected alternative are stated so the decision is auditable.
 None is silently resolved: the rejected alternative is named in each case.
+Rev 3 adds one question that is **not** resolved: OQ-6 (the fixed-delegation-
+scope approval-`never` seam), a permission-model decision owned by `09`.
 
 - **OQ-1 (resolved by 42-D19, §4.3): typed field + reserved-key encoding.**
   `SessionHeader.agent_preset`/`depth` are typed C++ fields (so `26 §4.4` /
@@ -1312,6 +1330,50 @@ None is silently resolved: the rejected alternative is named in each case.
   `preset.jsonc` format, the row vocabulary, and the loader validation are
   pinned by this spec; the loader is the roster's. `21`'s errata owns only the
   `presets.*` config keys (PR-3), not the preset-file vocabulary.
+
+**Open (not resolved).**
+
+- **OQ-6 (open): the fixed-delegation-scope approval-`never` seam.** `26`/dsh
+  fix a child's approval policy to `never` (`26-dsh-alignment.md:1095`), and
+  §3.5 / 42-I7 / 42-D9 require it, but ymh's v1 permission model has no
+  per-session or per-child approval axis. The model is host-wide: a single
+  `PermissionPolicy` (`include/ymh/policy/permission_policy.hpp:120-133`) and a
+  single `PermissionGate` per daemon (`:195-201`; constructed once in
+  `src/agent/workspace_runtime.cpp:183`), with `AgentServices.policy`/`.gate`
+  shared by every agent (`include/ymh/agent/agent_loop.hpp:57-58`);
+  `SessionOptions` (`include/ymh/session/session_manager.hpp:29-40`) has no
+  approval field, and `apply_child_composition` (§3.3) registers only
+  prompt/tool scope rows, which the policy never consults. `09` §10 lists "no
+  permission delegation to subagents beyond their own policy" among the accepted
+  v1 omissions. This is a permission-model decision, not a Wave-5 linkage gap:
+  it would amend `09-permissions.md`, which spec 42 does not list as amended.
+  Alternatives:
+
+  1. **Per-child decorated policy + per-child gate.** A `PermissionPolicy`
+     decorator mapping `Ask` to `Deny`, installed for the child's loop, with a
+     per-child `PermissionGate` so the shared gate's attention/decision hooks
+     cannot cross agents. *For:* matches dsh's per-child `approvalPolicy`; no
+     change to the `PermissionPolicy` interface. *Against:* introduces a second
+     gate construction path (attention/decision hooks, broker wiring), and
+     concurrent parent/child hook races on the shared gate must be resolved;
+     needs a `09` errata.
+  2. **Session-aware gate.** `PermissionGate::resolve` consults a per-session
+     approval override (the `PermissionRequest.session` is already carried).
+     *For:* one gate, no new construction path; the request already carries the
+     session. *Against:* widens the gate's contract and needs a per-session
+     override store; needs a `09` errata.
+  3. **Loop-level fixed-scope flag.** `SessionOptions`/`SessionHeader` carries a
+     fixed-scope bit; the loop maps `Ask` to `Deny` before the resolver/gate.
+     *For:* no change to `PermissionPolicy`/`PermissionGate`. *Against:* adds a
+     session-layer field whose type has no clean home without a layering
+     inversion, and it bypasses the gate's durable-decision path.
+  4. **Do not enforce; record the divergence.** Treat approval-`never` as
+     dsh-only. *For:* zero permission-model change. *Against:* contradicts
+     `26-I8`/42-I7 as written and weakens the child non-widening guarantee.
+
+  Until this is resolved, §3.5 / 42-I7 / 42-D9 assert the execution-root,
+  statement, and narrowing parts only; the approval-`never` part is **not
+  enforced and not tested** (see §11.2(2)).
 
 ---
 
@@ -1385,5 +1447,6 @@ None is silently resolved: the rejected alternative is named in each case.
 
 | Rev | Date | Change |
 |---|---|---|
+| Rev 3 | 2026-09-20 | Resolves the re-gate residual MEDIUM: the fixed-delegation-scope approval-`never` had no assigned seam. **Not a seam pin:** ymh's v1 permission model is host-wide (`09-permissions.md` §3.1, §10; one `PermissionPolicy`/`PermissionGate` per daemon), so §1.3(8), §3.5, 42-I7, 42-D9, and 42-F7 now assert the execution-root, fixed-statement, and narrowing parts only and record the approval-`never` enforcement as **OQ-6** (§12) with four alternatives and tradeoffs; §11.2(2) defers the approval test. Any future seam is owned by a `09` errata, not by this spec. |
 | Rev 2 | 2026-09-20 | Gate-fix rev, resolving the Rev 1 independent gate (2 HIGH / 5 MEDIUM / 4 LOW). **HIGH:** `select` gains the `SessionManager&` dependency (it must call `is_blank` and `Session::append`); the `Agent& -> AgentContext` bridge is pinned via the `AgentId -> leaf` map and `apply_child_composition` becomes a roster member (42-D15). **MEDIUM:** OQ-1 header encoding resolved (42-D19); `PresetConfig` defined and `presets.max_depth` pinned (42-D18); the `preset.jsonc` schema + loader validation pinned (42-D17); §9 rewritten as a blocking-prerequisite register whose contracts are pinned in the new `43-wave5-dependency-errata.md`; D17 continuable tools given an owner (42-D16). **LOW:** `deriveMessages` switch citation corrected to `:376`; the `29`/`36` statuses reconciled with `DESIGN_STATUS.md`; `PromptSectionSpec` pinned and the declaration order fixed. All five Rev-1 open questions resolved in §12. |
 | Rev 1 | 2026-09-20 | Initial pin. Wave-5 owning spec, numbered 42 because the reserved `29-agent-presets.md` name is taken. Pins the roster, standing mount plus joined scopes, blank-session-only switch, `agent_preset/selected`, `apply_child_composition`, depth, fixed delegation scope, and the `SessionHeader.agent_preset` field. Five open questions recorded; none silently resolved. |
