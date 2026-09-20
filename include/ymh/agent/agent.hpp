@@ -71,6 +71,8 @@ enum class AgentErrorCode : std::uint8_t {
     ProviderFailed,
     Cancelled,
     Internal,
+    // 42 §3.4 (42-I6, 42-F6): a delegation that would exceed `presets.max_depth`.
+    DelegationDepthExceeded,
 };
 
 struct AgentError {

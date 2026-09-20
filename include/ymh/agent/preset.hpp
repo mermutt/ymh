@@ -7,9 +7,11 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -19,6 +21,7 @@ namespace ymh {
 
 class Session;
 class SessionManager;
+class ScopeHandle;
 class SystemPrompt;
 class ToolRegistry;
 class SkillCatalog;
@@ -104,13 +107,36 @@ public:
     using PresetError::PresetError;
 };
 
-// 42 §3.3: defined with the child-composition slice.
-struct ChildComposition;
+// 42 §3.3 (26 §4.3.8): the child's own shadowing rows. The join is implied by
+// `apply_child_composition`; "child with no join" is unrepresentable (26-F9).
+struct ChildComposition {
+    std::optional<std::string>     persona;
+    std::optional<ToolRestriction> tool_filter;
+};
+
+// 42 §3.5: the fixed delegation statement, verbatim from the authoritative
+// source (dsh-subagent/lib/index.js:519, quoted at 26-dsh-alignment.md:1099-1101).
+inline constexpr std::string_view kDelegationScopeStatement =
+    "You are a delegated subagent: your permission scope was fixed when you were "
+    "started and cannot be widened from inside this session \u2014 operations that "
+    "require approval are rejected automatically. When the task needs access beyond "
+    "that scope, do not retry the denied operation; state the limitation in your "
+    "reply so the delegating agent can handle it.";
+
+// 42 §3.5 / 36 §2.2: the canonical name for the leaf-scoped delegation context.
+inline constexpr std::string_view kDelegationContextName = "subagent:delegation";
+
+// 42 §3.4 (42-I6, 42-D8, 42-D18): the delegation tool's pre-flight. Returns
+// nullopt when delegation is allowed; a value refuses it. `max_depth == 0`
+// forbids delegation entirely. Depth is `parent_depth + 1`; a fork inherits.
+[[nodiscard]] std::optional<AgentError> check_delegation_depth(std::uint32_t parent_depth,
+                                                               std::uint32_t max_depth);
 
 class AgentPresetRoster {
 public:
     AgentPresetRoster(SystemPrompt& prompt, ToolRegistry& tools, SkillCatalog& skills,
                       SessionManager& sessions, PresetConfig config);
+    ~AgentPresetRoster();
 
     AgentPresetRoster(const AgentPresetRoster&) = delete;
     AgentPresetRoster& operator=(const AgentPresetRoster&) = delete;
@@ -121,11 +147,14 @@ public:
 
     [[nodiscard]] ScopeKey standing_key_for(std::optional<std::string> id) const;
 
-    // Records the agent's live leaf; the joined scope chain lands with the
-    // standing-mount slice.
+    // 42 §3.2/§2.2: mount the preset once (idempotent), register its rows into
+    // the standing scope, then join the agent's leaf to that standing mount and
+    // record it. A second call for the same id registers nothing twice (42-I1).
     void mount(AgentContext& ctx, std::optional<std::string> id);
 
-    // Child composition: later slice.
+    // 42 §3.3: parent the child leaf to the parent's live chain and record it;
+    // returns the preset id for the session header. Reads the parent's live leaf,
+    // never a header-derived scope (42-F10).
     [[nodiscard]] std::string compose_from(AgentContext& child, AgentContext& parent);
 
     [[nodiscard]] std::string composed_preset(const AgentContext& ctx) const;
@@ -137,7 +166,10 @@ public:
     // Blank-session-only switch; appends `agent_preset/selected` after commit.
     void select(Agent& agent, const std::string& preset);
 
-    // Child composition: later slice.
+    // 42 §3.3: one call — join the parent's live chain, then apply the child's
+    // delegation statement, persona shadow, and narrowing tool filter. A child
+    // composed without the join is unrepresentable (42-I5, 26-F9). Throws
+    // UnknownAgent when the parent is unmounted (42-F15).
     void apply_child_composition(AgentContext& child, Agent& parent,
                                  const ChildComposition& composition);
 
@@ -147,12 +179,25 @@ private:
     void                                        ensure_loaded() const;
     [[nodiscard]] std::vector<std::filesystem::path> roots() const;
 
+    // Create the standing mount for `preset` on first use (42-I1) and register
+    // its rows into it.
+    void ensure_standing(const AgentPreset& preset);
+    void register_preset_rows(const AgentPreset& preset, ScopeHandle& scope);
+
+    // The standing mount a live leaf is parented to; empty when the leaf has no
+    // preset ancestor (the global layer only).
+    [[nodiscard]] ScopeKey standing_for_leaf(const ScopeKey& leaf) const;
+
     // The discovered presets (the pinned `resolve` returns a reference, so the
     // roster must own them).
     mutable std::vector<AgentPreset>              presets_;
     mutable bool                                  loaded_ = false;
     std::unordered_map<std::string, ScopeKey>     standing_;
     std::unordered_map<std::string, AgentContext> leaves_;
+    // The RAII scope handles the standing mounts and per-session leaves live
+    // under; destroying one unwinds its registrations (42 §3.2).
+    std::unordered_map<std::string, std::unique_ptr<ScopeHandle>> standing_handles_;
+    std::unordered_map<std::string, std::unique_ptr<ScopeHandle>> leaf_handles_;
     SystemPrompt&                                 prompt_;
     ToolRegistry&                                 tools_;
     SkillCatalog&                                 skills_;
