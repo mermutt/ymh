@@ -317,8 +317,8 @@ TEST(UiRenderGolden, SlashCommandHintsRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
     ASSERT_NE(state, nullptr);
-    state->command_hints = {CommandHint{"help", "list slash commands"},
-                            CommandHint{"new", "create and activate a new session"}};
+    state->command_hints = {CommandHint{"help", "help", "list slash commands"},
+                            CommandHint{"new", "new", "create and activate a new session"}};
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
@@ -326,6 +326,20 @@ TEST(UiRenderGolden, SlashCommandHintsRendered) {
     EXPECT_NE(rendered.find("/help"), std::string::npos);
     EXPECT_NE(rendered.find("list slash commands"), std::string::npos);
     EXPECT_NE(rendered.find("/new"), std::string::npos);
+}
+
+// 45-G1 (45-D8.3): the command list row for exit renders the alias inside the
+// displayed name, separated by " - ".
+TEST(UiRenderGolden, UI45_G1_ExitRowRendersAlias) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->command_hints = {CommandHint{"exit", "exit(quit)", "quit the supervisor"}};
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("> /exit(quit) - quit the supervisor"), std::string::npos);
 }
 
 TEST(UiRenderGolden, StatusShowsTokenUsage) {
@@ -603,9 +617,9 @@ TEST(UiRenderGolden, SlashCommandCompletionSelectionHighlighted) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
     ASSERT_NE(state, nullptr);
-    state->command_hints = {CommandHint{"help", "list slash commands"},
-                            CommandHint{"new", "create and activate a new session"},
-                            CommandHint{"model", "show or set the model"}};
+    state->command_hints = {CommandHint{"help", "help", "list slash commands"},
+                            CommandHint{"new", "new", "create and activate a new session"},
+                            CommandHint{"model", "model", "show or set the model"}};
     state->command_hint_selected = 1;
 
     const std::string rendered =
@@ -624,9 +638,9 @@ TEST(UiRenderGolden, PaletteHighlightAndDraftAgreeGolden) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
     ASSERT_NE(state, nullptr);
-    state->command_hints = {CommandHint{"help", "list slash commands"},
-                            CommandHint{"skills", "list available skills"},
-                            CommandHint{"new", "create and activate a new session"}};
+    state->command_hints = {CommandHint{"help", "help", "list slash commands"},
+                            CommandHint{"skills", "skills", "list available skills"},
+                            CommandHint{"new", "new", "create and activate a new session"}};
     state->command_hint_selected = 1;
     state->input.draft = "/skills";
     state->input.cursor = state->input.draft.size();
@@ -645,8 +659,8 @@ TEST(UiRenderGolden, SlashCommandSelectionUsesThemeAccent) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
     ASSERT_NE(state, nullptr);
-    state->command_hints = {CommandHint{"help", "list slash commands"},
-                            CommandHint{"new", "create and activate a new session"}};
+    state->command_hints = {CommandHint{"help", "help", "list slash commands"},
+                            CommandHint{"new", "new", "create and activate a new session"}};
 
     const auto accent_precedes = [](const std::string& raw, const std::string& token) {
         const std::size_t pos = raw.find(token);

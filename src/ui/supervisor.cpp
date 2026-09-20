@@ -387,7 +387,6 @@ public:
             state->input.draft.clear();
             state->input.cursor = 0;
             state->input.saved_draft.clear();
-            state->input.completion.reset();
             state->command_hints.clear();
             state->command_hint_selected = 0;
             model_.dirty.mark(workspace->activeSessionId, UiDirtyFlag::Input);
@@ -1669,9 +1668,19 @@ private:
         return registry_.dispatch(line, context);
     }
 
+    // 45-D1/45-D5: the list is navigable only while visible and not Esc-dismissed.
+    bool command_list_active(const SessionUiState& state) const {
+        return !state.command_hints.empty() && !state.hints_dismissed;
+    }
+
+    // 45-D5.2: while `hints_dismissed` is set the list stays hidden; only a
+    // command-prefix edit clears the flag (handled by `handle_input`).
     void refresh_hints(SessionUiState& state) {
         state.command_hints.clear();
         state.command_hint_selected = 0;
+        if (state.hints_dismissed) {
+            return;
+        }
         const std::string& draft = state.input.draft;
         if (draft.empty() || draft.front() != '/') {
             return;
@@ -1681,68 +1690,64 @@ private:
             return;
         }
         for (const Command* command : registry_.complete(prefix)) {
-            state.command_hints.push_back(CommandHint{command->name, command->description});
+            state.command_hints.push_back(CommandHint{command->name,
+                                                      command_display_name(*command),
+                                                      command->description});
         }
     }
 
-    // 17 §5 (RB-08) + RB-16: Tab completes a bare `/prefix` to the *selected*
-    // candidate. The candidate set is frozen into a `CompletionCycle` on the
-    // first Tab; each subsequent Tab types `names[index]` and advances the
-    // selection, so repeated Tab cycles through the candidates while the list
-    // highlight follows. TabReverse (Shift+Tab) types the selected candidate and
-    // moves the selection back. A unique match completes immediately with a
-    // trailing space (the pinned RB-08 terminal case).
-    bool complete_command(SessionUiState& state, bool reverse = false) {
-        InputModel& input = state.input;
-        const std::string& draft = input.draft;
-        if (draft.empty() || draft.front() != '/' ||
-            draft.find_first_of(" \t") != std::string::npos) {
+    // 45-D1.2: ArrowUp/ArrowDown move the highlight when the list is active.
+    // Wraps modulo the list size and never mutates the draft or history.
+    bool move_hint_selection(SessionUiState& state, int delta) {
+        const std::size_t count = state.command_hints.size();
+        if (count == 0) {
             return false;
         }
-        CompletionCycle* cycle = nullptr;
-        if (input.completion.has_value() && input.completion->draft == input.draft) {
-            cycle = &*input.completion;
-        } else {
+        const std::size_t current = state.command_hint_selected % count;
+        const std::size_t next =
+            delta < 0 ? (current + count - 1) % count : (current + 1) % count;
+        state.command_hint_selected = next;
+        return true;
+    }
+
+    // 45-D2.3: Tab completes the selected command with a trailing space and
+    // clears the list; it never cycles (45-I3/I4). After Esc the list is hidden,
+    // so the matches are recomputed from the bare `/prefix` and index 0 is
+    // completed (45-D5.5).
+    bool complete_selected_command(SessionUiState& state) {
+        if (state.command_hints.empty()) {
+            const std::string& draft = state.input.draft;
+            if (draft.empty() || draft.front() != '/' ||
+                draft.find_first_of(" \t") != std::string::npos) {
+                return false;
+            }
             const std::vector<const Command*> matches = registry_.complete(draft.substr(1));
             if (matches.empty()) {
                 return false;
             }
-            if (matches.size() == 1) {
-                input.draft = "/" + matches.front()->name + " ";
-                input.cursor = input.draft.size();
-                input.completion.reset();
-                state.command_hints.clear();
-                state.command_hint_selected = 0;
-                return true;
-            }
-            CompletionCycle fresh;
-            fresh.draft = input.draft;
-            fresh.names.reserve(matches.size());
-            for (const Command* command : matches) {
-                fresh.names.push_back(command->name);
-            }
-            input.completion = std::move(fresh);
-            cycle = &*input.completion;
+            state.input.draft  = "/" + matches.front()->name + " ";
+            state.input.cursor = state.input.draft.size();
+            state.command_hint_selected = 0;
+            return true;
         }
-        const std::size_t count = cycle->names.size();
-        const std::size_t applied = cycle->index % count;
-        input.draft = "/" + cycle->names[applied];
-        input.cursor = input.draft.size();
-        cycle->draft = input.draft;
-        cycle->index = reverse ? (applied + count - 1) % count : (applied + 1) % count;
-        // 25-D8: highlight the inserted candidate (`applied`), not the advanced index.
-        state.command_hint_selected = applied;
-        set_command_hints(state, cycle->names);
+        const std::size_t count = state.command_hints.size();
+        const std::size_t index = std::min(state.command_hint_selected, count - 1);
+        state.input.draft  = "/" + state.command_hints[index].name + " ";
+        state.input.cursor = state.input.draft.size();
+        state.command_hints.clear();
+        state.command_hint_selected = 0;
         return true;
     }
 
+    // 45-D2.5: the second pinned `CommandHint` construction site.
     void set_command_hints(SessionUiState& state, const std::vector<std::string>& names) {
         state.command_hints.clear();
         for (const std::string& name : names) {
             const Command* command = registry_.find(name);
             if (command != nullptr) {
-                state.command_hints.push_back(
-                    CommandHint{command->name, command->description});
+                state.command_hints.push_back(CommandHint{command->name,
+                                                          command_display_name(*command),
+                                                          command->description});
             }
         }
     }
@@ -1954,6 +1959,17 @@ private:
         if (event.is_character() && modal_tail_suppression_active()) {
             return true;
         }
+        // 45-D5.1: Esc hides a visible command list without touching the draft.
+        if (event == ftxui::Event::Escape) {
+            if (!state->command_hints.empty()) {
+                state->hints_dismissed = true;
+                state->command_hints.clear();
+                state->command_hint_selected = 0;
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
+            return false;
+        }
         if (event == ftxui::Event::Return) {
             std::string text = input.draft;
             if (accept_highlight(*state, text)) {
@@ -1964,7 +1980,6 @@ private:
                 input.draft.clear();
                 input.cursor = 0;
                 input.saved_draft.clear();
-                input.completion.reset();
                 state->command_hints.clear();
                 state->command_hint_selected = 0;
                 model_.dirty.mark(state->id, UiDirtyFlag::Input | UiDirtyFlag::Conversation);
@@ -1974,24 +1989,22 @@ private:
             return true;
         }
         if (event == ftxui::Event::Tab) {
-            if (complete_command(*state)) {
+            if (complete_selected_command(*state)) {
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
             return false;
         }
+        // 45-D2.3: Shift+Tab is not list navigation and is not agent cycling in
+        // this slice (45-D9); it is a no-op.
         if (event == ftxui::Event::TabReverse) {
-            if (complete_command(*state, /*reverse=*/true)) {
-                model_.dirty.mark(state->id, UiDirtyFlag::Input);
-                return true;
-            }
             return false;
         }
         if (event == ftxui::Event::Backspace) {
             if (input.cursor > 0) {
                 input.draft.erase(input.cursor - 1, 1);
                 --input.cursor;
-                input.completion.reset();
+                state->hints_dismissed = false;
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
             }
@@ -1999,6 +2012,7 @@ private:
         }
         if (event == ftxui::Event::Delete) {
             if (input.delete_forward()) {
+                state->hints_dismissed = false;
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
             }
@@ -2017,6 +2031,12 @@ private:
             return true;
         }
         if (event == ftxui::Event::ArrowUp) {
+            // 45-D1.2: the command list takes precedence over history recall.
+            if (command_list_active(*state)) {
+                move_hint_selection(*state, -1);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
             if (input.history_up()) {
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
@@ -2024,6 +2044,11 @@ private:
             return true;
         }
         if (event == ftxui::Event::ArrowDown) {
+            if (command_list_active(*state)) {
+                move_hint_selection(*state, 1);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
             if (input.history_down()) {
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
@@ -2032,12 +2057,14 @@ private:
         }
         if (event == ftxui::Event::CtrlU) {
             input.clear_line();
+            state->hints_dismissed = false;
             refresh_hints(*state);
             model_.dirty.mark(state->id, UiDirtyFlag::Input);
             return true;
         }
         if (event == ftxui::Event::CtrlW) {
             if (input.delete_word()) {
+                state->hints_dismissed = false;
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
             }
@@ -2046,7 +2073,7 @@ private:
         if (event.is_character()) {
             input.draft.insert(input.cursor, event.character());
             input.cursor += event.character().size();
-            input.completion.reset();
+            state->hints_dismissed = false;
             refresh_hints(*state);
             model_.dirty.mark(state->id, UiDirtyFlag::Input);
             return true;
@@ -2450,6 +2477,12 @@ public:
         }
         if (key == "escape") {
             return app_.handle_event(ftxui::Event::Escape);
+        }
+        if (key == "backspace") {
+            return app_.handle_event(ftxui::Event::Backspace);
+        }
+        if (key == "delete") {
+            return app_.handle_event(ftxui::Event::Delete);
         }
         if (key == "tab") {
             return app_.handle_event(ftxui::Event::Tab);

@@ -67,7 +67,7 @@ public:
     // events through the real handler so the swallow contract and the
     // Enter-only resolution are exercised end to end. `key` is a single
     // printable character or one of "up", "down", "enter", "escape", "ctrl-c",
-    // "tab", "tab-reverse".
+    // "tab", "tab-reverse", "backspace", "delete".
     virtual void open_permission_dialog(const SessionId& session,
                                         const PermissionRequestId& request,
                                         std::string tool, std::string summary) = 0;

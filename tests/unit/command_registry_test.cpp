@@ -54,7 +54,7 @@ TEST(CommandRegistryTest, HelpRendersAlias) {
     for (const ConversationEntry& entry : state.conversation.entries) {
         rendered += entry.text + "\n";
     }
-    EXPECT_NE(rendered.find("/exit  quit the supervisor (alias: /quit)"), std::string::npos);
+    EXPECT_NE(rendered.find("/exit(quit) - quit the supervisor"), std::string::npos);
 }
 
 TEST(CommandRegistryTest, SkillCommandRemovedAndSkillsDescriptionPinned) {
@@ -107,6 +107,53 @@ TEST(CommandRegistryTest, PlanWithoutSessionAppendsNotice) {
     context.plan_mode = [&called](bool, const std::string&) { called = true; };
     EXPECT_TRUE(registry.dispatch("/plan", context));
     EXPECT_FALSE(called);
+}
+
+// 45-D8.1 (45-I19): the display name folds aliases into the rendered label.
+TEST(CommandRegistryTest, UI45_D8_ExitRowLiteral) {
+    const CommandRegistry registry = CommandRegistry::builtin();
+    const Command*       exit     = registry.find("exit");
+    ASSERT_NE(exit, nullptr);
+    EXPECT_EQ(command_display_name(*exit), "exit(quit)");
+    EXPECT_EQ(command_display_name(Command{"help", "list slash commands", {}, {}}), "help");
+}
+
+// 45-D8.4 (45-I19): `/quit` is an alias, never a separate command row.
+TEST(CommandRegistryTest, UI45_D8_QuitNotSeparateRow) {
+    const CommandRegistry registry = CommandRegistry::builtin();
+    for (const Command& command : registry.commands()) {
+        EXPECT_NE(command.name, "quit");
+    }
+    EXPECT_EQ(registry.find("quit"), registry.find("exit"));
+    EXPECT_TRUE(registry.complete("qu").empty());
+}
+
+// 45-D8.5: completion matches the canonical name, never the displayed alias.
+TEST(CommandRegistryTest, UI45_D8_TabCompletesCanonicalName) {
+    const CommandRegistry registry = CommandRegistry::builtin();
+    const std::vector<const Command*> matches = registry.complete("exi");
+    ASSERT_EQ(matches.size(), 1u);
+    EXPECT_EQ(matches.front()->name, "exit");
+    EXPECT_EQ(command_display_name(*matches.front()), "exit(quit)");
+    EXPECT_TRUE(registry.complete("quit").empty());
+}
+
+// 45-D8.4 (45-S3): `/help` renders the display name with the " - " separator,
+// superseding 25-D12's "(alias: /quit)" suffix.
+TEST(CommandRegistryTest, UI45_D8_HelpUsesDisplayName) {
+    CommandRegistry registry = CommandRegistry::builtin();
+    UiModel         model;
+    SessionUiState& state = attach_session(model);
+    CommandContext  context{model};
+    context.session = &state;
+
+    EXPECT_TRUE(registry.dispatch("/help", context));
+    std::string rendered;
+    for (const ConversationEntry& entry : state.conversation.entries) {
+        rendered += entry.text + "\n";
+    }
+    EXPECT_NE(rendered.find("/exit(quit) - quit the supervisor"), std::string::npos);
+    EXPECT_EQ(rendered.find("(alias:"), std::string::npos);
 }
 
 } // namespace

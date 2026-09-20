@@ -630,42 +630,230 @@ TEST(SupervisorHarnessTest, SW_U20_StopWakesParkedEnsureWorker) {
     // mutex-serialized stop wakes every parked worker promptly.
     EXPECT_LT(elapsed, 30s) << "destructor join did not wake the parked ensure worker";
 }
+// UX-U14 (25-D8/UX24) is superseded by 45-D2: Tab no longer cycles the palette,
+// it completes the selected command once (see UI45_D2_TabCompletesSelected). The
+// fixture below gives each composer test one modeled active session.
+struct ComposerFixture {
+    explicit ComposerFixture(const std::string& name)
+        : root(name), registry(WorkspaceRegistry::open(harness_registry_config(root.path()))) {
+        SupervisorRunOptions options;
+        options.registry = registry.get();
+        options.identity = harness_identity();
+        harness          = make_supervisor_harness(std::move(options));
+        harness->seed_workspace(workspace_model(workspace));
+        harness->apply_resume_success(workspace, session);
+    }
 
-// UX-U14 (25-D8/UX24): after a completion the highlight names the candidate
-// that was inserted into the draft; repeated Tab and Shift+Tab stay in sync.
-TEST(SupervisorHarnessTest, UX_U14_TabHighlightTracksInsertedDraft) {
-    ShortTempRoot root("ymh_ux_u14");
-    std::unique_ptr<WorkspaceRegistry> registry =
-        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    const SessionUiState* state() const { return harness->model().session(session); }
 
-    SupervisorRunOptions options;
-    options.registry = registry.get();
-    options.identity  = harness_identity();
+    void type(const std::string& text) {
+        for (const char character : text) {
+            ASSERT_TRUE(harness->dispatch_key(std::string(1, character)));
+        }
+    }
 
-    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-    const WorkspaceId workspace{"ws-palette"};
-    const SessionId   session{"session-palette"};
-    harness->seed_workspace(workspace_model(workspace));
-    harness->apply_resume_success(workspace, session);
+    ShortTempRoot                      root;
+    std::unique_ptr<WorkspaceRegistry> registry;
+    std::unique_ptr<SupervisorHarness> harness;
+    WorkspaceId                        workspace{"ws-palette"};
+    SessionId                          session{"session-palette"};
+};
 
-    const auto assert_synced = [&]() {
-        const SessionUiState* state = harness->model().session(session);
-        ASSERT_NE(state, nullptr);
-        ASSERT_FALSE(state->command_hints.empty());
-        const std::size_t selected =
-            std::min(state->command_hint_selected, state->command_hints.size() - 1);
-        EXPECT_EQ(state->input.draft, "/" + state->command_hints[selected].name);
-    };
+// 45-D1.1 (45-I1): history holds prompts and commands in submission order.
+TEST(SupervisorHarnessTest, UI45_D1_HistoryHoldsPromptsAndCommands) {
+    ComposerFixture fixture("ymh45d1hist");
+    fixture.type("/help");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    fixture.type("hello world");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
 
-    ASSERT_TRUE(harness->dispatch_key("/"));
-    ASSERT_TRUE(harness->dispatch_key("tab"));
-    assert_synced();
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->input.history.size(), 2u);
+    EXPECT_EQ(state->input.history[0], "/help");
+    EXPECT_EQ(state->input.history[1], "hello world");
 
-    ASSERT_TRUE(harness->dispatch_key("tab"));
-    assert_synced();
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->input.draft, "hello world");
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->input.draft, "/help");
+}
 
-    ASSERT_TRUE(harness->dispatch_key("tab-reverse"));
-    assert_synced();
+// 45-D1.2 (45-I2): the active list takes precedence over history recall.
+TEST(SupervisorHarnessTest, UI45_D1_ArrowPrecedenceListVsHistory) {
+    ComposerFixture fixture("ymh45d1prec");
+    fixture.type("hi");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    fixture.type("/");
+
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_FALSE(state->command_hints.empty());
+    const std::size_t before = state->command_hint_selected;
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->input.draft, "/");
+    EXPECT_NE(fixture.state()->command_hint_selected, before);
+    ASSERT_EQ(fixture.state()->input.history.size(), 1u);
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->input.draft, "hi");
+}
+
+// 45-D2.2 (45-I2): ArrowUp/ArrowDown move the highlight and wrap; never edit.
+TEST(SupervisorHarnessTest, UI45_D2_ArrowMovesSelection) {
+    ComposerFixture fixture("ymh45d2arr");
+    fixture.type("/");
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_GE(state->command_hints.size(), 2u);
+    EXPECT_EQ(state->command_hint_selected, 0u);
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("down"));
+    EXPECT_EQ(fixture.state()->command_hint_selected, 1u);
+    EXPECT_EQ(fixture.state()->input.draft, "/");
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->command_hint_selected, 0u);
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->command_hint_selected, state->command_hints.size() - 1);
+}
+
+// 45-D2.3 (45-I3): Tab completes the selected command with a trailing space and
+// clears the list.
+TEST(SupervisorHarnessTest, UI45_D2_TabCompletesSelected) {
+    ComposerFixture fixture("ymh45d2tab");
+    fixture.type("/");
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_GE(state->command_hints.size(), 2u);
+    ASSERT_TRUE(fixture.harness->dispatch_key("down"));
+    const std::string expected = "/" + state->command_hints[1].name + " ";
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, expected);
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+    EXPECT_EQ(fixture.state()->command_hint_selected, 0u);
+}
+
+// 45-D2.3 (45-I3): Tab is completion, not navigation; a second Tab no-ops once
+// the draft is no longer a bare `/prefix`.
+TEST(SupervisorHarnessTest, UI45_D2_TabIsNotNavigation) {
+    ComposerFixture fixture("ymh45d2tabnav");
+    fixture.type("/");
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_FALSE(state->command_hints.empty());
+    const std::string expected = "/" + state->command_hints[0].name + " ";
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, expected);
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+
+    EXPECT_FALSE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, expected);
+}
+
+// 45-D2.3/45-D5.5: after Esc the list is hidden, but Tab recomputes the matches
+// from the bare `/prefix` and completes the first one; the list stays hidden.
+TEST(SupervisorHarnessTest, UI45_D2_TabAfterEscRecomputes) {
+    ComposerFixture fixture("ymh45d2tabesc");
+    fixture.type("/exi");
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_FALSE(state->command_hints.empty());
+    EXPECT_EQ(state->command_hints.front().name, "exit");
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+    ASSERT_TRUE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, "/exit ");
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+}
+
+// 45-D2.5 (45-D8): both pinned CommandHint sites pass `{name, display,
+// description}`; completion uses `name`, rendering uses `display`.
+TEST(SupervisorHarnessTest, UI45_D2_BothCommandHintSitesPinned) {
+    ComposerFixture fixture("ymh45d2sites");
+    fixture.type("/exi");
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    ASSERT_FALSE(state->command_hints.empty());
+    const CommandHint& hint = state->command_hints.front();
+    EXPECT_EQ(hint.name, "exit");
+    EXPECT_EQ(hint.display, "exit(quit)");
+    EXPECT_EQ(hint.description, "quit the supervisor");
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, "/exit ");
+}
+
+// 45-D5.1 (45-I8): Esc hides a visible list without touching the draft.
+TEST(SupervisorHarnessTest, UI45_D5_EscHidesList) {
+    ComposerFixture fixture("ymh45d5esc");
+    fixture.type("/");
+    ASSERT_FALSE(fixture.state()->command_hints.empty());
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+    EXPECT_TRUE(fixture.state()->hints_dismissed);
+    EXPECT_EQ(fixture.state()->input.draft, "/");
+}
+
+// 45-D5.1 (45-I8): Esc never mutates the draft or cursor.
+TEST(SupervisorHarnessTest, UI45_D5_EscKeepsDraft) {
+    ComposerFixture fixture("ymh45d5draft");
+    fixture.type("/he");
+    const SessionUiState* before = fixture.state();
+    ASSERT_NE(before, nullptr);
+    const std::size_t cursor = before->input.cursor;
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_EQ(fixture.state()->input.draft, "/he");
+    EXPECT_EQ(fixture.state()->input.cursor, cursor);
+}
+
+// 45-D5.2 (45-I9): history recall after Esc does not resurrect the list.
+TEST(SupervisorHarnessTest, UI45_D5_EscSurvivesHistoryRecall) {
+    ComposerFixture fixture("ymh45d5recall");
+    fixture.type("hi");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    fixture.type("/");
+    ASSERT_FALSE(fixture.state()->command_hints.empty());
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(fixture.state()->input.draft, "hi");
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+    EXPECT_TRUE(fixture.state()->hints_dismissed);
+}
+
+// 45-D5.3: deleting the leading `/` hides the list (and clears the flag).
+TEST(SupervisorHarnessTest, UI45_D5_DeleteSlashHidesList) {
+    ComposerFixture fixture("ymh45d5del");
+    fixture.type("/");
+    ASSERT_FALSE(fixture.state()->command_hints.empty());
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("backspace"));
+    EXPECT_TRUE(fixture.state()->input.draft.empty());
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+    EXPECT_FALSE(fixture.state()->hints_dismissed);
+}
+
+// 45-D5.4: typing `/` on an empty draft re-opens the list after Esc.
+TEST(SupervisorHarnessTest, UI45_D5_SlashReopensAfterEsc) {
+    ComposerFixture fixture("ymh45d5reopen");
+    fixture.type("/");
+    ASSERT_FALSE(fixture.state()->command_hints.empty());
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_TRUE(fixture.state()->command_hints.empty());
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("backspace"));
+    EXPECT_TRUE(fixture.state()->input.draft.empty());
+    fixture.type("/");
+    EXPECT_FALSE(fixture.state()->command_hints.empty());
+    EXPECT_FALSE(fixture.state()->hints_dismissed);
 }
 
 // UX-U15 (25-D9/UX25): Enter accepts the highlighted candidate and dispatches

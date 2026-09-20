@@ -370,13 +370,13 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
     for (std::size_t index = 0; index < count; ++index) {
         const CommandHint& hint = active->command_hints[index];
         const bool on = index == selected;
-        Element name = paint(ftxui::text("/" + hint.name),
+        Element name = paint(ftxui::text("/" + hint.display),
                              on ? theme.completion_selected : ftxui::Color::Green, theme) |
                        ftxui::bold;
         rows.push_back(ftxui::hbox({
             ftxui::text(on ? "> " : "  "),
             std::move(name),
-            ftxui::text("  " + hint.description) | ftxui::dim,
+            ftxui::text(" - " + hint.description) | ftxui::dim,
         }));
     }
     return ftxui::vbox(std::move(rows));

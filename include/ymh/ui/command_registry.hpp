@@ -49,6 +49,10 @@ struct Command {
     std::vector<std::string> aliases{};   // 25-D12
 };
 
+// 45-D8: pure display-name helper. Returns `name(alias1,alias2)` when aliases
+// are present, else `name`; for `/exit` it returns "exit(quit)".
+[[nodiscard]] std::string command_display_name(const Command& command);
+
 class CommandRegistry {
 public:
     void add(Command command);

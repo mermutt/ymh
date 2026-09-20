@@ -150,21 +150,15 @@ struct ToolModel {
     [[nodiscard]] std::size_t find(const std::string& id) const;
 };
 
-// 17 §5 (RB-08): Tab-completion cycle state. Names (not Command pointers) keep
-// the model pure and pointer-free; the field is per-session (U9).
-struct CompletionCycle {
-    std::string              draft;
-    std::vector<std::string> names;
-    std::size_t              index = 0;
-};
-
+// 45-D2 (45-I4): `CompletionCycle` and `InputModel::completion` are retired.
+// Tab no longer freezes a cycle; ArrowUp/ArrowDown move the highlight and Tab
+// consumes it (45-D2).
 struct InputModel {
     std::string              draft;
     std::size_t              cursor = 0;
     std::vector<std::string> history;
     std::size_t              history_pos = 0;
     std::string              saved_draft;
-    std::optional<CompletionCycle> completion;
 
     void push_history(std::string line);
     bool history_up();
@@ -175,9 +169,12 @@ struct InputModel {
 };
 
 // One entry of the slash-command completion list, snapshotted into the model so
-// the renderer stays pure (10 §8.2 refinement).
+// the renderer stays pure (10 §8.2 refinement). 45-D8: `display` is the rendered
+// label (`name` + aliases, e.g. "exit(quit)"); `name` stays the canonical
+// completion name.
 struct CommandHint {
     std::string name;
+    std::string display;
     std::string description;
 };
 
@@ -225,10 +222,13 @@ struct SessionUiState {
     SubagentModel      subagents;
     ConversationScroll scroll;
     std::vector<CommandHint> command_hints;
-    // RB-16: index into `command_hints` of the entry the next <tab> types. The
-    // renderer paints it brighter; it is reset to 0 whenever the hint set is
-    // rebuilt and advanced by `complete_command`.
+    // 45-D2: index into `command_hints` of the entry Tab completes. The renderer
+    // paints it brighter; it is reset to 0 whenever the hint set is rebuilt and
+    // moved by ArrowUp/ArrowDown.
     std::size_t command_hint_selected = 0;
+    // 45-D5: true while the list is hidden by Esc; any command-prefix edit clears
+    // it (45-I9).
+    bool hints_dismissed = false;
     // 17 §4 (RB-02): global expand-all / collapse-all for foldable entries.
     bool expand_all_folds = false;
     // 25-D6: non-durable TPS clock start for the streaming assistant message.
