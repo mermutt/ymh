@@ -58,6 +58,9 @@ coded after it is marked **verified** here.
 
 | 39 | `39-session-persist-prompt-text-errata.md` | yes | **verified (Rev 1) — re-gate PASS (0 HIGH / 0 MEDIUM)** | gate FAIL (1 MEDIUM / 3 LOW) → fixed → re-gate PASS | 408 lines; amends `21` by reference and owns `session.persist_prompt_text` (the `[session]` section, `bool`, default `false`, global-layer-only — a workspace occurrence is a `ConfigError` — governing the session-DB full-prompt copy only, distinct from `logging.log_prompts`). Closes the ONE gap the mechanical spec-symbol catalog test found (the recorded Wave-1 design-first debt) |
 
+| 40 | `40-output-retention.md` | yes | **verified (Rev 1) — re-gate PASS (0 HIGH / 0 MEDIUM)** | gate FAIL (1 MEDIUM / 3 LOW) → fixed → re-gate PASS | 984 lines; the Wave-4 owning spec: the bounded-parallel scheduler (D10), the retention library + the `ToolResult` omission metadata (D11), the tool-result pruner (D12), the compaction trigger taxonomy (D13), the repeat-tool reminders, and retiring `clamp_tool_result` (D21). References the verified spec 32; honors the Wave-3→4 serialization (40-I16) |
+| 41 | `41-retry-executor.md` | yes | **verified (Rev 1) — re-gate PASS (0 HIGH / 0 MEDIUM)** | gate FAIL (1 MEDIUM / 4 LOW) → fixed → re-gate PASS | 1016 lines; owns the separate durable retry executor (26-I3): the placement at a durable step boundary, the policy/backoff, the `llm/retry`/`llm/retry_started` events, the settlement interaction (spec 34), the `LlmRuntime` boundary (spec 28), and the no-double-call guarantees. **Does NOT activate it** — honors `26 OQ4`; activation timing stays an open user question |
+
 ## Open top-level items (`HANDOFF.md` §5)
 
 | # | Item | Status | Resolution |
