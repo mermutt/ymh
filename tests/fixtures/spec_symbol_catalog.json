@@ -1,0 +1,1524 @@
+{
+  "schema": 1,
+  "description": "Mechanical spec-symbol catalog. Every spec-bearing code symbol in the enumerated sources must have an entry here naming the docs/design spec file and numeric section that owns it, or a gap:true marker with a reason. Enforced by tests/unit/spec_catalog_test.cpp.",
+  "entries": [
+    {
+      "symbol": "EventType::SessionStarted",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::SessionEnded",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::TurnStarted",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::TurnEnded",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::TurnCancelled",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::TurnFailed",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::StepStarted",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::StepEnded",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::UserMessage",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::AssistantChunk",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::AssistantMessage",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::AssistantAttempt",
+      "category": "event_type",
+      "spec": "29-event-family-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "EventType::ToolCall",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::ToolResult",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::PermissionDecision",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::ContextInjected",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::ContextCompaction",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::TokenUsage",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::SubagentSpawned",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::SubagentFanIn",
+      "category": "event_type",
+      "spec": "01-session.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "EventType::SessionRenamed",
+      "category": "event_type",
+      "spec": "19-session-rename-errata.md",
+      "section": "5.1"
+    },
+    {
+      "symbol": "EventType::PlanMode",
+      "category": "event_type",
+      "spec": "25-ui-ux-errata.md",
+      "section": "3.3"
+    },
+    {
+      "symbol": "EventType::LlmRequestHeader",
+      "category": "event_type",
+      "spec": "28-llm-service-boundary-errata.md",
+      "section": "5.2"
+    },
+    {
+      "symbol": "EventType::McpServerStatusChanged",
+      "category": "event_type",
+      "spec": "15-mcp-adapter.md",
+      "section": "4.7"
+    },
+    {
+      "symbol": "protocol::method::kHostHello",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::method::kHostAttach",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::method::kHostDetach",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::method::kHostStatus",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::method::kHostPing",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::method::kHostShutdown",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::method::kHostOwnership",
+      "category": "wire_method",
+      "spec": "16-daemon-ownership.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kWorkspaceList",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::method::kWorkspaceShow",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::method::kSessionList",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::method::kSessionShow",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::method::kSessionCreate",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionResume",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionFork",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionReplay",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionActivate",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionSuspend",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionCompact",
+      "category": "wire_method",
+      "spec": "13-context-compaction.md",
+      "section": "6.8"
+    },
+    {
+      "symbol": "protocol::method::kSessionClose",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionDelete",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::method::kAgentPrompt",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "protocol::method::kAgentFollowup",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "protocol::method::kAgentSteer",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "protocol::method::kAgentInject",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "protocol::method::kAgentCancel",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "protocol::method::kAgentStatus",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "protocol::method::kPermissionDecide",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "protocol::method::kEventSubscribe",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::method::kEventUnsubscribe",
+      "category": "wire_method",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::method::kSessionRename",
+      "category": "wire_method",
+      "spec": "19-session-rename-errata.md",
+      "section": "5.4"
+    },
+    {
+      "symbol": "protocol::method::kSessionSetMode",
+      "category": "wire_method",
+      "spec": "25-ui-ux-errata.md",
+      "section": "3.3"
+    },
+    {
+      "symbol": "protocol::method::kSkillsList",
+      "category": "wire_method",
+      "spec": "20-skills.md",
+      "section": "5.7"
+    },
+    {
+      "symbol": "protocol::method::kSkillsShow",
+      "category": "wire_method",
+      "spec": "20-skills.md",
+      "section": "5.7"
+    },
+    {
+      "symbol": "protocol::method::kContextShow",
+      "category": "wire_method",
+      "spec": "18-context-errata.md",
+      "section": "3.4"
+    },
+    {
+      "symbol": "protocol::notify::kEventStream",
+      "category": "wire_notification",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::notify::kEventLive",
+      "category": "wire_notification",
+      "spec": "35-live-notification-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "protocol::notify::kEventUnsubscribed",
+      "category": "wire_notification",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::notify::kPermissionRequest",
+      "category": "wire_notification",
+      "spec": "05-transport.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "protocol::notify::kHostEvent",
+      "category": "wire_notification",
+      "spec": "05-transport.md",
+      "section": "5.3"
+    },
+    {
+      "symbol": "protocol::EventCursor",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "2.1"
+    },
+    {
+      "symbol": "protocol::ClientInstanceId",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "4.4"
+    },
+    {
+      "symbol": "protocol::ClientId",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "protocol::SubscriptionId",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::WorkspaceId",
+      "category": "protocol_type",
+      "spec": "03-workspace-registry.md",
+      "section": "2.1"
+    },
+    {
+      "symbol": "protocol::HostBootId",
+      "category": "protocol_type",
+      "spec": "04-workspace-host-daemon.md",
+      "section": "2.1"
+    },
+    {
+      "symbol": "protocol::HostState",
+      "category": "protocol_type",
+      "spec": "04-workspace-host-daemon.md",
+      "section": "4.4"
+    },
+    {
+      "symbol": "protocol::HostErrorCode",
+      "category": "protocol_type",
+      "spec": "04-workspace-host-daemon.md",
+      "section": "2.2"
+    },
+    {
+      "symbol": "protocol::ClientRole",
+      "category": "protocol_type",
+      "spec": "16-daemon-ownership.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::ShutdownReason",
+      "category": "protocol_type",
+      "spec": "16-daemon-ownership.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::RequestId",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "2.1"
+    },
+    {
+      "symbol": "protocol::ServerProfile",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "6.1"
+    },
+    {
+      "symbol": "protocol::RpcCode",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "2.2"
+    },
+    {
+      "symbol": "protocol::AppCode",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "2.2"
+    },
+    {
+      "symbol": "protocol::TransportLimits",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "3.3"
+    },
+    {
+      "symbol": "protocol::SessionEnvelope",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "5.2"
+    },
+    {
+      "symbol": "protocol::HostNoticeKind",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "5.3"
+    },
+    {
+      "symbol": "protocol::HostNotice",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "5.3"
+    },
+    {
+      "symbol": "protocol::PermissionAnswer",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "protocol::PermissionScope",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "protocol::PermissionRequest",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "protocol::PermissionDecisionParams",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "protocol::HostStatus",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "protocol::HelloParams",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "4.1"
+    },
+    {
+      "symbol": "protocol::HelloResult",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "4.1"
+    },
+    {
+      "symbol": "protocol::OwnershipView",
+      "category": "protocol_type",
+      "spec": "16-daemon-ownership.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "protocol::StreamFrom",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::SubscribeParams",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::SubscribeResult",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::StreamNotification",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::LiveNotification",
+      "category": "protocol_type",
+      "spec": "35-live-notification-errata.md",
+      "section": "3.3"
+    },
+    {
+      "symbol": "protocol::UnsubscribedNotice",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "protocol::WorkspaceSummary",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::WorkspaceDetail",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::SessionSummary",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "protocol::SessionDetail",
+      "category": "protocol_type",
+      "spec": "05-transport.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "payload::SessionStarted",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::SessionEndReason",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::SessionEnded",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::TurnOrigin",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::TurnStarted",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::TurnEnded",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::TurnCancelled",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::TurnFailed",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::StepStarted",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::StepEnded",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::UserMessage",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::AssistantChunkKind",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::AssistantChunk",
+      "category": "durable_payload",
+      "spec": "29-event-family-errata.md",
+      "section": "4.2"
+    },
+    {
+      "symbol": "payload::AssistantMessage",
+      "category": "durable_payload",
+      "spec": "29-event-family-errata.md",
+      "section": "4.2"
+    },
+    {
+      "symbol": "payload::AssistantAttempt",
+      "category": "durable_payload",
+      "spec": "29-event-family-errata.md",
+      "section": "4.2"
+    },
+    {
+      "symbol": "payload::ToolCall",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::ToolResult",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::PermissionDecisionKind",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::PermissionDecision",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::ContextInjected",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::ContextCompaction",
+      "category": "durable_payload",
+      "spec": "13-context-compaction.md",
+      "section": "4.1"
+    },
+    {
+      "symbol": "payload::TokenUsage",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::SubagentSpawned",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::SubagentOutcome",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::SubagentFanIn",
+      "category": "durable_payload",
+      "spec": "01-session.md",
+      "section": "4.5"
+    },
+    {
+      "symbol": "payload::RenameOrigin",
+      "category": "durable_payload",
+      "spec": "19-session-rename-errata.md",
+      "section": "5.1"
+    },
+    {
+      "symbol": "payload::SessionRenamed",
+      "category": "durable_payload",
+      "spec": "19-session-rename-errata.md",
+      "section": "5.1"
+    },
+    {
+      "symbol": "payload::PlanMode",
+      "category": "durable_payload",
+      "spec": "25-ui-ux-errata.md",
+      "section": "3.3"
+    },
+    {
+      "symbol": "payload::LlmRequestHeader",
+      "category": "durable_payload",
+      "spec": "28-llm-service-boundary-errata.md",
+      "section": "5.2"
+    },
+    {
+      "symbol": "cli::AssistantStreamPrinter",
+      "category": "cli_contract",
+      "spec": "34-assembler-replay-errata.md",
+      "section": "15"
+    },
+    {
+      "symbol": "config::agent.compaction",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.context_window_tokens",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.enabled",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.keep_recent_turns",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.max_compactions_per_turn",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.max_summary_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.max_summary_tokens",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.min_prefix_messages",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.reserve_output_tokens",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.retry_on_context_length",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.summarizer_model",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.threshold_ratio",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction.threshold_tokens",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.compaction_threshold_tokens",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.max_steps",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.model",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.plan",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.plan.section",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.reasoning_effort",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::agent.system_prompt",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.3"
+    },
+    {
+      "symbol": "config::llm.api_key_env",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.base_url",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.connect_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.api_key_env",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.base_url",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.connect_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.idle_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.max_concurrency",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.model",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.provider",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.reasoning_effort",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.request_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.retry",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.retry.base_delay_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.retry.honor_retry_after",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.retry.jitter",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.retry.max_attempts",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.default.retry.max_delay_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.idle_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.max_concurrency",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.model",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.provider",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.reasoning_effort",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.request_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::llm.retry",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.7"
+    },
+    {
+      "symbol": "config::logging.level",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "config::logging.log_prompts",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.6"
+    },
+    {
+      "symbol": "config::mcp.allow_network_servers",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.enabled",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.handshake_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.list_max_pages",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.list_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.max_frame_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.max_inflight_calls_per_server",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.max_servers",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.ping_interval_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.reconnect_initial_backoff_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.reconnect_jitter",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.reconnect_max_attempts",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.reconnect_max_backoff_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.reconnect_stable_window_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.allowed_tools",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.args",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.call_timeout_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.command",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.cwd",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.default_verdict",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.denied_tools",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.enabled",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.env",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.header_env",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.id",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.max_result_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.protocol_version",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.required",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.transport",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.server.url",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.shutdown_grace_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp.startup_deadline_ms",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.8"
+    },
+    {
+      "symbol": "config::mcp_servers.allowed_tools",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.args",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.call_timeout_ms",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.command",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.cwd",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.default_verdict",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.denied_tools",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.enabled",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.env",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.header_env",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.headers",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.max_result_bytes",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.protocol_version",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.required",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.transport",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.type",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::mcp_servers.url",
+      "category": "config_key",
+      "spec": "25-ui-ux-errata.md",
+      "section": "8"
+    },
+    {
+      "symbol": "config::permissions.read",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "config::permissions.shell",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "config::permissions.write",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.5"
+    },
+    {
+      "symbol": "config::prompt.instructions",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.candidates",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.enabled",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.load_local",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.local_candidates",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.max_bytes",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.max_source_bytes",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::prompt.instructions.project_root_markers",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::session.persist_prompt_text",
+      "category": "config_key",
+      "gap": true,
+      "reason": "KNOWN GAP: the key ships and is read (src/config/config.cpp apply_session, config.hpp:162, agent_loop.cpp:536), but no spec section owns it. 21-config-jsonc-errata.md is the config errata and its top-level allowlist predates `session`; its \u00a73.3 'Every config key read today' does not list it. 36-prompt-registry.md \u00a74.3 explicitly declines ownership ('This spec does not touch session.persist_prompt_text'). The 21 errata that should own it was never written (the third silent design-gate failure)."
+    },
+    {
+      "symbol": "config::skills.enabled",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::skills.expose_workspace",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::skills.max_description_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::skills.max_frontmatter_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::skills.max_index_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::skills.max_skill_bytes",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::skills.max_skills",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.11"
+    },
+    {
+      "symbol": "config::tools.presentation",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::tools.tool_order",
+      "category": "config_key",
+      "spec": "36-prompt-registry.md",
+      "section": "5"
+    },
+    {
+      "symbol": "config::ui.show_activity",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "config::ui.side_panel",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "config::ui.theme",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.2"
+    },
+    {
+      "symbol": "config::workspace.root",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.4"
+    },
+    {
+      "symbol": "config::workspace.workspace_roots",
+      "category": "config_key",
+      "spec": "21-config-jsonc-errata.md",
+      "section": "7.4"
+    }
+  ]
+}
