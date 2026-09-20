@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "ymh/prompt/system_prompt.hpp"
+
 namespace ymh {
 namespace {
 
@@ -38,11 +40,18 @@ void SessionContextAssembler::set_plan_policy_provider(
     plan_policy_ = std::move(provider);
 }
 
+void SessionContextAssembler::set_system_prompt(const SystemPrompt* prompt) { prompt_ = prompt; }
+
 std::vector<Message> SessionContextAssembler::assemble(const Session& session,
                                                        const TurnContext& context) const {
     (void)context;
     std::vector<Message> messages = session.deriveMessages();
-    std::string          system_text = systemPrompt_;
+    std::string system_text;
+    if (prompt_ != nullptr) {
+        system_text = prompt_->render(AssembleContext{});
+    } else {
+        system_text = systemPrompt_;
+    }
     if (plan_policy_) {
         const std::string section = plan_policy_(session);
         if (!section.empty()) {
@@ -65,6 +74,9 @@ std::vector<Message> SessionContextAssembler::assemble(const Session& session,
 }
 
 std::vector<ToolSchema> SessionContextAssembler::tools() const {
+    if (prompt_ != nullptr) {
+        return prompt_->assemble(AssembleContext{}).tools;
+    }
     return tools_.schemas();
 }
 

@@ -12,7 +12,9 @@
 #include "support/test_env.hpp"
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
+#include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
+#include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/execution/asio_executor.hpp"
@@ -96,6 +98,40 @@ TEST_F(WorkspaceRuntimeTest, WiresStoreBusToolsLeaseAndRegistry) {
     subscription.unsubscribe();
 
     EXPECT_TRUE(runtime.releaseLease(session));
+    runtime.agents().dispose(*created);
+}
+
+TEST_F(WorkspaceRuntimeTest, RegistryRenderReachesAssembledSystemMessage) {
+    TempWorkspace workspace("runtime_prompt");
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(options_for(workspace));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    SessionOptions session_options;
+    session_options.cwd           = workspace.path();
+    session_options.serverProfile = "automation";
+    session_options.model         = "fake-model";
+    session_options.title         = "prompt test";
+    const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+    const SessionId session_id = runtime.agents().getShared(*created)->session();
+    auto            session_owner = runtime.sessions().sessionPtr(session_id);
+    Session&        session       = *session_owner;
+
+    const std::vector<Message> messages = runtime.context().assemble(session, TurnContext{});
+    ASSERT_FALSE(messages.empty());
+    ASSERT_EQ(messages.front().role, Role::System);
+    std::string text;
+    for (const ContentBlock& block : messages.front().content) {
+        text += block.text;
+    }
+    EXPECT_NE(text.find(default_system_prompt()), std::string::npos);
+    EXPECT_NE(text.find("You are a coding agent powered by the"), std::string::npos);
+    EXPECT_NE(text.find(workspace.path().string()), std::string::npos);
+    EXPECT_EQ(text.find("{{model}}"), std::string::npos);
+    EXPECT_EQ(text.find("{{cwd}}"), std::string::npos);
+
     runtime.agents().dispose(*created);
 }
 

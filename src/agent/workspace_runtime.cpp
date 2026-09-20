@@ -23,6 +23,8 @@
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/prompt/persona.hpp"
+#include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/skills/skill_catalog.hpp"
 #include "ymh/skills/skill_tool.hpp"
@@ -109,6 +111,7 @@ public:
           agent_config_(make_agent_config(config, *skill_catalog_, policy_,
                                           attach_permission_gate ||
                                               attach_permission_resolver)),
+          prompt_(),
           assembler_(tools_, agent_config_.system_prompt),
           provider_config_(std::move(provider_config)),
           pool_(governor_.caps().max_llm_concurrency),
@@ -148,6 +151,16 @@ public:
             [this](const Session& session) -> std::string {
                 return plan_mode_.active(session) ? agent_config_.plan_section : std::string{};
             });
+
+        DefaultPromptConfig prompt_config;
+        prompt_config.identity = agent_config_.system_prompt;
+        prompt_config.persona  = default_persona_config();
+        prompt_config.model    = agent_config_.model;
+        prompt_config.cwd      = root_.string();
+        default_prompt_        = register_default_prompt(prompt_, std::move(prompt_config));
+        prompt_.set_tool_provider(
+            [this](const AssembleContext&) { return tools_.schemas(); });
+        assembler_.set_system_prompt(&prompt_);
 
         services_.sessions        = &sessions_;
         services_.plan_mode       = &plan_mode_;
@@ -200,6 +213,8 @@ public:
     RulePermissionPolicy               policy_;
     PermissionGate                     gate_;
     AgentConfig                        agent_config_;
+    SystemPrompt                       prompt_;
+    DefaultPromptHandles               default_prompt_;
     SessionContextAssembler            assembler_;
     DefaultTokenEstimator              estimator_;
     LLMProviderConfig                  provider_config_;
