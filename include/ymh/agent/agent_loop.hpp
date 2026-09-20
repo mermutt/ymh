@@ -44,6 +44,7 @@ class Logger;
 class OutputSink;
 class SystemPrompt;
 class InstructionLoader;
+class AgentPresetRoster;
 struct PromptAssembly;
 
 struct AgentServices {
@@ -78,6 +79,9 @@ struct AgentServices {
     PermissionResolver    permission_resolver;
     // 25-D2: null => plan mode is unavailable; `exit_plan_mode` fails closed.
     PlanModeController*   plan_mode = nullptr;
+    // 42 §3.2 / 43 §4: the Wave-5 roster. When null, Wave-5 composition is off
+    // and the delegation path applies no composition.
+    AgentPresetRoster*    presets = nullptr;
 
     // 34-D4: monotonic source for `TimedStreamEvent.at`. Production default is
     // steady_clock::now; tests inject a deterministic reader.

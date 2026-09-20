@@ -12,6 +12,8 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/config/config.hpp"
+#include "ymh/prompt/order.hpp"
+#include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
 
@@ -250,6 +252,52 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
     return preset;
 }
 
+bool names(const std::vector<std::string>& list, const std::string& name) {
+    return std::find(list.begin(), list.end(), name) != list.end();
+}
+
+// 42 §2.1/§3.3: deny wins over allow; an empty allow admits every not-denied
+// name. Composing two restrictions this way yields their intersection, so a
+// child can only narrow (42-I7, 26-I8).
+ToolRestriction intersect_restrictions(const ToolRestriction& outer, const ToolRestriction& inner) {
+    ToolRestriction merged;
+    if (outer.allow.empty()) {
+        merged.allow = inner.allow;
+    } else if (inner.allow.empty()) {
+        merged.allow = outer.allow;
+    } else {
+        for (const std::string& name : outer.allow) {
+            if (names(inner.allow, name)) {
+                merged.allow.push_back(name);
+            }
+        }
+    }
+    merged.deny = outer.deny;
+    for (const std::string& name : inner.deny) {
+        if (!names(merged.deny, name)) {
+            merged.deny.push_back(name);
+        }
+    }
+    return merged;
+}
+
+std::function<std::vector<ToolSchema>(std::vector<ToolSchema>)> make_tool_filter(
+    ToolRestriction restriction) {
+    return [restriction = std::move(restriction)](std::vector<ToolSchema> tools) {
+        std::vector<ToolSchema> kept;
+        kept.reserve(tools.size());
+        for (ToolSchema& schema : tools) {
+            const std::string& name    = schema.name.value;
+            const bool         allowed = restriction.allow.empty() || names(restriction.allow, name);
+            const bool         denied  = names(restriction.deny, name);
+            if (allowed && !denied) {
+                kept.push_back(std::move(schema));
+            }
+        }
+        return kept;
+    };
+}
+
 } // namespace
 
 std::filesystem::path default_presets_user_root() {
@@ -355,24 +403,154 @@ ScopeKey AgentPresetRoster::standing_key_for(std::optional<std::string> id) cons
     return "preset:" + resolve(std::move(id)).id;
 }
 
+AgentPresetRoster::~AgentPresetRoster() = default;
+
+void AgentPresetRoster::ensure_standing(const AgentPreset& preset) {
+    if (standing_.count(preset.id) != 0) {
+        return;
+    }
+    const ScopeKey standing = "preset:" + preset.id;
+    auto           handle   = std::make_unique<ScopeHandle>(prompt_.scope(ScopeKey{}, standing));
+    register_preset_rows(preset, *handle);
+    standing_handles_.emplace(preset.id, std::move(handle));
+    standing_.emplace(preset.id, standing);
+}
+
+void AgentPresetRoster::register_preset_rows(const AgentPreset& preset, ScopeHandle& scope) {
+    std::optional<ToolRestriction> filter;
+    bool                           persona_prefix = false;
+    bool                           persona_suffix = false;
+    for (const PresetRow& row : preset.rows) {
+        if (row.disabled) {
+            continue;
+        }
+        for (const PromptSectionSpec& spec : row.sections) {
+            PromptSection section;
+            section.name     = spec.name;
+            section.order    = spec.order;
+            section.complete = spec.complete;
+            section.text     = [text = spec.text](const AssembleContext&) { return text; };
+            scope.add_section(std::move(section));
+        }
+        if (row.persona_prefix.has_value() && !persona_prefix) {
+            PromptSection section;
+            section.name  = "deployment:persona-prefix";
+            section.order = section_order("deployment:persona-prefix");
+            section.text =
+                [text = *row.persona_prefix](const AssembleContext&) { return text; };
+            scope.add_section(std::move(section));
+            persona_prefix = true;
+        }
+        if (row.persona_suffix.has_value() && !persona_suffix) {
+            PromptSection section;
+            section.name  = "deployment:persona-suffix";
+            section.order = section_order("deployment:persona-suffix");
+            section.text =
+                [text = *row.persona_suffix](const AssembleContext&) { return text; };
+            scope.add_section(std::move(section));
+            persona_suffix = true;
+        }
+        if (row.tool_filter.has_value()) {
+            filter = filter.has_value() ? intersect_restrictions(*filter, *row.tool_filter)
+                                        : row.tool_filter;
+        }
+    }
+    if (filter.has_value()) {
+        scope.set_tool_filter(make_tool_filter(*filter));
+    }
+}
+
 void AgentPresetRoster::mount(AgentContext& ctx, std::optional<std::string> id) {
     const AgentPreset& preset = resolve(std::move(id));
-    const ScopeKey     key    = "preset:" + preset.id;
-    standing_.emplace(preset.id, key);
-    ctx.scope                 = key;
+    ensure_standing(preset);
+
+    const ScopeKey standing = standing_[preset.id];
+    const ScopeKey leaf     = "session:" + ctx.agent.value;
+    if (leaf_handles_.count(leaf) == 0) {
+        leaf_handles_.emplace(leaf,
+                              std::make_unique<ScopeHandle>(prompt_.scope(standing, leaf)));
+    }
+    ctx.scope                = leaf;
     leaves_[ctx.agent.value] = ctx;
 }
 
 std::string AgentPresetRoster::composed_preset(const AgentContext& ctx) const {
-    constexpr std::string_view kStandingPrefix = "preset:";
-    if (ctx.scope.rfind(kStandingPrefix, 0) == 0) {
-        return ctx.scope.substr(kStandingPrefix.size());
+    const auto preset_of = [](const ScopeKey& key) -> std::string {
+        constexpr std::string_view kPrefix = "preset:";
+        if (key.rfind(kPrefix, 0) == 0) {
+            return key.substr(kPrefix.size());
+        }
+        return {};
+    };
+    if (const std::string direct = preset_of(ctx.scope); !direct.empty()) {
+        return direct;
+    }
+    if (const std::optional<ScopeKey> parent = prompt_.scope_parent(ctx.scope);
+        parent.has_value()) {
+        return preset_of(*parent);
     }
     return {};
 }
 
 const PresetConfig& AgentPresetRoster::config() const noexcept {
     return config_;
+}
+
+ScopeKey AgentPresetRoster::standing_for_leaf(const ScopeKey& leaf) const {
+    constexpr std::string_view kPrefix = "preset:";
+    if (leaf.rfind(kPrefix, 0) == 0) {
+        return leaf;
+    }
+    if (const std::optional<ScopeKey> parent = prompt_.scope_parent(leaf);
+        parent.has_value() && parent->rfind(kPrefix, 0) == 0) {
+        return *parent;
+    }
+    return {};
+}
+
+std::string AgentPresetRoster::compose_from(AgentContext& child, AgentContext& parent) {
+    const std::string preset_id = composed_preset(parent);
+    const ScopeKey    standing  = standing_for_leaf(parent.scope);
+    const ScopeKey    leaf      = "session:" + child.agent.value;
+    if (leaf_handles_.count(leaf) == 0) {
+        leaf_handles_.emplace(leaf,
+                              std::make_unique<ScopeHandle>(prompt_.scope(standing, leaf)));
+    }
+    child.scope                = leaf;
+    leaves_[child.agent.value] = child;
+    return preset_id;
+}
+
+void AgentPresetRoster::apply_child_composition(AgentContext& child, Agent& parent,
+                                                const ChildComposition& composition) {
+    AgentContext parent_ctx = leaf_for(parent.id());
+    (void)compose_from(child, parent_ctx);
+
+    const auto handle = leaf_handles_.find(child.scope);
+    if (handle == leaf_handles_.end()) {
+        throw UnknownAgent("child leaf was not registered: " + child.scope);
+    }
+    ScopeHandle& leaf = *handle->second;
+
+    PromptContext statement;
+    statement.name  = std::string{kDelegationContextName};
+    statement.order = context_order(kDelegationContextName);
+    statement.text  = [](const AssembleContext&) {
+        return std::string{kDelegationScopeStatement};
+    };
+    leaf.add_context(std::move(statement));
+
+    if (composition.persona.has_value()) {
+        PromptSection persona;
+        persona.name  = "deployment:persona-prefix";
+        persona.order = section_order("deployment:persona-prefix");
+        persona.text  = [text = *composition.persona](const AssembleContext&) { return text; };
+        leaf.add_section(std::move(persona));
+    }
+
+    if (composition.tool_filter.has_value()) {
+        leaf.set_tool_filter(make_tool_filter(*composition.tool_filter));
+    }
 }
 
 AgentContext AgentPresetRoster::leaf_for(AgentId agent) const {
@@ -404,15 +582,32 @@ bool AgentPresetRoster::is_blank(const Session& session) {
 }
 
 void AgentPresetRoster::select(Agent& agent, const std::string& preset) {
-    const AgentPreset&      target  = resolve(preset);
-    AgentContext            ctx     = leaf_for(agent.id());
+    const AgentPreset&       target  = resolve(preset);
+    AgentContext             ctx     = leaf_for(agent.id());
     std::shared_ptr<Session> session = sessions_.sessionPtr(agent.session());
     if (!is_blank(*session)) {
         throw CompositionFixed("session composition is fixed after the first message");
     }
-    ctx.scope                 = "preset:" + target.id;
+
+    ensure_standing(target);
+    const ScopeKey standing = standing_[target.id];
+    const ScopeKey leaf     = ctx.scope;
+    leaf_handles_.erase(leaf);
+    leaf_handles_.emplace(leaf, std::make_unique<ScopeHandle>(prompt_.scope(standing, leaf)));
+    ctx.scope                 = leaf;
     leaves_[agent.id().value] = ctx;
     session->append(payload::AgentPresetSelected{.agent_preset = target.id});
+}
+
+std::optional<AgentError> check_delegation_depth(std::uint32_t parent_depth,
+                                                 std::uint32_t max_depth) {
+    const std::uint32_t child_depth = parent_depth + 1;
+    if (child_depth > max_depth) {
+        return AgentError{AgentErrorCode::DelegationDepthExceeded,
+                          "delegation depth " + std::to_string(child_depth) +
+                              " exceeds presets.max_depth " + std::to_string(max_depth)};
+    }
+    return std::nullopt;
 }
 
 } // namespace ymh

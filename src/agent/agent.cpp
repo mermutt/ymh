@@ -17,6 +17,8 @@ std::string_view agent_error_code_name(AgentErrorCode code) noexcept {
         case AgentErrorCode::ProviderFailed:        return "ProviderFailed";
         case AgentErrorCode::Cancelled:             return "Cancelled";
         case AgentErrorCode::Internal:              return "Internal";
+        case AgentErrorCode::DelegationDepthExceeded:
+            return "DelegationDepthExceeded";
     }
     return "Internal";
 }

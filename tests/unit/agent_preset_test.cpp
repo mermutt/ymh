@@ -109,6 +109,65 @@ SessionId make_session(SessionManager& sessions, const std::filesystem::path& cw
     return sessions.createSession(options);
 }
 
+ToolSchema tool_schema(std::string name) {
+    ToolSchema result;
+    result.name         = ToolName{std::move(name)};
+    result.version      = ToolVersion{};
+    result.description  = "test";
+    result.input_schema = nlohmann::json::object();
+    return result;
+}
+
+std::vector<std::string> section_names(const PromptAssembly& assembly) {
+    std::vector<std::string> names;
+    for (const AssembledSection& section : assembly.sections) {
+        names.push_back(section.name);
+    }
+    return names;
+}
+
+std::vector<std::string> context_names(const PromptAssembly& assembly) {
+    std::vector<std::string> names;
+    for (const AssembledContext& context : assembly.contexts) {
+        names.push_back(context.name);
+    }
+    return names;
+}
+
+std::vector<std::string> tool_names(const PromptAssembly& assembly) {
+    std::vector<std::string> names;
+    for (const ToolSchema& schema : assembly.tools) {
+        names.push_back(schema.name.value);
+    }
+    return names;
+}
+
+std::string section_text(const PromptAssembly& assembly, const std::string& name) {
+    for (const AssembledSection& section : assembly.sections) {
+        if (section.name == name) {
+            return section.text;
+        }
+    }
+    return {};
+}
+
+std::string context_text(const PromptAssembly& assembly, const std::string& name) {
+    for (const AssembledContext& context : assembly.contexts) {
+        if (context.name == name) {
+            return context.text;
+        }
+    }
+    return {};
+}
+
+AgentContext mount_agent(AgentPresetRoster& roster, const AgentId& agent,
+                         const std::string& preset) {
+    AgentContext ctx;
+    ctx.agent = agent;
+    roster.mount(ctx, preset);
+    return ctx;
+}
+
 // ---------------------------------------------------------------------------
 // Roster: resolve / list / standing key
 // ---------------------------------------------------------------------------
@@ -517,6 +576,262 @@ TEST(PresetHeaderCodec, ReservedKeyCollisionFailsLoud) {
     store->create(header);
 
     EXPECT_THROW((void)store->load(header.id), CorruptionError);
+}
+
+// ---------------------------------------------------------------------------
+// Scope registry: the mount rule Wave 3 deferred (42 §3.2, 42-D3)
+// ---------------------------------------------------------------------------
+
+TEST(PromptScope, DuplicateAndUnknownParentFailLoud) {
+    SystemPrompt prompt;
+    ScopeHandle  standing = prompt.scope("", "preset:alpha");
+    EXPECT_THROW((void)prompt.scope("", "preset:alpha"), ConfigError);
+    EXPECT_THROW((void)prompt.scope("preset:missing", "session:x"), ConfigError);
+
+    PromptSection section;
+    section.name = "dup";
+    section.text = [](const AssembleContext&) { return std::string{"body"}; };
+    standing.add_section(section);
+    EXPECT_THROW(standing.add_section(section), ConfigError);
+}
+
+TEST(PromptScope, DestroyingAStandingScopeUnwindsItsLeaves) {
+    SystemPrompt prompt;
+    PromptSection global;
+    global.name = "global";
+    global.text = [](const AssembleContext&) { return std::string{"G"}; };
+    SectionHandle global_handle = prompt.section(global);
+    (void)global_handle;
+
+    {
+        ScopeHandle standing = prompt.scope("", "preset:alpha");
+        PromptSection section;
+        section.name = "scoped";
+        section.text = [](const AssembleContext&) { return std::string{"S"}; };
+        standing.add_section(section);
+        ScopeHandle leaf = prompt.scope("preset:alpha", "session:1");
+        EXPECT_EQ(section_names(prompt.assemble(AssembleContext{.scope = ScopeKey{"session:1"}})),
+                  (std::vector<std::string>{"global", "scoped"}));
+    }
+    EXPECT_EQ(section_names(prompt.assemble(AssembleContext{.scope = ScopeKey{"session:1"}})),
+              (std::vector<std::string>{"global"}));
+}
+
+// ---------------------------------------------------------------------------
+// The standing mount and the per-session joined scopes (42 §2.2, 42-I1/I2)
+// ---------------------------------------------------------------------------
+
+TEST(AgentPresetMount, StandingSectionsAreVisibleToJoinedLeavesOnly) {
+    RosterEnv env("preset_mount_join");
+    write_preset(env.presets_root, "alpha", R"({
+        "rows": [{"id":"r1","sections":[{"name":"alpha:section","order":10,"text":"A"}]}]
+    })");
+    write_preset(env.presets_root, "beta", R"({
+        "rows": [{"id":"r1","sections":[{"name":"beta:section","order":10,"text":"B"}]}]
+    })");
+    PresetConfig config = root_config(env.presets_root);
+    config.default_id   = "alpha";
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions, config);
+
+    const AgentContext a1 = mount_agent(roster, AgentId{"agent-a1"}, "alpha");
+    const AgentContext a2 = mount_agent(roster, AgentId{"agent-a2"}, "alpha");
+    const AgentContext b1 = mount_agent(roster, AgentId{"agent-b1"}, "beta");
+
+    EXPECT_EQ(roster.composed_preset(roster.leaf_for(AgentId{"agent-a1"})), "alpha");
+    EXPECT_NE(a1.scope, a2.scope);
+    EXPECT_EQ(section_names(env.prompt.assemble(AssembleContext{.scope = a1.scope})),
+              (std::vector<std::string>{"alpha:section"}));
+    EXPECT_EQ(section_names(env.prompt.assemble(AssembleContext{.scope = a2.scope})),
+              (std::vector<std::string>{"alpha:section"}));
+    EXPECT_EQ(section_names(env.prompt.assemble(AssembleContext{.scope = b1.scope})),
+              (std::vector<std::string>{"beta:section"}));
+}
+
+TEST(AgentPresetMount, SecondMountRegistersNothingTwice) {
+    RosterEnv env("preset_mount_idempotent");
+    write_preset(env.presets_root, "alpha", R"({
+        "rows": [{"id":"r1","sections":[{"name":"alpha:section","order":10,"text":"A"}]}]
+    })");
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions,
+                             root_config(env.presets_root));
+
+    AgentContext first = mount_agent(roster, AgentId{"agent-1"}, "alpha");
+    const std::vector<std::string> before =
+        section_names(env.prompt.assemble(AssembleContext{.scope = first.scope}));
+
+    AgentContext second = mount_agent(roster, AgentId{"agent-2"}, "alpha");
+    mount_agent(roster, AgentId{"agent-1"}, "alpha");
+    (void)second;
+
+    EXPECT_EQ(section_names(env.prompt.assemble(AssembleContext{.scope = first.scope})), before);
+    EXPECT_EQ(before, (std::vector<std::string>{"alpha:section"}));
+}
+
+TEST(AgentPresetScope, LeafShadowsStandingAndGlobal) {
+    RosterEnv env("preset_scope_shadow");
+    PromptSection global;
+    global.name  = "shared";
+    global.order = 0;
+    global.text  = [](const AssembleContext&) { return std::string{"GLOBAL"}; };
+    SectionHandle global_handle = env.prompt.section(global);
+    (void)global_handle;
+
+    write_preset(env.presets_root, "alpha", R"({
+        "rows": [
+            {"id":"r1","persona":{"prefix":"PRESET"},"sections":[{"name":"shared","order":10,"text":"PRESET"}]}
+        ]
+    })");
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions,
+                             root_config(env.presets_root));
+
+    const AgentContext leaf = mount_agent(roster, AgentId{"agent-shadow"}, "alpha");
+    const PromptAssembly assembly = env.prompt.assemble(AssembleContext{.scope = leaf.scope});
+    EXPECT_EQ(section_text(assembly, "shared"), "PRESET");
+    EXPECT_EQ(section_text(assembly, "deployment:persona-prefix"), "PRESET");
+
+    const SessionId sid = make_session(env.sessions, env.workspace.path());
+    FakeAgent       parent{AgentId{"agent-shadow"}, sid};
+    ChildComposition composition;
+    composition.persona = "CHILD";
+    AgentContext child;
+    child.agent = AgentId{"agent-shadow-child"};
+    roster.apply_child_composition(child, parent, composition);
+
+    const PromptAssembly child_assembly =
+        env.prompt.assemble(AssembleContext{.scope = child.scope});
+    EXPECT_EQ(section_text(child_assembly, "deployment:persona-prefix"), "CHILD");
+}
+
+// ---------------------------------------------------------------------------
+// The child composition (42 §3.3, 42-I5/I7, 42-F3/F15)
+// ---------------------------------------------------------------------------
+
+TEST(AgentPresetChild, JoinsParentCompositionAndFixesScope) {
+    RosterEnv env("preset_child_join");
+    env.prompt.set_tool_provider([](const AssembleContext&) {
+        return std::vector<ToolSchema>{tool_schema("read"), tool_schema("shell"),
+                                       tool_schema("grep")};
+    });
+    write_preset(env.presets_root, "alpha", R"({
+        "rows": [
+            {"id":"r1","persona":{"prefix":"PRESET"},"tools":{"allow":["read","shell"]},
+             "sections":[{"name":"alpha:section","order":10,"text":"A"}]}
+        ]
+    })");
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions,
+                             root_config(env.presets_root));
+
+    const SessionId sid = make_session(env.sessions, env.workspace.path());
+    const AgentContext parent = mount_agent(roster, AgentId{"parent-agent"}, "alpha");
+    FakeAgent           parent_agent{AgentId{"parent-agent"}, sid};
+    (void)parent;
+
+    ChildComposition composition;
+    composition.persona     = "CHILD";
+    composition.tool_filter = ToolRestriction{.allow = {"read", "shell", "grep"}, .deny = {}};
+    AgentContext child;
+    child.agent = AgentId{"child-agent"};
+    roster.apply_child_composition(child, parent_agent, composition);
+
+    EXPECT_EQ(roster.composed_preset(roster.leaf_for(AgentId{"child-agent"})), "alpha");
+    EXPECT_EQ(roster.leaf_for(AgentId{"child-agent"}).scope, child.scope);
+
+    const PromptAssembly assembly = env.prompt.assemble(AssembleContext{.scope = child.scope});
+    EXPECT_EQ(section_text(assembly, "alpha:section"), "A");
+    EXPECT_EQ(section_text(assembly, "deployment:persona-prefix"), "CHILD");
+    EXPECT_EQ(context_names(assembly), (std::vector<std::string>{"subagent:delegation"}));
+    EXPECT_EQ(context_text(assembly, "subagent:delegation"),
+              std::string{kDelegationScopeStatement});
+    EXPECT_EQ(tool_names(assembly), (std::vector<std::string>{"read", "shell"}));
+}
+
+TEST(AgentPresetChild, ToolFilterIntersectionDenyWins) {
+    RosterEnv env("preset_child_filter");
+    env.prompt.set_tool_provider([](const AssembleContext&) {
+        return std::vector<ToolSchema>{tool_schema("read"), tool_schema("shell"),
+                                       tool_schema("grep")};
+    });
+    write_preset(env.presets_root, "alpha", R"({
+        "rows": [
+            {"id":"r1","tools":{"allow":["read","shell"]}},
+            {"id":"r2","tools":{"deny":["shell"]}}
+        ]
+    })");
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions,
+                             root_config(env.presets_root));
+
+    const SessionId sid = make_session(env.sessions, env.workspace.path());
+    mount_agent(roster, AgentId{"parent-agent"}, "alpha");
+    FakeAgent parent_agent{AgentId{"parent-agent"}, sid};
+
+    ChildComposition composition;
+    composition.tool_filter = ToolRestriction{.allow = {"read", "shell", "grep"}, .deny = {}};
+    AgentContext child;
+    child.agent = AgentId{"child-agent"};
+    roster.apply_child_composition(child, parent_agent, composition);
+
+    const PromptAssembly assembly = env.prompt.assemble(AssembleContext{.scope = child.scope});
+    EXPECT_EQ(tool_names(assembly), (std::vector<std::string>{"read"}));
+}
+
+TEST(AgentPresetChild, UnmountedParentThrowsAndRegistersNoChild) {
+    RosterEnv env("preset_child_unmounted");
+    write_preset(env.presets_root, "alpha", "{}");
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions,
+                             root_config(env.presets_root));
+
+    const SessionId sid = make_session(env.sessions, env.workspace.path());
+    FakeAgent       parent_agent{AgentId{"never-mounted"}, sid};
+    AgentContext    child;
+    child.agent = AgentId{"child-agent"};
+
+    EXPECT_THROW(roster.apply_child_composition(child, parent_agent, ChildComposition{}),
+                 UnknownAgent);
+    EXPECT_THROW((void)roster.leaf_for(AgentId{"child-agent"}), UnknownAgent);
+}
+
+// ---------------------------------------------------------------------------
+// Depth and the blank-session switch over scopes (42 §3.4, 42-I6, 42-F6)
+// ---------------------------------------------------------------------------
+
+TEST(AgentPresetDepth, ChildDepthIsParentPlusOneAndMaxDepthRefuses) {
+    EXPECT_FALSE(check_delegation_depth(0, 3).has_value());
+    EXPECT_FALSE(check_delegation_depth(2, 3).has_value());
+
+    const std::optional<AgentError> at_limit = check_delegation_depth(3, 3);
+    ASSERT_TRUE(at_limit.has_value());
+    EXPECT_EQ(at_limit->code, AgentErrorCode::DelegationDepthExceeded);
+
+    const std::optional<AgentError> zero = check_delegation_depth(0, 0);
+    ASSERT_TRUE(zero.has_value());
+    EXPECT_EQ(zero->code, AgentErrorCode::DelegationDepthExceeded);
+}
+
+TEST(AgentPresetSelect, SwitchRewiresTheStandingScope) {
+    RosterEnv env("preset_select_rewire");
+    write_preset(env.presets_root, "alpha", R"({
+        "rows": [{"id":"r1","sections":[{"name":"alpha:section","order":10,"text":"A"}]}]
+    })");
+    write_preset(env.presets_root, "beta", R"({
+        "rows": [{"id":"r1","sections":[{"name":"beta:section","order":10,"text":"B"}]}]
+    })");
+    PresetConfig config = root_config(env.presets_root);
+    config.default_id   = "alpha";
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions, config);
+
+    const SessionId sid = make_session(env.sessions, env.workspace.path());
+    AgentContext    leaf = mount_agent(roster, AgentId{"agent-rewire"}, "alpha");
+    FakeAgent       agent{AgentId{"agent-rewire"}, sid};
+
+    EXPECT_EQ(section_names(env.prompt.assemble(AssembleContext{.scope = leaf.scope})),
+              (std::vector<std::string>{"alpha:section"}));
+
+    roster.select(agent, "beta");
+
+    const AgentContext live = roster.leaf_for(AgentId{"agent-rewire"});
+    EXPECT_EQ(roster.composed_preset(live), "beta");
+    EXPECT_EQ(section_names(env.prompt.assemble(AssembleContext{.scope = live.scope})),
+              (std::vector<std::string>{"beta:section"}));
 }
 
 } // namespace

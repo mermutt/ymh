@@ -1082,6 +1082,7 @@ HostRuntime::WireError HostRuntime::map_agent_error(const AgentError& error) noe
         case AgentErrorCode::ContextAssemblyFailed:
         case AgentErrorCode::CompactionFailed:
         case AgentErrorCode::ProviderFailed:
+        case AgentErrorCode::DelegationDepthExceeded:
             return {protocol::code_value(protocol::RpcCode::InternalError),
                     std::string{agent_error_code_name(error.code)}};
         case AgentErrorCode::Cancelled:
