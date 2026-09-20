@@ -265,6 +265,14 @@ struct LlmRequestHeader {
     bool                       starts_series = true;
 };
 
+// ---- agent preset (42 §5.1, 43 §1.3) ---------------------------------------
+
+// dsh agent-preset/selected. The payload carries only the preset id; the event
+// envelope owns id/timestamp (42 §5.1).
+struct AgentPresetSelected {
+    std::string agent_preset;
+};
+
 } // namespace payload
 
 // ---------------------------------------------------------------------------
@@ -362,6 +370,10 @@ struct SessionEventMap<EventType::PlanMode> {
 template <>
 struct SessionEventMap<EventType::LlmRequestHeader> {
     using type = payload::LlmRequestHeader;
+};
+template <>
+struct SessionEventMap<EventType::AgentPresetSelected> {
+    using type = payload::AgentPresetSelected;
 };
 
 // Payload type -> EventType (01 §4.4).
@@ -461,6 +473,10 @@ template <>
 struct EventTraits<payload::LlmRequestHeader> {
     static constexpr EventType type = EventType::LlmRequestHeader;
 };
+template <>
+struct EventTraits<payload::AgentPresetSelected> {
+    static constexpr EventType type = EventType::AgentPresetSelected;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -530,5 +546,7 @@ void to_json(nlohmann::json& json, const PlanMode& value);
 void from_json(const nlohmann::json& json, PlanMode& value);
 void to_json(nlohmann::json& json, const LlmRequestHeader& value);
 void from_json(const nlohmann::json& json, LlmRequestHeader& value);
+void to_json(nlohmann::json& json, const AgentPresetSelected& value);
+void from_json(const nlohmann::json& json, AgentPresetSelected& value);
 
 } // namespace ymh::payload

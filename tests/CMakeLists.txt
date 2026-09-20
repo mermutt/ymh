@@ -33,6 +33,7 @@ add_executable(ymh_tests
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp
     unit/agent_turn_executor_test.cpp
+    unit/agent_preset_test.cpp
     unit/agent_coalescer_test.cpp
     unit/compaction_test.cpp
     unit/compaction_trigger_test.cpp

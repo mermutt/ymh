@@ -33,6 +33,10 @@ struct SessionOptions {
     std::string              title;
     SessionKind              kind          = SessionKind::Root;
     std::optional<SessionId> parentSession = std::nullopt;
+    // 43 §2 (42-D8/42-D5): the creation-path copy of the delegation depth and
+    // the start preset.
+    std::uint32_t              depth = 0;
+    std::optional<std::string> agent_preset;
 };
 
 class SessionManager {
