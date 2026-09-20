@@ -164,8 +164,28 @@ private:
     CompactionOutcome         commitCompactionResult(const CompactionResult& result, TurnId turn);
     [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,
                                              TurnId turn, StepId step);
-    bool                      executeToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
     void                      flushIdleCallbacks();
+
+    // 40 §2.4: the per-call body split so the scheduler can overlap only the
+    // execution while the loop thread keeps the durable appends (40-I4).
+    struct PreparedToolCall {
+        payload::ToolCall               call;
+        payload::PermissionDecisionKind decision = payload::PermissionDecisionKind::Allow;
+        CancellationToken               token;
+        bool                            run = true;
+        payload::ToolResult             decided;
+    };
+    PreparedToolCall    prepareToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
+    payload::ToolResult runToolCall(const PreparedToolCall& plan);
+    payload::ToolResult commitToolResult(const PreparedToolCall& plan, payload::ToolResult result);
+    [[nodiscard]] ToolConcurrencyMode toolConcurrencyMode(const std::string& name) const;
+    // 40 §2.3: the serial per-call body, used for the exclusive barrier path.
+    bool executeToolCall(const ToolCallAssembled& call, TurnId turn, StepId step,
+                         payload::ToolResult* out = nullptr);
+
+    friend Task<ToolScheduleOutcome> execute_tool_calls(AgentLoop&, TurnId, StepId,
+                                                        std::vector<ToolCallAssembled>,
+                                                        CancellationToken, ContextAcceptor);
 
     AgentId                  id_;
     std::shared_ptr<Session> session_owner_;  // declared before session_ (AL1)
@@ -191,5 +211,13 @@ private:
     ToolResultPruner                    pruner_;
     RepeatToolReminder                  reminder_;
 };
+
+// 40-output-retention.md §2.3 (26-D10). Exclusive calls form barriers;
+// parallel-safe calls use a bounded rolling pool. Policy, results, and result
+// context remain model-ordered. Abort drains started calls and records synthetic
+// Cancelled results for unstarted calls so replay stays valid.
+Task<ToolScheduleOutcome> execute_tool_calls(AgentLoop&, TurnId, StepId,
+                                             std::vector<ToolCallAssembled>,
+                                             CancellationToken, ContextAcceptor);
 
 } // namespace ymh

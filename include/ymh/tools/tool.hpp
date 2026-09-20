@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/core/retention.hpp"
 #include "ymh/core/task.hpp"
 #include "ymh/execution/errors.hpp"
 #include "ymh/session/events.hpp"
@@ -22,6 +23,11 @@ namespace ymh {
 class ToolContext;
 
 using ToolResult = payload::ToolResult;
+
+// dsh's "live concurrency mode" (40-output-retention.md §2.2). Default is the
+// SAFE value: a tool that has not declared itself parallel-safe is an exclusive
+// barrier.
+enum class ToolConcurrencyMode : std::uint8_t { Exclusive, ParallelSafe };
 
 // Stable, provider-visible tool identifier. Grammar:
 // [a-z][a-z0-9_]* ( "." [a-z0-9_]+ )*
@@ -42,6 +48,7 @@ struct ToolSchema {
     std::string    description;         // model-facing; bounded (§4.4)
     nlohmann::json input_schema;        // JSON Schema object (pinned subset)
     bool           destructive{false};  // hint for the permission layer (§19)
+    ToolConcurrencyMode concurrency{ToolConcurrencyMode::Exclusive};  // 40 §2.2
 };
 
 struct ToolArguments {
@@ -76,9 +83,11 @@ void validate_input_schema(const nlohmann::json& schema);
 [[nodiscard]] bool schema_validate(const nlohmann::json& schema,
                                    const nlohmann::json& arguments);
 
-// Clamp `output` until the serialized `payload::ToolResult` fits `max_bytes`
-// (X10, E-F11). Escaping-aware: measured on the serialized JSON, not raw bytes.
-// Returns true when truncation happened.
-bool clamp_tool_result(ToolResult& result, std::size_t max_bytes);
+// Apply the Wave-4 retention cap to `result.output` (40-output-retention.md
+// §3.4). Replaces the retired clamp: `max_bytes` is the serialized
+// `payload::ToolResult` budget and the escaping-aware `TextRetainer` budget is
+// derived from it minus envelope/notice headroom (40-D6, 40-I6). Sets
+// `omitted_kind`/`omitted_count` and derives `truncated` (40-I7).
+void retain_tool_result(ToolResult& result, std::size_t max_bytes);
 
 } // namespace ymh

@@ -21,6 +21,7 @@ add_executable(ymh_tests
     unit/retention_test.cpp
     unit/repeat_tool_reminder_test.cpp
     unit/tool_result_pruner_test.cpp
+    unit/tool_scheduler_test.cpp
     unit/process_test.cpp
     unit/pty_test.cpp
     unit/registry_test.cpp

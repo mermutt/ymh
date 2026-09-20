@@ -1,7 +1,11 @@
 #include "ymh/agent/agent_loop.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <exception>
+#include <future>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -611,13 +615,16 @@ void AgentLoop::drainFoldedItems() {
     }
 }
 
-bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn, StepId step) {
-    CancellationToken turnToken;
+AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& assembled,
+                                                       TurnId turn, StepId step) {
+    PreparedToolCall   plan;
+    payload::ToolCall& call = plan.call;
+    CancellationToken  turnToken;
     {
         std::lock_guard<std::mutex> lock(control_mutex_);
         turnToken = turn_cancel_.token();
     }
-    payload::ToolCall call;
+    plan.token       = turnToken;
     call.id          = assembled.id;
     call.turn        = turn;
     call.step        = step;
@@ -626,7 +633,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
     call.requestedAt = std::chrono::system_clock::now();
     session_.append(call);
 
-    const auto reject_exit_plan = [&](std::string message) {
+    const auto reject = [&](std::string message) {
         payload::ToolResult rejected;
         rejected.id      = call.id;
         rejected.name    = call.name;
@@ -634,19 +641,20 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         rejected.output  = std::move(message);
         rejected.error   = rejected.output;
         rejected.source.call = rejected.id;
-        session_.append(rejected);
-        return false;
+        plan.run     = false;
+        plan.decided = std::move(rejected);
     };
 
     const bool plan_active =
         services_.plan_mode != nullptr && services_.plan_mode->active(session_);
     if (call.name == "exit_plan_mode") {
         if (!plan_active) {
-            return reject_exit_plan("exit_plan_mode is only valid in plan mode");
+            reject("exit_plan_mode is only valid in plan mode");
+            return plan;
         }
         if (!has_valid_plan_argument(call.arguments)) {
-            return reject_exit_plan(
-                "exit_plan_mode requires a non-empty string 'plan' argument");
+            reject("exit_plan_mode requires a non-empty string 'plan' argument");
+            return plan;
         }
     }
 
@@ -727,6 +735,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         }
     }
 
+    plan.decision = decision;
     if (decision == payload::PermissionDecisionKind::Deny) {
         payload::ToolResult denied;
         denied.id      = call.id;
@@ -735,43 +744,75 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
         denied.output  = reason.empty() ? std::string{"permission denied"} : reason;
         denied.error   = denied.output;
         denied.source.call = denied.id;
-        session_.append(denied);
-        return false;
+        plan.run     = false;
+        plan.decided = std::move(denied);
     }
+    return plan;
+}
 
+payload::ToolResult AgentLoop::runToolCall(const PreparedToolCall& plan) {
     payload::ToolResult result;
     if (services_.tools == nullptr || services_.execution == nullptr ||
         services_.logger == nullptr || services_.governor == nullptr ||
         services_.output == nullptr) {
-        result.id      = call.id;
-        result.name    = call.name;
+        result.id      = plan.call.id;
+        result.name    = plan.call.name;
         result.outcome = payload::ToolOutcome::Error;
         result.output  = "tool runtime unavailable";
         result.error   = result.output;
-        result.source.call = result.id;
-        session_.append(result);
-        return false;
+        return result;
     }
 
-    StaticPermissionHandle handle(decision);
-    ToolContext context(*services_.execution, session_, *services_.logger, turnToken,
-                        *services_.governor, *services_.output, handle, call.id, turn, step);
+    StaticPermissionHandle handle(plan.decision);
+    ToolContext context(*services_.execution, session_, *services_.logger, plan.token,
+                        *services_.governor, *services_.output, handle, plan.call.id,
+                        plan.call.turn, plan.call.step);
     try {
-        result = services_.tools->execute(call, context).get();
+        result = services_.tools->execute(plan.call, context).get();
     } catch (const std::exception& error) {
-        result.id      = call.id;
-        result.name    = call.name;
+        result.id      = plan.call.id;
+        result.name    = plan.call.name;
         result.outcome = payload::ToolOutcome::Error;
         result.output  = error.what();
         result.error   = std::string{error.what()};
     }
+    return result;
+}
+
+payload::ToolResult AgentLoop::commitToolResult(const PreparedToolCall& plan,
+                                                payload::ToolResult       result) {
+    if (result.id.empty()) {
+        result.id = plan.call.id;
+    }
+    if (result.name.empty()) {
+        result.name = plan.call.name;
+    }
     result.source.call = result.id;
     session_.append(result);
-    if (call.name == "exit_plan_mode" && result.outcome == payload::ToolOutcome::Ok &&
+    if (plan.call.name == "exit_plan_mode" && result.outcome == payload::ToolOutcome::Ok &&
         services_.plan_mode != nullptr) {
         services_.plan_mode->request_exit(session_.id());
     }
-    return true;
+    return result;
+}
+
+ToolConcurrencyMode AgentLoop::toolConcurrencyMode(const std::string& name) const {
+    if (services_.tools == nullptr) {
+        return ToolConcurrencyMode::Exclusive;
+    }
+    Tool* tool = services_.tools->find(ToolName{name});
+    return tool == nullptr ? ToolConcurrencyMode::Exclusive : tool->schema().concurrency;
+}
+
+bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn, StepId step,
+                                payload::ToolResult* out) {
+    PreparedToolCall    plan = prepareToolCall(assembled, turn, step);
+    payload::ToolResult result = plan.run ? runToolCall(plan) : plan.decided;
+    result                     = commitToolResult(plan, std::move(result));
+    if (out != nullptr) {
+        *out = result;
+    }
+    return plan.run;
 }
 
 void AgentLoop::runMaintenanceTurn(TurnId turn) {
@@ -1093,15 +1134,20 @@ void AgentLoop::runTurn() {
         }
 
         state_ = AgentState::CallingTool;
-        for (const ToolCallAssembled& call : response.tool_calls) {
-            if (turnToken.cancelled()) {
-                break;
-            }
-            executeToolCall(call, turn, step);
-            if (std::optional<ContextMessage> reminder = reminder_.observe(call);
-                reminder.has_value()) {
-                appendContextInjected(*reminder);
-            }
+        ContextAcceptor accept = [this](const ContextMessage& message) {
+            appendContextInjected(message);
+            return true;
+        };
+        try {
+            (void)execute_tool_calls(*this, turn, step, response.tool_calls, turnToken,
+                                     std::move(accept))
+                .get();
+        } catch (const std::exception& error) {
+            appendTurnFailed(turn, AgentErrorCode::Internal, error.what());
+            return;
+        } catch (...) {
+            appendTurnFailed(turn, AgentErrorCode::Internal, "tool scheduler failure");
+            return;
         }
 
         if (usage.has_value()) {
@@ -1119,6 +1165,126 @@ void AgentLoop::runTurn() {
             return;
         }
     }
+}
+
+Task<ToolScheduleOutcome> execute_tool_calls(AgentLoop& loop, TurnId turn, StepId step,
+                                             std::vector<ToolCallAssembled> calls,
+                                             CancellationToken cancel, ContextAcceptor accept) {
+    ToolScheduleOutcome outcome;
+    outcome.results.resize(calls.size());
+
+    const std::size_t bound =
+        std::max<std::size_t>(1, loop.config_.schedule.max_parallel_tool_calls);
+
+    struct InFlight {
+        std::size_t                      index;
+        std::future<payload::ToolResult> future;
+    };
+    std::vector<InFlight>                    in_flight;
+    std::vector<AgentLoop::PreparedToolCall> plans(calls.size());
+    std::vector<bool>                        committed(calls.size(), false);
+
+    const auto observe = [&](std::size_t index) {
+        std::optional<ContextMessage> reminder = loop.reminder_.observe(calls[index]);
+        if (!reminder.has_value()) {
+            return;
+        }
+        if (accept && accept(*reminder)) {
+            return;
+        }
+        if (loop.services_.logger != nullptr) {
+            loop.services_.logger->warn("repeat-tool reminder injection rejected");
+        }
+    };
+
+    const auto commit = [&](std::size_t index, payload::ToolResult result) {
+        outcome.results[index] = loop.commitToolResult(plans[index], std::move(result));
+        committed[index]       = true;
+        observe(index);
+    };
+
+    const auto drain_all = [&]() {
+        for (InFlight& item : in_flight) {
+            commit(item.index, item.future.get());
+        }
+        in_flight.clear();
+    };
+
+    try {
+        for (std::size_t index = 0; index < calls.size(); ++index) {
+            if (cancel.cancelled()) {
+                break;
+            }
+
+            if (loop.toolConcurrencyMode(calls[index].name) == ToolConcurrencyMode::Exclusive) {
+                drain_all();
+                if (cancel.cancelled()) {
+                    break;
+                }
+                (void)loop.executeToolCall(calls[index], turn, step, &outcome.results[index]);
+                committed[index] = true;
+                observe(index);
+                continue;
+            }
+
+            if (in_flight.size() >= bound) {
+                InFlight oldest = std::move(in_flight.front());
+                in_flight.erase(in_flight.begin());
+                commit(oldest.index, oldest.future.get());
+                if (cancel.cancelled()) {
+                    break;
+                }
+            }
+
+            plans[index] = loop.prepareToolCall(calls[index], turn, step);
+            if (!plans[index].run) {
+                drain_all();
+                commit(index, plans[index].decided);
+                if (cancel.cancelled()) {
+                    break;
+                }
+                continue;
+            }
+            if (cancel.cancelled()) {
+                break;
+            }
+            const AgentLoop::PreparedToolCall plan = plans[index];
+            in_flight.push_back(InFlight{
+                index, std::async(std::launch::async,
+                                  [&loop, plan]() { return loop.runToolCall(plan); })});
+        }
+        drain_all();
+    } catch (...) {
+        const std::exception_ptr failure = std::current_exception();
+        for (InFlight& item : in_flight) {
+            try {
+                commit(item.index, item.future.get());
+            } catch (...) {
+            }
+        }
+        in_flight.clear();
+        std::rethrow_exception(failure);
+    }
+
+    outcome.aborted = cancel.cancelled();
+    if (outcome.aborted) {
+        for (std::size_t index = 0; index < calls.size(); ++index) {
+            if (committed[index]) {
+                continue;
+            }
+            payload::ToolResult synthetic;
+            synthetic.id          = calls[index].id;
+            synthetic.name        = calls[index].name;
+            synthetic.outcome     = payload::ToolOutcome::Cancelled;
+            synthetic.output      = "tool call cancelled";
+            synthetic.source.call = synthetic.id;
+            loop.session_.append(synthetic);
+            outcome.results[index] = std::move(synthetic);
+            committed[index]       = true;
+        }
+    }
+
+    return Task<ToolScheduleOutcome>(std::move(outcome));
 }
 
 } // namespace ymh
