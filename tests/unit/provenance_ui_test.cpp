@@ -44,9 +44,8 @@ UiModel make_model() {
     workspace.cwd           = "/tmp/prov";
     workspace.daemonStatus  = DaemonStatus::Attached;
     workspace.live          = true;
-    workspace.activeSessionId = kSession;
     model.workspaces.emplace(workspace.id, workspace);
-    model.ensureSession(kSession);
+    model.focusSessionIn(workspace.id, kSession);
     return model;
 }
 

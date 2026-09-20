@@ -102,9 +102,9 @@ void revalidate_switcher_cursor(SwitcherOverlayModel& switcher, const UiModel& m
             switcher.cursor.workspace = target->id;
             const auto active = model.workspaces.find(target->id);
             if (active != model.workspaces.end() &&
-                !active->second.activeSessionId.value.empty()) {
+                !active->second.activeSessionId().value.empty()) {
                 for (const SessionNode& session : target->sessions) {
-                    if (session.id == active->second.activeSessionId) {
+                    if (session.id == active->second.activeSessionId()) {
                         switcher.cursor.session = session.id;
                         break;
                     }
@@ -429,7 +429,34 @@ SessionUiState* UiModel::activeSession() {
     if (workspace == nullptr) {
         return nullptr;
     }
-    return session(workspace->activeSessionId);
+    return session(workspace->activeSessionId());
+}
+
+SessionUiState* UiModel::ensureActiveSession() {
+    if (SessionUiState* modeled = activeSession(); modeled != nullptr) {
+        return modeled;
+    }
+    WorkspaceModel* workspace = activeWorkspace();
+    if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
+        return nullptr;
+    }
+    return &ensureSessionIn(workspace->id, workspace->activeSessionId());
+}
+
+bool UiModel::catalog_has_session(const WorkspaceId& workspace,
+                                  const SessionId& session_id) const {
+    for (const WorkspaceHistory& history : catalog.workspaces) {
+        if (history.id != workspace) {
+            continue;
+        }
+        for (const SessionHistoryEntry& entry : history.sessions) {
+            if (entry.id == session_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
 }
 
 SessionUiState* UiModel::session(const SessionId& id) {
@@ -504,7 +531,7 @@ void UiModel::refreshCellIn(const WorkspaceId& workspace, const SessionId& id) {
         }
         cell.state = state->second.agent_state;
         cell.attention = state->second.attention.needsInput;
-        cell.unread = state->second.attention.completed && id != target.activeSessionId;
+        cell.unread = state->second.attention.completed && id != target.activeSessionId();
         return;
     }
 }
@@ -553,8 +580,8 @@ void UiModel::eraseSession(const WorkspaceId& workspace, const SessionId& id) {
         std::remove_if(target.sessions.begin(), target.sessions.end(),
                        [&id](const SessionCell& cell) { return cell.id == id; }),
         target.sessions.end());
-    if (target.activeSessionId == id) {
-        target.activeSessionId = SessionId{};
+    if (target.activeSessionId() == id) {
+        target.setActiveSessionId(SessionId{});
     }
     dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::SessionBar);
 }
@@ -938,17 +965,28 @@ void UiModel::focusWorkspace(const WorkspaceId& workspace) {
 }
 
 void UiModel::focusSession(const SessionId& id) {
-    const auto state = sessions.find(id);
-    if (state == sessions.end()) {
+    if (id.value.empty()) {
         return;
     }
-    const WorkspaceId workspace = state->second.workspace;
+    const auto state = sessions.find(id);
+    const WorkspaceId workspace =
+        state != sessions.end() && !state->second.workspace.value.empty()
+            ? state->second.workspace
+            : activeWorkspaceId;
+    focusSessionIn(workspace, id);
+}
+
+void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) {
+    if (id.value.empty()) {
+        return;
+    }
     const auto workspace_it = workspaces.find(workspace);
     if (workspace_it == workspaces.end()) {
         return;
     }
+    ensureSessionIn(workspace, id);
     activeWorkspaceId = workspace;
-    workspace_it->second.activeSessionId = id;
+    workspace_it->second.setActiveSessionId(id);
     mode = UiMode::Conversation;
     dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::Input);
     dirty.markAggregate();
@@ -958,6 +996,14 @@ void SwitcherOverlayModel::open(const UiModel& model) {
     workspaces.clear();
     source = SwitcherSource::Live;
     const bool filtering = filter.has_value() && !filter->empty();
+    const bool catalog_pending = !model.catalog.loaded || model.catalog.generation == 0;
+    SessionId focused;
+    if (!model.activeWorkspaceId.value.empty()) {
+        const auto active = model.workspaces.find(model.activeWorkspaceId);
+        if (active != model.workspaces.end()) {
+            focused = active->second.activeSessionId();
+        }
+    }
     for (const auto& [workspace_id, workspace] : model.workspaces) {
         if (!live_switcher_renderable(workspace)) {
             continue;
@@ -968,9 +1014,28 @@ void SwitcherOverlayModel::open(const UiModel& model) {
         node.status = workspace.daemonStatus;
         node.mark = ownership_mark(workspace.daemonStatus);
         node.live = workspace.live;
+        node.catalog_pending = catalog_pending;
+        for (const WorkspaceHistory& history : model.catalog.workspaces) {
+            if (history.id == workspace_id) {
+                node.note = history.note;
+                break;
+            }
+        }
+        std::size_t hidden_by_focus = 0;
         for (const SessionCell& cell : workspace.sessions) {
-            if (filtering && cell.title.find(*filter) == std::string::npos &&
-                cell.id.value.find(*filter) == std::string::npos) {
+            const bool matches =
+                !filtering || cell.title.find(*filter) != std::string::npos ||
+                cell.id.value.find(*filter) != std::string::npos;
+            if (cell.id == focused && !focused.value.empty()) {
+                if (matches) {
+                    ++hidden_by_focus;
+                }
+                continue;
+            }
+            if (!matches) {
+                continue;
+            }
+            if (!model.catalog_has_session(workspace_id, cell.id)) {
                 continue;
             }
             SessionNode session;
@@ -980,6 +1045,7 @@ void SwitcherOverlayModel::open(const UiModel& model) {
             session.attention = cell.attention;
             node.sessions.push_back(std::move(session));
         }
+        node.sessions_hidden_by_focus = hidden_by_focus > 0 && node.sessions.empty();
         if (filtering && node.sessions.empty() && node.title.find(*filter) == std::string::npos) {
             continue;
         }
@@ -1017,6 +1083,13 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
     workspaces.clear();
     source = SwitcherSource::History;
     const bool filtering = filter.has_value() && !filter->empty();
+    SessionId focused;
+    if (!model.activeWorkspaceId.value.empty()) {
+        const auto active = model.workspaces.find(model.activeWorkspaceId);
+        if (active != model.workspaces.end()) {
+            focused = active->second.activeSessionId();
+        }
+    }
 
     const auto path_of = [&model](const WorkspaceId& id) -> const std::string& {
         static const std::string empty;
@@ -1042,9 +1115,18 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
             node.status = DaemonStatus::NotRunning;
             node.mark = OwnershipMark::NotRunning;
         }
+        std::size_t hidden_by_focus = 0;
         for (const SessionHistoryEntry& entry : history.sessions) {
-            if (filtering && entry.title.find(*filter) == std::string::npos &&
-                entry.id.value.find(*filter) == std::string::npos) {
+            const bool matches =
+                !filtering || entry.title.find(*filter) != std::string::npos ||
+                entry.id.value.find(*filter) != std::string::npos;
+            if (entry.id == focused && !focused.value.empty()) {
+                if (matches) {
+                    ++hidden_by_focus;
+                }
+                continue;
+            }
+            if (!matches) {
                 continue;
             }
             SessionNode session;
@@ -1057,6 +1139,7 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
             session.parent = entry.parent;
             node.sessions.push_back(std::move(session));
         }
+        node.sessions_hidden_by_focus = hidden_by_focus > 0 && node.sessions.empty();
         if (filtering && node.sessions.empty() && node.title.find(*filter) == std::string::npos) {
             continue;
         }

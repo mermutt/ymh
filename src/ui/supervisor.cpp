@@ -381,7 +381,7 @@ public:
         if (workspace == nullptr) {
             return;
         }
-        SessionUiState* state = model_.session(workspace->activeSessionId);
+        SessionUiState* state = model_.session(workspace->activeSessionId());
         if (state != nullptr) {
             state->input.push_history(text);
             state->input.draft.clear();
@@ -389,22 +389,22 @@ public:
             state->input.saved_draft.clear();
             state->command_hints.clear();
             state->command_hint_selected = 0;
-            model_.dirty.mark(workspace->activeSessionId, UiDirtyFlag::Input);
+            model_.dirty.mark(workspace->activeSessionId(), UiDirtyFlag::Input);
         }
         const WorkspaceId workspace_id = workspace->id;
-        if (workspace->activeSessionId.value.empty()) {
+        if (workspace->activeSessionId().value.empty()) {
             create_session(workspace_id, text);
             return;
         }
-        prompt(workspace_id, workspace->activeSessionId, text);
+        prompt(workspace_id, workspace->activeSessionId(), text);
     }
 
     void cancelActive() override {
         WorkspaceModel* workspace = model_.activeWorkspace();
-        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
             return;
         }
-        nlohmann::json params{{"session", workspace->activeSessionId.value}};
+        nlohmann::json params{{"session", workspace->activeSessionId().value}};
         submit_to(workspace->id, std::string(protocol::method::kAgentCancel), std::move(params),
                   nullptr);
     }
@@ -851,6 +851,9 @@ private:
         if (model_.mode == UiMode::Switcher &&
             model_.switcher.source == SwitcherSource::History) {
             model_.switcher.openHistory(model_);
+        } else if (model_.mode == UiMode::Switcher &&
+                   model_.switcher.source == SwitcherSource::Live) {
+            resnapshot_switcher();
         }
         model_.dirty.markAggregate();
     }
@@ -993,10 +996,11 @@ private:
                               reply.error_code ==
                               static_cast<int>(protocol::AppCode::UnknownSession);
                           enqueue([this, workspace, session, error = reply.error, unknown] {
-                              surface_notice(workspace, session,
-                                             unknown ? "session not found in " +
-                                                           workspace_label(workspace)
-                                                     : "resume failed: " + error);
+                              if (unknown) {
+                                  recover_unknown_session(workspace, session);
+                                  return;
+                              }
+                              surface_notice(workspace, session, "resume failed: " + error);
                           });
                           return;
                       }
@@ -1022,6 +1026,24 @@ private:
         // workspace's active session and switches `activeWorkspaceId`, so a
         // session selected in another workspace becomes the visible one.
         model_.focusSession(session);
+    }
+
+    // 45-D10.8 (45-F23): drop a daemon-rejected session (which clears the focus
+    // through the single mutator), report it, then focus the workspace's first
+    // remaining session or create one when none remain, so the focus never
+    // dangles on a session the daemon will reject.
+    void recover_unknown_session(const WorkspaceId& workspace, const SessionId& session) {
+        model_.eraseSession(workspace, session);
+        push_notice("session no longer exists");
+        const auto it = model_.workspaces.find(workspace);
+        if (it == model_.workspaces.end()) {
+            return;
+        }
+        if (!it->second.sessions.empty()) {
+            model_.focusSessionIn(workspace, it->second.sessions.front().id);
+        } else {
+            create_session(workspace, std::string{});
+        }
     }
 
     std::optional<SupervisorWorkspace> workspace_spec_from_registry(
@@ -1155,8 +1177,8 @@ private:
                 refresh_sessions(workspace);
                 // 25 review M3: a plain re-attach does not re-activate, so
                 // refresh the status context for the already-active session.
-                if (!it->second.activeSessionId.value.empty()) {
-                    refresh_status_context(workspace, it->second.activeSessionId);
+                if (!it->second.activeSessionId().value.empty()) {
+                    refresh_status_context(workspace, it->second.activeSessionId());
                 }
                 // 22 §5.1 (S3/S4, SW14/SW15): consume the pending resume exactly
                 // once per successful attach through the shared resume path.
@@ -1172,14 +1194,7 @@ private:
     }
 
     void activate_session(const WorkspaceId& workspace, const SessionId& session) {
-        const auto it = model_.workspaces.find(workspace);
-        if (it == model_.workspaces.end()) {
-            return;
-        }
-        it->second.activeSessionId = session;
-        model_.dirty.mark(session,
-                          UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::Input);
-        model_.dirty.markAggregate();
+        model_.focusSessionIn(workspace, session);
     }
 
     void refresh_sessions(const WorkspaceId& workspace) {
@@ -1219,7 +1234,7 @@ private:
                         model_.ensureCellIn(workspace, session);
                         model_.setCellTitle(workspace, session, title);
                     }
-                    if (it->second.activeSessionId.value.empty()) {
+                    if (it->second.activeSessionId().value.empty()) {
                         if (!sessions.empty()) {
                             activate_session(workspace, sessions.front().first);
                             // 25 review M3: plain attach must refresh the context.
@@ -1317,7 +1332,17 @@ private:
 
     void prompt(const WorkspaceId& workspace, const SessionId& session, const std::string& text) {
         submit_to(workspace, std::string(protocol::method::kAgentPrompt),
-                  nlohmann::json{{"session", session.value}, {"message", text}}, nullptr);
+                  nlohmann::json{{"session", session.value}, {"message", text}},
+                  [this, workspace, session](SupervisorReply reply) {
+                      if (reply.ok ||
+                          reply.error_code !=
+                              static_cast<int>(protocol::AppCode::UnknownSession)) {
+                          return;
+                      }
+                      enqueue([this, workspace, session] {
+                          recover_unknown_session(workspace, session);
+                      });
+                  });
     }
 
     void submit_to(const WorkspaceId& workspace, std::string method, nlohmann::json params,
@@ -1369,7 +1394,7 @@ private:
         if (workspace == nullptr) {
             return nullptr;
         }
-        return model_.session(workspace->activeSessionId);
+        return model_.session(workspace->activeSessionId());
     }
 
     // RB-12: true while an input-blocking modal owns the keyboard. The
@@ -1458,7 +1483,7 @@ private:
     // opens the editor with the terminal temporarily restored.
     std::string export_session(const std::string& args) {
         WorkspaceModel* workspace = model_.activeWorkspace();
-        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
             return "export: no active session";
         }
         if (workspace->cwd.empty()) {
@@ -1474,7 +1499,7 @@ private:
         config.db_path   = root / ".ymh" / "sessions.db";
         config.lock_path = root / ".ymh" / "sessions.lock";
 
-        const SessionId                session = workspace->activeSessionId;
+        const SessionId                session = workspace->activeSessionId();
         std::optional<SessionHeader>   header;
         EventRange                     events;
         try {
@@ -1524,12 +1549,12 @@ private:
         if (it == model_.workspaces.end()) {
             return nullptr;
         }
-        return model_.session(it->second.activeSessionId);
+        return model_.session(it->second.activeSessionId());
     }
 
     void request_skills(const std::string& args) {
         WorkspaceModel* workspace = model_.activeWorkspace();
-        if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
             return;
         }
         const WorkspaceId id = workspace->id;
@@ -1537,7 +1562,7 @@ private:
         if (trimmed.rfind("--show", 0) == 0) {
             const std::string name = trim_command_arg(trimmed.substr(6));
             if (name.empty()) {
-                if (SessionUiState* state = model_.session(workspace->activeSessionId);
+                if (SessionUiState* state = model_.session(workspace->activeSessionId());
                     state != nullptr) {
                     append_system_entry(model_, *state, "usage: /skills --show <name>");
                 }
@@ -1589,25 +1614,25 @@ private:
 
     bool dispatch_command(const std::string& line) {
         CommandContext context{model_};
-        context.session = active();
+        context.session = model_.ensureActiveSession();
         context.request_exit = [this] { requestExit(); };
         context.create_session = [this] { new_session(); };
         context.set_model = [this](const std::string& name) { preferred_model_ = name; };
         context.compact = [this] {
             WorkspaceModel* workspace = model_.activeWorkspace();
-            if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+            if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
                 return;
             }
-            nlohmann::json params{{"session", workspace->activeSessionId.value}};
+            nlohmann::json params{{"session", workspace->activeSessionId().value}};
             submit_to(workspace->id, std::string(protocol::method::kSessionCompact),
                       std::move(params), nullptr);
         };
         context.rename_session = [this](const std::string& title) {
             WorkspaceModel* workspace = model_.activeWorkspace();
-            if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+            if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
                 return;
             }
-            const SessionId session = workspace->activeSessionId;
+            const SessionId session = workspace->activeSessionId();
             // 19 §6.1 (M1): the reply surfaces a rejected rename. It runs on the
             // pump thread, so it marshals to the UI thread via enqueue and
             // reuses the ErrorOccurred path, which appends a Role::System entry.
@@ -1629,11 +1654,11 @@ private:
         context.skills = [this](const std::string& args) { request_skills(args); };
         context.plan_mode = [this](bool active, const std::string& message) {
             WorkspaceModel* workspace = model_.activeWorkspace();
-            if (workspace == nullptr || workspace->activeSessionId.value.empty()) {
+            if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
                 return;
             }
             const WorkspaceId id = workspace->id;
-            const SessionId   session = workspace->activeSessionId;
+            const SessionId   session = workspace->activeSessionId();
             submit_to(id, std::string(protocol::method::kSessionSetMode),
                       nlohmann::json{{"session", session.value}, {"active", active}},
                       [this, id, session, message](SupervisorReply reply) {
@@ -1934,7 +1959,7 @@ private:
             if (model_.switcher.source == SwitcherSource::History) {
                 select_history(cursor);
             } else if (cursor.session.has_value()) {
-                model_.focusSession(*cursor.session);
+                model_.focusSessionIn(cursor.workspace, *cursor.session);
             } else {
                 model_.focusWorkspace(cursor.workspace);
             }
@@ -1949,8 +1974,11 @@ private:
     bool handle_input(const ftxui::Event& event) {
         SessionUiState* state = active();
         if (state == nullptr) {
+            state = model_.ensureActiveSession();
+        }
+        if (state == nullptr) {
             WorkspaceModel* workspace = model_.activeWorkspace();
-            if (workspace != nullptr && workspace->activeSessionId.value.empty()) {
+            if (workspace != nullptr && workspace->activeSessionId().value.empty()) {
                 create_session(workspace->id, std::string{});
             }
             return false;
@@ -2234,6 +2262,9 @@ private:
         if (event == ftxui::Event::CtrlS || event == ftxui::Event::CtrlP) {
             model_.openSwitcher();
             catalog_visible_.store(false);
+            if (catalog_ != nullptr) {
+                catalog_->refreshNow();
+            }
             return true;
         }
         if (event == ftxui::Event::CtrlD) {
@@ -2420,6 +2451,15 @@ public:
         app_.apply_create_reply(workspace, session, std::move(error));
     }
 
+    void activate_session(const WorkspaceId& workspace, const SessionId& session) override {
+        app_.activate_session(workspace, session);
+    }
+
+    void recover_unknown_session(const WorkspaceId& workspace,
+                                 const SessionId& session) override {
+        app_.recover_unknown_session(workspace, session);
+    }
+
     void drain_actions() override { app_.drain(); }
 
     void start_catalog_with(WorkspaceCatalogSource source,
@@ -2439,6 +2479,14 @@ public:
         if (app_.catalog_ != nullptr) {
             app_.catalog_->refreshNow();
         }
+    }
+
+    void on_catalog_snapshot(SessionCatalogSnapshot snapshot) override {
+        app_.on_catalog_snapshot(std::move(snapshot));
+    }
+
+    void forget_session_state(const SessionId& session) override {
+        app_.model_.sessions.erase(session);
     }
 
     void seed_pending_resume(const WorkspaceId& workspace, const SessionId& session) override {
@@ -2492,6 +2540,12 @@ public:
         }
         if (key == "ctrl-c") {
             return app_.handle_event(ftxui::Event::CtrlC);
+        }
+        if (key == "ctrl-s") {
+            return app_.handle_event(ftxui::Event::CtrlS);
+        }
+        if (key == "ctrl-p") {
+            return app_.handle_event(ftxui::Event::CtrlP);
         }
         return app_.handle_event(ftxui::Event::Character(key));
     }

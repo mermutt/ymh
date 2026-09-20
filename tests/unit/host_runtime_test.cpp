@@ -1590,4 +1590,30 @@ TEST_F(HostRuntimeTest, ShowContextUnknownSessionIsTypedError) {
     }
 }
 
+// 45-D10.6 (45-I10): whatever session the supervisor focuses, the first prompt
+// resumes its agent daemon-side and continues the conversation. Disposing the
+// resident agent must not break a later prompt.
+TEST_F(HostRuntimeTest, UI45_D10_AgentResumedOnPrompt) {
+    Bridge bridge("hr45_resume_prompt");
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<AgentLoop> agent =
+        bridge.runtime().agents().findShared(created.session);
+    ASSERT_NE(agent, nullptr);
+    bridge.runtime().agents().dispose(agent->id());
+    ASSERT_EQ(bridge.runtime().agents().findShared(created.session), nullptr);
+    bridge.clear_forwarded();
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array(
+        {nlohmann::json{{"kind", "text"}, {"text", "continue"}}});
+    bridge.host().agentPrompt(created.session, message);
+
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    EXPECT_NE(bridge.runtime().agents().findShared(created.session), nullptr);
+    const EventRange events = bridge.runtime().store().read(created.session, 0);
+    EXPECT_GE(count_type(events, EventType::TurnEnded), 1u);
+}
+
 } // namespace

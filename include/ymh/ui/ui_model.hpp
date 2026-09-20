@@ -13,6 +13,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "ymh/agent/context_snapshot.hpp"
@@ -246,13 +247,13 @@ struct SessionCell {
     bool        readOnly = false;
 };
 
-struct WorkspaceModel {
+class WorkspaceModel {
+public:
     WorkspaceId              id;
     std::string              title;
     std::string              cwd;
     std::string              boot_id;
     DaemonStatus             daemonStatus = DaemonStatus::Attached;
-    SessionId                activeSessionId;
     std::vector<SessionCell> sessions;
     // 22 §3.1 (S1): true only once this supervisor's handshake is `Attached`.
     // The Live switcher renders a workspace iff `live && daemonStatus ∈
@@ -262,6 +263,19 @@ struct WorkspaceModel {
     bool                     live = false;
 
     [[nodiscard]] bool hasDaemon() const { return daemonStatus == DaemonStatus::Attached; }
+
+    // 45-D10.7: the focus is PRIVATE with a single public writer,
+    // `UiModel::focusSessionIn` (which models the target via `ensureSessionIn`).
+    // `UiModel` is a friend so it can call the private setter; `eraseSession`
+    // clears through the same setter. Any other translation unit that tries to
+    // assign the focus fails to compile — 45-I10 is enforced by the compiler,
+    // not by convention. Public read is via the getter.
+    [[nodiscard]] const SessionId& activeSessionId() const noexcept { return activeSessionId_; }
+
+private:
+    friend struct UiModel;
+    void setActiveSessionId(SessionId id) noexcept { activeSessionId_ = std::move(id); }
+    SessionId activeSessionId_;   // written only by focusSessionIn / eraseSession
 };
 
 // 22 §3.6 (H1): workspace-independent notice surface. Rendered in the status
@@ -315,6 +329,14 @@ struct WorkspaceNode {
     // leaf; it is never rendered by the Live source.
     bool                       historyOnly = false;
     std::optional<std::string> note;
+    // 45-D4.3: true iff >= 1 leaf was removed by the focused-session exclusion
+    // and the result is empty, so the renderer shows `(current session hidden)`
+    // instead of a false empty-state. No node is suppressed.
+    bool                       sessions_hidden_by_focus = false;
+    // 45-D3.3: the Live node's catalog snapshot has not been delivered yet
+    // (`!catalog.loaded || generation == 0`); the renderer shows
+    // `(loading live sessions…)`.
+    bool                       catalog_pending = false;
     std::vector<SessionNode>   sessions;
 };
 
@@ -490,6 +512,18 @@ struct UiModel {
     void            openSwitcher();
     void            focusWorkspace(const WorkspaceId& workspace);
     void            focusSession(const SessionId& id);
+    // 45-D10.7: THE single mutator of WorkspaceModel's private focus. Models the
+    // target via `ensureSessionIn` before assigning, so `active() != nullptr`
+    // after any successful selection (45-I10). `activate_session` delegates here.
+    void            focusSessionIn(const WorkspaceId& workspace, const SessionId& id);
+    // 45-D10.2: reconciles the focused workspace's activeSessionId into
+    // `sessions`. Returns the state, or nullptr when there is no workspace / no
+    // active id.
+    [[nodiscard]] SessionUiState* ensureActiveSession();
+    // 45-D3: the Live switcher's membership authority — true iff `session` is in
+    // the latest catalog snapshot for `workspace`.
+    [[nodiscard]] bool catalog_has_session(const WorkspaceId& workspace,
+                                           const SessionId& session) const;
 
     void apply(const UiEvent& event);
     void apply(const WorkspaceEvent& event);
