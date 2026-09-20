@@ -1045,4 +1045,41 @@ TEST(Config, PresetsUnknownKeyRejected) {
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
 
+TEST(Config, GoalsDefaults) {
+    const Config config;
+    EXPECT_EQ(config.goals.max_rounds, 256u);
+    EXPECT_EQ(config.goals.blocked_after_consecutive_rounds, 3u);
+}
+
+TEST(Config, GoalsKeysParse) {
+    test::TempWorkspace workspace("config_goals_keys");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"goals\": { \"max_rounds\": 12, "
+                    "\"blocked_after_consecutive_rounds\": 5 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    EXPECT_EQ(config.goals.max_rounds, 12u);
+    EXPECT_EQ(config.goals.blocked_after_consecutive_rounds, 5u);
+}
+
+TEST(Config, GoalsZeroMaxRoundsRejected) {
+    test::TempWorkspace workspace("config_goals_zero");
+    workspace.write(".ymh/config.jsonc", "{ \"goals\": { \"max_rounds\": 0 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, GoalsUnknownKeyRejected) {
+    test::TempWorkspace workspace("config_goals_unknown");
+    workspace.write(".ymh/config.jsonc", "{ \"goals\": { \"bogus\": 1 } }\n");
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
 } // namespace

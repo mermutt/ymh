@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/goal/goal.hpp"
 #include "ymh/session/ids.hpp"
 
 namespace ymh {
@@ -133,23 +134,35 @@ struct ContextFormed {
     bool operator==(const ContextFormed&) const = default;
 };
 
+// dsh GoalMessageSource (dsh-goal/lib/types/domain.d.ts:33-40). A goal round is
+// an ordinary `user/message` whose source carries this ref (44 §5.4).
+struct GoalMessageRef {
+    GoalId        goal_id  = 0;
+    std::uint64_t revision = 0;
+    RoundNumber   round    = 0;   // positive admitted round
+
+    bool operator==(const GoalMessageRef&) const = default;
+};
+
 // dsh MessageSourceMap (message.d.ts:94-104), flattened. `kind` gates its
 // fields (36-I8): `plugin`/`context` only for `Plugin`, `call` only for `Tool`,
-// `provider`/`model` only for `Model`.
+// `provider`/`model` only for `Model`, `goal` only for `Goal`.
 struct MessageSource {
     enum class Kind : std::uint8_t {
         User,
         Plugin,
         Model,
         Tool,
+        Goal,
     };
 
-    Kind                      kind = Kind::User;
-    std::string               plugin;                 // Kind::Plugin
-    ContextFormed             context;                // Kind::Plugin
-    std::optional<ToolCallId> call;                   // Kind::Tool
-    std::string               provider;               // Kind::Model
-    std::string               model;                  // Kind::Model
+    Kind                          kind = Kind::User;
+    std::string                   plugin;                 // Kind::Plugin
+    ContextFormed                 context;                // Kind::Plugin
+    std::optional<ToolCallId>     call;                   // Kind::Tool
+    std::string                   provider;               // Kind::Model
+    std::string                   model;                  // Kind::Model
+    std::optional<GoalMessageRef> goal;                   // Kind::Goal
 
     void validate() const {
         const bool has_plugin   = !plugin.empty();
@@ -157,25 +170,31 @@ struct MessageSource {
         const bool has_call     = call.has_value();
         const bool has_provider = !provider.empty();
         const bool has_model    = !model.empty();
+        const bool has_goal     = goal.has_value();
         switch (kind) {
             case Kind::User:
-                if (has_plugin || has_context || has_call || has_provider || has_model) {
+                if (has_plugin || has_context || has_call || has_provider || has_model || has_goal) {
                     throw std::invalid_argument("message source kind user carries gated fields");
                 }
                 break;
             case Kind::Plugin:
-                if (has_call || has_provider || has_model) {
+                if (has_call || has_provider || has_model || has_goal) {
                     throw std::invalid_argument("message source kind plugin carries gated fields");
                 }
                 break;
             case Kind::Model:
-                if (has_plugin || has_context || has_call) {
+                if (has_plugin || has_context || has_call || has_goal) {
                     throw std::invalid_argument("message source kind model carries gated fields");
                 }
                 break;
             case Kind::Tool:
-                if (has_plugin || has_context || has_provider || has_model) {
+                if (has_plugin || has_context || has_provider || has_model || has_goal) {
                     throw std::invalid_argument("message source kind tool carries gated fields");
+                }
+                break;
+            case Kind::Goal:
+                if (has_plugin || has_context || has_call || has_provider || has_model) {
+                    throw std::invalid_argument("message source kind goal carries gated fields");
                 }
                 break;
         }
@@ -215,6 +234,13 @@ struct MessageSource {
     return source;
 }
 
+[[nodiscard]] inline MessageSource goal_message_source(GoalMessageRef ref) {
+    MessageSource source;
+    source.kind = MessageSource::Kind::Goal;
+    source.goal = std::move(ref);
+    return source;
+}
+
 [[nodiscard]] inline std::string_view message_source_kind_name(
     MessageSource::Kind kind) noexcept {
     switch (kind) {
@@ -226,6 +252,8 @@ struct MessageSource {
             return "model";
         case MessageSource::Kind::Tool:
             return "tool";
+        case MessageSource::Kind::Goal:
+            return "goal";
     }
     return {};
 }
@@ -243,6 +271,9 @@ struct MessageSource {
     }
     if (name == "tool") {
         return MessageSource::Kind::Tool;
+    }
+    if (name == "goal") {
+        return MessageSource::Kind::Goal;
     }
     return std::nullopt;
 }
@@ -305,6 +336,20 @@ inline void from_json(const nlohmann::json& json, ContextFormed& value) {
     value = std::move(decoded);
 }
 
+inline void to_json(nlohmann::json& json, const GoalMessageRef& value) {
+    json = nlohmann::json{
+        {"goal_id", value.goal_id},
+        {"revision", value.revision},
+        {"round", value.round},
+    };
+}
+
+inline void from_json(const nlohmann::json& json, GoalMessageRef& value) {
+    value.goal_id  = json.at("goal_id").get<GoalId>();
+    value.revision = json.at("revision").get<std::uint64_t>();
+    value.round    = json.at("round").get<RoundNumber>();
+}
+
 inline void to_json(nlohmann::json& json, const MessageSource& value) {
     value.validate();
     json = nlohmann::json{{"kind", std::string{message_source_kind_name(value.kind)}}};
@@ -332,6 +377,11 @@ inline void to_json(nlohmann::json& json, const MessageSource& value) {
                 json["call"] = *value.call;
             }
             break;
+        case MessageSource::Kind::Goal:
+            if (value.goal.has_value()) {
+                json["goal"] = *value.goal;
+            }
+            break;
     }
 }
 
@@ -357,6 +407,9 @@ inline void from_json(const nlohmann::json& json, MessageSource& value) {
     }
     if (json.contains("model")) {
         decoded.model = json.at("model").get<std::string>();
+    }
+    if (json.contains("goal") && !json.at("goal").is_null()) {
+        decoded.goal = json.at("goal").get<GoalMessageRef>();
     }
     decoded.validate();
     value = std::move(decoded);

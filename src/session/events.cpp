@@ -126,6 +126,31 @@ RenameOrigin parse_rename_origin(std::string_view value) {
     reject_enum("rename origin", value);
 }
 
+payload::GoalOperation parse_goal_operation(std::string_view value) {
+    if (value == "create") {
+        return payload::GoalOperation::Create;
+    }
+    if (value == "edit") {
+        return payload::GoalOperation::Edit;
+    }
+    if (value == "pause") {
+        return payload::GoalOperation::Pause;
+    }
+    if (value == "resume") {
+        return payload::GoalOperation::Resume;
+    }
+    if (value == "complete") {
+        return payload::GoalOperation::Complete;
+    }
+    if (value == "block") {
+        return payload::GoalOperation::Block;
+    }
+    if (value == "clear") {
+        return payload::GoalOperation::Clear;
+    }
+    reject_enum("goal operation", value);
+}
+
 } // namespace
 
 std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept {
@@ -208,6 +233,26 @@ std::string_view rename_origin_name(payload::RenameOrigin origin) noexcept {
             return "user";
         case payload::RenameOrigin::Auto:
             return "auto";
+    }
+    return {};
+}
+
+std::string_view goal_operation_name(payload::GoalOperation operation) noexcept {
+    switch (operation) {
+        case payload::GoalOperation::Create:
+            return "create";
+        case payload::GoalOperation::Edit:
+            return "edit";
+        case payload::GoalOperation::Pause:
+            return "pause";
+        case payload::GoalOperation::Resume:
+            return "resume";
+        case payload::GoalOperation::Complete:
+            return "complete";
+        case payload::GoalOperation::Block:
+            return "block";
+        case payload::GoalOperation::Clear:
+            return "clear";
     }
     return {};
 }
@@ -647,6 +692,34 @@ void to_json(nlohmann::json& json, const AgentPresetSelected& value) {
 
 void from_json(const nlohmann::json& json, AgentPresetSelected& value) {
     value.agent_preset = json.at("agent_preset").get<std::string>();
+}
+
+void to_json(nlohmann::json& json, const GoalChange& value) {
+    json = nlohmann::json{
+        {"operation", std::string{goal_operation_name(value.operation)}},
+        {"rounds_started", value.rounds_started},
+    };
+    if (value.goal.has_value()) {
+        json["goal"] = *value.goal;
+    }
+    if (value.cleared.has_value()) {
+        json["cleared"] = *value.cleared;
+    }
+}
+
+void from_json(const nlohmann::json& json, GoalChange& value) {
+    value.operation = parse_goal_operation(json.at("operation").get<std::string>());
+    value.rounds_started = json.value("rounds_started", std::uint32_t{0});
+    if (json.contains("goal") && !json.at("goal").is_null()) {
+        value.goal = json.at("goal").get<GoalSnapshot>();
+    } else {
+        value.goal = std::nullopt;
+    }
+    if (json.contains("cleared") && !json.at("cleared").is_null()) {
+        value.cleared = json.at("cleared").get<GoalRef>();
+    } else {
+        value.cleared = std::nullopt;
+    }
 }
 
 } // namespace payload

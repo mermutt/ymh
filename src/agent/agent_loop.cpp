@@ -378,6 +378,7 @@ void AgentLoop::appendUserMessage(const Message& message) {
     payload::UserMessage user;
     user.id      = make_event_id().value;
     user.content = message.content;
+    user.source  = message.source.value_or(message_source(MessageSource::Kind::User));
     session_.append(user);
 }
 

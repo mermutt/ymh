@@ -135,7 +135,7 @@ TEST(ProvenanceCodec, MessageSourceRoundTrips) {
         MessageSource{},
         plugin_source("runtime-context", snapshot_form()),
         model_source("deepseek", "deepseek-flash"),
-        MessageSource{MessageSource::Kind::Tool, {}, {}, "call-9", {}, {}},
+        MessageSource{MessageSource::Kind::Tool, {}, {}, "call-9", {}, {}, {}},
     };
     for (const MessageSource& original : sources) {
         const nlohmann::json json = original;

@@ -270,6 +270,7 @@ std::string render_session_markdown(const SessionHeader& header, const EventRang
                 break;
             }
             case EventType::AssistantAttempt:
+            case EventType::GoalChange:
                 break;
             default:
                 break;

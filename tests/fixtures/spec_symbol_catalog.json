@@ -153,6 +153,12 @@
       "section": "5.1"
     },
     {
+      "symbol": "EventType::GoalChange",
+      "category": "event_type",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "6.1"
+    },
+    {
       "symbol": "EventType::McpServerStatusChanged",
       "category": "event_type",
       "spec": "15-mcp-adapter.md",
@@ -795,6 +801,18 @@
       "section": "5.1"
     },
     {
+      "symbol": "payload::GoalChange",
+      "category": "durable_payload",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "5.7"
+    },
+    {
+      "symbol": "payload::GoalOperation",
+      "category": "durable_payload",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "5.7"
+    },
+    {
       "symbol": "cli::AssistantStreamPrinter",
       "category": "cli_contract",
       "spec": "34-assembler-replay-errata.md",
@@ -1405,6 +1423,18 @@
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
       "section": "7.5"
+    },
+    {
+      "symbol": "config::goals.blocked_after_consecutive_rounds",
+      "category": "config_key",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::goals.max_rounds",
+      "category": "config_key",
+      "spec": "44-goals-jobs-commands.md",
+      "section": "10.2"
     },
     {
       "symbol": "config::presets.default",

@@ -698,6 +698,26 @@ void apply_presets(Config& config, const Json& table, const std::filesystem::pat
     presets.max_depth = static_cast<std::uint32_t>(depth);
 }
 
+void apply_goals(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "goals", {"max_rounds", "blocked_after_consecutive_rounds"}, source);
+    GoalsSettings& goals = config.goals;
+    const std::int64_t rounds =
+        read_int64(table, "max_rounds", "goals", static_cast<std::int64_t>(goals.max_rounds), source);
+    if (rounds < 1 ||
+        rounds > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+        fail(source, "value out of range for 'goals.max_rounds'");
+    }
+    goals.max_rounds = static_cast<std::uint32_t>(rounds);
+    const std::int64_t blocked =
+        read_int64(table, "blocked_after_consecutive_rounds", "goals",
+                   static_cast<std::int64_t>(goals.blocked_after_consecutive_rounds), source);
+    if (blocked < 1 ||
+        blocked > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+        fail(source, "value out of range for 'goals.blocked_after_consecutive_rounds'");
+    }
+    goals.blocked_after_consecutive_rounds = static_cast<std::uint32_t>(blocked);
+}
+
 void apply_prompt(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "prompt", {"instructions"}, source);
     const Json* instructions = member(table, "instructions");
@@ -781,7 +801,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
                     bool global_layer) {
     reject_unknown(table, "",
                    {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "session", "prompt", "tools", "presets", "mcp_servers"},
+                    "session", "prompt", "tools", "presets", "goals", "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -848,6 +868,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     }
     if (const Json* presets = section("presets"); presets != nullptr) {
         apply_presets(config, *presets, source);
+    }
+    if (const Json* goals = section("goals"); goals != nullptr) {
+        apply_goals(config, *goals, source);
     }
     if (mcp_servers != nullptr) {
         apply_mcp_servers_object(config.mcp, *mcp_servers, source);
