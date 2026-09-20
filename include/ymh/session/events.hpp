@@ -14,10 +14,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/agent/ids.hpp"
 #include "ymh/agent/message.hpp"
+#include "ymh/commands/command_types.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/omission.hpp"
 #include "ymh/goal/goal.hpp"
+#include "ymh/jobs/job_types.hpp"
 #include "ymh/llm/assistant_stream.hpp"
 #include "ymh/llm/llm_call_config.hpp"
 #include "ymh/session/ids.hpp"
@@ -297,6 +300,40 @@ struct GoalChange {
     std::uint32_t               rounds_started = 0;   // non-Clear
 };
 
+// ---- commands (44 §5.7, 26 §4.3.9.1) ---------------------------------------
+
+// dsh command/run (dsh-commands types.d.ts:99-117). Log-only: ignored by
+// deriveMessages and token accounting (44-I12). `args` is omitted when the
+// spec set record_input=false (44-D18).
+struct CommandRun {
+    CommandId                  command_id = 0;
+    std::string                name;
+    std::optional<std::string> args;
+    CommandSource              source = CommandSource::User;
+};
+
+enum class CommandDoneKind : std::uint8_t { Success, Error };
+
+// dsh command/done, paired by `command_id`.
+struct CommandDone {
+    CommandId                  command_id = 0;
+    CommandDoneKind            kind = CommandDoneKind::Success;
+    std::optional<std::string> text;
+    std::optional<Sequence>    source_event_seq;
+};
+
+// ---- jobs (44 §5.7) --------------------------------------------------------
+
+// ymh-local job registry change (owner-scoped; no dsh session-event analogue).
+// `owner` is absent when the job is unowned (44-D10, Rev 2).
+struct JobChanged {
+    std::optional<AgentId> owner;
+    std::string            kind;
+    std::uint64_t          ordinal = 0;
+    JobStatus              status = JobStatus::Running;
+    std::string            label;
+};
+
 } // namespace payload
 
 // ---------------------------------------------------------------------------
@@ -402,6 +439,18 @@ struct SessionEventMap<EventType::AgentPresetSelected> {
 template <>
 struct SessionEventMap<EventType::GoalChange> {
     using type = payload::GoalChange;
+};
+template <>
+struct SessionEventMap<EventType::CommandRun> {
+    using type = payload::CommandRun;
+};
+template <>
+struct SessionEventMap<EventType::CommandDone> {
+    using type = payload::CommandDone;
+};
+template <>
+struct SessionEventMap<EventType::JobChanged> {
+    using type = payload::JobChanged;
 };
 
 // Payload type -> EventType (01 §4.4).
@@ -509,6 +558,18 @@ template <>
 struct EventTraits<payload::GoalChange> {
     static constexpr EventType type = EventType::GoalChange;
 };
+template <>
+struct EventTraits<payload::CommandRun> {
+    static constexpr EventType type = EventType::CommandRun;
+};
+template <>
+struct EventTraits<payload::CommandDone> {
+    static constexpr EventType type = EventType::CommandDone;
+};
+template <>
+struct EventTraits<payload::JobChanged> {
+    static constexpr EventType type = EventType::JobChanged;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -582,5 +643,11 @@ void to_json(nlohmann::json& json, const AgentPresetSelected& value);
 void from_json(const nlohmann::json& json, AgentPresetSelected& value);
 void to_json(nlohmann::json& json, const GoalChange& value);
 void from_json(const nlohmann::json& json, GoalChange& value);
+void to_json(nlohmann::json& json, const CommandRun& value);
+void from_json(const nlohmann::json& json, CommandRun& value);
+void to_json(nlohmann::json& json, const CommandDone& value);
+void from_json(const nlohmann::json& json, CommandDone& value);
+void to_json(nlohmann::json& json, const JobChanged& value);
+void from_json(const nlohmann::json& json, JobChanged& value);
 
 } // namespace ymh::payload

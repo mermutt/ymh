@@ -35,6 +35,8 @@ add_executable(ymh_tests
     unit/agent_turn_executor_test.cpp
     unit/agent_preset_test.cpp
     unit/goal_test.cpp
+    unit/job_test.cpp
+    unit/command_test.cpp
     unit/agent_coalescer_test.cpp
     unit/compaction_test.cpp
     unit/compaction_trigger_test.cpp

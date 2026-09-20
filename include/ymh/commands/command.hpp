@@ -12,17 +12,10 @@
 #include <string>
 
 #include "ymh/agent/agent.hpp"
+#include "ymh/commands/command_types.hpp"
 #include "ymh/core/event.hpp"
 
 namespace ymh {
-
-// 26 §4.3.8. dsh CommandId (dsh-commands brand.d.ts).
-using CommandId = std::uint64_t;
-
-// 26 §4.3.9. dsh has only User; ymh adds Agent (44-D16).
-enum class CommandSource : std::uint8_t { User, Agent };
-
-enum class CommandOutcomeKind : std::uint8_t { Success, Error };
 
 struct CommandInput {
     std::string   name;        // without the leading '/'

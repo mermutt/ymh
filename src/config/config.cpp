@@ -718,6 +718,46 @@ void apply_goals(Config& config, const Json& table, const std::filesystem::path&
     goals.blocked_after_consecutive_rounds = static_cast<std::uint32_t>(blocked);
 }
 
+void apply_jobs(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "jobs",
+                   {"wait_timeout_ms", "max_wait_timeout_ms", "completion_delivery",
+                    "max_consecutive_wakes"},
+                   source);
+    JobsSettings& jobs = config.jobs;
+
+    const std::int64_t wait =
+        read_int64(table, "wait_timeout_ms", "jobs", jobs.wait_timeout_ms, source);
+    if (wait < 0) {
+        fail(source, "value out of range for 'jobs.wait_timeout_ms'");
+    }
+    jobs.wait_timeout_ms = wait;
+
+    const std::int64_t max_wait =
+        read_int64(table, "max_wait_timeout_ms", "jobs", jobs.max_wait_timeout_ms, source);
+    if (max_wait < 1) {
+        fail(source, "value out of range for 'jobs.max_wait_timeout_ms'");
+    }
+    jobs.max_wait_timeout_ms = max_wait;
+
+    const std::string delivery =
+        read_string(table, "completion_delivery", "jobs",
+                    std::string{completion_delivery_name(jobs.completion_delivery)}, source);
+    const std::optional<CompletionDelivery> parsed_delivery = parse_completion_delivery(delivery);
+    if (!parsed_delivery.has_value()) {
+        fail(source, "unknown jobs.completion_delivery '" + delivery + "'");
+    }
+    jobs.completion_delivery = *parsed_delivery;
+
+    const std::int64_t wakes =
+        read_int64(table, "max_consecutive_wakes", "jobs",
+                   static_cast<std::int64_t>(jobs.max_consecutive_wakes), source);
+    if (wakes < 0 ||
+        wakes > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+        fail(source, "value out of range for 'jobs.max_consecutive_wakes'");
+    }
+    jobs.max_consecutive_wakes = static_cast<std::uint32_t>(wakes);
+}
+
 void apply_prompt(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "prompt", {"instructions"}, source);
     const Json* instructions = member(table, "instructions");
@@ -801,7 +841,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
                     bool global_layer) {
     reject_unknown(table, "",
                    {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "session", "prompt", "tools", "presets", "goals", "mcp_servers"},
+                    "session", "prompt", "tools", "presets", "goals", "jobs", "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -871,6 +911,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     }
     if (const Json* goals = section("goals"); goals != nullptr) {
         apply_goals(config, *goals, source);
+    }
+    if (const Json* jobs = section("jobs"); jobs != nullptr) {
+        apply_jobs(config, *jobs, source);
     }
     if (mcp_servers != nullptr) {
         apply_mcp_servers_object(config.mcp, *mcp_servers, source);

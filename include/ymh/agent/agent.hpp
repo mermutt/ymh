@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 
+#include "ymh/agent/ids.hpp"
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/execution/environment.hpp"
@@ -20,12 +21,6 @@
 #include "ymh/session/ids.hpp"
 
 namespace ymh {
-
-struct AgentId {
-    std::string value;
-
-    auto operator<=>(const AgentId&) const = default;
-};
 
 enum class AgentStatus : std::uint8_t {
     Idle,

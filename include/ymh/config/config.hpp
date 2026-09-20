@@ -28,6 +28,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/jobs/job_types.hpp"
 #include "ymh/prompt/instructions.hpp"
 #include "ymh/tools/presentation.hpp"
 
@@ -200,6 +201,14 @@ struct GoalsSettings {
     std::uint32_t blocked_after_consecutive_rounds = 3;
 };
 
+// [jobs] — the owner-scoped job registry (44 §10.2, 26 §4.9). Additive.
+struct JobsSettings {
+    std::int64_t       wait_timeout_ms = 30'000;
+    std::int64_t       max_wait_timeout_ms = 600'000;
+    CompletionDelivery completion_delivery = CompletionDelivery::Wakeup;
+    std::uint32_t      max_consecutive_wakes = 3;
+};
+
 struct Config {
     UiConfig           ui;
     AgentDefaults      agent;
@@ -214,6 +223,7 @@ struct Config {
     ToolsSettings      tools;
     PresetsSettings    presets;
     GoalsSettings      goals;
+    JobsSettings       jobs;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

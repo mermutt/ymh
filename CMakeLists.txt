@@ -445,9 +445,13 @@ add_library(ymh_agent STATIC
     src/agent/repeat_tool_reminder.cpp
     src/agent/subagent.cpp
     src/agent/tool_result_pruner.cpp
+    src/commands/command_registry.cpp
     src/commands/goal_command.cpp
     src/goal/goal_service.cpp
     src/goal/round_driver.cpp
+    src/jobs/job_registry.cpp
+    src/jobs/job_wakeup.cpp
+    src/tools/job_tools.cpp
 )
 add_library(ymh::agent ALIAS ymh_agent)
 

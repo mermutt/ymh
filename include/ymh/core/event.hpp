@@ -75,6 +75,9 @@ enum class EventType : std::uint16_t {
     LlmRequestHeader,    // wire: llm/request_header (28 §5.2, 29 §3.2)
     AgentPresetSelected, // wire: agent_preset/selected (42 §5.1, 43 §1.3)
     GoalChange,          // wire: goal/change  (44 §6.1, 26 §4.3.9)
+    CommandRun,          // wire: command/run  (44 §6.1, 26 §4.3.9)
+    CommandDone,         // wire: command/done (44 §6.1, 26 §4.3.9)
+    JobChanged,          // wire: job/changed  (44 §6.1, 26 §4.3.9)
     // Live-only (15 §4.7, AM-1): never in the durable SessionEventMap, never
     // appended to the session log. Delivered to global EventBus subscribers.
     McpServerStatusChanged,  // wire: mcp/server_status_changed

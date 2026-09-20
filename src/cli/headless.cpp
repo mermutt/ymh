@@ -226,6 +226,9 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
                 break;
             }
             case EventType::GoalChange:
+            case EventType::CommandRun:
+            case EventType::CommandDone:
+            case EventType::JobChanged:
                 break;
             default:
                 break;
