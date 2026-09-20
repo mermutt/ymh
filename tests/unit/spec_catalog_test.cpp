@@ -553,8 +553,9 @@ TEST(SpecCatalog, HistoricalDefectsRemainOwned) {
     require("protocol::LiveNotification", "35-live-notification-errata.md", "3.3");
     require("cli::AssistantStreamPrinter", "34-assembler-replay-errata.md", "15");
 
-    const auto gap = by_symbol.find("config::session.persist_prompt_text");
-    ASSERT_NE(gap, by_symbol.end()) << "the known persist_prompt_text gap is not recorded";
-    EXPECT_TRUE(gap->second.gap) << "config::session.persist_prompt_text must be a gap marker";
-    EXPECT_FALSE(gap->second.reason.empty()) << "the gap must explain why no section owns it";
+    // The third historical defect is now owned by the `39` errata (the gap this
+    // catalog test itself found and forced closed). It is asserted as ownership,
+    // not as a gap marker, so a future refactor cannot quietly drop the owner.
+    require("config::session.persist_prompt_text",
+            "39-session-persist-prompt-text-errata.md", "3.1");
 }

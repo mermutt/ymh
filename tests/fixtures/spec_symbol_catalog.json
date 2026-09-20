@@ -1433,8 +1433,8 @@
     {
       "symbol": "config::session.persist_prompt_text",
       "category": "config_key",
-      "gap": true,
-      "reason": "KNOWN GAP: the key ships and is read (src/config/config.cpp apply_session, config.hpp:162, agent_loop.cpp:536), but no spec section owns it. 21-config-jsonc-errata.md is the config errata and its top-level allowlist predates `session`; its \u00a73.3 'Every config key read today' does not list it. 36-prompt-registry.md \u00a74.3 explicitly declines ownership ('This spec does not touch session.persist_prompt_text'). The 21 errata that should own it was never written (the third silent design-gate failure)."
+      "spec": "39-session-persist-prompt-text-errata.md",
+      "section": "3.1"
     },
     {
       "symbol": "config::skills.enabled",
