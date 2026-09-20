@@ -349,6 +349,12 @@ The program is a **mechanics-alignment** effort, not a port. Per
 This scope is the reason the cascade in §4 is bounded: the excluded surfaces
 (Cordis, PTC, remote transports) contribute no seam change to `00`.
 
+**User decision (2026-09-19, recorded).** Run **Waves 3–4 together, then a
+checkpoint** (Wave 3 = the prompt system, the first model-visible wave; Wave 4 =
+output processing, the other half of the stated goal; Wave 4 must land after
+Wave 3 per §5.3). **Wave 6 (goals/jobs/commands) remains in scope** for a later
+slice — it is not cut. Wave 5 follows Wave 3.
+
 ### P2 — Prompt-logging policy
 
 `26-D23` (`:161`) and `26 §4.9` pin the durable prompt policy:
@@ -368,6 +374,11 @@ The default durable record is therefore the digest, and the mechanism is safe by
 default. Whether to ever enable durable full-prompt capture remains a user
 product decision.
 
+**User decision (2026-09-19, recorded).** **Keep the default `false`**; enable
+`session.persist_prompt_text` only per test run when a baseline needs to be
+diffed (e.g. the Wave-3 checkpoint records its baseline with the flag on in a
+scratch workspace). The shipped default does not change.
+
 ### P3 — No-downgrade acceptance (the one-way door)
 
 `26 §4.6` pins the compatibility asymmetry:
@@ -385,6 +396,12 @@ product decision.
 Recording P3 is a Wave-0 gate obligation: this errata is where the acceptance is
 recorded for the gate. Until the user's sign-off is on record, the top-level gate
 does not pass.
+
+**User sign-off (2026-09-19, recorded).** **ACCEPTED.** The no-downgrade one-way
+door is accepted as specified: after a new binary appends a new event type, an
+older binary cannot open that DB (the loud forward-fence holds); downgrades are
+unsupported; no migration/dual-read window is proposed. **With P1/P2/P3 on
+record, the top-level gate passes.**
 
 ## 7. Supersession map — what this errata does NOT change
 
