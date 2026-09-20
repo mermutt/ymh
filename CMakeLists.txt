@@ -399,6 +399,31 @@ target_link_libraries(ymh_skills
 )
 
 # ---------------------------------------------------------------------------
+# Prompt registry library (component 36): ordered sections, persona, rendering
+# ---------------------------------------------------------------------------
+
+add_library(ymh_prompt STATIC
+    src/prompt/order.cpp
+    src/prompt/persona.cpp
+    src/prompt/system_prompt.cpp
+)
+add_library(ymh::prompt ALIAS ymh_prompt)
+
+target_include_directories(ymh_prompt
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(ymh_prompt
+    PUBLIC
+        ymh::core
+        ymh::tools
+    PRIVATE
+        ymh::config
+        ymh::warnings
+)
+
+# ---------------------------------------------------------------------------
 # Agent & loop library (component 06)
 # ---------------------------------------------------------------------------
 
@@ -428,6 +453,7 @@ target_link_libraries(ymh_agent
         ymh::llm
         ymh::execution
         ymh::policy
+        ymh::prompt
         ymh::tools
         nlohmann_json::nlohmann_json
     PRIVATE

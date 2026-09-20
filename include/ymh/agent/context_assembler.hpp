@@ -21,6 +21,8 @@
 
 namespace ymh {
 
+class SystemPrompt;
+
 struct TurnContext {
     TurnId                      turn = 0;
     StepId                      step = 0;
@@ -66,6 +68,11 @@ public:
     void set_plan_policy_provider(
         std::function<std::string(const Session&)> provider);
 
+    // 36 §2.7: when set, the registry render replaces `systemPrompt_` and the
+    // registry's `.tools` replaces `tools_.schemas()`. When null, the fixed
+    // string and the raw registry order are used (the pre-Wave-3 behavior).
+    void set_system_prompt(const SystemPrompt* prompt);
+
     std::vector<Message> assemble(const Session&, const TurnContext&) const override;
     std::vector<ToolSchema> tools() const override;
 
@@ -73,6 +80,7 @@ private:
     ToolRegistry&                              tools_;
     std::string                                systemPrompt_;
     std::function<std::string(const Session&)> plan_policy_;
+    const SystemPrompt*                        prompt_ = nullptr;
 };
 
 class NullCompactor final : public Compactor {

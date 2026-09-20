@@ -79,6 +79,8 @@ add_executable(ymh_tests
     unit/skills_wiring_test.cpp
     unit/skills_rpc_test.cpp
     unit/no_raw_map_handle_test.cpp
+    unit/prompt_registry_test.cpp
+    unit/prompt_golden_test.cpp
     unit/global_test_env_test.cpp
     support/global_test_env.cpp
     support/replay_harness.cpp
