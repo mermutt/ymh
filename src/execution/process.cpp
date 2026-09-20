@@ -9,7 +9,9 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,6 +62,34 @@ void redirect_to_devnull(int target) {
         if (fd != target) {
             ::close(fd);
         }
+    }
+}
+
+// 04 §3.2 / 07 §5.4 fd hygiene: a forked tool child must not inherit the
+// daemon's descriptors (the listening socket, accepted connections, the
+// session/registry handles). Close every fd above stderr that is not already
+// close-on-exec; the O_CLOEXEC pipes (including the exec-status pipe) are left
+// for the kernel to close at exec, so an exec failure is still reportable.
+void close_inherited_fds() {
+    DIR* directory = ::opendir("/proc/self/fd");
+    if (directory == nullptr) {
+        return;
+    }
+    const int        directory_fd = ::dirfd(directory);
+    std::vector<int> inherited;
+    while (dirent* entry = ::readdir(directory)) {
+        const int fd = std::atoi(entry->d_name);
+        if (fd <= STDERR_FILENO || fd == directory_fd) {
+            continue;
+        }
+        const int descriptor_flags = ::fcntl(fd, F_GETFD);
+        if (descriptor_flags >= 0 && (descriptor_flags & FD_CLOEXEC) == 0) {
+            inherited.push_back(fd);
+        }
+    }
+    ::closedir(directory);
+    for (const int fd : inherited) {
+        ::close(fd);
     }
 }
 
@@ -341,6 +371,8 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
             ::setenv(key.c_str(), value.c_str(), 1);
         }
 
+        close_inherited_fds();
+
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
 
@@ -498,6 +530,7 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         for (const auto& [key, value] : request.environment) {
             ::setenv(key.c_str(), value.c_str(), 1);
         }
+        close_inherited_fds();
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
         const int saved = errno;

@@ -270,12 +270,19 @@ private:
 // identified by `--host` plus (when given) `--workspace <id>` / `--root <path>`.
 // A registry read can lag the daemon's claim/exit, so teardown scans `/proc`.
 inline std::vector<std::string> proc_args(pid_t pid) {
-    std::ifstream input("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
-    if (!input) {
+    // A process can exit between the `/proc` scan and this read; libstdc++'s
+    // filebuf throws on the resulting ESRCH rather than setting a stream error,
+    // so a vanished pid must be treated as "not a daemon", not as a test failure.
+    std::string blob;
+    try {
+        std::ifstream input("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+        if (!input) {
+            return {};
+        }
+        blob.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    } catch (const std::exception&) {
         return {};
     }
-    const std::string blob((std::istreambuf_iterator<char>(input)),
-                           std::istreambuf_iterator<char>());
     std::vector<std::string> args;
     std::string              current;
     for (const char character : blob) {

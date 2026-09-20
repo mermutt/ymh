@@ -222,13 +222,18 @@ bool SupervisorConnection::attempt_attach() {
         return false;
     }
 
-    set_state(SupervisorLinkState::Attached, "hello accepted");
+    // Complete the subscribe phase before publishing `Attached`, then bump the
+    // generation and switch state. `Attached` and `attachCount()` are both
+    // mutex-guarded, so a waiter that observes `Attached` (or a count of N)
+    // observes a fully attached link whose resubscribe requests were already
+    // sent. Publishing `Attached`/the count before `subscribe_tracked()` let
+    // observers see a link with no resubscription yet.
     subscribe_tracked();
     {
         std::lock_guard lock(mutex_);
         ++attach_count_;
     }
-    cv_.notify_all();
+    set_state(SupervisorLinkState::Attached, "hello accepted");
     return true;
 }
 
@@ -328,11 +333,18 @@ void SupervisorConnection::dispatch(const protocol::Notification& notification) 
         if (envelope.session != envelope.event.session_id) {
             return;
         }
+        // Advance the cursor BEFORE handing the envelope to the sink. The
+        // cursor is the resume position for the last delivered event, so a
+        // consumer that observes the envelope (e.g. from `on_envelope`) must
+        // already observe its cursor; writing it afterwards let a reader see
+        // the envelope with no/older cursor and re-request from `beginning`.
+        {
+            std::lock_guard lock(mutex_);
+            cursors_[envelope.session] = stream.cursor;
+        }
         if (sink_.on_envelope) {
             sink_.on_envelope(envelope);
         }
-        std::lock_guard lock(mutex_);
-        cursors_[envelope.session] = stream.cursor;
         return;
     }
     if (notification.method == protocol::notify::kEventLive) {

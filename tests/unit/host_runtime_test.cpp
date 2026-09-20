@@ -647,6 +647,16 @@ TEST_F(HostRuntimeTest, SL_I22_DependentDeleteRefusalLeavesNoSideEffects) {
     bridge.clear_forwarded();
     bridge.host().agentPrompt(parent.session, message);
     ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+    // 24-D5: the turn-end event is published before the executor releases its
+    // queue/active slot, so the queue-aware mid-turn guard can still refuse
+    // immediately after `wait_for_turn_end`. Wait for the predicate the delete
+    // path actually consults so the dependent-children guard is the one reached.
+    const auto settled_deadline = std::chrono::steady_clock::now() + 5s;
+    while (bridge.host().hasPendingWork(parent.session) &&
+           std::chrono::steady_clock::now() < settled_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_FALSE(bridge.host().hasPendingWork(parent.session));
     ASSERT_NE(bridge.runtime().agents().findShared(parent.session), nullptr);
 
     PtyRequest request;

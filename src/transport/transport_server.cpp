@@ -238,6 +238,17 @@ void TransportServer::start() {
     if (error) {
         throw std::runtime_error("transport: open acceptor: " + error.message());
     }
+    // 05 §5.1 / 11 §8.1 require the listening socket to be `SOCK_CLOEXEC`. Asio
+    // does not set it, so a forked tool/PTY child could inherit the listener;
+    // the orphaned child then keeps `host.sock` connectable after the daemon
+    // dies and the replacement daemon's stale-socket probe reports a live peer
+    // (AlreadyRunning -> WorkspaceBusy) instead of replacing the socket.
+    if (const int listener_fd = acceptor_.native_handle(); listener_fd >= 0) {
+        const int descriptor_flags = ::fcntl(listener_fd, F_GETFD);
+        if (descriptor_flags >= 0) {
+            (void)::fcntl(listener_fd, F_SETFD, descriptor_flags | FD_CLOEXEC);
+        }
+    }
     acceptor_.bind(asio::local::stream_protocol::endpoint(socket_path_), error);
     if (error) {
         throw std::runtime_error("transport: bind " + socket_path_ + ": " + error.message());

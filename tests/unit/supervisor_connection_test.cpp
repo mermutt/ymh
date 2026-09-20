@@ -571,7 +571,9 @@ TEST(SupervisorConnection, RejectsAttachIdentityMismatch) {
     SupervisorConnection connection(std::move(config), sink_for(collected));
     connection.start();
     EXPECT_FALSE(connection.waitForState(SupervisorLinkState::Attached, 500ms));
-    EXPECT_EQ(connection.state(), SupervisorLinkState::Dead);
+    // The mismatch retry loop alternates Dead with a transient Connecting while
+    // it re-handshakes, so wait for the rejected state instead of sampling it.
+    EXPECT_TRUE(connection.waitForState(SupervisorLinkState::Dead, 2s));
     connection.stop();
 }
 
