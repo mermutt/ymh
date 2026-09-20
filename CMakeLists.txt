@@ -441,7 +441,9 @@ add_library(ymh_agent STATIC
     src/agent/context_snapshot.cpp
     src/agent/llm_pool.cpp
     src/agent/plan_mode_controller.cpp
+    src/agent/repeat_tool_reminder.cpp
     src/agent/subagent.cpp
+    src/agent/tool_result_pruner.cpp
 )
 add_library(ymh::agent ALIAS ymh_agent)
 

@@ -66,6 +66,7 @@ enum class EventType : std::uint16_t {
     PermissionDecision,  // wire: permission/decision
     ContextInjected,     // wire: context/injected
     ContextCompaction,   // wire: context/compaction
+    ContextPrune,        // wire: context/prune (32 §5.1, 26-D12)
     TokenUsage,          // wire: usage
     SubagentSpawned,     // wire: subagent/spawned
     SubagentFanIn,       // wire: subagent/fan_in

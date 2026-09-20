@@ -501,6 +501,11 @@ void to_json(nlohmann::json& json, const ContextCompaction& value) {
         {"token_estimate", value.tokenEstimate},
         {"model", value.model},
         {"created_at", to_epoch_ms(value.createdAt)},
+        {"provider", value.provider},
+        {"shadowed_start", value.shadowedStart},
+        {"shadowed_end", value.shadowedEnd},
+        {"shadowed_seqs", value.shadowedSeqs},
+        {"shadowed_token_count", value.shadowedTokenCount},
     };
 }
 
@@ -510,6 +515,27 @@ void from_json(const nlohmann::json& json, ContextCompaction& value) {
     value.tokenEstimate = json.value("token_estimate", std::size_t{0});
     value.model         = json.value("model", std::string{});
     value.createdAt     = from_epoch_ms(json.value("created_at", std::int64_t{0}));
+    value.provider      = json.value("provider", std::string{});
+    value.shadowedStart = json.value("shadowed_start", Sequence{0});
+    value.shadowedEnd   = json.value("shadowed_end", Sequence{0});
+    value.shadowedSeqs  = json.value("shadowed_seqs", std::vector<Sequence>{});
+    value.shadowedTokenCount = json.value("shadowed_token_count", std::uint64_t{0});
+}
+
+void to_json(nlohmann::json& json, const ContextPrune& value) {
+    json = nlohmann::json{
+        {"shadowed_start", value.shadowedStart},
+        {"shadowed_end", value.shadowedEnd},
+        {"shadowed_seqs", value.shadowedSeqs},
+        {"shadowed_token_count", value.shadowedTokenCount},
+    };
+}
+
+void from_json(const nlohmann::json& json, ContextPrune& value) {
+    value.shadowedStart = json.value("shadowed_start", Sequence{0});
+    value.shadowedEnd   = json.value("shadowed_end", Sequence{0});
+    value.shadowedSeqs  = json.value("shadowed_seqs", std::vector<Sequence>{});
+    value.shadowedTokenCount = json.value("shadowed_token_count", std::uint64_t{0});
 }
 
 void to_json(nlohmann::json& json, const TokenUsage& value) {

@@ -178,6 +178,24 @@ struct ContextCompaction {
     std::size_t                           tokenEstimate = 0;
     std::string                           model;
     std::chrono::system_clock::time_point createdAt{};
+    // D13 additions (32-compaction-errata.md §3.2; 26 §4.3.9.1). Additive on
+    // the wire: every field is optional/defaulted so an older reader ignores
+    // them (C21, C-F19).
+    std::string           provider;
+    Sequence              shadowedStart = 0;
+    Sequence              shadowedEnd = 0;
+    std::vector<Sequence> shadowedSeqs;
+    std::uint64_t         shadowedTokenCount = 0;
+};
+
+// The tool-result pruner's shadow-price event (32-compaction-errata.md §5.1;
+// 26 §4.3.9). It never deletes: it precedes a same-`id` replacement
+// `ToolResult` and carries the shadowed set for audit (C22, C26).
+struct ContextPrune {
+    Sequence              shadowedStart = 0;
+    Sequence              shadowedEnd = 0;
+    std::vector<Sequence> shadowedSeqs;
+    std::uint64_t         shadowedTokenCount = 0;
 };
 
 struct TokenUsage {
@@ -318,6 +336,10 @@ struct SessionEventMap<EventType::ContextCompaction> {
     using type = payload::ContextCompaction;
 };
 template <>
+struct SessionEventMap<EventType::ContextPrune> {
+    using type = payload::ContextPrune;
+};
+template <>
 struct SessionEventMap<EventType::TokenUsage> {
     using type = payload::TokenUsage;
 };
@@ -412,6 +434,10 @@ struct EventTraits<payload::ContextCompaction> {
     static constexpr EventType type = EventType::ContextCompaction;
 };
 template <>
+struct EventTraits<payload::ContextPrune> {
+    static constexpr EventType type = EventType::ContextPrune;
+};
+template <>
 struct EventTraits<payload::TokenUsage> {
     static constexpr EventType type = EventType::TokenUsage;
 };
@@ -490,6 +516,8 @@ void to_json(nlohmann::json& json, const ContextInjected& value);
 void from_json(const nlohmann::json& json, ContextInjected& value);
 void to_json(nlohmann::json& json, const ContextCompaction& value);
 void from_json(const nlohmann::json& json, ContextCompaction& value);
+void to_json(nlohmann::json& json, const ContextPrune& value);
+void from_json(const nlohmann::json& json, ContextPrune& value);
 void to_json(nlohmann::json& json, const TokenUsage& value);
 void from_json(const nlohmann::json& json, TokenUsage& value);
 void to_json(nlohmann::json& json, const SubagentSpawned& value);

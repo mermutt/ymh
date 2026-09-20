@@ -19,6 +19,8 @@ add_executable(ymh_tests
     unit/path_safety_test.cpp
     unit/output_test.cpp
     unit/retention_test.cpp
+    unit/repeat_tool_reminder_test.cpp
+    unit/tool_result_pruner_test.cpp
     unit/process_test.cpp
     unit/pty_test.cpp
     unit/registry_test.cpp
@@ -32,6 +34,7 @@ add_executable(ymh_tests
     unit/agent_turn_executor_test.cpp
     unit/agent_coalescer_test.cpp
     unit/compaction_test.cpp
+    unit/compaction_trigger_test.cpp
     unit/context_snapshot_test.cpp
     unit/plan_mode_test.cpp
     unit/llm_pool_test.cpp

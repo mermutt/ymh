@@ -453,23 +453,54 @@ void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string m
     state_ = AgentState::Error;
 }
 
-CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages, TurnId turn) {
+CompactionOutcome AgentLoop::commitCompactionResult(const CompactionResult& result, TurnId turn) {
+    if (result.outcome == CompactionOutcome::Compacted && result.compaction.has_value()) {
+        session_.append(*result.compaction);
+        ++compactions_this_turn_;
+        if (result.usage.has_value()) {
+            session_.append(payload::TokenUsage{*result.usage, turn});
+        }
+    }
+    return result.outcome;
+}
+
+CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages, TurnId turn,
+                                           CompactionTrigger trigger) {
     CancellationToken turnToken;
     {
         std::lock_guard<std::mutex> lock(control_mutex_);
         turnToken = turn_cancel_.token();
     }
     if (services_.context_compactor != nullptr) {
-        CompactionResult result =
-            services_.context_compactor->compact(session_, messages, turnToken);
-        if (result.outcome == CompactionOutcome::Compacted && result.compaction.has_value()) {
-            session_.append(*result.compaction);
-            ++compactions_this_turn_;
-            if (result.usage.has_value()) {
-                session_.append(payload::TokenUsage{*result.usage, turn});
-            }
+        std::optional<CompactionResult> result =
+            services_.context_compactor->compact_if_needed(trigger, session_, messages, turnToken)
+                .get();
+        if (!result.has_value()) {
+            return CompactionOutcome::NotNeeded;
         }
-        return result.outcome;
+        return commitCompactionResult(*result, turn);
+    }
+    if (services_.compactor != nullptr) {
+        std::optional<payload::ContextCompaction> compaction =
+            services_.compactor->run(session_, messages, turnToken);
+        if (compaction.has_value()) {
+            session_.append(*compaction);
+            ++compactions_this_turn_;
+            return CompactionOutcome::Compacted;
+        }
+    }
+    return CompactionOutcome::NotNeeded;
+}
+
+CompactionOutcome AgentLoop::runCompactionNow(const std::vector<Message>& messages, TurnId turn) {
+    CancellationToken turnToken;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        turnToken = turn_cancel_.token();
+    }
+    if (services_.context_compactor != nullptr) {
+        return commitCompactionResult(
+            services_.context_compactor->compact_now(session_, messages, turnToken).get(), turn);
     }
     if (services_.compactor != nullptr) {
         std::optional<payload::ContextCompaction> compaction =
@@ -485,6 +516,7 @@ CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages,
 
 FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
                                       TurnId turn, StepId step) {
+    (void)pruner_.prune_session(session_);
     LLMRequest request;
     request.model    = config_.model;
     request.messages = messages;
@@ -765,13 +797,14 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
     }
     std::vector<Message> messages;
     try {
+        (void)pruner_.prune_session(session_);
         messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
     } catch (const std::exception& error) {
         appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
         return;
     }
 
-    const CompactionOutcome outcome = runCompaction(messages, turn);
+    const CompactionOutcome outcome = runCompactionNow(messages, turn);
     if (outcome == CompactionOutcome::Cancelled) {
         std::string reason;
         {
@@ -826,6 +859,7 @@ void AgentLoop::runTurn() {
     compactions_this_turn_ = 0;
 
     const auto assemble_messages = [&](StepId step) -> std::vector<Message> {
+        (void)pruner_.prune_session(session_);
         if (services_.prompt != nullptr) {
             materializeContexts(services_.prompt->assemble(AssembleContext{}));
         }
@@ -874,7 +908,7 @@ void AgentLoop::runTurn() {
                                                     .effective_threshold_tokens()
                                               : config_.compaction_threshold_tokens;
             if (estimate > threshold) {
-                runCompaction(messages, turn);
+                runCompaction(messages, turn, CompactionTrigger::Pressure);
                 try {
                     messages = assemble_messages(step);
                 } catch (const std::exception& error) {
@@ -1010,7 +1044,7 @@ void AgentLoop::runTurn() {
                 !services_.context_compactor->policy().retry_on_context_length) {
                 break;
             }
-            runCompaction(messages, turn);
+            runCompaction(messages, turn, CompactionTrigger::ContextOverflow);
             try {
                 messages = assemble_messages(step);
             } catch (const std::exception& error) {
@@ -1064,6 +1098,10 @@ void AgentLoop::runTurn() {
                 break;
             }
             executeToolCall(call, turn, step);
+            if (std::optional<ContextMessage> reminder = reminder_.observe(call);
+                reminder.has_value()) {
+                appendContextInjected(*reminder);
+            }
         }
 
         if (usage.has_value()) {

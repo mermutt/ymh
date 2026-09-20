@@ -18,6 +18,7 @@
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/agent/message.hpp"
 #include "ymh/core/cancellation.hpp"
+#include "ymh/core/task.hpp"
 #include "ymh/llm/llm_provider.hpp"
 #include "ymh/llm/llm_runtime.hpp"
 #include "ymh/session/events.hpp"
@@ -59,6 +60,13 @@ struct CompactionPolicy {
         }
         return 0;
     }
+};
+
+// The compaction trigger taxonomy (32-compaction-errata.md §4.1; 26-D13). The
+// manual `/compact` path is `compact_now`, not a third value (C24).
+enum class CompactionTrigger : std::uint8_t {
+    Pressure,
+    ContextOverflow,
 };
 
 // The result of a compaction attempt (13 §5.3). Not durable.
@@ -125,6 +133,17 @@ public:
     run(const Session&, const std::vector<Message>&, CancellationToken) override;
 
     CompactionResult compact(const Session&, const std::vector<Message>&, CancellationToken);
+
+    // 32 §4.2: the two D13 entry points. `compact_if_needed` is the
+    // proactive/overflow path (nullopt when no compaction is warranted);
+    // `compact_now` always attempts and is the manual `/compact` path.
+    Task<std::optional<CompactionResult>> compact_if_needed(CompactionTrigger trigger,
+                                                            const Session&,
+                                                            const std::vector<Message>&,
+                                                            CancellationToken);
+    Task<CompactionResult> compact_now(const Session&,
+                                       const std::vector<Message>&,
+                                       CancellationToken);
 
     [[nodiscard]] CompactionPlan plan(const Session&,
                                       const std::vector<Message>&) const;
