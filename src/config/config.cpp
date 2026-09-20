@@ -673,11 +673,90 @@ void apply_skills(Config& config, const Json& table, const std::filesystem::path
         static_cast<std::int64_t>(skills.max_frontmatter_bytes), source));
 }
 
+void apply_prompt(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "prompt", {"instructions"}, source);
+    const Json* instructions = member(table, "instructions");
+    if (instructions == nullptr) {
+        return;
+    }
+    if (!instructions->is_object()) {
+        fail(source, "invalid type for 'prompt.instructions'");
+    }
+    reject_unknown(*instructions, "prompt.instructions",
+                   {"enabled", "max_bytes", "project_root_markers", "candidates", "local_candidates",
+                    "load_local", "max_source_bytes"},
+                   source);
+
+    InstructionFileConfig& cfg = config.prompt.instructions;
+    config.prompt.instructions_enabled =
+        read_bool(*instructions, "enabled", "prompt.instructions",
+                  config.prompt.instructions_enabled, source);
+    if (member(*instructions, "max_bytes") != nullptr) {
+        cfg.max_bytes = static_cast<std::size_t>(
+            read_int64(*instructions, "max_bytes", "prompt.instructions", 0, source));
+    }
+    if (member(*instructions, "project_root_markers") != nullptr) {
+        cfg.project_root_markers =
+            read_string_array(*instructions, "project_root_markers", "prompt.instructions", source);
+    }
+    if (member(*instructions, "candidates") != nullptr) {
+        cfg.candidates = read_string_array(*instructions, "candidates", "prompt.instructions", source);
+    }
+    if (member(*instructions, "local_candidates") != nullptr) {
+        cfg.local_candidates =
+            read_string_array(*instructions, "local_candidates", "prompt.instructions", source);
+    }
+    cfg.load_local = read_bool(*instructions, "load_local", "prompt.instructions", cfg.load_local,
+                               source);
+    if (member(*instructions, "max_source_bytes") != nullptr) {
+        cfg.max_source_bytes = static_cast<std::size_t>(
+            read_int64(*instructions, "max_source_bytes", "prompt.instructions",
+                       static_cast<std::int64_t>(cfg.max_source_bytes), source));
+    }
+    if (config.prompt.instructions_enabled && cfg.max_bytes == 0) {
+        fail(source,
+             "prompt.instructions.max_bytes is required when prompt.instructions.enabled is true");
+    }
+}
+
+void apply_tools(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "tools", {"presentation", "tool_order"}, source);
+    const std::string presentation =
+        read_string(table, "presentation", "tools",
+                    std::string{tool_presentation_name(config.tools.presentation)}, source);
+    if (presentation == "native") {
+        config.tools.presentation = ToolPresentationMode::Native;
+    } else if (presentation == "ptc" || presentation == "both") {
+        fail(source, "tools.presentation '" + presentation +
+                         "' is reserved and not implemented; only 'native' is supported");
+    } else {
+        fail(source, "unknown tools.presentation '" + presentation + "'");
+    }
+
+    config.tools.tool_order = read_string_array(table, "tool_order", "tools", source);
+    if (!config.tools.tool_order.empty()) {
+        std::set<std::string> named;
+        std::size_t           rest = 0;
+        for (const std::string& entry : config.tools.tool_order) {
+            if (entry == "<unlisted-tools>") {
+                ++rest;
+                continue;
+            }
+            if (!named.insert(entry).second) {
+                fail(source, "duplicate tools.tool_order entry '" + entry + "'");
+            }
+        }
+        if (rest != 1) {
+            fail(source, "tools.tool_order must contain <unlisted-tools> exactly once");
+        }
+    }
+}
+
 void apply_document(Config& config, const Json& table, const std::filesystem::path& source,
                     bool global_layer) {
     reject_unknown(table, "",
                    {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "session", "mcp_servers"},
+                    "session", "prompt", "tools", "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -735,6 +814,12 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
             fail(source, "'session' is global-layer only");
         }
         apply_session(config, *session, source);
+    }
+    if (const Json* prompt = section("prompt"); prompt != nullptr) {
+        apply_prompt(config, *prompt, source);
+    }
+    if (const Json* tools = section("tools"); tools != nullptr) {
+        apply_tools(config, *tools, source);
     }
     if (mcp_servers != nullptr) {
         apply_mcp_servers_object(config.mcp, *mcp_servers, source);

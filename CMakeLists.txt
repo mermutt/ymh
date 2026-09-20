@@ -403,8 +403,10 @@ target_link_libraries(ymh_skills
 # ---------------------------------------------------------------------------
 
 add_library(ymh_prompt STATIC
+    src/prompt/instructions.cpp
     src/prompt/order.cpp
     src/prompt/persona.cpp
+    src/prompt/runtime_context.cpp
     src/prompt/system_prompt.cpp
 )
 add_library(ymh::prompt ALIAS ymh_prompt)
@@ -420,6 +422,7 @@ target_link_libraries(ymh_prompt
         ymh::tools
     PRIVATE
         ymh::config
+        ymh::execution
         ymh::warnings
 )
 

@@ -23,7 +23,9 @@
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/prompt/instructions.hpp"
 #include "ymh/prompt/persona.hpp"
+#include "ymh/prompt/runtime_context.hpp"
 #include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/skills/skill_catalog.hpp"
@@ -111,7 +113,7 @@ public:
           agent_config_(make_agent_config(config, *skill_catalog_, policy_,
                                           attach_permission_gate ||
                                               attach_permission_resolver)),
-          prompt_(),
+          prompt_(config.tools.tool_order),
           assembler_(tools_, agent_config_.system_prompt),
           provider_config_(std::move(provider_config)),
           pool_(governor_.caps().max_llm_concurrency),
@@ -157,9 +159,20 @@ public:
         prompt_config.persona  = default_persona_config();
         prompt_config.model    = agent_config_.model;
         prompt_config.cwd      = root_.string();
+        const bool include_runtime_context = prompt_config.persona.include_runtime_context;
         default_prompt_        = register_default_prompt(prompt_, std::move(prompt_config));
         prompt_.set_tool_provider(
             [this](const AssembleContext&) { return tools_.schemas(); });
+        if (include_runtime_context) {
+            RuntimeContextConfig runtime;
+            runtime.cwd   = root_.string();
+            runtime.model = agent_config_.model;
+            runtime_context_ = register_runtime_context(prompt_, std::move(runtime));
+        }
+        if (config.prompt.instructions_enabled) {
+            instructions_ = std::make_unique<InstructionLoader>(config.prompt.instructions,
+                                                                *environment_);
+        }
         assembler_.set_system_prompt(&prompt_);
 
         services_.sessions        = &sessions_;
@@ -169,6 +182,8 @@ public:
         services_.policy          = &policy_;
         services_.gate            = attach_permission_gate ? &gate_ : nullptr;
         services_.context         = &assembler_;
+        services_.prompt          = &prompt_;
+        services_.instructions    = instructions_.get();
         services_.execution       = environment_.get();
         services_.logger          = &category_logger(LogCategory::Tool);
         services_.output          = &sink_;
@@ -215,6 +230,8 @@ public:
     AgentConfig                        agent_config_;
     SystemPrompt                       prompt_;
     DefaultPromptHandles               default_prompt_;
+    ContextHandle                      runtime_context_;
+    std::unique_ptr<InstructionLoader> instructions_;
     SessionContextAssembler            assembler_;
     DefaultTokenEstimator              estimator_;
     LLMProviderConfig                  provider_config_;
