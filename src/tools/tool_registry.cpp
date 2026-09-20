@@ -324,7 +324,7 @@ Task<ToolResult> ToolRegistry::execute(const payload::ToolCall& call,
     const auto finish = [this, &start](ToolResult result) {
         result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             SteadyClock::now() - start);
-        clamp_tool_result(result, config_.tool_result_max_bytes);
+        retain_tool_result(result, config_.tool_result_max_bytes);
         return Task<ToolResult>(std::move(result));
     };
 

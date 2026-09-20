@@ -93,6 +93,21 @@ struct ContextMessage {
     ContextFormed context{};
 };
 
+// 40-output-retention.md §2.3 (26-D10). The scheduler's bound and its committed
+// outcome; `results` is always model-ordered.
+struct ToolScheduleConfig {
+    std::size_t max_parallel_tool_calls = 10;  // dsh DEFAULT_MAX_PARALLEL_TOOL_CALLS
+};
+
+struct ToolScheduleOutcome {
+    std::vector<payload::ToolResult> results;
+    bool                             aborted = false;
+};
+
+// Accepts a context contribution produced by a tool; returns false to reject
+// (full/duplicate). Keeps the scheduler free of ContextAssembler details.
+using ContextAcceptor = std::function<bool(const ContextMessage&)>;
+
 struct AgentConfig {
     // 28-D9 / 31-D7: the provider id source for `LlmCallConfig::provider`,
     // populated from `config.llm.provider`. Empty => the runtime default route.
@@ -108,6 +123,7 @@ struct AgentConfig {
     std::string              system_prompt;
     std::string              plan_section;
     bool                     persist_prompt_text = false;
+    ToolScheduleConfig       schedule;  // 40 §2.3
 };
 
 class Agent {

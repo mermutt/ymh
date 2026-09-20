@@ -33,7 +33,7 @@ Task<ToolResult> McpTool::execute(const ToolContext& context,
     if (!slot.has_value()) {
         result.outcome = payload::ToolOutcome::Error;
         result.error = std::string{to_string(McpErrorCode::CapExhausted)};
-        clamp_tool_result(result, result_max_bytes_);
+        retain_tool_result(result, result_max_bytes_);
         return Task<ToolResult>(std::move(result));
     }
 
@@ -66,7 +66,7 @@ Task<ToolResult> McpTool::execute(const ToolContext& context,
         result.error = std::string{to_string(McpErrorCode::Internal)};
     }
 
-    result.truncated = clamp_tool_result(result, result_max_bytes_);
+    retain_tool_result(result, result_max_bytes_);
     return Task<ToolResult>(std::move(result));
 }
 

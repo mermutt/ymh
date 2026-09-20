@@ -3,10 +3,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
-
-#include "ymh/execution/output.hpp"
 
 namespace ymh {
 namespace {
@@ -15,6 +14,17 @@ constexpr std::string_view kSchemaKeywords[] = {
     "type", "description", "enum", "default", "items",
     "properties", "required", "additionalProperties",
 };
+
+// Reserved for the serialized envelope and the retention notice so the
+// escaping-aware retainer budget leaves room for both (40-D6, 40-I6).
+constexpr std::size_t kToolResultEnvelopeHeadroom = 4096;
+
+std::size_t retention_budget(std::size_t max_bytes) noexcept {
+    if (max_bytes > kToolResultEnvelopeHeadroom) {
+        return max_bytes - kToolResultEnvelopeHeadroom;
+    }
+    return std::max<std::size_t>(1, max_bytes / 2);
+}
 
 bool is_allowed_keyword(std::string_view key) {
     return std::find(std::begin(kSchemaKeywords), std::end(kSchemaKeywords), key) !=
@@ -250,28 +260,38 @@ bool schema_validate(const nlohmann::json& schema, const nlohmann::json& argumen
     return object_matches(schema, arguments);
 }
 
-bool clamp_tool_result(ToolResult& result, std::size_t max_bytes) {
-    if (max_bytes == 0) {
-        max_bytes = 1;
-    }
-    const auto serialized_size = [&result]() {
-        nlohmann::json json = result;
-        return json.dump().size();
-    };
-    if (serialized_size() <= max_bytes) {
-        return false;
+void retain_tool_result(ToolResult& result, std::size_t max_bytes) {
+    const bool input_truncated = result.truncated;
+
+    TextRetainer retainer(TextRetentionStrategy::HeadTail, retention_budget(max_bytes));
+    (void)retainer.push(std::as_bytes(std::span(result.output)));
+    const RetainedText retained = retainer.finish();
+
+    std::string output = retained.text;
+    if (retained.omitted.kind != OmittedKind::None) {
+        RetentionNotice notice;
+        notice.omitted        = retained.omitted;
+        notice.omitted_labels = {"bytes"};
+        const std::string clause = format_retention_notice(notice, {});
+        if (!clause.empty()) {
+            output += "\n\n";
+            output += clause;
+        }
     }
 
-    result.truncated = true;
-    while (!result.output.empty() && serialized_size() > max_bytes) {
-        const std::size_t remove = std::max<std::size_t>(1, result.output.size() / 8);
-        result.output.erase(0, remove);
-        result.output = std::string(trim_to_utf8_start(result.output));
+    if (retained.omitted.kind == OmittedKind::Exact) {
+        result.omitted_kind  = OmittedKind::Exact;
+        result.omitted_count = retained.omitted.count;
+    } else if (input_truncated) {
+        // 40-I7: a tool/ring truncation with no exact retainer count is Unknown.
+        result.omitted_kind  = OmittedKind::Unknown;
+        result.omitted_count = 0;
+    } else {
+        result.omitted_kind  = OmittedKind::None;
+        result.omitted_count = 0;
     }
-    if (serialized_size() > max_bytes) {
-        result.output.clear();
-    }
-    return true;
+    result.truncated = result.omitted_kind != OmittedKind::None;
+    result.output    = std::move(output);
 }
 
 } // namespace ymh
