@@ -981,6 +981,26 @@ TEST_F(HostRuntimeTest, ListSessionsUsesJunctionOrderAndFlagsStoreOnly) {
     EXPECT_EQ(sessions[3].id.value, orphan.value);
     EXPECT_EQ(sessions[0].title, "first");
 
+    // `session.list` enumerates the whole store; only sessions the daemon holds
+    // a resident agent for are flagged live. The store-only orphan is not.
+    EXPECT_TRUE(sessions[0].live);
+    EXPECT_TRUE(sessions[1].live);
+    EXPECT_TRUE(sessions[2].live);
+    EXPECT_FALSE(sessions[3].live);
+
+    // Disposing an agent parks its session without deleting it from the store:
+    // it drops out of the live set while `session.list` still enumerates it.
+    const std::shared_ptr<AgentLoop> second_agent =
+        bridge.runtime().agents().findShared(second.session);
+    ASSERT_NE(second_agent, nullptr);
+    bridge.runtime().agents().dispose(second_agent->id());
+    const std::vector<protocol::SessionSummary> after_dispose = bridge.host().listSessions();
+    ASSERT_EQ(after_dispose.size(), 4u);
+    EXPECT_TRUE(after_dispose[0].live);
+    EXPECT_FALSE(after_dispose[1].live);
+    EXPECT_TRUE(after_dispose[2].live);
+    EXPECT_FALSE(after_dispose[3].live);
+
     const protocol::SessionDetail detail = bridge.host().showSession(first.session);
     EXPECT_EQ(detail.summary.id.value, first.session.value);
     EXPECT_GE(detail.event_count, 1u);

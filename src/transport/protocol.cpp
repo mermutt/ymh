@@ -604,7 +604,8 @@ void to_json(nlohmann::json& json, const SessionSummary& summary) {
                           {"archived", summary.archived},
                           {"title", summary.title},
                           {"kind", summary.kind},
-                          {"updated_at_ms", summary.updated_at_ms}};
+                          {"updated_at_ms", summary.updated_at_ms},
+                          {"live", summary.live}};
 }
 
 void from_json(const nlohmann::json& json, SessionSummary& summary) {
@@ -614,6 +615,7 @@ void from_json(const nlohmann::json& json, SessionSummary& summary) {
     summary.title = json.at("title").get<std::string>();
     summary.kind = json.at("kind").get<std::string>();
     summary.updated_at_ms = json.at("updated_at_ms").get<std::int64_t>();
+    summary.live = json.value("live", false);
 }
 
 void to_json(nlohmann::json& json, const SessionDetail& detail) {
