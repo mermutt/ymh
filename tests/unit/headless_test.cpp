@@ -196,7 +196,9 @@ TEST_F(HeadlessTest, RetriedAttemptTextIsNotDoublePrinted) {
 
     const std::string stdout_text = out.str();
     EXPECT_NE(stdout_text.find("attempt-one-text"), std::string::npos) << stdout_text;
-    EXPECT_EQ(stdout_text.find("attempt-zero-text"), std::string::npos) << stdout_text;
+    EXPECT_NE(stdout_text.find("attempt-zero-text"), std::string::npos) << stdout_text;
+    EXPECT_NE(err.str().find(std::string(AssistantStreamPrinter::kRetryMarker)), std::string::npos)
+        << err.str();
 }
 
 TEST_F(HeadlessTest, CancellationProducesTurnCancelled) {
@@ -356,7 +358,7 @@ TEST(StreamReceiver, LiveChunkSuppressesDurableDuplicateText) {
     chunk.kind    = payload::AssistantChunkKind::Text;
     live.envelope.event.payload = chunk;
     EXPECT_EQ(handle_live_notification(live, out, err, &printer), StreamDisposition::Continue);
-    EXPECT_TRUE(out.str().empty());
+    EXPECT_EQ(out.str(), "hello");
 
     protocol::StreamNotification stream;
     stream.envelope.session    = SessionId{"s"};
@@ -412,8 +414,10 @@ TEST(StreamReceiver, RetriedAttemptTextIsNotDoublePrinted) {
     done.envelope.event.payload = message;
     EXPECT_EQ(handle_stream_notification(done, out, err, &printer), StreamDisposition::Continue);
 
-    EXPECT_EQ(out.str().find("attempt-zero-text"), std::string::npos) << out.str();
+    EXPECT_NE(out.str().find("attempt-zero-text"), std::string::npos) << out.str();
     EXPECT_NE(out.str().find("attempt-one-text"), std::string::npos) << out.str();
+    EXPECT_NE(err.str().find(std::string(AssistantStreamPrinter::kRetryMarker)), std::string::npos)
+        << err.str();
 }
 
 TEST(StreamReceiver, DurableAssistantMessagePrintsAssembledText) {

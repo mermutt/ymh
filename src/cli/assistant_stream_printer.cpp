@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <ostream>
-#include <utility>
 #include <vector>
 
 #include "ymh/agent/message.hpp"
@@ -42,9 +41,13 @@ AssistantStreamPrinter::Commit AssistantStreamPrinter::feed(const Event& event, 
             if (chunk.message != message_) {
                 message_ = chunk.message;
                 text_.clear();
+                streamed_total_ = 0;
                 reasoning_.clear();
             }
             if (chunk.kind == payload::AssistantChunkKind::Text) {
+                out << chunk.text;
+                out.flush();
+                streamed_total_ += chunk.text.size();
                 append_bounded(text_, chunk.text);
             } else {
                 append_bounded(reasoning_, chunk.text);
@@ -54,25 +57,41 @@ AssistantStreamPrinter::Commit AssistantStreamPrinter::feed(const Event& event, 
         case EventType::AssistantMessage: {
             commit.handled = true;
             const auto& message = event.payload.get<payload::AssistantMessage>();
-            // 26-D9 / 35 §3.6: the durable settlement is the recovery path for a
-            // dropped live chunk, so it wins; the buffer is a live-only fallback.
             const std::string durable = assistant_text_of(message.content);
-            commit.text = durable.empty() ? text_ : durable;
-            out << commit.text;
-            out.flush();
+            if (durable.empty()) {
+                commit.text = text_;
+            } else {
+                commit.text = durable;
+                const bool live_prefix_matches =
+                    durable.size() >= text_.size() && durable.compare(0, text_.size(), text_) == 0;
+                if (streamed_total_ == 0) {
+                    out << durable;
+                } else if (live_prefix_matches && durable.size() >= streamed_total_) {
+                    out << durable.substr(streamed_total_);
+                } else {
+                    out << durable;
+                }
+                out.flush();
+            }
             if (print_reasoning && !reasoning_.empty()) {
                 err << reasoning_;
                 err.flush();
             }
             message_.clear();
             text_.clear();
+            streamed_total_ = 0;
             reasoning_.clear();
             break;
         }
         case EventType::AssistantAttempt:
             commit.handled = true;
+            if (!text_.empty()) {
+                err << kRetryMarker;
+                err.flush();
+            }
             message_.clear();
             text_.clear();
+            streamed_total_ = 0;
             reasoning_.clear();
             break;
         default:
