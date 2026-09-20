@@ -155,6 +155,7 @@ add_library(ymh_core STATIC
     src/core/clock.cpp
     src/core/event.cpp
     src/core/event_bus.cpp
+    src/core/retention.cpp
 )
 add_library(ymh::core ALIAS ymh_core)
 

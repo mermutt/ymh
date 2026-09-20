@@ -396,12 +396,20 @@ void from_json(const nlohmann::json& json, ToolCall& value) {
 }
 
 void to_json(nlohmann::json& json, const ToolResult& value) {
+    // Legacy ring/tool-domain truncation has no exact count: it maps to
+    // `Unknown` on the wire so `truncated` stays a derived boolean and no
+    // durable signal is lost (40-output-retention.md §3.3, 40-I7).
+    const OmittedKind kind = value.omitted_kind == OmittedKind::None && value.truncated
+                                 ? OmittedKind::Unknown
+                                 : value.omitted_kind;
     json = nlohmann::json{
         {"id", value.id},
         {"name", value.name},
         {"outcome", std::string{tool_outcome_name(value.outcome)}},
         {"output", value.output},
-        {"truncated", value.truncated},
+        {"truncated", kind != OmittedKind::None},
+        {"omitted_kind", std::string{omitted_kind_name(kind)}},
+        {"omitted_count", value.omitted_count},
         {"duration_ms", value.duration.count()},
     };
     if (value.error.has_value()) {
@@ -421,6 +429,13 @@ void from_json(const nlohmann::json& json, ToolResult& value) {
     value.outcome   = parse_tool_outcome(json.at("outcome").get<std::string>());
     value.output    = json.value("output", std::string{});
     value.truncated = json.value("truncated", false);
+    if (json.contains("omitted_kind") && !json.at("omitted_kind").is_null()) {
+        value.omitted_kind = parse_omitted_kind(json.at("omitted_kind").get<std::string>());
+    } else {
+        value.omitted_kind = value.truncated ? OmittedKind::Unknown : OmittedKind::None;
+    }
+    value.truncated     = value.omitted_kind != OmittedKind::None;
+    value.omitted_count = json.value("omitted_count", std::size_t{0});
     value.duration  = std::chrono::milliseconds{json.value("duration_ms", std::int64_t{0})};
     if (json.contains("error") && !json.at("error").is_null()) {
         value.error = json.at("error").get<std::string>();

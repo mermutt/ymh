@@ -18,6 +18,7 @@ add_executable(ymh_tests
     unit/llm_live_test.cpp
     unit/path_safety_test.cpp
     unit/output_test.cpp
+    unit/retention_test.cpp
     unit/process_test.cpp
     unit/pty_test.cpp
     unit/registry_test.cpp

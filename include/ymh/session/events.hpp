@@ -16,6 +16,7 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/core/omission.hpp"
 #include "ymh/llm/assistant_stream.hpp"
 #include "ymh/llm/llm_call_config.hpp"
 #include "ymh/session/ids.hpp"
@@ -136,8 +137,10 @@ struct ToolResult {
     ToolCallId                 id;
     std::string                name;
     ToolOutcome                outcome = ToolOutcome::Ok;
-    std::string                output;
-    bool                       truncated = false;
+    std::string                output;      // retained text + retention notice
+    bool                       truncated = false;   // == (omitted_kind != None)
+    OmittedKind                omitted_kind = OmittedKind::None;
+    std::size_t                omitted_count = 0;
     std::optional<std::string> error;
     std::chrono::milliseconds  duration{0};
     MessageSource              source = tool_message_source(
