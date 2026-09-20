@@ -78,6 +78,28 @@ TEST(StatusFormat, UI45_D6_McpMethodNotFoundDegradation) {
                      .has_value());
 }
 
+// 45-D9.9/45-D9.10/45-I23/45-I27: the pinned agent notices, and only the two
+// degradation codes map to the empty-roster notice.
+TEST(StatusFormat, UI45_D9_AgentNotices) {
+    EXPECT_EQ(agent_no_agents_notice(),
+              "no agents configured (add <config>/presets/<id>/preset.jsonc)");
+    EXPECT_EQ(agent_no_others_notice(), "no other agents available");
+    EXPECT_EQ(agent_composition_fixed_notice(),
+              "agent composition is fixed for this session");
+
+    const std::optional<std::string> not_found =
+        agent_unavailable_notice(static_cast<int>(protocol::RpcCode::MethodNotFound));
+    ASSERT_TRUE(not_found.has_value());
+    EXPECT_EQ(*not_found, agent_no_agents_notice());
+    EXPECT_EQ(agent_unavailable_notice(
+                  static_cast<int>(protocol::AppCode::MethodNotAllowedForProfile)),
+              not_found);
+    EXPECT_FALSE(agent_unavailable_notice(0).has_value());
+    EXPECT_FALSE(agent_unavailable_notice(
+                     static_cast<int>(protocol::AppCode::CompositionFixed))
+                     .has_value());
+}
+
 // 45-D7/45-I16: version, model, and the derived api line render in all three
 // connectivity states.
 TEST(StatusFormat, UI45_D7_StatusRendersVersionModelApi) {

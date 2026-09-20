@@ -539,6 +539,11 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     const std::string state = status.agent_state == AgentState::Idle
                                   ? std::string{}
                                   : std::string{state_name(status.agent_state)};
+    const std::string agent_seg =
+        status.agent.empty() ? std::string{} : "agent:" + status.agent;
+    const std::string pending_seg = status.pending_agent.empty()
+                                        ? std::string{}
+                                        : "agent(next):" + status.pending_agent;
 
     // Inclusion priority is counters > context > note > notice > tps > state
     // (25-D1 step 4); a strict prefix, so a lower-priority segment is never
@@ -564,6 +569,10 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     const bool include_tps    = try_include(ftxui::string_width(tps));
     const bool include_state =
         !state.empty() && try_include(ftxui::string_width(state));
+    const bool include_agent =
+        !agent_seg.empty() && try_include(ftxui::string_width(agent_seg));
+    const bool include_pending =
+        !pending_seg.empty() && try_include(ftxui::string_width(pending_seg));
 
     Elements left_cells;
     const auto append_segment = [&](Element element) {
@@ -576,6 +585,12 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
                                       : ftxui::text(mode));
     if (include_state) {
         append_segment(ftxui::text(state));
+    }
+    if (include_agent) {
+        append_segment(ftxui::text(agent_seg));
+    }
+    if (include_pending) {
+        append_segment(ftxui::text(pending_seg));
     }
     if (!model_name.empty()) {
         append_segment(ftxui::text(model_name));

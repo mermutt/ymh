@@ -84,6 +84,12 @@ public:
     // command dispatch.
     virtual void seed_active_workspace(const WorkspaceModel& workspace) = 0;
 
+    // 45-D9: installs canned `agent.list`/`agent.select` replies so the async
+    // cycle path can be driven without a live daemon.
+    virtual void install_agent_replies(nlohmann::json list_result, int list_error,
+                                       nlohmann::json select_result,
+                                       int select_error) = 0;
+
     // RB-12 addendum (2026-09-17): permission-dialog key semantics. Opens the
     // dialog through the same model fields the adapter writes, then drives FTXUI
     // events through the real handler so the swallow contract and the

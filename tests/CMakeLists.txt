@@ -89,6 +89,7 @@ add_executable(ymh_tests
     unit/skills_wiring_test.cpp
     unit/skills_rpc_test.cpp
     unit/mcp_rpc_test.cpp
+    unit/agent_rpc_test.cpp
     unit/no_raw_map_handle_test.cpp
     unit/spec_catalog_test.cpp
     unit/prompt_registry_test.cpp

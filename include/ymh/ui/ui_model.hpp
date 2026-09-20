@@ -197,6 +197,11 @@ struct StatusModel {
     std::string note;
     // 45-D7: derived connectivity for `/status`.
     ApiConnectivity api_state = ApiConnectivity::Unknown;
+    // 45-D9: the DAEMON-ACTIVE preset only; never the pending preference.
+    std::string agent;
+    // 45-D9.6: the pending preference for the next session.create, rendered
+    // distinctly (e.g. "agent(next):<id>"); never written into `agent`.
+    std::string pending_agent;
     // 25-D1/D2/D6/D7
     bool                  plan_active = false;
     std::optional<double> tps;

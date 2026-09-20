@@ -1321,4 +1321,55 @@ TEST(TransportServer, UI45_D6_McpStatusStrictParams) {
     EXPECT_TRUE(frames[0].contains("result")) << frames[0].dump();
 }
 
+// 45-D9.3/45-D9.4: agent.list/agent.select are dispatched to the host and
+// their results pass through unchanged.
+TEST(TransportServer, UI45_D9_AgentRpcPassThrough) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+
+    harness.host.agent_list_result = nlohmann::json{
+        {"agents", nlohmann::json::array()}, {"active", ""}, {"default", ""}};
+    harness.send(*peer, Harness::request(2, protocol::method::kAgentList));
+    auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    ASSERT_TRUE(frames[0].contains("result")) << frames[0].dump();
+    EXPECT_TRUE(frames[0].at("result").contains("agents"));
+    EXPECT_EQ(harness.host.calls.back(), "agent.list");
+
+    harness.host.agent_select_result = nlohmann::json{{"agent", "second"}};
+    harness.send(*peer, Harness::request(3, protocol::method::kAgentSelect,
+                                         nlohmann::json{{"session", "s"}, {"agent", "second"}}));
+    frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    ASSERT_TRUE(frames[0].contains("result")) << frames[0].dump();
+    EXPECT_EQ(frames[0].at("result").at("agent").get<std::string>(), "second");
+    EXPECT_EQ(harness.host.calls.back(), "agent.select");
+    EXPECT_EQ(harness.host.last_agent_params.value().at("agent").get<std::string>(), "second");
+}
+
+// 45-D9.10/45-I29: agent.list is allowed in both profiles; agent.select is
+// Interactive-only (MethodNotAllowedForProfile in Automation).
+TEST(TransportServer, UI45_D9_AgentSelectProfileDenied) {
+    Harness harness;
+    Peer*   automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceA, 1,
+                  protocol::ClientRole::Automation);
+    harness.drain(*automation);
+
+    harness.send(*automation, Harness::request(2, protocol::method::kAgentList));
+    auto frames = harness.drain(*automation);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_TRUE(frames[0].contains("result")) << frames[0].dump();
+
+    harness.send(*automation,
+                 Harness::request(3, protocol::method::kAgentSelect,
+                                  nlohmann::json{{"session", "s"}, {"agent", "x"}}));
+    frames = harness.drain(*automation);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]),
+              protocol::code_value(protocol::AppCode::MethodNotAllowedForProfile));
+}
+
 } // namespace

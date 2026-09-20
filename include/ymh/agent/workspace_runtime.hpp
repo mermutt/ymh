@@ -49,6 +49,7 @@ class Executor;
 class SkillCatalog;
 class TokenEstimator;
 class McpManager;
+class AgentPresetRoster;
 class PlanModeController;
 struct AgentConfig;
 struct CompactionPolicy;
@@ -165,6 +166,11 @@ public:
     // 24-D9/AL28: the owned MCP manager, so the coordinator can shut it down
     // explicitly before `TransportServer::stop()` (mirrors `gate()`).
     [[nodiscard]] McpManager& mcp() noexcept;
+
+    // 45-D9.8: the owned agent-preset roster (built from `config.presets`), so
+    // `agent.list`/`agent.select` reach the same instance the loops are given
+    // via `AgentServices::presets`.
+    [[nodiscard]] AgentPresetRoster& presets() noexcept;
 
     // 24-D9/AL28: ordered child teardown after quiesce and before transport
     // stop — close every PTY session, then shut the MCP manager down within
