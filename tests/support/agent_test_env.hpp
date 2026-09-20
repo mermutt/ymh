@@ -17,6 +17,7 @@
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/prompt/instructions.hpp"
 #include "ymh/tools/builtin_tools.hpp"
 #include "ymh/tools/plan_tools.hpp"
 #include "ymh/tools/tool_registry.hpp"
@@ -70,7 +71,9 @@ inline AgentServices make_agent_services(SessionManager& sessions,
                                          AgentServices::PermissionResolver resolver,
                                          Compactor* compactor,
                                          ContextCompactor* context_compactor = nullptr,
-                                         PlanModeController* plan_mode = nullptr) {
+                                         PlanModeController* plan_mode = nullptr,
+                                         SystemPrompt* prompt = nullptr,
+                                         InstructionLoader* instructions = nullptr) {
     AgentServices services;
     services.sessions            = &sessions;
     services.governor            = &governor;
@@ -88,6 +91,8 @@ inline AgentServices make_agent_services(SessionManager& sessions,
     services.context_compactor   = context_compactor;
     services.permission_resolver = std::move(resolver);
     services.plan_mode           = plan_mode;
+    services.prompt              = prompt;
+    services.instructions        = instructions;
     return services;
 }
 
@@ -103,7 +108,9 @@ struct AgentEnv {
              bool use_permission_gate = false,
              std::optional<CompactionPolicy> compaction = std::nullopt,
              WallClock wall_clock = std::chrono::system_clock::now,
-             bool enable_plan_mode = false)
+             bool enable_plan_mode = false,
+             SystemPrompt* prompt = nullptr,
+             InstructionLoader* instructions = nullptr)
         : workspace(prefix),
           sessions(store, bus),
           env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
@@ -131,7 +138,8 @@ struct AgentEnv {
           registry(make_agent_services(sessions, governor, tools, policy, gate.get(), assembler, env,
                                         logger, sink, runtime, pool, estimator,
                                         std::move(resolver), compactor, context_compactor.get(),
-                                        plan_mode_controller ? &*plan_mode_controller : nullptr),
+                                        plan_mode_controller ? &*plan_mode_controller : nullptr,
+                                        prompt, instructions),
                    std::move(config)) {
         if (register_builtins) {
             for (std::unique_ptr<Tool>& tool : make_builtin_tools()) {

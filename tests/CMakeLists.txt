@@ -81,6 +81,9 @@ add_executable(ymh_tests
     unit/no_raw_map_handle_test.cpp
     unit/prompt_registry_test.cpp
     unit/prompt_golden_test.cpp
+    unit/prompt_instructions_test.cpp
+    unit/prompt_runtime_context_test.cpp
+    unit/prompt_presentation_test.cpp
     unit/global_test_env_test.cpp
     support/global_test_env.cpp
     support/replay_harness.cpp

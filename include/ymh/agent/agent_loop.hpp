@@ -40,6 +40,9 @@ class ToolRegistry;
 class ExecutionEnvironment;
 class Logger;
 class OutputSink;
+class SystemPrompt;
+class InstructionLoader;
+struct PromptAssembly;
 
 struct AgentServices {
     using PermissionResolver =
@@ -54,6 +57,12 @@ struct AgentServices {
     // `provider`, and `provider_config`; no `LLMProvider*` remains here.
     LlmRuntime*           runtime = nullptr;
     ContextAssembler*     context = nullptr;
+    // 36 §2.7: the prompt registry. When set, the loop calls `assemble()` and
+    // materializes `.contexts` before the request messages are derived.
+    SystemPrompt*         prompt = nullptr;
+    // 36 §2.4: the workspace-instruction loader. When set, the loop appends the
+    // rendered `<system-reminder>` message once at the first request.
+    InstructionLoader*    instructions = nullptr;
     ExecutionEnvironment* execution = nullptr;
     Logger*               logger = nullptr;
     OutputSink*           output = nullptr;
@@ -144,6 +153,8 @@ private:
     void                      drainFoldedItems();
     void                      appendUserMessage(const Message& message);
     void                      appendContextInjected(const ContextMessage& context);
+    void                      materializeContexts(const PromptAssembly& assembly);
+    void                      materializeInstructions();
     void                      appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message);
     CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn);
     [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,
@@ -170,6 +181,7 @@ private:
     std::optional<CallPurpose>          held_purpose_;              // worker-only
     std::optional<std::string>          held_prompt_digest_;        // worker-only
     std::optional<std::vector<std::string>> held_tool_digests_;     // worker-only
+    bool                                instructions_loaded_ = false;  // worker-only
     CancellationSource                  turn_cancel_;
 };
 

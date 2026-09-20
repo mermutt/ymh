@@ -28,6 +28,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/prompt/instructions.hpp"
+#include "ymh/tools/presentation.hpp"
+
 namespace ymh {
 
 // Thrown on a malformed/unreadable config file or an unknown key.
@@ -159,6 +162,18 @@ struct SessionSettings {
     bool persist_prompt_text = false;
 };
 
+// [prompt] — the prompt registry (36 §5). Additive.
+struct PromptSettings {
+    bool                  instructions_enabled = false;
+    InstructionFileConfig instructions;
+};
+
+// [tools] — the tool registry presentation (36 §5). Additive.
+struct ToolsSettings {
+    ToolPresentationMode     presentation = ToolPresentationMode::Native;
+    std::vector<std::string> tool_order;
+};
+
 // [skills] — the skill subsystem (20 §5.6). Additive.
 struct SkillsSettings {
     bool        enabled = true;
@@ -180,6 +195,8 @@ struct Config {
     McpSettings        mcp;
     SkillsSettings     skills;
     SessionSettings    session;
+    PromptSettings     prompt;
+    ToolsSettings      tools;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

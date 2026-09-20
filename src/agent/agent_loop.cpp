@@ -11,6 +11,8 @@
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/assistant_stream.hpp"
+#include "ymh/prompt/instructions.hpp"
+#include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/tools/tool.hpp"
 #include "ymh/tools/tool_context.hpp"
@@ -30,6 +32,11 @@ std::string assembled_system_prompt(const LLMRequest& request) {
         }
     }
     return text;
+}
+
+std::string first_line(const std::string& text) {
+    const std::size_t newline = text.find('\n');
+    return text.substr(0, newline == std::string::npos ? text.size() : newline);
 }
 
 bool has_valid_plan_argument(const nlohmann::json& arguments) {
@@ -376,6 +383,51 @@ void AgentLoop::appendContextInjected(const ContextMessage& context) {
     injected.role = context.role;
     injected.text = context.text;
     session_.append(injected);
+}
+
+void AgentLoop::materializeInstructions() {
+    if (services_.instructions == nullptr || instructions_loaded_) {
+        return;
+    }
+    instructions_loaded_ = true;
+    const LoadedInstructions loaded = services_.instructions->load();
+    const std::optional<std::string> message = loaded.render_message();
+    if (!message.has_value()) {
+        return;
+    }
+    ContextMessage context;
+    context.role = Role::User;
+    context.text = *message;
+    appendContextInjected(context);
+}
+
+void AgentLoop::materializeContexts(const PromptAssembly& assembly) {
+    const EventRange events = session_.events();
+    for (const AssembledContext& context : assembly.contexts) {
+        if (context.text.empty()) {
+            continue;
+        }
+        const std::string identity = first_line(context.text);
+        std::optional<std::string> previous;
+        for (auto record = events.rbegin(); record != events.rend(); ++record) {
+            if (record->event.type != EventType::ContextInjected) {
+                continue;
+            }
+            const auto& injected = record->event.payload.get<payload::ContextInjected>();
+            if (injected.role != Role::User || first_line(injected.text) != identity) {
+                continue;
+            }
+            previous = injected.text;
+            break;
+        }
+        if (previous.has_value() && *previous == context.text) {
+            continue;
+        }
+        ContextMessage message;
+        message.role = Role::User;
+        message.text = context.text;
+        appendContextInjected(message);
+    }
 }
 
 void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message) {
@@ -755,6 +807,13 @@ void AgentLoop::runTurn() {
     }
     compactions_this_turn_ = 0;
 
+    const auto assemble_messages = [&](StepId step) -> std::vector<Message> {
+        if (services_.prompt != nullptr) {
+            materializeContexts(services_.prompt->assemble(AssembleContext{}));
+        }
+        return services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+    };
+
     const auto compaction_available = [&]() -> bool {
         if (services_.context_compactor != nullptr) {
             return compactions_this_turn_ <
@@ -784,12 +843,12 @@ void AgentLoop::runTurn() {
 
         std::vector<Message> messages;
         try {
-            messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+            materializeInstructions();
+            messages = assemble_messages(step);
         } catch (const std::exception& error) {
             appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
             return;
         }
-
         if (services_.estimator != nullptr && compaction_available() && threshold_enabled) {
             const std::size_t estimate = services_.estimator->estimate(messages);
             const std::size_t threshold = services_.context_compactor != nullptr
@@ -799,8 +858,7 @@ void AgentLoop::runTurn() {
             if (estimate > threshold) {
                 runCompaction(messages, turn);
                 try {
-                    messages =
-                        services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+                    messages = assemble_messages(step);
                 } catch (const std::exception& error) {
                     appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
                     return;
@@ -935,7 +993,7 @@ void AgentLoop::runTurn() {
             }
             runCompaction(messages, turn);
             try {
-                messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+                messages = assemble_messages(step);
             } catch (const std::exception& error) {
                 appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
                 return;
