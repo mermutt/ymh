@@ -1,12 +1,14 @@
 # 45 — UI Interaction Errata: Input History, Command List, Switcher/Sessions Subset, `/mcp`, `/status`, Agent Cycling, and the Unmodeled-Session Lockout
 
 ```
-Status: draft (Rev 6) — NOT verified. No implementation until the gate passes with
-        zero open HIGH/MEDIUM findings. This spec amends the owning specs; it
-        introduces no new component. Rev 6 closes the re-gate's 1 MEDIUM + 2 LOW:
-        the shared-function dedupe is WITHDRAWN (ymh_agent does not link ymh_mcp,
-        so no MCP-type builder may live there) and replaced by a shared JSON
-        SCHEMA implemented by two serializers; `ContextServerEntry` is unchanged
+Status: **verified (Rev 6)** — independent gate PASS (0 HIGH / 0 MEDIUM; 1 LOW
+        recorded). This spec amends the owning specs; it introduces no new
+        component. Rev 6 closes the re-gate's 1 MEDIUM + 2 LOW: the
+        shared-function dedupe is WITHDRAWN and replaced by a shared JSON SCHEMA
+        implemented by two serializers (the rationale given in early Rev 6 drafts
+        was inaccurate — `ymh_agent` DOES reach `ymh_mcp` transitively via
+        `ymh::config`, so a shared builder *could* compile; the host-side
+        serializer is kept local for cohesion, not necessity); `ContextServerEntry` is unchanged
         (no `connected` field) and `/status` derives `connected` from
         `state == "ready"`; D9.3 no longer claims an event-driven agent projection;
         and D10.7's migration list covers the renderer reads and the test
