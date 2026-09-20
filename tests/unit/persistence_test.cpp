@@ -148,6 +148,23 @@ Event make_event_with_id(const SessionId& session, const EventId& id) {
     return encode(typed);
 }
 
+template <class P>
+Event payload_event(const SessionId& session, const P& payload) {
+    TypedEvent<P> typed;
+    typed.id         = make_event_id();
+    typed.session_id = session;
+    typed.timestamp  = std::chrono::system_clock::now();
+    typed.payload    = payload;
+    return encode(typed);
+}
+
+ContentBlock text_block(std::string text) {
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = std::move(text);
+    return block;
+}
+
 Event make_rename(const SessionId& session, const std::string& title,
                   payload::RenameOrigin origin = payload::RenameOrigin::User) {
     TypedEvent<payload::SessionRenamed> typed;
@@ -718,6 +735,86 @@ TEST(Persistence, SnapshotCheckpointLifecycle) {
     EXPECT_FALSE(store->snapshotIsCurrent(header.id));
     store->discardSnapshot(header.id);
     EXPECT_FALSE(store->loadSnapshot(header.id).has_value());
+}
+
+TEST(Persistence, ProvenanceRoundTripsThroughDb) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+
+    payload::UserMessage user;
+    user.id      = "u1";
+    user.content = {text_block("hi")};
+
+    payload::ContextInjected injected;
+    injected.id      = "c1";
+    injected.role    = Role::User;
+    injected.text    = "instructions";
+    injected.context = ContextFormed{ContextForm::Instructions};
+    injected.source  = plugin_message_source("agent-instructions", injected.context);
+
+    payload::AssistantMessage assistant;
+    assistant.id      = "a1";
+    assistant.content = {text_block("answer")};
+    assistant.source  = model_message_source("deepseek", "deepseek-flash");
+
+    payload::ToolResult tool;
+    tool.id          = "t1";
+    tool.name        = "read_file";
+    tool.output      = "body";
+    tool.source.call = tool.id;
+
+    store->append(header.id, payload_event(header.id, user));
+    store->append(header.id, payload_event(header.id, injected));
+    store->append(header.id, payload_event(header.id, assistant));
+    store->append(header.id, payload_event(header.id, tool));
+
+    const EventRange events = store->read(header.id);
+    ASSERT_EQ(events.size(), 4u);
+
+    const auto& stored_user = events[0].event.payload.get<payload::UserMessage>();
+    EXPECT_EQ(stored_user.source.kind, MessageSource::Kind::User);
+
+    const auto& stored_injected = events[1].event.payload.get<payload::ContextInjected>();
+    EXPECT_EQ(stored_injected.source.plugin, "agent-instructions");
+    EXPECT_EQ(stored_injected.context.form, ContextForm::Instructions);
+
+    const auto& stored_assistant = events[2].event.payload.get<payload::AssistantMessage>();
+    EXPECT_EQ(stored_assistant.source.provider, "deepseek");
+    EXPECT_EQ(stored_assistant.source.model, "deepseek-flash");
+
+    const auto& stored_tool = events[3].event.payload.get<payload::ToolResult>();
+    ASSERT_TRUE(stored_tool.source.call.has_value());
+    EXPECT_EQ(*stored_tool.source.call, "t1");
+
+    const std::vector<Message> messages = deriveMessages(header, events);
+    ASSERT_EQ(messages.size(), 4u);
+    EXPECT_TRUE(messages[1].source == stored_injected.source);
+    EXPECT_TRUE(messages[1].context == stored_injected.context);
+    EXPECT_TRUE(messages[3].source == stored_tool.source);
+}
+
+TEST(Persistence, PreAmendmentMessagesCompareUnequalToFreshProjection) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    const SessionHeader header = store->create(make_header(workspace.root()));
+
+    payload::AssistantMessage assistant;
+    assistant.id      = "a1";
+    assistant.content = {text_block("answer")};
+    assistant.source  = model_message_source("deepseek", "deepseek-flash");
+    store->append(header.id, payload_event(header.id, assistant));
+
+    nlohmann::json pre_amendment = nlohmann::json::array();
+    pre_amendment.push_back(
+        {{"role", "assistant"}, {"content", nlohmann::json::array()}, {"tool_call_id", ""}});
+    const std::vector<Message> decoded = pre_amendment.get<std::vector<Message>>();
+    ASSERT_EQ(decoded.size(), 1u);
+    EXPECT_FALSE(decoded[0].source.has_value());
+
+    const std::vector<Message> fresh = deriveMessages(header, store->read(header.id));
+    ASSERT_EQ(fresh.size(), 1u);
+    EXPECT_FALSE(decoded[0] == fresh[0]);
 }
 
 TEST(Persistence, DuplicateEventIdRejected) {

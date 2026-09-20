@@ -88,6 +88,7 @@ struct StepEnded {
 struct UserMessage {
     MessageId                 id;
     std::vector<ContentBlock> content;
+    MessageSource             source{};
 };
 
 enum class AssistantChunkKind : std::uint8_t {
@@ -109,6 +110,7 @@ struct AssistantMessage {
     // 29-D3 / 26 §4.3.9.1 :949: additive, defaulted stream + replay state.
     std::vector<AssistantStreamRecord> stream;
     std::optional<ReplayEnvelope>      replay_state;
+    MessageSource                      source = message_source(MessageSource::Kind::Model);
 };
 
 // 29-D2 / 26 §4.3.9.1 :957: a settled non-Completed provider attempt. Durable,
@@ -130,13 +132,6 @@ struct ToolCall {
     std::chrono::system_clock::time_point requestedAt{};
 };
 
-enum class ToolOutcome : std::uint8_t {
-    Ok,
-    Error,
-    Denied,
-    Cancelled,
-};
-
 struct ToolResult {
     ToolCallId                 id;
     std::string                name;
@@ -145,6 +140,9 @@ struct ToolResult {
     bool                       truncated = false;
     std::optional<std::string> error;
     std::chrono::milliseconds  duration{0};
+    MessageSource              source = tool_message_source(
+        id.empty() ? std::optional<ToolCallId>{} : std::optional<ToolCallId>{id});
+    ContextFormed              context{};
 };
 
 // ---- permissions (01 §4.5, §19) --------------------------------------------
@@ -164,9 +162,11 @@ struct PermissionDecision {
 // ---- context (01 §4.5, §31-§33) --------------------------------------------
 
 struct ContextInjected {
-    MessageId   id;
-    Role        role = Role::System;
-    std::string text;
+    MessageId     id;
+    Role          role = Role::User;
+    std::string   text;
+    MessageSource source = message_source(MessageSource::Kind::Plugin);
+    ContextFormed context{};
 };
 
 struct ContextCompaction {

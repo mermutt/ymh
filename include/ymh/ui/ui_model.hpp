@@ -83,6 +83,7 @@ enum class ConversationRole : std::uint8_t {
     Reasoning,
     Tool,
     System,
+    Context,
 };
 
 struct ConversationEntry {
@@ -91,6 +92,8 @@ struct ConversationEntry {
     std::string      tool_name;
     std::string      tool_call_id;
     bool             streaming = false;
+    std::optional<MessageSource> source  = std::nullopt;
+    std::optional<ContextFormed> context = std::nullopt;
 };
 
 struct ConversationModel {
@@ -137,6 +140,7 @@ struct ToolCallView {
     bool         truncated = false;
     bool         finished = false;
     bool         expanded = false;
+    std::optional<ContextFormed> notice = std::nullopt;
 };
 
 struct ToolModel {

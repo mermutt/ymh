@@ -86,7 +86,9 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
     switch (event.type) {
         case EventType::UserMessage: {
             const auto payload = event.payload.get<payload::UserMessage>();
-            events.push_back(UiEvent{UserMessage{session, payload.id, flatten_content(payload.content)}});
+            events.push_back(UiEvent{UserMessage{session, payload.id,
+                                                 flatten_content(payload.content),
+                                                 payload.source}});
             break;
         }
         case EventType::AssistantChunk: {
@@ -107,7 +109,8 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
         case EventType::AssistantMessage: {
             const auto payload = event.payload.get<payload::AssistantMessage>();
             events.push_back(UiEvent{AssistantMessageFinished{
-                session, payload.id, flatten_content(payload.content), payload.usage}});
+                session, payload.id, flatten_content(payload.content), payload.usage,
+                payload.source}});
             break;
         }
         case EventType::ToolCall: {
@@ -121,7 +124,15 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             const auto payload = event.payload.get<payload::ToolResult>();
             events.push_back(UiEvent{ToolFinished{session, payload.id, payload.name,
                                                   payload.outcome, payload.output,
-                                                  payload.truncated, payload.error}});
+                                                  payload.truncated, payload.error,
+                                                  payload.source, payload.context}});
+            break;
+        }
+        case EventType::ContextInjected: {
+            const auto payload = event.payload.get<payload::ContextInjected>();
+            events.push_back(UiEvent{ContextInjected{session, payload.id, payload.role,
+                                                     payload.text, payload.source,
+                                                     payload.context}});
             break;
         }
         case EventType::TokenUsage: {

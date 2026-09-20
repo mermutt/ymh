@@ -628,7 +628,8 @@ void UiModel::apply(const UiEvent& event) {
                    std::is_same_v<T, ToolFinished> ||
                    std::is_same_v<T, ErrorOccurred> ||
                    std::is_same_v<T, CompactionMarker> ||
-                   std::is_same_v<T, CompactionOutcomeNotice>;
+                   std::is_same_v<T, CompactionOutcomeNotice> ||
+                   std::is_same_v<T, ContextInjected>;
         },
         event.value);
     std::visit(
@@ -637,8 +638,9 @@ void UiModel::apply(const UiEvent& event) {
             SessionUiState& state = ensureSession(e.session);
             if constexpr (std::is_same_v<T, UserMessage>) {
                 ConversationEntry entry;
-                entry.role = ConversationRole::User;
-                entry.text = e.text;
+                entry.role   = ConversationRole::User;
+                entry.text   = e.text;
+                entry.source = e.source;
                 state.conversation.entries.push_back(std::move(entry));
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, AssistantMessageStarted>) {
@@ -680,6 +682,7 @@ void UiModel::apply(const UiEvent& event) {
                 if (!e.text.empty()) {
                     state.conversation.entries[index].text = e.text;
                 }
+                state.conversation.entries[index].source    = e.source;
                 state.conversation.entries[index].streaming = false;
                 const std::size_t reasoning =
                     state.conversation.find_reasoning_message(e.message);
@@ -741,6 +744,9 @@ void UiModel::apply(const UiEvent& event) {
                     call.finished = true;
                     call.outcome = e.outcome;
                     call.truncated = e.truncated;
+                    call.notice = e.context.form == ContextForm::Notice
+                                      ? std::optional<ContextFormed>{e.context}
+                                      : std::nullopt;
                     if (!e.output.empty()) {
                         call.output = e.output;
                         if (call.output.size() > kMaxToolOutput) {
@@ -758,10 +764,22 @@ void UiModel::apply(const UiEvent& event) {
                                 entry.text += "\n... (truncated)";
                             }
                         }
+                        entry.source  = e.source;
+                        entry.context = e.context.form == ContextForm::None
+                                            ? std::nullopt
+                                            : std::optional<ContextFormed>{e.context};
                         break;
                     }
                 }
                 dirty.mark(e.session, UiDirtyFlag::Tools | UiDirtyFlag::Conversation);
+            } else if constexpr (std::is_same_v<T, ContextInjected>) {
+                ConversationEntry entry;
+                entry.role    = ConversationRole::Context;
+                entry.text    = e.text;
+                entry.source  = e.source;
+                entry.context = e.context;
+                state.conversation.entries.push_back(std::move(entry));
+                dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, FileChanged>) {
                 dirty.mark(e.session, UiDirtyFlag::Diff);
             } else if constexpr (std::is_same_v<T, DiffUpdated>) {

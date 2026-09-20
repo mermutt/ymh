@@ -86,9 +86,11 @@ struct AgentError {
 [[nodiscard]] AgentErrorCode mapAgentError(LLMErrorCode code) noexcept;
 
 struct ContextMessage {
-    Role        role = Role::System;
-    std::string text;
-    bool        startsTurn = false;
+    Role          role = Role::System;
+    std::string   text;
+    bool          startsTurn = false;
+    MessageSource source = message_source(MessageSource::Kind::Plugin);
+    ContextFormed context{};
 };
 
 struct AgentConfig {
