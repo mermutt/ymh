@@ -299,6 +299,60 @@ std::string format_skill_detail(const nlohmann::json& result) {
     return out;
 }
 
+struct AgentListEntry {
+    std::string id;
+    std::string display_name;
+    bool        blank      = false;
+    bool        can_select = false;
+};
+
+std::vector<AgentListEntry> parse_agent_entries(const nlohmann::json& result) {
+    std::vector<AgentListEntry> entries;
+    const nlohmann::json        agents = result.value("agents", nlohmann::json::array());
+    if (!agents.is_array()) {
+        return entries;
+    }
+    for (const nlohmann::json& agent : agents) {
+        if (!agent.is_object()) {
+            continue;
+        }
+        AgentListEntry entry;
+        entry.id           = agent.value("id", std::string{});
+        entry.display_name = agent.value("display_name", entry.id);
+        entry.blank        = agent.value("blank", false);
+        entry.can_select   = agent.value("can_select", false);
+        if (!entry.id.empty()) {
+            entries.push_back(std::move(entry));
+        }
+    }
+    return entries;
+}
+
+bool bare_slash_prefix(const std::string& draft) {
+    return !draft.empty() && draft.front() == '/' &&
+           draft.find_first_of(" \t") == std::string::npos;
+}
+
+std::string next_agent_id(const std::vector<AgentListEntry>& entries, const std::string& base,
+                          int delta) {
+    if (entries.empty()) {
+        return {};
+    }
+    const std::size_t count = entries.size();
+    std::size_t       index = count;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (entries[i].id == base) {
+            index = i;
+            break;
+        }
+    }
+    if (index == count) {
+        return delta < 0 ? entries.back().id : entries.front().id;
+    }
+    const std::size_t next = delta < 0 ? (index + count - 1) % count : (index + 1) % count;
+    return entries[next].id;
+}
+
 class SupervisorApp final : public UiController {
 public:
     explicit SupervisorApp(SupervisorRunOptions options)
@@ -1270,6 +1324,9 @@ private:
         if (!preferred_model_.empty()) {
             create_params["model"] = preferred_model_;
         }
+        if (!preferred_agent_.empty()) {
+            create_params["agent_preset"] = preferred_agent_;
+        }
         connection->second->submit(
             std::string(protocol::method::kSessionCreate), std::move(create_params),
             [this, workspace](SupervisorReply reply) {
@@ -1657,6 +1714,160 @@ private:
                           }
                       });
                   });
+    }
+
+    void set_preferred_agent(std::string id) {
+        preferred_agent_ = std::move(id);
+        if (SessionUiState* state = active()) {
+            state->status.pending_agent = preferred_agent_;
+            model_.dirty.mark(state->id, UiDirtyFlag::Status);
+        }
+        model_.dirty.markAggregate();
+    }
+
+    void submit_agent(const WorkspaceId& workspace, std::string method, nlohmann::json params,
+                      SupervisorConnection::ReplyFn reply) {
+        if (!agent_replies_installed_) {
+            submit_to(workspace, std::move(method), std::move(params), std::move(reply));
+            return;
+        }
+        const bool list = method == protocol::method::kAgentList;
+        SupervisorReply canned;
+        canned.ok         = (list ? agent_list_error_ : agent_select_error_) == 0;
+        canned.result     = list ? agent_list_reply_ : agent_select_reply_;
+        canned.error_code = list ? agent_list_error_ : agent_select_error_;
+        canned.error      = canned.ok ? std::string{} : "stubbed error";
+        reply(std::move(canned));
+    }
+
+    // 45-D9: cycles `preferred_agent_`; issues `agent.select` ONLY when the
+    // daemon's `can_select` is true (45-D9.5), never a local blank predicate.
+    void cycle_agent(int delta) {
+        if (agents_disabled_) {
+            model_.pushNotice(agent_no_agents_notice());
+            model_.dirty.markAggregate();
+            return;
+        }
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->id.value.empty()) {
+            return;
+        }
+        SessionUiState* state   = active();
+        const SessionId session = state != nullptr ? state->id : SessionId{};
+        nlohmann::json  params  = nlohmann::json::object();
+        if (!session.value.empty()) {
+            params["session"] = session.value;
+        }
+        const WorkspaceId id = workspace->id;
+        submit_agent(id, std::string(protocol::method::kAgentList), std::move(params),
+                     [this, id, session, delta](SupervisorReply reply) {
+                         enqueue([this, id, session, delta, reply = std::move(reply)]() mutable {
+                             on_agent_list_reply(id, session, delta, std::move(reply));
+                         });
+                     });
+    }
+
+    void on_agent_list_reply(const WorkspaceId& workspace, const SessionId& session, int delta,
+                             SupervisorReply reply) {
+        if (model_.workspaces.count(workspace) == 0) {
+            return;
+        }
+        if (!reply.ok) {
+            if (agent_unavailable_notice(reply.error_code).has_value()) {
+                agents_disabled_ = true;
+                model_.pushNotice(agent_no_agents_notice());
+                model_.dirty.markAggregate();
+                return;
+            }
+            model_.pushNotice("agents: " + (reply.error.empty() ? std::string{"request failed"}
+                                                                : reply.error));
+            model_.dirty.markAggregate();
+            return;
+        }
+        const std::vector<AgentListEntry> entries   = parse_agent_entries(reply.result);
+        const std::string                 active_id = reply.result.value("active", std::string{});
+        if (entries.empty()) {
+            if (!agent_empty_noticed_) {
+                agent_empty_noticed_ = true;
+                model_.pushNotice(agent_no_agents_notice());
+                model_.dirty.markAggregate();
+            }
+            return;
+        }
+        if (SessionUiState* state = model_.session(session)) {
+            state->status.agent = active_id;
+            model_.dirty.mark(state->id, UiDirtyFlag::Status);
+        }
+        const std::string base = preferred_agent_.empty() ? active_id : preferred_agent_;
+        const std::string next = next_agent_id(entries, base, delta);
+        bool              any_can_select = false;
+        bool              has_other      = false;
+        for (const AgentListEntry& entry : entries) {
+            any_can_select = any_can_select || entry.can_select;
+            has_other      = has_other || entry.id != active_id;
+        }
+        if (any_can_select) {
+            if (session.value.empty()) {
+                set_preferred_agent(next);
+                return;
+            }
+            submit_agent(workspace, std::string(protocol::method::kAgentSelect),
+                         nlohmann::json{{"session", session.value}, {"agent", next}},
+                         [this, workspace, session, next](SupervisorReply select_reply) {
+                             enqueue([this, workspace, session, next,
+                                      select_reply = std::move(select_reply)]() mutable {
+                                 on_agent_select_reply(workspace, session, next,
+                                                       std::move(select_reply));
+                             });
+                         });
+            return;
+        }
+        if (has_other) {
+            set_preferred_agent(next);
+            return;
+        }
+        if (!agent_no_others_noticed_) {
+            agent_no_others_noticed_ = true;
+            model_.pushNotice(agent_no_others_notice());
+            model_.dirty.markAggregate();
+        }
+    }
+
+    void on_agent_select_reply(const WorkspaceId& workspace, const SessionId& session,
+                               const std::string& requested, SupervisorReply reply) {
+        if (model_.workspaces.count(workspace) == 0) {
+            return;
+        }
+        if (reply.ok) {
+            const std::string active = reply.result.value("agent", requested);
+            if (SessionUiState* state = model_.session(session)) {
+                state->status.agent = active;
+                state->status.pending_agent.clear();
+                model_.dirty.mark(state->id, UiDirtyFlag::Status);
+            }
+            preferred_agent_.clear();
+            return;
+        }
+        if (reply.error_code == static_cast<int>(protocol::AppCode::CompositionFixed)) {
+            set_preferred_agent(requested);
+            model_.pushNotice(agent_composition_fixed_notice());
+            model_.dirty.markAggregate();
+            return;
+        }
+        if (reply.error_code == static_cast<int>(protocol::AppCode::UnknownSession)) {
+            enqueue([this, workspace, session] { recover_unknown_session(workspace, session); });
+            return;
+        }
+        if (agent_unavailable_notice(reply.error_code).has_value()) {
+            agents_disabled_ = true;
+            set_preferred_agent(requested);
+            model_.pushNotice(agent_no_agents_notice());
+            model_.dirty.markAggregate();
+            return;
+        }
+        model_.pushNotice("agents: " + (reply.error.empty() ? std::string{"request failed"}
+                                                            : reply.error));
+        model_.dirty.markAggregate();
     }
 
     // 45-D7: `/status` renders local lines plus the per-tool and per-server
@@ -2111,15 +2322,27 @@ private:
             return true;
         }
         if (event == ftxui::Event::Tab) {
-            if (complete_selected_command(*state)) {
-                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            if (command_list_active(*state) || bare_slash_prefix(input.draft)) {
+                if (complete_selected_command(*state)) {
+                    model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                    return true;
+                }
+                return false;
+            }
+            if (input.draft.empty()) {
+                cycle_agent(1);
                 return true;
             }
             return false;
         }
-        // 45-D2.3: Shift+Tab is not list navigation and is not agent cycling in
-        // this slice (45-D9); it is a no-op.
         if (event == ftxui::Event::TabReverse) {
+            if (command_list_active(*state) || bare_slash_prefix(input.draft)) {
+                return false;
+            }
+            if (input.draft.empty()) {
+                cycle_agent(-1);
+                return true;
+            }
             return false;
         }
         if (event == ftxui::Event::Backspace) {
@@ -2461,6 +2684,22 @@ private:
     // 45-D6.11: set once when the daemon reports `mcp.status` unavailable, so
     // `/mcp` never retries (45-F19). UI thread only.
     bool mcp_disabled_ = false;
+    // 45-D9.6: the pending preference for the next `session.create`; never the
+    // active composition (45-I28). UI thread only.
+    std::string preferred_agent_;
+    // 45-D9.10: set once when the daemon cannot serve the agent RPCs, so the
+    // surface is disabled without a retry loop. UI thread only.
+    bool agents_disabled_ = false;
+    // 45-D9.9: one-shot notices so repeated Tabs do not spam the ring.
+    bool agent_empty_noticed_     = false;
+    bool agent_no_others_noticed_ = false;
+    // 45-D9 test seam: canned `agent.list`/`agent.select` replies installed by
+    // the harness, so the async cycle path is drivable without a live daemon.
+    bool           agent_replies_installed_ = false;
+    nlohmann::json agent_list_reply_        = nlohmann::json::object();
+    int            agent_list_error_        = 0;
+    nlohmann::json agent_select_reply_      = nlohmann::json::object();
+    int            agent_select_error_      = 0;
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
     std::map<WorkspaceId, std::string> pending_creates_;
@@ -2605,6 +2844,15 @@ public:
     void seed_active_workspace(const WorkspaceModel& workspace) override {
         app_.model_.workspaces[workspace.id] = workspace;
         app_.model_.activeWorkspaceId = workspace.id;
+    }
+
+    void install_agent_replies(nlohmann::json list_result, int list_error,
+                               nlohmann::json select_result, int select_error) override {
+        app_.agent_replies_installed_ = true;
+        app_.agent_list_reply_        = std::move(list_result);
+        app_.agent_list_error_        = list_error;
+        app_.agent_select_reply_      = std::move(select_result);
+        app_.agent_select_error_      = select_error;
     }
 
     void open_permission_dialog(const SessionId& session, const PermissionRequestId& request,

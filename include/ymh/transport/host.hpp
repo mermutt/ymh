@@ -120,6 +120,12 @@ public:
     // the shared MCP JSON schema (45-D6.9).
     virtual nlohmann::json mcpStatus() = 0;
 
+    // 45-D9: roster + daemon-owned blank/can_select (both profiles); and the
+    // blank-session-only switch (Interactive only; MethodNotAllowedForProfile
+    // in Automation).
+    virtual nlohmann::json listAgents(const nlohmann::json& params) = 0;
+    virtual nlohmann::json selectAgent(const nlohmann::json& params) = 0;
+
     virtual SetModeResult setSessionMode(const nlohmann::json& params) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,

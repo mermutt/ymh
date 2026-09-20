@@ -898,6 +898,140 @@ TEST(SupervisorHarnessTest, UI45_D7_StatusUsesEffectiveModel) {
     EXPECT_NE(notice.find("(no session)"), std::string::npos);
 }
 
+// 45-D9.1/45-I20/45-F21: Tab on a non-empty draft never cycles the agent; a
+// bare `/prefix` with zero matches is a no-op, not a cycle.
+TEST(SupervisorHarnessTest, UI45_D9_TabNoAgentCycleOnNonEmptyDraft) {
+    ComposerFixture fixture("ymh45d9draft");
+    fixture.type("plain text");
+    EXPECT_FALSE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, "plain text");
+
+    for (int i = 0; i < 10; ++i) {
+        ASSERT_TRUE(fixture.harness->dispatch_key("backspace"));
+    }
+    fixture.type("/zzz");
+    EXPECT_FALSE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, "/zzz");
+    EXPECT_TRUE(fixture.state()->status.agent.empty());
+    EXPECT_TRUE(fixture.state()->status.pending_agent.empty());
+}
+
+// 45-D9.1/45-I20: with the command list active Tab completes; Shift+Tab no-ops.
+TEST(SupervisorHarnessTest, UI45_D9_TabCompletesWhenListActive) {
+    ComposerFixture fixture("ymh45d9list");
+    fixture.type("/");
+    ASSERT_FALSE(fixture.state()->command_hints.empty());
+    EXPECT_FALSE(fixture.harness->dispatch_key("tab-reverse"));
+    EXPECT_EQ(fixture.state()->input.draft, "/");
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    ASSERT_FALSE(fixture.state()->input.draft.empty());
+    EXPECT_EQ(fixture.state()->input.draft.back(), ' ');
+}
+
+// 45-D9.1/45-I20: an empty draft cycles to the next selectable agent via the
+// daemon's can_select and updates the active display.
+TEST(SupervisorHarnessTest, UI45_D9_TabCyclesAgentWhenNoList) {
+    ComposerFixture fixture("ymh45d9cycle");
+    fixture.harness->install_agent_replies(
+        nlohmann::json{{"agents",
+                        nlohmann::json::array(
+                            {{{"id", "standard"},
+                              {"display_name", "standard"},
+                              {"blank", true},
+                              {"can_select", false}},
+                             {{"id", "second"},
+                              {"display_name", "second"},
+                              {"blank", true},
+                              {"can_select", true}}})},
+                       {"active", "standard"},
+                       {"default", "standard"}},
+        0, nlohmann::json{{"agent", "second"}}, 0);
+    ASSERT_TRUE(fixture.state()->input.draft.empty());
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    fixture.harness->drain_actions();
+    fixture.harness->drain_actions();
+    EXPECT_EQ(fixture.state()->status.agent, "second");
+    EXPECT_TRUE(fixture.state()->status.pending_agent.empty());
+}
+
+// 45-D9.5/45-I21/45-I28/45-F22: a non-blank session cannot switch; the
+// preference is pending, never the active display.
+TEST(SupervisorHarnessTest, UI45_D9_PendingAgentNeverActive) {
+    ComposerFixture fixture("ymh45d9pending");
+    fixture.harness->install_agent_replies(
+        nlohmann::json{{"agents",
+                        nlohmann::json::array(
+                            {{{"id", "standard"},
+                              {"display_name", "standard"},
+                              {"blank", false},
+                              {"can_select", false}},
+                             {{"id", "second"},
+                              {"display_name", "second"},
+                              {"blank", false},
+                              {"can_select", false}}})},
+                       {"active", "standard"},
+                       {"default", "standard"}},
+        0, nlohmann::json{{"agent", "second"}}, 0);
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    fixture.harness->drain_actions();
+    EXPECT_EQ(fixture.state()->status.agent, "standard");
+    EXPECT_EQ(fixture.state()->status.pending_agent, "second");
+}
+
+// 45-D9.5/45-I23: a blank session whose roster has no other selectable preset
+// no-ops with the pinned notice.
+TEST(SupervisorHarnessTest, UI45_D9_SinglePresetNoop) {
+    ComposerFixture fixture("ymh45d9single");
+    fixture.harness->install_agent_replies(
+        nlohmann::json{{"agents",
+                        nlohmann::json::array(
+                            {{{"id", "standard"},
+                              {"display_name", "standard"},
+                              {"blank", true},
+                              {"can_select", false}}})},
+                       {"active", "standard"},
+                       {"default", "standard"}},
+        0, nlohmann::json{{"agent", "standard"}}, 0);
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    fixture.harness->drain_actions();
+    ASSERT_FALSE(fixture.harness->model().notices.empty());
+    EXPECT_NE(fixture.harness->model().notices.back().text.find("no other agents available"),
+              std::string::npos);
+    EXPECT_TRUE(fixture.state()->status.pending_agent.empty());
+}
+
+// 45-D9.9/45-I23: an empty roster pushes the pinned notice at most once.
+TEST(SupervisorHarnessTest, UI45_D9_EmptyRosterNotice) {
+    ComposerFixture fixture("ymh45d9empty");
+    fixture.harness->install_agent_replies(
+        nlohmann::json{{"agents", nlohmann::json::array()}, {"active", ""}, {"default", ""}},
+        0, nlohmann::json{{"agent", ""}}, 0);
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    fixture.harness->drain_actions();
+    ASSERT_FALSE(fixture.harness->model().notices.empty());
+    EXPECT_NE(fixture.harness->model().notices.back().text.find("no agents configured"),
+              std::string::npos);
+    const std::size_t count = fixture.harness->model().notices.size();
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    fixture.harness->drain_actions();
+    EXPECT_EQ(fixture.harness->model().notices.size(), count);
+}
+
+// 45-D9.10/45-I27/45-F12: an agent.list MethodNotFound degrades with a notice
+// and disables the surface without a retry loop.
+TEST(SupervisorHarnessTest, UI45_D9_MethodNotFoundDegradation) {
+    ComposerFixture fixture("ymh45d9notfound");
+    fixture.harness->install_agent_replies(
+        nlohmann::json::object(), static_cast<int>(protocol::RpcCode::MethodNotFound),
+        nlohmann::json::object(), 0);
+    EXPECT_TRUE(fixture.harness->dispatch_key("tab"));
+    fixture.harness->drain_actions();
+    ASSERT_FALSE(fixture.harness->model().notices.empty());
+    EXPECT_NE(fixture.harness->model().notices.back().text.find("no agents configured"),
+              std::string::npos);
+    EXPECT_TRUE(fixture.state()->status.agent.empty());
+}
+
 // UX-U15 (25-D9/UX25): Enter accepts the highlighted candidate and dispatches
 // it (not the raw draft). `/he` + Enter runs `/help`.
 TEST(SupervisorHarnessTest, UX_U15_EnterAcceptsHighlightAndDispatches) {

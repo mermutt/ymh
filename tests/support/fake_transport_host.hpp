@@ -286,6 +286,29 @@ public:
     nlohmann::json mcp_status_result =
         nlohmann::json{{"servers", nlohmann::json::array()}, {"tool_total", 0}};
 
+    nlohmann::json listAgents(const nlohmann::json& params) override {
+        calls.push_back("agent.list");
+        last_agent_params = params;
+        if (throw_internal_on == "agent.list") {
+            throw std::runtime_error("internal failure in agent.list");
+        }
+        return agent_list_result;
+    }
+
+    nlohmann::json selectAgent(const nlohmann::json& params) override {
+        calls.push_back("agent.select");
+        last_agent_params = params;
+        if (throw_internal_on == "agent.select") {
+            throw std::runtime_error("internal failure in agent.select");
+        }
+        return agent_select_result;
+    }
+
+    std::optional<nlohmann::json> last_agent_params;
+    nlohmann::json agent_list_result = nlohmann::json{
+        {"agents", nlohmann::json::array()}, {"active", ""}, {"default", ""}};
+    nlohmann::json agent_select_result = nlohmann::json{{"agent", ""}};
+
     bool sessionExists(const SessionId& id) const override {
         return logs_.find(id.value) != logs_.end();
     }

@@ -79,6 +79,24 @@ std::optional<std::string> mcp_unavailable_notice(int error_code) {
     return std::nullopt;
 }
 
+std::string agent_no_agents_notice() {
+    return "no agents configured (add <config>/presets/<id>/preset.jsonc)";
+}
+
+std::string agent_no_others_notice() { return "no other agents available"; }
+
+std::string agent_composition_fixed_notice() {
+    return "agent composition is fixed for this session";
+}
+
+std::optional<std::string> agent_unavailable_notice(int error_code) {
+    if (error_code == static_cast<int>(protocol::RpcCode::MethodNotFound) ||
+        error_code == static_cast<int>(protocol::AppCode::MethodNotAllowedForProfile)) {
+        return agent_no_agents_notice();
+    }
+    return std::nullopt;
+}
+
 std::string format_mcp_block(const nlohmann::json& result) {
     const nlohmann::json servers =
         result.is_object() && result.contains("servers") && result.at("servers").is_array()

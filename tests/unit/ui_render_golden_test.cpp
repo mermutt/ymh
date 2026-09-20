@@ -388,6 +388,21 @@ TEST(UiRenderGolden, StatusWideShowsAllSegments) {
               std::string::npos);
 }
 
+// 45-D9.6/45-I28: `agent` and the distinct `agent(next)` segment both render;
+// the pending preference never replaces the active display.
+TEST(UiRenderGolden, UI45_D9_AgentAndPendingSegments) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->status.agent         = "standard";
+    state->status.pending_agent = "second";
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{200, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("agent:standard"), std::string::npos);
+    EXPECT_NE(rendered.find("agent(next):second"), std::string::npos);
+}
+
 TEST(UiRenderGolden, StatusPlanModeGolden) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);

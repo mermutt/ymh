@@ -187,6 +187,9 @@ enum class AppCode : int {
     PermissionDenied           = -32017,
     SessionNotActive           = -32018,
     NotLastOwner               = -32019,  // any non-override host.shutdown refused (§4.4)
+    // 45-D9.4: `agent.select` on a session whose composition is already fixed
+    // (spec 42-F4). Next free server-range code after `NotLastOwner`.
+    CompositionFixed           = -32020,
 };
 
 [[nodiscard]] constexpr int code_value(RpcCode code) noexcept {
@@ -529,6 +532,10 @@ inline constexpr std::string_view kSkillsShow       = "skills.show";
 inline constexpr std::string_view kContextShow      = "context.show";
 // 45-D6: read-only, session-less MCP inventory (both profiles).
 inline constexpr std::string_view kMcpStatus        = "mcp.status";
+// 45-D9: roster + daemon-owned blank/can_select (both profiles), and the
+// blank-session-only switch (Interactive only; MethodNotAllowedForProfile).
+inline constexpr std::string_view kAgentList        = "agent.list";
+inline constexpr std::string_view kAgentSelect      = "agent.select";
 } // namespace method
 
 // The full catalog, in the order of 05 §7. `host.hello` is first.

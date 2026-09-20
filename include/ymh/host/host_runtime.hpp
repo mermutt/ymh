@@ -194,6 +194,11 @@ public:
     // skipped_tools); it never reads `last_error` into the JSON.
     nlohmann::json mcpStatus() override;
 
+    // 45-D9: the roster + daemon-owned blank/can_select, and the
+    // blank-session-only switch.
+    nlohmann::json listAgents(const nlohmann::json& params) override;
+    nlohmann::json selectAgent(const nlohmann::json& params) override;
+
     bool decidePermission(const std::string& request_id, protocol::PermissionAnswer decision,
                           protocol::PermissionScope scope) override;
 

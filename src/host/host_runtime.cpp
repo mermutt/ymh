@@ -16,6 +16,7 @@
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/context_snapshot.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
+#include "ymh/agent/preset.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/core/logging.hpp"
@@ -250,6 +251,42 @@ nlohmann::json mcp_status_json(const std::vector<McpServerStatus>& statuses) {
         });
     }
     return nlohmann::json{{"servers", std::move(servers)}, {"tool_total", tool_total}};
+}
+
+// 45-D9.3: the daemon-active preset is the LAST `agent_preset/selected` event,
+// falling back to the creation-time header preset only when the log has none.
+std::string fold_active_preset(const Session& session) {
+    std::string active;
+    for (const EventRecord& record : session.events()) {
+        if (record.event.type == EventType::AgentPresetSelected) {
+            active = record.event.payload.value("agent_preset", std::string{});
+        }
+    }
+    if (active.empty()) {
+        active = session.header().agent_preset.value_or("");
+    }
+    return active;
+}
+
+// 45-D9.3: the agent.list result. `blank` is the daemon's 42-I3 predicate; with
+// no session there is nothing to test, so `blank`/`can_select` are false.
+nlohmann::json agent_list_json(AgentPresetRoster& roster, const Session* session) {
+    const std::vector<AgentPreset> presets = roster.list();
+    const std::string              active =
+        session != nullptr ? fold_active_preset(*session) : std::string{};
+    const bool blank = session != nullptr && AgentPresetRoster::is_blank(*session);
+    nlohmann::json agents = nlohmann::json::array();
+    for (const AgentPreset& preset : presets) {
+        agents.push_back(nlohmann::json{
+            {"id", preset.id},
+            {"display_name", preset.display_name},
+            {"blank", blank},
+            {"can_select", blank && preset.id != active},
+        });
+    }
+    return nlohmann::json{{"agents", std::move(agents)},
+                          {"active", active},
+                          {"default", roster.config().default_id.value_or("")}};
 }
 
 } // namespace
@@ -591,6 +628,16 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
         options.model = object.value("model", runtime_.agent_config().model);
         options.title = object.value("title", std::string{});
         options.cwd = runtime_.root();
+        if (object.contains("agent_preset")) {
+            if (!object.at("agent_preset").is_string()) {
+                throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                       "InvalidParams"});
+            }
+            const std::string preset = object.at("agent_preset").get<std::string>();
+            if (!preset.empty()) {
+                options.agent_preset = preset;
+            }
+        }
         if (object.contains("cwd")) {
             if (!object.at("cwd").is_string()) {
                 throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
@@ -1016,6 +1063,99 @@ nlohmann::json HostRuntime::showSkill(const std::string& name) {
 
 nlohmann::json HostRuntime::mcpStatus() {
     return translate([&]() -> nlohmann::json { return mcp_status_json(runtime_.mcp_statuses()); });
+}
+
+nlohmann::json HostRuntime::listAgents(const nlohmann::json& params) {
+    return translate([&]() -> nlohmann::json {
+        if (!params.is_null() && !params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        std::optional<SessionId> session_id;
+        if (params.is_object()) {
+            for (auto it = params.begin(); it != params.end(); ++it) {
+                if (it.key() != "session") {
+                    throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                           "InvalidParams"});
+                }
+            }
+            const auto it = params.find("session");
+            if (it != params.end()) {
+                if (!it->is_string() || it->get<std::string>().empty()) {
+                    throw_mapped(
+                        WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                  "InvalidParams"});
+                }
+                session_id = SessionId{it->get<std::string>()};
+            }
+        }
+        std::shared_ptr<Session> session;
+        if (session_id.has_value()) {
+            session = runtime_.sessions().sessionPtr(*session_id);
+        }
+        return agent_list_json(runtime_.presets(), session.get());
+    });
+}
+
+nlohmann::json HostRuntime::selectAgent(const nlohmann::json& params) {
+    return translate([&]() -> nlohmann::json {
+        if (!params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        for (auto it = params.begin(); it != params.end(); ++it) {
+            if (it.key() != "session" && it.key() != "agent") {
+                throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                       "InvalidParams"});
+            }
+        }
+        const auto session_it = params.find("session");
+        const auto agent_it   = params.find("agent");
+        if (session_it == params.end() || !session_it->is_string() ||
+            session_it->get<std::string>().empty() || agent_it == params.end() ||
+            !agent_it->is_string() || agent_it->get<std::string>().empty()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const SessionId   session_id{session_it->get<std::string>()};
+        const std::string preset = agent_it->get<std::string>();
+        std::shared_ptr<Session> session = runtime_.sessions().sessionPtr(session_id);
+
+        ensureAgent(session_id);
+        std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(session_id);
+        if (agent == nullptr) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
+                                   "UnknownSession"});
+        }
+
+        AgentPresetRoster& roster = runtime_.presets();
+        bool               mounted = true;
+        try {
+            (void)roster.leaf_for(agent->id());
+        } catch (const UnknownAgent&) {
+            mounted = false;
+        }
+        try {
+            if (!mounted) {
+                // The agent's live leaf is mounted lazily (spec 42's standing-mount
+                // rule is not wired for fresh agents), so mount the session's
+                // current composition before swapping it.
+                const std::string current = fold_active_preset(*session);
+                AgentContext      leaf_ctx{agent->id(), {}};
+                roster.mount(leaf_ctx,
+                             current.empty() ? std::optional<std::string>{preset}
+                                             : std::optional<std::string>{current});
+            }
+            roster.select(*agent, preset);
+        } catch (const CompositionFixed&) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::CompositionFixed),
+                                   "CompositionFixed"});
+        } catch (const PresetNotFound&) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        return nlohmann::json{{"agent", preset}};
+    });
 }
 
 bool HostRuntime::sessionExists(const SessionId& id) const {

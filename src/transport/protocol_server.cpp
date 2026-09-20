@@ -547,6 +547,10 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
                                    "mcp.status takes no parameters");
             }
             respond(conn, request.id, host_.mcpStatus());
+        } else if (method_name == method::kAgentList) {
+            respond(conn, request.id, host_.listAgents(request.params));
+        } else if (method_name == method::kAgentSelect) {
+            respond(conn, request.id, host_.selectAgent(request.params));
         } else {
             respond_error(conn, request.id, code_value(RpcCode::MethodNotFound),
                           "unhandled method");

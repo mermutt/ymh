@@ -11,6 +11,7 @@
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
+#include "ymh/agent/preset.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
@@ -64,6 +65,16 @@ AgentConfig make_agent_config(const Config& config,
         }
     }
     return agent;
+}
+
+PresetConfig make_preset_config(const Config& config) {
+    PresetConfig preset;
+    preset.root                 = config.presets.root;
+    preset.default_id           = config.presets.default_id;
+    preset.include_shipped_root = config.presets.include_shipped_root;
+    preset.include_user_root    = config.presets.include_user_root;
+    preset.max_depth            = config.presets.max_depth;
+    return preset;
 }
 
 } // namespace
@@ -127,7 +138,9 @@ public:
                   }
               } catch (const UnknownSession&) {
               }
-          }) {
+          }),
+          roster_(std::make_unique<AgentPresetRoster>(prompt_, tools_, *skill_catalog_,
+                                                     sessions_, make_preset_config(config))) {
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
             registrations_.push_back(tools_.add(std::move(tool)));
         }
@@ -188,6 +201,7 @@ public:
         services_.logger          = &category_logger(LogCategory::Tool);
         services_.output          = &sink_;
         services_.estimator       = &estimator_;
+        services_.presets         = roster_.get();
 
         if (provider != nullptr) {
             std::shared_ptr<LLMProvider> adapter = std::move(provider);
@@ -243,6 +257,7 @@ public:
     RingOutputSink                     sink_;
     SessionManager                     sessions_;
     PlanModeController                 plan_mode_;
+    std::unique_ptr<AgentPresetRoster> roster_;
     AgentServices                      services_;
     std::unique_ptr<AgentRegistry>     agents_;
 };
@@ -376,6 +391,8 @@ std::vector<McpServerStatus> WorkspaceRuntime::mcp_statuses() const {
 }
 
 McpManager& WorkspaceRuntime::mcp() noexcept { return *impl_->mcp_; }
+
+AgentPresetRoster& WorkspaceRuntime::presets() noexcept { return *impl_->roster_; }
 
 void WorkspaceRuntime::shutdownChildren(std::chrono::milliseconds grace) {
     impl_->environment_->pty().closeAll();

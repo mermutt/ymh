@@ -18,6 +18,21 @@ namespace ymh::ui {
 // (including success) yields `std::nullopt`.
 [[nodiscard]] std::optional<std::string> mcp_unavailable_notice(int error_code);
 
+// 45-D9.9: the pinned empty-roster notice (also used when `agent.list` is
+// unavailable, 45-D9.10).
+[[nodiscard]] std::string agent_no_agents_notice();
+
+// 45-D9.5: a blank session whose roster has no other selectable preset.
+[[nodiscard]] std::string agent_no_others_notice();
+
+// 45-D9.5: the daemon rejected `agent.select` because the composition is fixed.
+[[nodiscard]] std::string agent_composition_fixed_notice();
+
+// 45-D9.10: the pinned degradation for a daemon that cannot serve `agent.list`
+// (`MethodNotFound` / `MethodNotAllowedForProfile`). Any other code yields
+// `std::nullopt`.
+[[nodiscard]] std::optional<std::string> agent_unavailable_notice(int error_code);
+
 // 45-D6 §8.2: renders the `/mcp` block from the `mcp.status` result.
 [[nodiscard]] std::string format_mcp_block(const nlohmann::json& result);
 
