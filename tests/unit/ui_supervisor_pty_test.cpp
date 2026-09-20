@@ -1227,6 +1227,20 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
     }
 }
 
+// Opens a session in a running daemon so it becomes OPEN (a resident agent)
+// without going through a supervisor. Used to seed another workspace's live
+// session for the Live-switcher regression.
+void resume_session_via_daemon(const std::filesystem::path& socket, const std::string& session) {
+    protocol::HostConnection connection;
+    connection.connect(socket.string());
+    static_cast<void>(connection.handshake(protocol::ServerProfile::Interactive,
+                                           protocol::ClientInstanceId{generate_uuid_v4()}));
+    static_cast<void>(
+        connection.request(std::string(protocol::method::kSessionResume),
+                           nlohmann::json{{"session", session}}));
+    connection.close();
+}
+
 RegistryConfig pty_registry_config(const std::filesystem::path& state) {
     RegistryConfig config;
     config.db_path         = state / "ymh" / "registry.db";
@@ -1300,6 +1314,109 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
 
     child.terminate();
     alpha_guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// Bug regression (Live source = daemon OPEN sessions): a LIVE workspace whose
+// daemon has no open session but holds stored-but-closed history must not leak
+// those rows into the Ctrl-S Live switcher. The focused session is the resumed
+// stored session (hidden), and `/sessions` still lists every stored session.
+TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
+    ShortTempRoot root("ymh_pty_live_hide");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    std::filesystem::create_directories(alpha);
+
+    WorkspaceId alpha_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+    }
+    write_stored_session(alpha, "zzstoredone", "zzmarkerone");
+    write_stored_session(alpha, "zzstoredtwo", "zzmarkertwo");
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("\x13");
+    ASSERT_TRUE(child.wait_for("(current session hidden)", 20s))
+        << "the Live switcher must hide the focused live session: " << child.text();
+    EXPECT_EQ(child.text().find("[zzstoredone"), std::string::npos)
+        << "Live switcher leaked a stored-but-closed session: " << child.text();
+    EXPECT_EQ(child.text().find("[zzstoredtwo"), std::string::npos)
+        << "Live switcher leaked a stored-but-closed session: " << child.text();
+
+    child.write("\x1b");
+    ASSERT_TRUE(child.wait_for_frame_absent("Switcher", 10s)) << child.text();
+    child.write("/sessions\r");
+    ASSERT_TRUE(child.wait_for("zzstoredone", 20s)) << child.text();
+    ASSERT_TRUE(child.wait_for("zzstoredtwo", 20s)) << child.text();
+
+    child.terminate();
+    alpha_guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// Bug regression (Live source = daemon OPEN sessions): with two live workspaces,
+// the other workspace's OPEN session appears in Ctrl-S while the viewer's own
+// focused session stays hidden.
+TEST(UiSupervisorPty, SwLive_ShowsOtherWorkspaceLiveSession) {
+    ShortTempRoot root("ymh_pty_live_peer");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    const SessionId beta_session = write_stored_session(beta, "zzbetalive", "zzbetamarker");
+
+    HostHarnessOptions beta_options;
+    beta_options.binary         = resolve_ymh_binary();
+    beta_options.workspace_root = beta;
+    beta_options.workspace_id   = beta_id;
+    beta_options.socket_path    = beta / ".ymh" / "host.sock";
+    beta_options.log_sink       = beta / ".ymh" / "host.log";
+    beta_options.env["XDG_STATE_HOME"] = state.string();
+    beta_options.env["HOME"]           = root.path().string();
+    HostHarness beta_host(std::move(beta_options));
+    beta_host.start();
+    ASSERT_TRUE(beta_host.wait_ready(20s)) << beta_host.read_log();
+
+    resume_session_via_daemon(beta / ".ymh" / "host.sock", beta_session.value);
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("\x13");
+    ASSERT_TRUE(child.wait_for("zzbetalive", 20s))
+        << "the other live workspace's open session must appear: " << child.text();
+    EXPECT_NE(child.last_frame().find("(current session hidden)"), std::string::npos)
+        << "the viewer's own focused session must stay hidden: " << child.last_frame();
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_host.stop();
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 

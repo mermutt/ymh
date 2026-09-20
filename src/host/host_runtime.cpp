@@ -537,7 +537,12 @@ std::vector<protocol::SessionSummary> HostRuntime::listSessions() {
             if (!header.has_value()) {
                 continue;
             }
-            summaries.push_back(summary_for(*header, entry));
+            protocol::SessionSummary summary = summary_for(*header, entry);
+            // A session is OPEN iff the daemon holds a resident agent for it.
+            // `session.list` still enumerates the whole store; the flag lets the
+            // supervisor's Live switcher ignore stored-but-closed history.
+            summary.live = runtime_.agents().findShared(header->id) != nullptr;
+            summaries.push_back(std::move(summary));
         }
         return summaries;
     });

@@ -378,6 +378,11 @@ struct SessionSummary {
     std::string  title;
     std::string  kind;            // root | fork | subagent
     std::int64_t updated_at_ms{0};
+    // True iff the daemon currently has this session OPEN (a resident agent in
+    // its `AgentRegistry`). `session.list` still enumerates every stored session;
+    // this flag is the explicit live/open signal the Live switcher consumes so it
+    // never renders stored-but-closed history. Stored-only entries carry false.
+    bool         live{false};
 };
 
 struct SessionDetail {

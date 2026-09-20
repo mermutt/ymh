@@ -1252,6 +1252,15 @@ private:
         model_.focusSessionIn(workspace, session);
     }
 
+    // The Live switcher's session source is the daemon's OPEN/LIVE set, never
+    // stored-but-closed history. `session.list` still enumerates every stored
+    // session (its pinned contract) and tags each with a `live` flag; only live
+    // entries become cells and are subscribed. The focus/create/resume decision
+    // is scoped to the user's ACTIVE workspace: a background workspace is only
+    // observed (its live sessions render as leaves) and never steals focus. For
+    // the active workspace with no open session but stored history, the first
+    // stored session is resumed (the History selection path) so the focus is
+    // always a usable, live session.
     void refresh_sessions(const WorkspaceId& workspace) {
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
@@ -1260,28 +1269,33 @@ private:
         connection->second->submit(
             std::string(protocol::method::kSessionList), nlohmann::json::object(),
             [this, workspace](SupervisorReply reply) {
-                std::vector<std::pair<SessionId, std::string>> sessions;
+                std::vector<std::pair<SessionId, std::string>> stored;
+                std::vector<std::pair<SessionId, std::string>> live;
                 if (reply.ok && reply.result.is_array()) {
                     for (const nlohmann::json& entry : reply.result) {
                         const std::string id = entry.value("id", std::string{});
                         if (id.empty()) {
                             continue;
                         }
-                        sessions.emplace_back(SessionId{id}, entry.value("title", std::string{}));
+                        const std::string title = entry.value("title", std::string{});
+                        stored.emplace_back(SessionId{id}, title);
+                        if (entry.value("live", false)) {
+                            live.emplace_back(SessionId{id}, title);
+                        }
                     }
                 }
                 const auto connection_it = connections_.find(workspace);
                 if (connection_it != connections_.end()) {
-                    for (const auto& entry : sessions) {
+                    for (const auto& entry : live) {
                         connection_it->second->track(entry.first);
                     }
                 }
-                enqueue([this, workspace, sessions] {
+                enqueue([this, workspace, stored, live] {
                     const auto it = model_.workspaces.find(workspace);
                     if (it == model_.workspaces.end()) {
                         return;
                     }
-                    for (const auto& [session, title] : sessions) {
+                    for (const auto& [session, title] : live) {
                         SessionUiState& state = model_.ensureSessionIn(workspace, session);
                         if (state.status.model.empty()) {
                             state.status.model = effective_model(options_.config);
@@ -1289,11 +1303,15 @@ private:
                         model_.ensureCellIn(workspace, session);
                         model_.setCellTitle(workspace, session, title);
                     }
-                    if (it->second.activeSessionId().value.empty()) {
-                        if (!sessions.empty()) {
-                            activate_session(workspace, sessions.front().first);
+                    if (it->second.activeSessionId().value.empty() &&
+                        model_.activeWorkspaceId == workspace) {
+                        if (!live.empty()) {
+                            // A live session can be focused directly.
+                            activate_session(workspace, live.front().first);
                             // 25 review M3: plain attach must refresh the context.
-                            refresh_status_context(workspace, sessions.front().first);
+                            refresh_status_context(workspace, live.front().first);
+                        } else if (!stored.empty()) {
+                            resume_after_attach(workspace, stored.front().first);
                         } else {
                             // Attach (existing daemon) and spawn paths both
                             // converge here, so auto-create the first session.
