@@ -53,9 +53,8 @@ TEST(UiDriver, RendersScriptedTranscript) {
     WorkspaceModel workspace;
     workspace.id = model.activeWorkspaceId;
     workspace.cwd = env.workspace.path().string();
-    workspace.activeSessionId = agent.session();
     model.workspaces.emplace(workspace.id, workspace);
-    model.ensureSession(agent.session());
+    model.focusSessionIn(workspace.id, agent.session());
 
     UiEventAdapter adapter(model);
     Subscription subscription =

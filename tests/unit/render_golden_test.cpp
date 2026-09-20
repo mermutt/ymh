@@ -158,8 +158,7 @@ TEST(RenderGolden, TuiRoutesAssistantMarkdownAndToolDiff) {
     model.activeWorkspaceId = WorkspaceId{"workspace"};
     WorkspaceModel& workspace = model.workspaces[model.activeWorkspaceId];
     workspace.id = model.activeWorkspaceId;
-    workspace.activeSessionId = SessionId{"session"};
-    model.ensureSession(SessionId{"session"});
+    model.focusSessionIn(model.activeWorkspaceId, SessionId{"session"});
 
     SessionUiState* session = model.session(SessionId{"session"});
     ASSERT_NE(session, nullptr);
@@ -189,8 +188,7 @@ TEST(RenderGolden, TuiCollapsedToolRendersOneLineAndNoBody) {
     model.activeWorkspaceId = WorkspaceId{"workspace"};
     WorkspaceModel& workspace = model.workspaces[model.activeWorkspaceId];
     workspace.id = model.activeWorkspaceId;
-    workspace.activeSessionId = SessionId{"session"};
-    model.ensureSession(SessionId{"session"});
+    model.focusSessionIn(model.activeWorkspaceId, SessionId{"session"});
 
     SessionUiState* session = model.session(SessionId{"session"});
     ASSERT_NE(session, nullptr);
@@ -213,8 +211,7 @@ TEST(RenderGolden, TuiExitConfirmOverlayCountsAndOwnershipMark) {
     workspace.title = "alpha";
     workspace.daemonStatus = DaemonStatus::Attached;
     workspace.live = true;
-    workspace.activeSessionId = SessionId{"session"};
-    model.ensureSession(SessionId{"session"});
+    model.focusSessionIn(model.activeWorkspaceId, SessionId{"session"});
 
     model.exitConfirm.open = true;
     model.exitConfirm.orphaning = {WorkspaceId{"workspace"}};

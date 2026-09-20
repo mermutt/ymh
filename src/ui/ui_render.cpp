@@ -386,7 +386,7 @@ Element render_input(const UiModel& model, const Theme& theme) {
     const SessionUiState* active = nullptr;
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     if (workspace != model.workspaces.end()) {
-        const auto session = model.sessions.find(workspace->second.activeSessionId);
+        const auto session = model.sessions.find(workspace->second.activeSessionId());
         if (session != model.sessions.end()) {
             active = &session->second;
         }
@@ -770,10 +770,19 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         if (collapsed) {
             continue;
         }
-        if (history && workspace.sessions.empty()) {
-            const std::string leaf = workspace.note.has_value()
-                                         ? history_note_leaf(*workspace.note)
-                                         : std::string("(no stored sessions)");
+        if (workspace.sessions.empty()) {
+            std::string leaf;
+            if (!history && workspace.catalog_pending) {
+                leaf = "(loading live sessions…)";
+            } else if (workspace.note.has_value()) {
+                leaf = history_note_leaf(*workspace.note);
+            } else if (workspace.sessions_hidden_by_focus) {
+                leaf = "(current session hidden)";
+            } else if (history) {
+                leaf = "(no stored sessions)";
+            } else {
+                leaf = "(no live sessions)";
+            }
             rows.push_back(ftxui::text("    " + leaf) | ftxui::dim);
             continue;
         }
@@ -831,7 +840,7 @@ Element render_header(const UiModel& model, const Theme& theme) {
     }
     std::string session_title;
     if (workspace != model.workspaces.end()) {
-        const SessionId& active_id = workspace->second.activeSessionId;
+        const SessionId& active_id = workspace->second.activeSessionId();
         if (!active_id.value.empty()) {
             for (const SessionCell& cell : workspace->second.sessions) {
                 if (cell.id == active_id) {
@@ -1148,7 +1157,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     const SessionUiState* active = nullptr;
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     if (workspace != model.workspaces.end()) {
-        const auto session = model.sessions.find(workspace->second.activeSessionId);
+        const auto session = model.sessions.find(workspace->second.activeSessionId());
         if (session != model.sessions.end()) {
             active = &session->second;
         }

@@ -60,10 +60,30 @@ UiModel make_model() {
     workspace.cwd = "/tmp/workspace";
     workspace.daemonStatus = DaemonStatus::Attached;
     workspace.live = true;
-    workspace.activeSessionId = kSession;
     model.workspaces.emplace(workspace.id, workspace);
-    model.ensureSession(kSession);
+    model.focusSessionIn(workspace.id, kSession);
+    model.dirty.clear();
     return model;
+}
+
+void add_catalog_sessions(UiModel& model, const WorkspaceId& workspace,
+                          std::initializer_list<SessionId> sessions) {
+    WorkspaceHistory history;
+    history.id = workspace;
+    history.title = workspace.value;
+    history.canonicalPath = "/" + workspace.value;
+    for (const SessionId& session : sessions) {
+        SessionHistoryEntry entry;
+        entry.id = session;
+        entry.title = session.value;
+        entry.kind = "root";
+        entry.model = "m";
+        entry.updatedAt = 1;
+        history.sessions.push_back(std::move(entry));
+    }
+    model.catalog.workspaces.push_back(std::move(history));
+    model.catalog.loaded = true;
+    model.catalog.generation = 1;
 }
 
 TEST(UiModel, AppliesUserAndStreamingAssistant) {
@@ -364,8 +384,12 @@ TEST(TerminalLayer, DisablesIxonAndRestores) {
 TEST(UiModel, MultiWorkspaceSessionsRouteAndCount) {
     UiModel model = make_model();
     const SessionId other{"session-2"};
-    model.workspaces[WorkspaceId{"workspace-2"}] = WorkspaceModel{
-        WorkspaceId{"workspace-2"}, "beta", "/tmp/beta", "", DaemonStatus::Attached, other, {}};
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-2"};
+    beta.title = "beta";
+    beta.cwd = "/tmp/beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-2"}, other);
 
     model.session(kSession)->agent_state = AgentState::Thinking;
@@ -389,13 +413,14 @@ TEST(UiModel, SwitcherNavigatesAcrossWorkspaces) {
     beta.title = "beta";
     beta.daemonStatus = DaemonStatus::Attached;
     beta.live = true;
-    beta.activeSessionId = second;
     SessionCell cell;
     cell.id = second;
     cell.title = "second";
     beta.sessions.push_back(cell);
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-2"}, second);
+    add_catalog_sessions(model, WorkspaceId{"workspace"}, {kSession});
+    add_catalog_sessions(model, WorkspaceId{"workspace-2"}, {second});
 
     model.openSwitcher();
     ASSERT_EQ(model.switcher.workspaces.size(), 2u);
@@ -411,7 +436,7 @@ TEST(UiModel, SwitcherNavigatesAcrossWorkspaces) {
 
     model.focusSession(second);
     EXPECT_EQ(model.activeWorkspaceId, WorkspaceId{"workspace-2"});
-    EXPECT_EQ(model.activeWorkspace()->activeSessionId, second);
+    EXPECT_EQ(model.activeWorkspace()->activeSessionId(), second);
     EXPECT_EQ(model.mode, UiMode::Conversation);
 }
 
@@ -824,7 +849,7 @@ TEST(UiModel, SessionClosedClearsActiveSession) {
     closed.session = kSession;
     model.apply(closed);
 
-    EXPECT_TRUE(model.workspaces.at(WorkspaceId{"workspace"}).activeSessionId.value.empty());
+    EXPECT_TRUE(model.workspaces.at(WorkspaceId{"workspace"}).activeSessionId().value.empty());
     EXPECT_EQ(model.session(kSession), nullptr);
 }
 
@@ -845,7 +870,6 @@ TEST(UiModel, SwitcherNodesCarryOwnershipMark) {
     beta.title = "beta";
     beta.daemonStatus = DaemonStatus::Attached;
     beta.live = true;
-    beta.activeSessionId = second;
     SessionCell cell;
     cell.id = second;
     cell.title = "second";
@@ -914,7 +938,6 @@ TEST(UiModel, EraseWorkspaceRemovesSessionsAndRepairsFocus) {
     beta.title = "beta";
     beta.daemonStatus = DaemonStatus::Attached;
     beta.live = true;
-    beta.activeSessionId = other;
     model.workspaces.emplace(beta.id, beta);
     model.ensureSessionIn(beta.id, other);
 
@@ -1020,6 +1043,7 @@ TEST(UiModel, SwitcherOrderingAndSessionOrder) {
     first.id = SessionId{"s1"};
     first.title = "one";
     model.workspaces[WorkspaceId{"ws-b"}].sessions = {second, first};
+    add_catalog_sessions(model, WorkspaceId{"ws-b"}, {SessionId{"s2"}, SessionId{"s1"}});
 
     model.openSwitcher();
     ASSERT_EQ(model.switcher.workspaces.size(), 4u);
@@ -1033,6 +1057,9 @@ TEST(UiModel, SwitcherOrderingAndSessionOrder) {
 
     // History source (22 §3.7/SW17): the same workspace rule; sessions are
     // `updated_at` desc, `id` asc. The Live source above was NOT re-sorted.
+    model.catalog.workspaces.clear();
+    model.catalog.loaded = false;
+    model.catalog.generation = 0;
     const auto add_history = [&model](const char* id, const char* title, const char* path) {
         WorkspaceHistory history;
         history.id = WorkspaceId{id};
@@ -1094,7 +1121,9 @@ TEST(UiModel, SwitcherCursorValidatedAgainstNodes) {
     model.switcher.cursor.session = SessionId{"hidden-session"};
     model.switcher.open(model);
     EXPECT_EQ(model.switcher.cursor.workspace, model.activeWorkspaceId);
-    EXPECT_EQ(model.switcher.cursor.session, std::optional<SessionId>{kSession});
+    // 45-D4: the focused session is excluded from the Live source, so the cursor
+    // cannot point at it.
+    EXPECT_FALSE(model.switcher.cursor.session.has_value());
 
     model.switcher.cursor.session = SessionId{"bogus"};
     model.switcher.open(model);
@@ -1221,6 +1250,257 @@ TEST(UiModel, SessionsCommandOpensHistoryAndLoadingPlaceholder) {
     const std::string rendered =
         render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
     EXPECT_NE(rendered.find("loading stored sessions"), std::string::npos);
+}
+
+// ── 45-D3: the Live switcher is a strict subset of `/sessions` ───────────────
+
+TEST(UiModel, UI45_D3_LiveIsSubsetOfHistory) {
+    UiModel model = make_model();
+    const SessionId second{"session-2"};
+    WorkspaceModel beta;
+    beta.id = WorkspaceId{"workspace-2"};
+    beta.title = "beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live = true;
+    SessionCell cell;
+    cell.id = second;
+    cell.title = "second";
+    beta.sessions.push_back(cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-2"}, second);
+    add_catalog_sessions(model, WorkspaceId{"workspace"}, {kSession});
+    add_catalog_sessions(model, WorkspaceId{"workspace-2"}, {second});
+
+    model.switcher.open(model);
+    std::set<std::pair<std::string, std::string>> live;
+    for (const WorkspaceNode& node : model.switcher.workspaces) {
+        for (const SessionNode& session : node.sessions) {
+            live.emplace(node.id.value, session.id.value);
+        }
+    }
+
+    model.switcher.openHistory(model);
+    std::set<std::pair<std::string, std::string>> history;
+    for (const WorkspaceNode& node : model.switcher.workspaces) {
+        for (const SessionNode& session : node.sessions) {
+            history.emplace(node.id.value, session.id.value);
+        }
+    }
+
+    ASSERT_FALSE(live.empty());
+    for (const auto& leaf : live) {
+        EXPECT_EQ(history.count(leaf), 1u) << leaf.first << "/" << leaf.second;
+    }
+}
+
+TEST(UiModel, UI45_D3_LiveHidesUncataloguedSession) {
+    UiModel model = make_model();
+    const SessionId catalogued{"s-cat"};
+    const SessionId uncatalogued{"s-uncat"};
+    model.ensureSessionIn(model.activeWorkspaceId, catalogued);
+    model.ensureSessionIn(model.activeWorkspaceId, uncatalogued);
+    add_catalog_sessions(model, model.activeWorkspaceId, {kSession, catalogued});
+
+    model.switcher.open(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    ASSERT_EQ(model.switcher.workspaces[0].sessions.size(), 1u);
+    EXPECT_EQ(model.switcher.workspaces[0].sessions[0].id, catalogued);
+}
+
+// ── 45-D4: hide the focused session from both lists ─────────────────────────
+
+TEST(UiModel, UI45_D4_FocusedSessionExcludedLive) {
+    UiModel model = make_model();
+    const SessionId other{"other"};
+    model.ensureSessionIn(model.activeWorkspaceId, other);
+    add_catalog_sessions(model, model.activeWorkspaceId, {kSession, other});
+
+    model.switcher.open(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    ASSERT_EQ(model.switcher.workspaces[0].sessions.size(), 1u);
+    EXPECT_EQ(model.switcher.workspaces[0].sessions[0].id, other);
+    EXPECT_FALSE(model.switcher.workspaces[0].sessions_hidden_by_focus);
+}
+
+TEST(UiModel, UI45_D4_FocusedSessionExcludedHistory) {
+    UiModel model = make_model();
+    const SessionId other{"other"};
+    add_catalog_sessions(model, model.activeWorkspaceId, {kSession, other});
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    ASSERT_EQ(model.switcher.workspaces[0].sessions.size(), 1u);
+    EXPECT_EQ(model.switcher.workspaces[0].sessions[0].id, other);
+}
+
+TEST(UiModel, UI45_D4_LiveEmptyNodeRendered) {
+    UiModel model = make_model();
+    add_catalog_sessions(model, model.activeWorkspaceId, {kSession});
+
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u) << "the node must not be suppressed";
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions_hidden_by_focus);
+    EXPECT_FALSE(model.switcher.workspaces[0].catalog_pending);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(current session hidden)"), std::string::npos);
+}
+
+TEST(UiModel, UI45_D4_LivePlaceholderLeaf) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws"};
+    WorkspaceModel workspace;
+    workspace.id = model.activeWorkspaceId;
+    workspace.cwd = "/ws";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(workspace.id, workspace);
+    add_catalog_sessions(model, workspace.id, {});
+
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
+    EXPECT_FALSE(model.switcher.workspaces[0].sessions_hidden_by_focus);
+    EXPECT_FALSE(model.switcher.workspaces[0].catalog_pending);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(no live sessions)"), std::string::npos);
+}
+
+TEST(UiModel, UI45_D4_LiveCatalogPendingPlaceholder) {
+    UiModel model = make_model();
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(model.switcher.workspaces[0].catalog_pending);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(loading live sessions…"), std::string::npos);
+    EXPECT_EQ(rendered.find("(no live sessions)"), std::string::npos);
+}
+
+TEST(UiModel, UI45_D4_LiveCatalogNotePlaceholder) {
+    UiModel model = make_model();
+    WorkspaceHistory history;
+    history.id = model.activeWorkspaceId;
+    history.title = "workspace";
+    history.canonicalPath = "/workspace";
+    history.live = true;
+    history.note = "corrupt";
+    model.catalog.workspaces.push_back(std::move(history));
+    model.catalog.loaded = true;
+    model.catalog.generation = 1;
+
+    model.openSwitcher();
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    ASSERT_TRUE(model.switcher.workspaces[0].note.has_value());
+    EXPECT_FALSE(model.switcher.workspaces[0].catalog_pending);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(corrupt)"), std::string::npos);
+    EXPECT_EQ(rendered.find("(no live sessions)"), std::string::npos);
+}
+
+TEST(UiModel, UI45_D4_HistoryGenuinelyEmptyKeepsEmptyState) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws"};
+    WorkspaceModel workspace;
+    workspace.id = model.activeWorkspaceId;
+    workspace.cwd = "/ws";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(workspace.id, workspace);
+    add_catalog_sessions(model, workspace.id, {});
+
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
+    EXPECT_FALSE(model.switcher.workspaces[0].sessions_hidden_by_focus);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(no stored sessions)"), std::string::npos);
+    EXPECT_EQ(rendered.find("(current session hidden)"), std::string::npos);
+}
+
+TEST(UiModel, UI45_D4_HistoryAllHiddenDistinctLabel) {
+    UiModel model = make_model();
+    add_catalog_sessions(model, model.activeWorkspaceId, {kSession});
+
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions_hidden_by_focus);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(current session hidden)"), std::string::npos);
+    EXPECT_EQ(rendered.find("(no stored sessions)"), std::string::npos);
+}
+
+TEST(UiModel, UI45_D4_HistoryNoteLeafRetained) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws"};
+    WorkspaceHistory history;
+    history.id = model.activeWorkspaceId;
+    history.title = "ws";
+    history.canonicalPath = "/ws";
+    history.live = false;
+    history.note = "corrupt";
+    model.catalog.workspaces.push_back(std::move(history));
+    model.catalog.loaded = true;
+    model.catalog.generation = 1;
+
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
+    EXPECT_FALSE(model.switcher.workspaces[0].sessions_hidden_by_focus);
+
+    const std::string rendered = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    EXPECT_NE(rendered.find("(corrupt)"), std::string::npos);
+}
+
+// ── 45-D10: the unmodeled-session lockout ───────────────────────────────────
+
+TEST(UiModel, UI45_D10_FocusModelsTarget) {
+    UiModel model = make_model();
+    const SessionId target{"unmodeled"};
+    ASSERT_EQ(model.session(target), nullptr);
+
+    model.focusSessionIn(model.activeWorkspaceId, target);
+    ASSERT_NE(model.session(target), nullptr);
+    EXPECT_EQ(model.activeWorkspace()->activeSessionId(), target);
+    ASSERT_NE(model.activeSession(), nullptr);
+    EXPECT_EQ(model.activeSession()->id, target);
+}
+
+TEST(UiModel, UI45_D10_EnsureActiveSessionRepairs) {
+    UiModel model = make_model();
+    const SessionId target{"repair"};
+    model.focusSessionIn(model.activeWorkspaceId, target);
+    ASSERT_NE(model.activeSession(), nullptr);
+
+    model.sessions.erase(target);
+    EXPECT_EQ(model.activeSession(), nullptr);
+    EXPECT_FALSE(model.activeWorkspace()->activeSessionId().value.empty());
+
+    SessionUiState* repaired = model.ensureActiveSession();
+    ASSERT_NE(repaired, nullptr);
+    EXPECT_EQ(repaired->id, target);
+    EXPECT_NE(model.activeSession(), nullptr);
+}
+
+TEST(UiModel, UI45_D10_EnsureActiveSessionNoWorkspace) {
+    UiModel model;
+    EXPECT_EQ(model.ensureActiveSession(), nullptr);
+}
+
+TEST(UiModel, UI45_D10_SingleMutator) {
+    static_assert(!std::is_aggregate_v<WorkspaceModel>,
+                  "WorkspaceModel must not be an aggregate once the focus is private");
+    EXPECT_TRUE(
+        (std::is_member_function_pointer_v<decltype(&WorkspaceModel::activeSessionId)>));
 }
 
 } // namespace

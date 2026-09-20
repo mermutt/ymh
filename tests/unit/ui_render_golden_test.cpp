@@ -103,9 +103,8 @@ UiModel build_model() {
     workspace.cwd = "/work";
     workspace.daemonStatus = DaemonStatus::Attached;
     workspace.live = true;
-    workspace.activeSessionId = kSession;
     model.workspaces.emplace(workspace.id, workspace);
-    model.ensureSession(kSession);
+    model.focusSessionIn(workspace.id, kSession);
     model.session(kSession)->status.model = "test-model";
 
     UiEventAdapter adapter(model);
@@ -152,6 +151,24 @@ UiModel build_model() {
     }()));
     adapter.onEvent(typed_event(EventType::TurnEnded, payload::TurnEnded{}));
     return model;
+}
+
+void seed_catalog_session(UiModel& model, const WorkspaceId& workspace,
+                          const SessionId& session) {
+    WorkspaceHistory history;
+    history.id = workspace;
+    history.title = workspace.value;
+    history.canonicalPath = "/" + workspace.value;
+    SessionHistoryEntry entry;
+    entry.id = session;
+    entry.title = session.value;
+    entry.kind = "root";
+    entry.model = "m";
+    entry.updatedAt = 1;
+    history.sessions.push_back(std::move(entry));
+    model.catalog.workspaces.push_back(std::move(history));
+    model.catalog.loaded = true;
+    model.catalog.generation = 1;
 }
 
 const char* kGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
@@ -233,7 +250,6 @@ TEST(UiRenderGolden, MultiWorkspaceSwitcherTree) {
     beta.cwd = "/work/beta";
     beta.daemonStatus = DaemonStatus::Attached;
     beta.live = true;
-    beta.activeSessionId = SessionId{"beta-session"};
     SessionCell beta_cell;
     beta_cell.id = SessionId{"beta-session"};
     beta_cell.title = "notes";
@@ -242,6 +258,7 @@ TEST(UiRenderGolden, MultiWorkspaceSwitcherTree) {
     beta.sessions.push_back(beta_cell);
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     model.openSwitcher();
 
     const std::string rendered =
@@ -725,14 +742,17 @@ TEST(UiRenderGolden, HeaderHidesPlaceholderTitle) {
 TEST(UiRenderGolden, SwitcherShowsShortIdForPlaceholderTitle) {
     UiModel model = build_model();
     model.workspaces[model.activeWorkspaceId].title = "alpha";
-    model.setCellTitle(model.activeWorkspaceId, kSession, "tui");
+    const SessionId other{"cafebabe-1234"};
+    model.ensureSessionIn(model.activeWorkspaceId, other);
+    model.setCellTitle(model.activeWorkspaceId, other, "tui");
+    seed_catalog_session(model, model.activeWorkspaceId, other);
     model.openSwitcher();
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_EQ(rendered.find("tui"), std::string::npos);
-    EXPECT_NE(rendered.find("[golden-s "), std::string::npos);
+    EXPECT_NE(rendered.find("[cafebabe "), std::string::npos);
 }
 
 TEST(UiRenderGolden, BottomLineCountsOnlyNoSessionList) {
@@ -752,7 +772,6 @@ TEST(UiRenderGolden, SwitcherAttentionBadgeStillRenders) {
     beta.title = "beta";
     beta.cwd = "/work/beta";
     beta.live = true;
-    beta.activeSessionId = SessionId{"beta-session"};
     SessionCell beta_cell;
     beta_cell.id = SessionId{"beta-session"};
     beta_cell.title = "notes";
@@ -761,6 +780,7 @@ TEST(UiRenderGolden, SwitcherAttentionBadgeStillRenders) {
     beta.sessions.push_back(beta_cell);
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     model.openSwitcher();
 
     const std::string rendered =
@@ -792,7 +812,6 @@ UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int 
     workspace.cwd = "/work";
     workspace.title = "alpha";
     workspace.daemonStatus = DaemonStatus::Attached;
-    workspace.activeSessionId = SessionId{"active-session"};
     SessionCell active;
     active.id = SessionId{"active-session"};
     active.title = "active-session";
@@ -802,14 +821,13 @@ UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int 
     other.title = "other-session";
     workspace.sessions.push_back(other);
     model.workspaces.emplace(workspace.id, workspace);
-    model.ensureSession(SessionId{"active-session"});
+    model.focusSessionIn(workspace.id, SessionId{"active-session"});
 
     WorkspaceModel beta;
     beta.id = WorkspaceId{"workspace-beta"};
     beta.title = "beta";
     beta.cwd = "/work/beta";
     beta.daemonStatus = DaemonStatus::Attached;
-    beta.activeSessionId = SessionId{"beta-session"};
     SessionCell beta_cell;
     beta_cell.id = SessionId{"beta-session"};
     beta_cell.title = "beta-session";
@@ -1334,9 +1352,8 @@ UiModel provenance_model() {
     workspace.cwd             = "/work";
     workspace.daemonStatus    = DaemonStatus::Attached;
     workspace.live            = true;
-    workspace.activeSessionId = kSession;
     model.workspaces.emplace(workspace.id, workspace);
-    model.ensureSession(kSession);
+    model.focusSessionIn(workspace.id, kSession);
     return model;
 }
 
@@ -1429,6 +1446,181 @@ TEST(UiRenderGolden, ToolNoticeSuffixRendered) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     EXPECT_NE(rendered.find("tool: read_file"), std::string::npos);
     EXPECT_NE(rendered.find("notice: retention notice"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI45_G4_LiveNoSuppression) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws-alpha"};
+    WorkspaceModel alpha;
+    alpha.id           = WorkspaceId{"ws-alpha"};
+    alpha.title        = "alpha";
+    alpha.cwd          = "/alpha";
+    alpha.daemonStatus = DaemonStatus::Attached;
+    alpha.live         = true;
+    SessionCell focused_cell;
+    focused_cell.id    = SessionId{"focused"};
+    focused_cell.title = "focused";
+    SessionCell kept_cell;
+    kept_cell.id    = SessionId{"kept"};
+    kept_cell.title = "kept";
+    alpha.sessions  = {focused_cell, kept_cell};
+    model.workspaces.emplace(alpha.id, alpha);
+    model.focusSessionIn(alpha.id, SessionId{"focused"});
+    WorkspaceHistory alpha_history;
+    alpha_history.id            = alpha.id;
+    alpha_history.title         = "alpha";
+    alpha_history.canonicalPath = "/alpha";
+    alpha_history.live          = true;
+    alpha_history.sessions.push_back(history_session("focused", "focused", 1, "root", "m"));
+    alpha_history.sessions.push_back(history_session("kept", "kept", 2, "root", "m"));
+    model.catalog.workspaces = {alpha_history};
+    model.catalog.loaded     = true;
+    model.catalog.generation = 1;
+    model.openSwitcher();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("kept"), std::string::npos);
+    EXPECT_EQ(rendered.find("[focused "), std::string::npos);
+    EXPECT_EQ(rendered.find("(current session hidden)"), std::string::npos);
+
+    UiModel only;
+    only.activeWorkspaceId = WorkspaceId{"ws-only"};
+    WorkspaceModel only_workspace;
+    only_workspace.id           = WorkspaceId{"ws-only"};
+    only_workspace.title        = "only";
+    only_workspace.cwd          = "/only";
+    only_workspace.daemonStatus = DaemonStatus::Attached;
+    only_workspace.live         = true;
+    SessionCell only_cell;
+    only_cell.id    = SessionId{"only-session"};
+    only_cell.title = "only-session";
+    only_workspace.sessions = {only_cell};
+    only.workspaces.emplace(only_workspace.id, only_workspace);
+    only.focusSessionIn(only_workspace.id, SessionId{"only-session"});
+    WorkspaceHistory only_history;
+    only_history.id            = only_workspace.id;
+    only_history.title         = "only";
+    only_history.canonicalPath = "/only";
+    only_history.live          = true;
+    only_history.sessions.push_back(
+        history_session("only-session", "only-session", 1, "root", "m"));
+    only.catalog.workspaces = {only_history};
+    only.catalog.loaded     = true;
+    only.catalog.generation = 1;
+    only.openSwitcher();
+
+    const std::string hidden =
+        normalize(render_to_ansi(only, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(hidden);
+    EXPECT_NE(hidden.find("only"), std::string::npos);
+    EXPECT_NE(hidden.find("(current session hidden)"), std::string::npos);
+
+    UiModel pending = build_model();
+    pending.openSwitcher();
+    const std::string loading =
+        normalize(render_to_ansi(pending, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(loading);
+    EXPECT_NE(loading.find("(loading live sessions…"), std::string::npos);
+    EXPECT_EQ(loading.find("(no live sessions)"), std::string::npos);
+
+    UiModel noted = build_model();
+    WorkspaceHistory noted_history;
+    noted_history.id            = noted.activeWorkspaceId;
+    noted_history.title         = "workspace";
+    noted_history.canonicalPath = "/workspace";
+    noted_history.live          = true;
+    noted_history.note          = "corrupt";
+    noted.catalog.workspaces    = {noted_history};
+    noted.catalog.loaded        = true;
+    noted.catalog.generation    = 1;
+    noted.openSwitcher();
+    const std::string failed =
+        normalize(render_to_ansi(noted, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(failed);
+    EXPECT_NE(failed.find("(corrupt)"), std::string::npos);
+    EXPECT_EQ(failed.find("(no live sessions)"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI45_G5_HistoryDistinctHiddenLabel) {
+    UiModel empty;
+    empty.catalog.workspaces = {history_workspace("ws-empty", "empty", "/empty", false)};
+    empty.catalog.loaded     = true;
+    empty.catalog.generation = 1;
+    empty.switcher.openHistory(empty);
+    empty.mode = UiMode::Switcher;
+    const std::string empty_rendered =
+        normalize(render_to_ansi(empty, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(empty_rendered);
+    EXPECT_NE(empty_rendered.find("(no stored sessions)"), std::string::npos);
+
+    UiModel hidden;
+    hidden.activeWorkspaceId = WorkspaceId{"ws-hidden"};
+    WorkspaceModel hidden_workspace;
+    hidden_workspace.id           = hidden.activeWorkspaceId;
+    hidden_workspace.title        = "hidden";
+    hidden_workspace.cwd          = "/hidden";
+    hidden_workspace.daemonStatus = DaemonStatus::Attached;
+    hidden_workspace.live         = true;
+    hidden.workspaces.emplace(hidden_workspace.id, hidden_workspace);
+    hidden.focusSessionIn(hidden_workspace.id, SessionId{"focused"});
+    WorkspaceHistory hidden_history =
+        history_workspace("ws-hidden", "hidden", "/hidden", true);
+    hidden_history.sessions.push_back(history_session("focused", "focused", 1, "root", "m"));
+    hidden.catalog.workspaces = {hidden_history};
+    hidden.catalog.loaded     = true;
+    hidden.catalog.generation = 1;
+    hidden.switcher.openHistory(hidden);
+    hidden.mode = UiMode::Switcher;
+    const std::string hidden_rendered =
+        normalize(render_to_ansi(hidden, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(hidden_rendered);
+    EXPECT_NE(hidden_rendered.find("(current session hidden)"), std::string::npos);
+    EXPECT_EQ(hidden_rendered.find("(no stored sessions)"), std::string::npos);
+
+    UiModel noted;
+    WorkspaceHistory noted_history = history_workspace("ws-note", "note", "/note", false);
+    noted_history.note            = "corrupt";
+    noted.catalog.workspaces      = {noted_history};
+    noted.catalog.loaded          = true;
+    noted.catalog.generation      = 1;
+    noted.switcher.openHistory(noted);
+    noted.mode = UiMode::Switcher;
+    const std::string noted_rendered =
+        normalize(render_to_ansi(noted, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(noted_rendered);
+    EXPECT_NE(noted_rendered.find("(corrupt)"), std::string::npos);
+    ASSERT_EQ(noted.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(noted.switcher.workspaces[0].historyOnly);
+    EXPECT_NE(noted_rendered.find("[history]"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI45_D4_WholeListPlaceholder) {
+    UiModel live;
+    live.openSwitcher();
+    const std::string live_rendered =
+        normalize(render_to_ansi(live, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(live_rendered);
+    EXPECT_NE(live_rendered.find("(no workspaces)"), std::string::npos);
+
+    UiModel stored;
+    stored.catalog.loaded     = true;
+    stored.catalog.generation = 1;
+    stored.switcher.openHistory(stored);
+    stored.mode = UiMode::Switcher;
+    const std::string stored_rendered =
+        normalize(render_to_ansi(stored, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(stored_rendered);
+    EXPECT_NE(stored_rendered.find("(no stored sessions)"), std::string::npos);
+
+    UiModel loading;
+    loading.switcher.openHistory(loading);
+    loading.mode = UiMode::Switcher;
+    const std::string loading_rendered =
+        normalize(render_to_ansi(loading, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(loading_rendered);
+    EXPECT_NE(loading_rendered.find("loading stored sessions"), std::string::npos);
 }
 
 } // namespace

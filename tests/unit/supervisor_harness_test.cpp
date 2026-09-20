@@ -356,7 +356,7 @@ TEST(SupervisorHarnessTest, SW_U18_ResumeSuccessNeverInjectsWorkspace) {
     EXPECT_TRUE(harness->model().session(session) != nullptr);
     const auto modeled_it = harness->model().workspaces.find(modeled);
     ASSERT_NE(modeled_it, harness->model().workspaces.end());
-    EXPECT_EQ(modeled_it->second.activeSessionId, session);
+    EXPECT_EQ(modeled_it->second.activeSessionId(), session);
 }
 
 // RB-15 (22 §5.2/SW25 generalised): the `session.create` reply never injects a
@@ -393,7 +393,7 @@ TEST(SupervisorHarnessTest, RB15_CreateReplyNeverInjectsWorkspace) {
     ASSERT_TRUE(harness->model().session(session) != nullptr);
     const auto modeled_it = harness->model().workspaces.find(modeled);
     ASSERT_NE(modeled_it, harness->model().workspaces.end());
-    EXPECT_EQ(modeled_it->second.activeSessionId, session);
+    EXPECT_EQ(modeled_it->second.activeSessionId(), session);
 }
 
 // SW-F5 (22 §5.3/§12): `lifecycle == nullptr` surfaces the pinned
@@ -889,4 +889,243 @@ TEST(SupervisorHarnessTest, UX_U15_EnterAcceptsHighlightAndDispatches) {
         std::any_of(after->conversation.entries.begin(), after->conversation.entries.end(),
                     [](const ConversationEntry& entry) { return entry.text == "commands:"; });
     EXPECT_TRUE(help_ran) << "Enter did not dispatch the highlighted /help";
+}
+
+// ── 45-D3/D4/D10: the switcher subset, focus exclusion, and the lockout ──────
+
+WorkspaceModel live_workspace_model(const WorkspaceId& id) {
+    WorkspaceModel model;
+    model.id           = id;
+    model.title        = "ws";
+    model.daemonStatus = DaemonStatus::Attached;
+    model.live         = true;
+    return model;
+}
+
+SessionCatalogSnapshot catalog_snapshot(const WorkspaceId& workspace, const SessionId& session,
+                                        bool live) {
+    SessionCatalogSnapshot snapshot;
+    snapshot.generation   = 1;
+    snapshot.capturedAtMs = 1;
+    snapshot.complete     = true;
+    WorkspaceHistory history;
+    history.id            = workspace;
+    history.title         = workspace.value;
+    history.canonicalPath = "/" + workspace.value;
+    history.live          = live;
+    SessionHistoryEntry entry;
+    entry.id        = session;
+    entry.title     = session.value;
+    entry.kind      = "root";
+    entry.model     = "m";
+    entry.updatedAt = 1;
+    history.sessions.push_back(std::move(entry));
+    snapshot.workspaces.push_back(std::move(history));
+    return snapshot;
+}
+
+TEST(SupervisorHarnessTest, UI45_D3_CatalogRefreshOnOpen) {
+    ShortTempRoot root("ymh45d3refresh");
+    std::filesystem::create_directories(root.path() / "ws");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    const WorkspaceRecord row = registry->registerWorkspace(root.path() / "ws", "ws");
+
+    std::atomic<int> reads{0};
+    WorkspaceCatalogSource source;
+    source.list    = [row] { return std::vector<WorkspaceRecord>{row}; };
+    source.is_live = [](const WorkspaceId&) { return false; };
+    source.read    = [&reads](const WorkspaceRecord& input, bool live) {
+        reads.fetch_add(1);
+        WorkspaceHistory history;
+        history.id            = input.id;
+        history.title         = input.displayTitle;
+        history.canonicalPath = input.canonicalPath.string();
+        history.live          = live;
+        return history;
+    };
+
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    harness->start_catalog_with(source, 1h);
+    EXPECT_EQ(reads.load(), 0);
+
+    ASSERT_TRUE(harness->dispatch_key("ctrl-s"));
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (reads.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    EXPECT_GE(reads.load(), 1) << "Ctrl+S did not request a catalog refresh";
+}
+
+TEST(SupervisorHarnessTest, UI45_D4_LiveNodeFocusableHistoryReadOnly) {
+    ShortTempRoot root("ymh45d4readonly");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId active_workspace{"ws-active"};
+    const SessionId active_session{"session-active"};
+    harness->seed_workspace(live_workspace_model(active_workspace));
+    harness->apply_resume_success(active_workspace, active_session);
+
+    const WorkspaceId workspace{"ws-offline"};
+    const SessionId session{"session-offline"};
+    harness->on_catalog_snapshot(catalog_snapshot(workspace, session, false));
+
+    for (const char character : std::string("/sessions")) {
+        ASSERT_TRUE(harness->dispatch_key(std::string(1, character)));
+    }
+    ASSERT_TRUE(harness->dispatch_key("enter"));
+    ASSERT_EQ(harness->model().mode, UiMode::Switcher);
+
+    ASSERT_TRUE(harness->dispatch_key("enter"));
+    ASSERT_FALSE(harness->model().notices.empty());
+    EXPECT_NE(harness->model().notices.back().text.find("workspace not running"),
+              std::string::npos);
+}
+
+TEST(SupervisorHarnessTest, UI45_D10_NoActiveSessionAfterSwitcher) {
+    ShortTempRoot root("ymh45d10sw");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-live"};
+    const SessionId session{"session-live"};
+    WorkspaceModel workspace_model = live_workspace_model(workspace);
+    SessionCell cell;
+    cell.id    = session;
+    cell.title = "one";
+    workspace_model.sessions.push_back(cell);
+    harness->seed_workspace(workspace_model);
+    harness->on_catalog_snapshot(catalog_snapshot(workspace, session, true));
+
+    ASSERT_TRUE(harness->dispatch_key("ctrl-s"));
+    ASSERT_TRUE(harness->dispatch_key("down"));
+    ASSERT_TRUE(harness->dispatch_key("enter"));
+
+    const auto it = harness->model().workspaces.find(workspace);
+    ASSERT_NE(it, harness->model().workspaces.end());
+    EXPECT_EQ(it->second.activeSessionId(), session);
+    ASSERT_NE(harness->model().session(session), nullptr);
+
+    ASSERT_TRUE(harness->dispatch_key("x"));
+    ASSERT_NE(harness->model().session(session), nullptr);
+    EXPECT_EQ(harness->model().session(session)->input.draft, "x");
+}
+
+TEST(SupervisorHarnessTest, UI45_D10_NoActiveSessionAfterSessions) {
+    ShortTempRoot root("ymh45d10sess");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-hist"};
+    const SessionId session{"session-hist"};
+    harness->seed_workspace(live_workspace_model(workspace));
+    harness->apply_resume_success(workspace, session);
+
+    const auto it = harness->model().workspaces.find(workspace);
+    ASSERT_NE(it, harness->model().workspaces.end());
+    EXPECT_EQ(it->second.activeSessionId(), session);
+    ASSERT_NE(harness->model().session(session), nullptr);
+}
+
+TEST(SupervisorHarnessTest, UI45_D10_SlashWorksAfterRepair) {
+    ShortTempRoot root("ymh45d10slash");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-repair"};
+    const SessionId session{"session-repair"};
+    harness->seed_workspace(live_workspace_model(workspace));
+    harness->apply_resume_success(workspace, session);
+    harness->forget_session_state(session);
+    ASSERT_EQ(harness->model().session(session), nullptr);
+    ASSERT_FALSE(harness->model().workspaces.at(workspace).activeSessionId().value.empty());
+
+    ASSERT_TRUE(harness->dispatch_key("/"));
+    ASSERT_NE(harness->model().session(session), nullptr);
+    EXPECT_FALSE(harness->model().session(session)->command_hints.empty());
+}
+
+TEST(SupervisorHarnessTest, UI45_D10_ActivateSessionModels) {
+    ShortTempRoot root("ymh45d10act");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-act"};
+    const SessionId session{"session-act"};
+    harness->seed_workspace(live_workspace_model(workspace));
+    ASSERT_EQ(harness->model().session(session), nullptr);
+
+    harness->activate_session(workspace, session);
+    ASSERT_NE(harness->model().session(session), nullptr);
+    EXPECT_EQ(harness->model().workspaces.at(workspace).activeSessionId(), session);
+}
+
+TEST(SupervisorHarnessTest, UI45_D10_UnknownSessionRecovery) {
+    ShortTempRoot root("ymh45d10recover");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-recover"};
+    const SessionId first{"session-first"};
+    const SessionId second{"session-second"};
+    harness->seed_workspace(live_workspace_model(workspace));
+    harness->apply_resume_success(workspace, first);
+    harness->apply_resume_success(workspace, second);
+
+    harness->recover_unknown_session(workspace, second);
+    EXPECT_EQ(harness->model().session(second), nullptr);
+    ASSERT_NE(harness->model().session(first), nullptr);
+    EXPECT_EQ(harness->model().workspaces.at(workspace).activeSessionId(), first);
+    ASSERT_FALSE(harness->model().notices.empty());
+    EXPECT_EQ(harness->model().notices.back().text, "session no longer exists");
+}
+
+TEST(SupervisorHarnessTest, UI45_D10_UnknownSessionCreatesFallback) {
+    ShortTempRoot root("ymh45d10fallback");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-fallback"};
+    const SessionId only{"session-only"};
+    harness->seed_workspace(live_workspace_model(workspace));
+    harness->apply_resume_success(workspace, only);
+
+    harness->recover_unknown_session(workspace, only);
+    EXPECT_EQ(harness->model().session(only), nullptr);
+    EXPECT_TRUE(harness->model().workspaces.at(workspace).sessions.empty());
+    EXPECT_TRUE(harness->model().workspaces.at(workspace).activeSessionId().value.empty());
+    ASSERT_FALSE(harness->model().notices.empty());
+    EXPECT_EQ(harness->model().notices.back().text, "session no longer exists");
 }

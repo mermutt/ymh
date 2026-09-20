@@ -30,14 +30,13 @@ UiModel make_model() {
     a.id = kWorkspaceA;
     a.cwd = "/work/a";
     a.title = "alpha";
-    a.activeSessionId = kSessionA;
     model.workspaces.emplace(kWorkspaceA, std::move(a));
     WorkspaceModel b;
     b.id = kWorkspaceB;
     b.cwd = "/work/b";
     b.title = "beta";
     model.workspaces.emplace(kWorkspaceB, std::move(b));
-    model.ensureSessionIn(kWorkspaceA, kSessionA);
+    model.focusSessionIn(kWorkspaceA, kSessionA);
     return model;
 }
 

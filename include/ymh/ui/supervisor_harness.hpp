@@ -46,6 +46,12 @@ public:
                                       const SessionId& session) = 0;
     virtual void apply_create_reply(const WorkspaceId& workspace, const SessionId& session,
                                     std::string error) = 0;
+    // 45-D10.7: drives the real `activate_session` (a delegate to the single
+    // modeling mutator) so the pinned invariant is exercised, not re-seeded.
+    virtual void activate_session(const WorkspaceId& workspace, const SessionId& session) = 0;
+    // 45-D10.8: drives the real UnknownSession recovery.
+    virtual void recover_unknown_session(const WorkspaceId& workspace,
+                                         const SessionId& session) = 0;
 
     // The FTXUI loop's action pump; runs every action queued so far.
     virtual void drain_actions() = 0;
@@ -56,6 +62,13 @@ public:
     virtual void start_catalog_with(WorkspaceCatalogSource source,
                                     std::chrono::milliseconds refresh_interval) = 0;
     virtual void refresh_catalog_now() = 0;
+    // 45-D3/D4: drives the real catalog-delivery path so the Live resnapshot and
+    // the History rebuild are exercised without a reader thread.
+    virtual void on_catalog_snapshot(SessionCatalogSnapshot snapshot) = 0;
+    // 45-D10.3: drops a session's UI state while leaving the workspace cell and
+    // the focus in place, reproducing the non-empty-but-unmodeled focus that
+    // `handle_input` must self-heal.
+    virtual void forget_session_state(const SessionId& session) = 0;
 
     // Test-only seeding (SW-U13/SW-U14/SW-U18).
     virtual void seed_pending_resume(const WorkspaceId& workspace, const SessionId& session) = 0;
