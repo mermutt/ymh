@@ -52,6 +52,8 @@ coded after it is marked **verified** here.
 
 | 35 | `35-live-notification-errata.md` | yes | **gated FAIL 0H/1M/3L — MEDIUM-1 fixed, re-gate pending** | not yet re-gated | 708 lines; pins the `event.live` JSON-RPC notification that the Wave-2 H1 fix added unpinned (a design-first gate violation the re-check caught): the wire name, the `LiveNotification{envelope}` payload, the per-(connection,session) audience, the bus-publish ordering, the **no-cursor/no-replay** rule, and NO `kProtocolVersion` bump. Decision 35-D1 keeps a DISTINCT notification (rejecting `event.stream` routing — it is `SubscriptionId`-keyed and needs a post-event cursor a live-only event cannot have). Also records the required spec-05 edits, applied here: §5.1's "only live signals" sentence (which had also OMITTED the pre-existing `event.unsubscribed`) and §7.7's notification catalog |
 
+| 36 | `36-prompt-registry.md` | yes | **verified (Rev 1)** — independent gate: Rev 1 FAIL (1 HIGH / 7 MEDIUM / 5 LOW) → fixed → **re-gate PASS (0 HIGH / 0 MEDIUM; 5 LOW)** | not yet committed at gate time | 1233 lines; the Wave-3 owning spec: the ordered section registry + `assemble()`/`render_prompt()`, persona (harness identity + a persona), the AGENTS.md/CLAUDE.md loader, runtime-context snapshots, tool presentation Native, the `MessageSource`/`ContextForm` provenance reshaping the `01` message model, the `default_system_prompt()` migration, and the digest/replay interaction. Keeps ymh's identity (per `26-part2:1591-1595`); `session.persist_prompt_text` stays default `false` (recorded P2) |
+
 ## Open top-level items (`HANDOFF.md` §5)
 
 | # | Item | Status | Resolution |
