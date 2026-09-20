@@ -9,6 +9,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -28,6 +30,12 @@ using namespace ymh;
 using namespace ymh::ui;
 
 const SessionId kSession{"session-1"};
+
+template <typename T, typename = void>
+struct HasCompletionMember : std::false_type {};
+template <typename T>
+struct HasCompletionMember<T, std::void_t<decltype(std::declval<T&>().completion)>>
+    : std::true_type {};
 
 Event make_event(EventType type, const nlohmann::json& payload) {
     Event event;
@@ -646,31 +654,12 @@ TEST(UiModel, LongestCommonPrefixOverZeroOneAndManyMatches) {
     EXPECT_EQ(CommandRegistry::longest_common_prefix(many), "c");
 }
 
-TEST(UiModel, CompletionCycleResetsOnDraftMutation) {
-    InputModel input;
-    input.draft = "/c";
-    input.cursor = 2;
-    input.completion = CompletionCycle{"/c", {"clear", "compact"}, 0};
-    EXPECT_FALSE(input.delete_forward());
-    EXPECT_TRUE(input.completion.has_value());
-
-    input.history.push_back("/help");
-    input.history_pos = 1;
-    ASSERT_TRUE(input.history_up());
-    EXPECT_FALSE(input.completion.has_value());
-    EXPECT_EQ(input.draft, "/help");
-
-    input.draft = "/c";
-    input.cursor = 2;
-    input.completion = CompletionCycle{"/c", {"clear", "compact"}, 0};
-    input.clear_line();
-    EXPECT_FALSE(input.completion.has_value());
-
-    input.draft = "/clear now";
-    input.cursor = input.draft.size();
-    input.completion = CompletionCycle{"/clear now", {"clear"}, 0};
-    ASSERT_TRUE(input.delete_word());
-    EXPECT_FALSE(input.completion.has_value());
+TEST(UiModel, UI45_D2_CompletionCycleRetired) {
+    // 45-I4 (compile-level): `InputModel::completion` and `CompletionCycle` are
+    // gone; the detection idiom below fails to compile if either returns.
+    static_assert(!HasCompletionMember<InputModel>::value,
+                  "InputModel::completion must be retired (45-D2/45-I4)");
+    SUCCEED();
 }
 
 TEST(UiModel, ClearResetsReasoningIndex) {

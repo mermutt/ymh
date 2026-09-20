@@ -49,6 +49,21 @@ void append_system_entry(UiModel& model, SessionUiState& state, std::string text
     model.dirty.mark(state.id, UiDirtyFlag::Conversation);
 }
 
+std::string command_display_name(const Command& command) {
+    if (command.aliases.empty()) {
+        return command.name;
+    }
+    std::string display = command.name + "(";
+    for (std::size_t index = 0; index < command.aliases.size(); ++index) {
+        if (index != 0) {
+            display += ",";
+        }
+        display += command.aliases[index];
+    }
+    display += ")";
+    return display;
+}
+
 void CommandRegistry::add(Command command) {
     commands_.push_back(std::move(command));
 }
@@ -250,18 +265,14 @@ CommandRegistry CommandRegistry::builtin() {
         {"quit"}});
     std::vector<std::pair<std::string, std::string>> listed{{"help", "list slash commands"}};
     for (const Command& command : registry.commands()) {
-        std::string description = command.description;
-        for (const std::string& alias : command.aliases) {
-            description += " (alias: /" + alias + ")";
-        }
-        listed.emplace_back(command.name, std::move(description));
+        listed.emplace_back(command_display_name(command), command.description);
     }
     registry.add(Command{
         "help", "list slash commands",
         [listed = std::move(listed)](CommandContext& context, const std::string&) {
             append_system(context, "commands:");
-            for (const auto& [name, description] : listed) {
-                append_system(context, "  /" + name + "  " + description);
+            for (const auto& [display, description] : listed) {
+                append_system(context, "  /" + display + " - " + description);
             }
         }});
     return registry;

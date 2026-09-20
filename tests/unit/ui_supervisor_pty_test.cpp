@@ -528,19 +528,22 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     child.write("/he\t");
     ASSERT_TRUE(child.wait_for_since(complete_mark, "/help ", 10s)) << child.text();
 
+    // 45-D2: ArrowDown moves the highlight; Tab completes the selected command.
     child.write("\x15");
-    const std::size_t cycle_mark = child.raw_size();
-    child.write("/\t");
-    ASSERT_TRUE(child.wait_for_since(cycle_mark, "/new_", 10s)) << child.text();
-    const std::size_t step_mark = child.raw_size();
+    const std::size_t select_mark = child.raw_size();
+    child.write("/");
+    child.write("\x1b[B");
     child.write("\t");
-    ASSERT_TRUE(child.wait_for_since(step_mark, "/clear_", 10s)) << child.text();
-    const std::size_t reverse_mark = child.raw_size();
-    child.write("\x1b[Z");
-    ASSERT_TRUE(child.wait_for_since(reverse_mark, "/model_", 10s)) << child.text();
-    const std::size_t forward_mark = child.raw_size();
+    ASSERT_TRUE(child.wait_for_since(select_mark, "/clear ", 10s)) << child.text();
+
+    // 45-D2: ArrowUp wraps to the last match; Tab completes it.
+    child.write("\x15");
+    const std::size_t wrap_mark = child.raw_size();
+    child.write("/");
+    child.write("\x1b[A");
     child.write("\t");
-    ASSERT_TRUE(child.wait_for_since(forward_mark, "/clear_", 10s)) << child.text();
+    ASSERT_TRUE(child.wait_for_since(wrap_mark, "/help ", 10s)) << child.text();
+
     child.write("\x15");
 
     const std::size_t recall_mark = child.raw_size();

@@ -212,7 +212,6 @@ bool InputModel::history_up() {
     --history_pos;
     draft = history[history_pos];
     cursor = draft.size();
-    completion.reset();
     return true;
 }
 
@@ -223,7 +222,6 @@ bool InputModel::history_down() {
     ++history_pos;
     draft = history_pos == history.size() ? saved_draft : history[history_pos];
     cursor = draft.size();
-    completion.reset();
     return true;
 }
 
@@ -232,14 +230,12 @@ bool InputModel::delete_forward() {
         return false;
     }
     draft.erase(cursor, 1);
-    completion.reset();
     return true;
 }
 
 void InputModel::clear_line() {
     draft.clear();
     cursor = 0;
-    completion.reset();
 }
 
 bool InputModel::delete_word() {
@@ -251,9 +247,6 @@ bool InputModel::delete_word() {
     while (cursor > 0 && draft[cursor - 1] != ' ') {
         draft.erase(cursor - 1, 1);
         --cursor;
-    }
-    if (draft.size() != before) {
-        completion.reset();
     }
     return draft.size() != before;
 }
