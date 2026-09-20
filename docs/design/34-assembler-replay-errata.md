@@ -1,8 +1,17 @@
 # 34 — Assembler & Replay Errata (dsh alignment, Wave 2 prerequisite)
 
 ```
-Status: Rev 3 written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
-Revision: Rev 3 (2026-09-19). Pins the shipped `AssistantStreamPrinter`
+Status: Rev 4 written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Revision: Rev 4 (2026-09-19). Restores live token-by-token streaming in the
+          shared run-path printer (§15 item 1, decision 34-D13, invariants
+          34-I11–34-I16, failure mode 34-F9). Text deltas are written to `out`
+          as they arrive; a `Completed` settlement prints only the
+          not-yet-streamed durable suffix (durable is the authority, `26-D9` /
+          `35 §3.6`); a non-`Completed` `AssistantAttempt` emits a retry
+          boundary marker on `err` because forward-only stdout cannot retract
+          the failed attempt's already-streamed text. Supersedes the Rev 3
+          buffer-only contract; test plan §13 items 21-29. See §16.
+          Rev 3 (2026-09-19) — pins the shipped `AssistantStreamPrinter`
           contract (§15 item 1, decision 34-D13, invariants 34-I11–34-I16,
           failure mode 34-F9), closing the Rev 2 open risk for the two `ymh run`
           paths. Back-fills the owning spec for code already implemented and
@@ -883,28 +892,47 @@ compared across real process runs.
   `ReplayMismatch{PrefixMismatch}` (§9.2).
 - **34-I11.** `AssistantStreamPrinter::feed` is the sole writer to `out`/`err`
   for the three assistant stream/settlement events; `Commit::handled` is true iff
-  `event.type` is `AssistantChunk`, `AssistantMessage`, or `AssistantAttempt`,
-  and `Commit::text` is non-empty only for a committed `AssistantMessage`
-  (§15 item 1).
-- **34-I12.** Live `AssistantChunk` deltas are buffered by `chunk.message` and
-  are never printed before settlement; an id change clears the id and both
-  buffers first; `Text` deltas append to the text buffer, `Reasoning` deltas to
-  the reasoning buffer (§15 item 1 R1).
+  `event.type` is `AssistantChunk`, `AssistantMessage`, or `AssistantAttempt`.
+  `Commit::text` is the **settlement's authoritative assistant text** (the
+  durable settlement text, else the live fallback record) and is non-empty only
+  for a committed `AssistantMessage`; it is *not* the same quantity as "bytes
+  newly written to `out`" because live deltas are written directly (§15 item 1
+  R1/R3).
+- **34-I12.** Live `AssistantChunk` **`Text`** deltas are written to `out` (and
+  flushed) **as they arrive**, before any settlement; the same deltas are also
+  appended to a bounded per-message record for settlement dedup. An id change
+  clears the id, the bounded text record, the streamed byte count, and the
+  reasoning buffer first. `Reasoning` deltas are never written live; they append
+  only to the reasoning buffer (§15 item 1 R1/R5).
 - **34-I13.** On `AssistantMessage` the committed text is the durable settlement
-  text whenever that is non-empty and the live buffer only otherwise
+  text whenever that is non-empty and the live fallback record only otherwise
   (`durable.empty() ? text_ : durable`); the durable is the recovery path for a
-  missed live chunk (`26-D9`, `35 §3.6`; §15 item 1 R2).
-- **34-I14.** On `AssistantAttempt` the id and both buffers are discarded and
-  nothing is printed; because only a non-`Completed` settlement emits
-  `AssistantAttempt` (34-I3, 34-D6), a retried attempt's text cannot concatenate
-  into the retry under the per-step `messageId` (§6.1; §15 item 1 R3).
+  missed live chunk (`26-D9`, `35 §3.6`; §15 item 1 R2). When the durable is
+  non-empty and the recorded live prefix matches the durable's prefix, only the
+  not-yet-streamed suffix `durable.substr(streamed_total)` is printed; when
+  nothing was streamed live, the full durable is printed; on any prefix
+  divergence (a dropped live chunk) the full durable is printed, because the
+  durable is the authority and stdout is forward-only. In every non-empty-durable
+  branch the full durable is present in `out` exactly once when the live stream
+  matched, and at least once otherwise (§15 item 1 R2).
+- **34-I14.** On `AssistantAttempt` with a non-empty streamed text record, the
+  fixed retry marker `kRetryMarker` is written to `err` and flushed; the id, the
+  bounded text record, the streamed byte count, and the reasoning buffer are
+  discarded. Because stdout is forward-only the failed attempt's streamed text
+  cannot be retracted, so the marker is the visible boundary; because only a
+  non-`Completed` settlement emits `AssistantAttempt` (34-I3, 34-D6) and the
+  per-step `messageId` is unchanged across a retry (§6.1), the marker delimits
+  the retried stream (§15 item 1 R3).
 - **34-I15.** Each live buffer is independently capped at `kMaxBufferedBytes`
   (1 MiB); a crossing delta is truncated to the remaining room and later deltas
-  are dropped once full. The cap bounds only the live fallback; the durable
-  settlement path prints the full text (§15 item 1 R4).
+  are dropped from the record once full. The text record additionally tracks the
+  total streamed byte count (an O(1) counter, not a buffer), so dedup past the
+  cap does not re-print already-streamed bytes. The cap bounds only the retained
+  record; the durable settlement path prints the full text (§15 item 1 R4).
 - **34-I16.** Buffered reasoning is written to `err` on commit only when
-  `print_reasoning` is set; text is written to `out` on commit; both buffers are
-  cleared after every commit or discard (§15 item 1 R5).
+  `print_reasoning` is set; text is written to `out` live and (as the dedup
+  suffix or the full durable) at settlement; all state is cleared after every
+  commit or discard (§15 item 1 R5).
 
 ## 12. Failure modes (extending `08 §11.2`)
 
@@ -918,7 +946,7 @@ compared across real process runs.
 | **34-F6** | The prompt text is unknowable on disk-only replay | §9.4 | return `PromptUnavailable`; assert nothing prompt-dependent |
 | **34-F7** | A settled non-`Completed` attempt would commit a message | 34-D6 predicate | it cannot: only `Completed` reaches the `AssistantMessage` branch |
 | **34-F8** | A replay prefix is bounded at the header instead of the attempt's settlement | §9.2 prefix validation | throw `ReplayMismatch{PrefixMismatch}`; never rebuild over a truncated prefix |
-| **34-F9** | A live `AssistantChunk` is dropped, or a retried attempt re-streams under the same `messageId` | `AssistantStreamPrinter::feed` (§15 item 1) | the durable `AssistantMessage` prints the full text and wins (`DurableWinsOverLiveBuffer`); the failed attempt's buffer is discarded (`DiscardsBufferOnFailedAttempt`); a live-only stream falls back to the capped buffer (`FallsBackToLiveBufferWhenDurableEmpty`) |
+| **34-F9** | A live `AssistantChunk` is dropped, or a retried attempt re-streams under the same `messageId` | `AssistantStreamPrinter::feed` (§15 item 1) | the durable `AssistantMessage` is the authority: a matching live prefix is deduped and only the suffix is printed (`DurableWinsOverLiveBuffer`, `CompletedSettlementDoesNotDoublePrintStreamedText`, `LongStreamBeyondCapIsNotReprinted`), while a dropped live chunk (prefix divergence) re-prints the full durable (`FullDurableTextAfterBufferCapExceeded`). A non-`Completed` `AssistantAttempt` cannot retract its already-streamed text from forward-only stdout, so it emits `kRetryMarker` on `err` and discards the record (`FailedAttemptEmitsRetryMarker`, `DiscardsBufferOnFailedAttempt`); a live-only stream falls back to the capped record (`FallsBackToLiveBufferWhenDurableEmpty`). |
 
 ## 13. Test plan
 
@@ -967,20 +995,35 @@ compared across real process runs.
     `prefix = {seq < settlement_seq}` and throws `PrefixMismatch` with the
     header-bounded `{seq <= header_seq}`.
 
-**Unit — `AssistantStreamPrinter` (34-D13).**
-21. `DurableWinsOverLiveBuffer` — a live delta prints nothing; the durable
-    settlement prints its own text and wins over the buffer.
-22. `FallsBackToLiveBufferWhenDurableEmpty` — an empty durable settlement
-    commits the live buffer.
-23. `DiscardsBufferOnFailedAttempt` — an `AssistantAttempt` discards the failed
-    text; only the retry's text is printed.
-24. `PrintsBufferedReasoningWhenEnabled` /
-    `SuppressesBufferedReasoningWhenDisabled` — reasoning reaches `err` iff
-    `print_reasoning`.
-25. `LiveBufferStaysBoundedWithoutSettlement` — with no settlement the buffer
-    stops at `kMaxBufferedBytes`.
-26. `FullDurableTextAfterBufferCapExceeded` — the durable settlement prints in
-    full past the cap.
+**Unit — `AssistantStreamPrinter` (34-D13, Rev 4 live streaming).**
+21. `StreamsTextDeltasBeforeSettlement` — a `Text` delta reaches `out` as it
+    arrives, before any `AssistantMessage`/`AssistantAttempt`; `Commit::text` is
+    empty for a delta (34-I12, R1). Fails against the Rev 3 buffer-only code
+    (which printed nothing before settlement).
+22. `DurableWinsOverLiveBuffer` / `CompletedSettlementDoesNotDoublePrintStreamedText`
+    — the live prefix is printed once; the `AssistantMessage` prints only the
+    not-yet-streamed durable suffix, so the final `out` equals the durable text
+    exactly once and `Commit::text` is the durable (34-I13, R2).
+23. `FallsBackToLiveBufferWhenDurableEmpty` — an empty durable settlement
+    attributes the live record as `Commit::text` and does **not** re-print the
+    already-streamed text (34-I13, R2).
+24. `FailedAttemptEmitsRetryMarker` — streamed text followed by an
+    `AssistantAttempt` writes `kRetryMarker` to `err` (34-I14, R3).
+25. `DiscardsBufferOnFailedAttempt` — the `AssistantAttempt` discards the record
+    so the retry's `AssistantMessage` adds no duplicate; the failed attempt's
+    already-streamed text remains on `out` (forward-only) and the retry's text is
+    printed once (34-I14, R3).
+26. `PrintsBufferedReasoningWhenEnabled` /
+    `SuppressesBufferedReasoningWhenDisabled` / `ReasoningStaysBufferedUntilCommit`
+    — reasoning is never streamed live and reaches `err` iff `print_reasoning`
+    (34-I16, R5).
+27. `LiveBufferStaysBoundedWithoutSettlement` — with no settlement the retained
+    record stops at `kMaxBufferedBytes` while the live output is not truncated
+    (34-I15, R4).
+28. `FullDurableTextAfterBufferCapExceeded` — on prefix divergence past the cap
+    the durable settlement prints in full (34-I13, R4).
+29. `LongStreamBeyondCapIsNotReprinted` — a matching stream past the cap is
+    deduped by the streamed byte count and is not re-printed (34-I15, R4).
 
 ## 14. Cross-spec reconciliation
 
@@ -1007,14 +1050,16 @@ compared across real process runs.
 
 ## 15. Open items and the pinned `AssistantStreamPrinter` contract (34-D13)
 
-1. **`AssistantStreamPrinter` contract (pinned in Rev 3; formerly open).**
+1. **`AssistantStreamPrinter` contract (pinned in Rev 4; formerly open).**
    `headless.cpp:192-200` (in-process) and `cli.cpp:61-77, 585`
    (daemon-connected) feed every session event through one shared
-   `AssistantStreamPrinter`, which owns the per-message live-delta buffer so live
-   deltas and the durable `assistant/message` cannot double-print in `ymh run`
+   `AssistantStreamPrinter`. Rev 4 **restores live token-by-token streaming**:
+   `Text` deltas are written to `out` as they arrive, the durable
+   `assistant/message` settlement prints only the not-yet-streamed suffix, and a
+   non-`Completed` `AssistantAttempt` emits a retry boundary marker on `err`
    (`26 §5.2 :1434-1442`). The contract is pinned as decision **34-D13** and
    invariants **34-I11–34-I16**; `tests/unit/assistant_stream_printer_test.cpp`
-   enforces it (test plan §13 items 21-26).
+   enforces it (test plan §13 items 21-29).
 
    *Interface* (`include/ymh/cli/assistant_stream_printer.hpp`):
 
@@ -1023,51 +1068,69 @@ compared across real process runs.
        bool        handled = false;  // true iff event.type is one of
                                      //   AssistantChunk, AssistantMessage,
                                      //   AssistantAttempt
-       std::string text;             // assistant text committed to `out`;
+       std::string text;             // settlement's authoritative assistant text
+                                     //   (durable, else live fallback);
                                      //   non-empty only on AssistantMessage
    };
    Commit feed(const Event& event, std::ostream& out, std::ostream& err,
                bool print_reasoning);
    static constexpr std::size_t kMaxBufferedBytes = 1u << 20;  // 1 MiB / buffer
+   static constexpr std::string_view kRetryMarker = "\n[retry]\n";
    ```
 
-   Private state: `message_` (current live message id), `text_`, `reasoning_`.
+   Private state: `message_` (current live message id), `text_` (bounded record
+   of streamed text), `streamed_total_` (total text bytes streamed, O(1)),
+   `reasoning_` (bounded).
 
    *Rules.*
-   - **R1. Per-message-id buffering (34-I12).** A live `AssistantChunk` is
-     buffered and never printed. If `chunk.message != message_`, the id and both
-     buffers reset first. `kind == Text` appends to `text_`; `kind == Reasoning`
-     appends to `reasoning_`. Buffering-before-settlement is enforced by
-     `DurableWinsOverLiveBuffer`; the id-change reset is
-     `assistant_stream_printer.cpp:42-46` and has no dedicated test among the
-     seven.
-   - **R2. Durable wins (34-I13).** On `AssistantMessage`, `durable` is the
-     in-order concatenation of the settlement's `Text`-kind `content` blocks, and
-     `commit.text = durable.empty() ? text_ : durable`. `durable` wins whenever
-     non-empty; the live buffer is only the fallback for a settlement with no
-     durable text (resume/replay). Rationale (`26-D9` / `35 §3.6`): the durable
-     settlement is the recovery path for a missed live chunk, so the live channel
-     is never the source of truth. Enforced by `DurableWinsOverLiveBuffer` and
-     `FallsBackToLiveBufferWhenDurableEmpty`.
-   - **R3. Discard on `AssistantAttempt` (34-I14).** An `AssistantAttempt`
-     clears the id and both buffers and prints nothing. The event type is the
-     discriminator: only a non-`Completed` settlement emits `AssistantAttempt`
-     (34-I3, 34-D6), so no attempt status is inspected. Why: the per-step
-     `messageId` (§6.1) is unchanged across a retry, so without the discard the
-     failed attempt's streamed text would concatenate with the retry's under the
-     same id. Enforced by `DiscardsBufferOnFailedAttempt`.
-   - **R4. Bounded buffer (34-I15, F8).** Each buffer independently holds at
+   - **R1. Live text streaming + per-message-id record (34-I12).** A `Text`
+     `AssistantChunk` is written to `out` and flushed immediately, then appended
+     to the bounded record. A `Reasoning` chunk is only buffered. If
+     `chunk.message != message_`, the id, the record, `streamed_total_`, and the
+     reasoning buffer reset first. Enforced by
+     `StreamsTextDeltasBeforeSettlement`.
+   - **R2. Durable wins with suffix dedup (34-I13).** On `AssistantMessage`,
+     `durable` is the in-order concatenation of the settlement's `Text`-kind
+     `content` blocks, and `commit.text = durable.empty() ? text_ : durable`.
+     Printing: if `durable` is empty, print nothing (the live record was already
+     streamed) and attribute `text_`; if nothing was streamed
+     (`streamed_total_ == 0`), print the full `durable`; if
+     `durable.size() >= text_.size()` and `durable` begins with the recorded
+     `text_`, print only `durable.substr(streamed_total_)`; otherwise (prefix
+     divergence, a dropped live chunk) print the full `durable`, because the
+     durable is the authority and stdout is forward-only. Rationale (`26-D9` /
+     `35 §3.6`): the durable settlement is the recovery path for a missed live
+     chunk, so the live channel is never the source of truth. Enforced by
+     `DurableWinsOverLiveBuffer`,
+     `CompletedSettlementDoesNotDoublePrintStreamedText`,
+     `FallsBackToLiveBufferWhenDurableEmpty`, and
+     `FullDurableTextAfterBufferCapExceeded`.
+   - **R3. Retry marker + discard on `AssistantAttempt` (34-I14).** On an
+     `AssistantAttempt` with a non-empty streamed record, write `kRetryMarker`
+     (`"\n[retry]\n"`; the leading newline breaks the streamed line) to `err` and
+     flush; then clear the id, the record, `streamed_total_`, and the reasoning
+     buffer. The event type is the discriminator: only a non-`Completed`
+     settlement emits `AssistantAttempt` (34-I3, 34-D6), so no attempt status is
+     inspected. Why: the per-step `messageId` (§6.1) is unchanged across a retry,
+     so without the discard the failed attempt's text would concatenate with the
+     retry's under the same id; and because stdout is forward-only the marker,
+     not removal, is what makes the boundary visible. The marker is emitted only
+     when there is non-retractable streamed text to delimit. Enforced by
+     `FailedAttemptEmitsRetryMarker` and `DiscardsBufferOnFailedAttempt`.
+   - **R4. Bounded record (34-I15, F8).** Each buffer independently holds at
      most `kMaxBufferedBytes`. A delta appends only up to the remaining room (a
      crossing delta is truncated); once a buffer is full, further deltas for it
-     are dropped. The cap bounds only the live-only fallback: the durable path
-     prints the full settlement text regardless of the cap. Enforced by
-     `LiveBufferStaysBoundedWithoutSettlement` and
-     `FullDurableTextAfterBufferCapExceeded`.
-   - **R5. Reasoning output (34-I16).** On commit, text is written to `out` (and
-     flushed) always, and buffered reasoning is written to `err` (and flushed)
-     only when `print_reasoning` is set. Both buffers clear after every commit or
-     discard. Enforced by `PrintsBufferedReasoningWhenEnabled` and
-     `SuppressesBufferedReasoningWhenDisabled`.
+     are dropped from the record. `streamed_total_` counts every streamed byte,
+     so dedup past the cap does not re-print already-streamed bytes. The cap
+     bounds only the retained record: the live output and the durable path print
+     the full text. Enforced by `LiveBufferStaysBoundedWithoutSettlement`,
+     `FullDurableTextAfterBufferCapExceeded`, and `LongStreamBeyondCapIsNotReprinted`.
+   - **R5. Reasoning output (34-I16).** Reasoning is never streamed live. On
+     commit, buffered reasoning is written to `err` (and flushed) only when
+     `print_reasoning` is set. All state clears after every commit or discard.
+     Enforced by `PrintsBufferedReasoningWhenEnabled`,
+     `SuppressesBufferedReasoningWhenDisabled`, and
+     `ReasoningStaysBufferedUntilCommit`.
 
    *Remaining consumer item (TUI, not this class).* `ui_event_adapter.cpp:92-105`
    is the separate TUI path: it opens `AssistantMessageStarted` only when the
@@ -1089,6 +1152,21 @@ compared across real process runs.
 
 ## 16. Revision log
 
+- **Rev 4 (2026-09-19).** Restores live token-by-token streaming in the shared
+  run-path `AssistantStreamPrinter` (user decision), superseding the Rev 3
+  buffer-only contract. `Text` deltas are written to `out` as they arrive
+  (34-I12 R1); on `AssistantMessage` the durable settlement is the authority and
+  only the not-yet-streamed suffix is printed, deduped by a bounded record plus
+  an O(1) streamed-byte counter (34-I13 R2); a non-`Completed` `AssistantAttempt`
+  emits `kRetryMarker` (`"\n[retry]\n"`) on `err` and discards the record
+  (34-I14 R3), because forward-only stdout cannot retract the failed attempt's
+  text; the record stays capped at `kMaxBufferedBytes` (34-I15 R4) and reasoning
+  stays buffered (34-I16 R5). Updates failure mode 34-F9, test plan §13 items
+  21-29, and the 34-D13 decision row. Consumer assertions in
+  `tests/unit/headless_test.cpp` are updated for the restored live output (the
+  failed attempt's text is now visible on `out`; the retry boundary is the
+  marker). No production interface change beyond the additive
+  `kRetryMarker` constant.
 - **Rev 3 (2026-09-19).** Closes the Rev 2 §15 item 1 open risk by pinning the
   shipped `AssistantStreamPrinter` contract: decision 34-D13, invariants
   34-I11–34-I16, failure mode 34-F9, and test plan §13 items 21-26. The pin
@@ -1134,7 +1212,7 @@ compared across real process runs.
 | **34-D10** | `ReplayEnvelope` keys = `provider`/`version`/`state` | Matches the `26 §4.3.4 :529-533` struct; fills the `26 §4.3.9.1` omission |
 | **34-D11** | Durable usage = `BlockAssembler::usage()` | `26 §4.3.4 :549`; single authority |
 | **34-D12** | The replay prefix is bounded by the attempt's settlement (`prefix = {seq < settlement_seq}`), not the header; the harness validates it and throws `PrefixMismatch` | The header is a changed snapshot logged only on template change (`agent_loop.cpp:468-496`), so it cannot bound the attempt's messages (`28 §4.4 :501-512`) |
-| **34-D13** | The run-path de-duplication is `AssistantStreamPrinter`: per-message-id live buffer, durable-wins on `AssistantMessage`, discard on `AssistantAttempt`, `kMaxBufferedBytes` cap | `26-D9` / `35 §3.6` make the durable settlement the recovery path for a missed live chunk; one shared printer keeps both `ymh run` paths identical; closes the Rev 2 §15 item 1 open risk |
+| **34-D13** | The run-path printer is `AssistantStreamPrinter` with **restored live streaming** (Rev 4): `Text` deltas stream to `out` as they arrive; the `AssistantMessage` settlement prints only the not-yet-streamed durable suffix (durable is authority) deduped by a `kMaxBufferedBytes` record plus an O(1) streamed-byte counter; a non-`Completed` `AssistantAttempt` with streamed text emits `kRetryMarker` on `err` and discards the record | `26-D9` / `35 §3.6` make the durable settlement the recovery path for a missed live chunk, but the user requires live output; stdout is forward-only, so retractability is replaced by a visible retry boundary; one shared printer keeps both `ymh run` paths identical |
 
 ## 18. References
 
