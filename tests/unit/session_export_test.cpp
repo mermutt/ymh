@@ -80,7 +80,7 @@ EventRange make_events() {
     events.push_back(record(
         6, 1700000004000, EventType::ToolResult,
         payload::ToolResult{"call-1", "read", payload::ToolOutcome::Ok, "int main() {}", false,
-                            std::nullopt, std::chrono::milliseconds{10}}));
+                            OmittedKind::None, 0, std::nullopt, std::chrono::milliseconds{10}}));
     events.push_back(record(7, 1700000005000, EventType::TurnEnded, payload::TurnEnded{1}));
     return events;
 }
