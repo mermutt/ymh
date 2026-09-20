@@ -731,6 +731,7 @@ void UiModel::apply(const UiEvent& event) {
                     }
                     state.stream_started_at.reset();
                 }
+                state.status.api_state = ApiConnectivity::Ok;
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, ToolStarted>) {
                 ToolCallView view;
@@ -849,6 +850,7 @@ void UiModel::apply(const UiEvent& event) {
                 dirty.mark(e.session, UiDirtyFlag::Subagents);
             } else if constexpr (std::is_same_v<T, ErrorOccurred>) {
                 state.status.last_error = e.message;
+                state.status.api_state = ApiConnectivity::Error;
                 ConversationEntry entry;
                 entry.role = ConversationRole::System;
                 entry.text = "error: " + e.message;
@@ -859,6 +861,7 @@ void UiModel::apply(const UiEvent& event) {
                 state.status.input_tokens = e.usage.input_tokens;
                 state.status.output_tokens = e.usage.output_tokens;
                 state.status.cached_tokens = e.usage.cached_tokens;
+                state.status.api_state = ApiConnectivity::Ok;
                 dirty.mark(e.session, UiDirtyFlag::Status);
             } else if constexpr (std::is_same_v<T, StatusChanged>) {
                 state.status.note = e.text;

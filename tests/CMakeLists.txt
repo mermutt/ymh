@@ -60,6 +60,7 @@ add_executable(ymh_tests
     unit/headless_live_test.cpp
     unit/ui_model_test.cpp
     unit/command_registry_test.cpp
+    unit/status_format_test.cpp
     unit/session_catalog_test.cpp
     unit/ui_context_overlay_test.cpp
     unit/session_export_test.cpp
@@ -87,6 +88,7 @@ add_executable(ymh_tests
     unit/skills_tool_test.cpp
     unit/skills_wiring_test.cpp
     unit/skills_rpc_test.cpp
+    unit/mcp_rpc_test.cpp
     unit/no_raw_map_handle_test.cpp
     unit/spec_catalog_test.cpp
     unit/prompt_registry_test.cpp

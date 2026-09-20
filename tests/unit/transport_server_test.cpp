@@ -1264,4 +1264,61 @@ TEST(TransportServer, SessionCreatedBroadcastOnResumeAndFork) {
     EXPECT_EQ(peer_frames[0].at("params").at("session").get<std::string>(), forked);
 }
 
+// 45-D6.1/45-I13: mcp.status accepts absent or empty params and passes the host
+// result through; any other shape is InvalidParams.
+TEST(TransportServer, UI45_D6_McpStatusStrictParams) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+
+    harness.host.mcp_status_result = nlohmann::json{
+        {"servers",
+         nlohmann::json::array({{{"id", "alpha"},
+                                 {"state", "ready"},
+                                 {"connected", true},
+                                 {"tool_count", 3},
+                                 {"skipped", 0},
+                                 {"skipped_tools", nlohmann::json::array()},
+                                 {"has_error", false}}})},
+        {"tool_total", 3}};
+
+    harness.send(*peer, Harness::request(2, protocol::method::kMcpStatus));
+    auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    ASSERT_TRUE(frames[0].contains("result")) << frames[0].dump();
+    EXPECT_EQ(frames[0].at("result").at("tool_total").get<int>(), 3);
+    EXPECT_EQ(harness.host.calls.back(), "mcp.status");
+
+    harness.send(*peer,
+                 Harness::request(3, protocol::method::kMcpStatus, nlohmann::json::object()));
+    frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_TRUE(frames[0].contains("result"));
+
+    const std::size_t calls_before = harness.host.calls.size();
+    harness.send(*peer,
+                 Harness::request(4, protocol::method::kMcpStatus, nlohmann::json{{"x", 1}}));
+    frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InvalidParams));
+
+    harness.send(*peer,
+                 Harness::request(5, protocol::method::kMcpStatus, nlohmann::json::array()));
+    frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(error_code(frames[0]), protocol::code_value(protocol::RpcCode::InvalidParams));
+    EXPECT_EQ(harness.host.calls.size(), calls_before) << "invalid params must not reach the host";
+
+    // 45-D6.10/45-I29: allowed in both profiles.
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB, 6,
+                  protocol::ClientRole::Automation);
+    harness.drain(*automation);
+    harness.send(*automation, Harness::request(7, protocol::method::kMcpStatus));
+    frames = harness.drain(*automation);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_TRUE(frames[0].contains("result")) << frames[0].dump();
+}
+
 } // namespace

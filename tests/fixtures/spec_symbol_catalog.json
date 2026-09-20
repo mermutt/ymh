@@ -387,6 +387,12 @@
       "section": "3.4"
     },
     {
+      "symbol": "protocol::method::kMcpStatus",
+      "category": "wire_method",
+      "spec": "45-ui-interaction-errata.md",
+      "section": "8.2"
+    },
+    {
       "symbol": "protocol::notify::kEventStream",
       "category": "wire_notification",
       "spec": "05-transport.md",

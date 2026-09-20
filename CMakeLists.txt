@@ -692,6 +692,7 @@ add_library(ymh_ui STATIC
     src/ui/ui_render.cpp
     src/ui/command_registry.cpp
     src/ui/session_export.cpp
+    src/ui/status_format.cpp
     src/ui/terminal_layer.cpp
     src/ui/supervisor_connection.cpp
     src/ui/supervisor_presence.cpp

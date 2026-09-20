@@ -38,8 +38,9 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 }
 
 TEST(TransportProtocol, MethodCatalogIsComplete) {
-    // 18 §3.4.1 (CX-D11/M10) landed at 33; 25-D5 adds `session.set_mode`.
-    EXPECT_EQ(protocol::all_methods().size(), 34u);
+    // 18 §3.4.1 (CX-D11/M10) landed at 33; 25-D5 adds `session.set_mode`;
+    // 45-D6 adds `mcp.status`.
+    EXPECT_EQ(protocol::all_methods().size(), 35u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
@@ -49,6 +50,7 @@ TEST(TransportProtocol, MethodCatalogIsComplete) {
     EXPECT_TRUE(protocol::is_known_method("skills.list"));
     EXPECT_TRUE(protocol::is_known_method("skills.show"));
     EXPECT_TRUE(protocol::is_known_method("context.show"));
+    EXPECT_TRUE(protocol::is_known_method("mcp.status"));
     EXPECT_FALSE(protocol::is_known_method("host.nope"));
 }
 
@@ -72,6 +74,8 @@ TEST(TransportProtocol, ProfileGating) {
                                             protocol::method::kSessionRename));
     EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
                                             protocol::method::kContextShow));
+    EXPECT_TRUE(protocol::is_method_allowed(protocol::ServerProfile::Automation,
+                                            protocol::method::kMcpStatus));
 }
 
 TEST(TransportProtocol, HostErrorMapping) {

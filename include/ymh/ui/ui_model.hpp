@@ -179,6 +179,14 @@ struct CommandHint {
     std::string description;
 };
 
+// 45-D7: derived last-outcome connectivity (never a probe). `Error` can be set
+// by a non-LLM `ErrorOccurred` until the next successful assistant message.
+enum class ApiConnectivity : std::uint8_t {
+    Unknown,
+    Ok,
+    Error,
+};
+
 struct StatusModel {
     std::string model;
     std::int64_t input_tokens = 0;
@@ -187,6 +195,8 @@ struct StatusModel {
     AgentState  agent_state = AgentState::Idle;
     std::string last_error;
     std::string note;
+    // 45-D7: derived connectivity for `/status`.
+    ApiConnectivity api_state = ApiConnectivity::Unknown;
     // 25-D1/D2/D6/D7
     bool                  plan_active = false;
     std::optional<double> tps;

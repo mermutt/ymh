@@ -33,6 +33,10 @@ struct SupervisorRunOptions {
     Config                           config;
     bool                             verbose = false;
 
+    // 45-D7: the build version, threaded from the CLI (`YMH_VERSION` is not
+    // visible to `ymh_ui`). Empty means "unknown".
+    std::string version;
+
     bool                      no_prompt{false};       // --yes; skip the exit prompt
     std::chrono::milliseconds scan_interval{2'000};   // 16 §3.2 daemon-set scan
 

@@ -36,6 +36,11 @@ struct CommandContext {
     std::function<void()> context;
     // 22 §4.3/§4.6 (S2): opens the History catalog overlay (`/sessions`).
     std::function<void()> sessions;
+    // 45-D6/45-D7: read-only informational surfaces. Both are session-less: the
+    // handler issues its RPC unconditionally and routes the block to the active
+    // session when one is modeled, else to the notice ring.
+    std::function<void()> mcp;
+    std::function<void()> status;
 };
 
 // 20 §6.1: the non-static, callable-from-supervisor form of the file-local
