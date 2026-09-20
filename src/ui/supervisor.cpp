@@ -34,6 +34,7 @@
 #include "ymh/ui/context_request.hpp"
 #include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/session_export.hpp"
+#include "ymh/ui/status_format.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
 #include "ymh/ui/supervisor_harness.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
@@ -1229,7 +1230,7 @@ private:
                     for (const auto& [session, title] : sessions) {
                         SessionUiState& state = model_.ensureSessionIn(workspace, session);
                         if (state.status.model.empty()) {
-                            state.status.model = options_.config.agent.model;
+                            state.status.model = effective_model(options_.config);
                         }
                         model_.ensureCellIn(workspace, session);
                         model_.setCellTitle(workspace, session, title);
@@ -1316,7 +1317,7 @@ private:
         }
         SessionUiState& state = model_.ensureSessionIn(workspace, session);
         if (state.status.model.empty()) {
-            state.status.model = options_.config.agent.model;
+            state.status.model = effective_model(options_.config);
         }
         model_.ensureCellIn(workspace, session);
         activate_session(workspace, session);
@@ -1612,6 +1613,97 @@ private:
         append_system_entry(model_, *state, format_skill_detail(reply.result));
     }
 
+    // 45-D6: `/mcp` issues `mcp.status` unconditionally (session-less) and
+    // routes the block to the active session, else the notice ring. A daemon
+    // that cannot serve the method disables the surface for the rest of the
+    // process (45-F19: no retry loop).
+    void request_mcp() {
+        if (mcp_disabled_) {
+            model_.pushNotice(*mcp_unavailable_notice(
+                static_cast<int>(protocol::RpcCode::MethodNotFound)));
+            model_.dirty.markAggregate();
+            return;
+        }
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr) {
+            model_.pushNotice("mcp: no active workspace");
+            model_.dirty.markAggregate();
+            return;
+        }
+        const WorkspaceId id = workspace->id;
+        submit_to(id, std::string(protocol::method::kMcpStatus), nlohmann::json::object(),
+                  [this, id](SupervisorReply reply) {
+                      enqueue([this, id, reply = std::move(reply)]() mutable {
+                          if (model_.workspaces.count(id) == 0) {
+                              return;
+                          }
+                          std::string block;
+                          if (reply.ok) {
+                              block = format_mcp_block(reply.result);
+                          } else if (std::optional<std::string> notice =
+                                         mcp_unavailable_notice(reply.error_code)) {
+                              mcp_disabled_ = true;
+                              block = std::move(*notice);
+                          } else {
+                              block = "mcp: " + (reply.error.empty()
+                                                     ? std::string{"request failed"}
+                                                     : reply.error);
+                          }
+                          if (SessionUiState* state = model_.ensureActiveSession()) {
+                              append_system_entry(model_, *state, std::move(block));
+                          } else {
+                              model_.pushNotice(std::move(block));
+                              model_.dirty.markAggregate();
+                          }
+                      });
+                  });
+    }
+
+    // 45-D7: `/status` renders local lines plus the per-tool and per-server
+    // block from `context.show` when a session exists; otherwise local lines
+    // with a `(no session)` note go to the notice ring.
+    void request_status() {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        StatusBlockInputs inputs;
+        inputs.version = options_.version;
+        inputs.model = effective_model(options_.config);
+        if (workspace != nullptr) {
+            inputs.daemon = workspace->daemonStatus;
+            inputs.workspace_title = workspace->title;
+        }
+        SessionUiState* state = model_.ensureActiveSession();
+        if (state == nullptr || workspace == nullptr) {
+            model_.pushNotice(format_status_block(inputs));
+            model_.dirty.markAggregate();
+            return;
+        }
+        inputs.has_session = true;
+        inputs.api_state = state->status.api_state;
+        inputs.last_error = state->status.last_error;
+        const WorkspaceId id = workspace->id;
+        const SessionId   session = state->id;
+        submit_to(id, std::string(protocol::method::kContextShow),
+                  nlohmann::json{{"session", session.value}},
+                  [this, id, session, inputs](SupervisorReply reply) mutable {
+                      ContextSnapshot snapshot;
+                      const bool loaded = reply.ok && parse_context_snapshot(reply.result, snapshot);
+                      enqueue([this, id, session, inputs = std::move(inputs), loaded,
+                               snapshot = std::move(snapshot)]() mutable {
+                          if (model_.workspaces.count(id) == 0) {
+                              return;
+                          }
+                          SessionUiState* target = model_.session(session);
+                          if (target == nullptr) {
+                              return;
+                          }
+                          if (loaded) {
+                              inputs.snapshot = &snapshot;
+                          }
+                          append_system_entry(model_, *target, format_status_block(inputs));
+                      });
+                  });
+    }
+
     bool dispatch_command(const std::string& line) {
         CommandContext context{model_};
         context.session = model_.ensureActiveSession();
@@ -1690,6 +1782,8 @@ private:
         };
         context.context = [this] { open_context(); };
         context.sessions = [this] { open_sessions(); };
+        context.mcp = [this] { request_mcp(); };
+        context.status = [this] { request_status(); };
         return registry_.dispatch(line, context);
     }
 
@@ -2364,6 +2458,9 @@ private:
     UiEventAdapter adapter_;
     CommandRegistry registry_;
     std::string preferred_model_;
+    // 45-D6.11: set once when the daemon reports `mcp.status` unavailable, so
+    // `/mcp` never retries (45-F19). UI thread only.
+    bool mcp_disabled_ = false;
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
     std::map<WorkspaceId, std::string> pending_creates_;
@@ -2462,6 +2559,10 @@ public:
 
     void drain_actions() override { app_.drain(); }
 
+    bool dispatch_command_line(const std::string& line) override {
+        return app_.dispatch_command(line);
+    }
+
     void start_catalog_with(WorkspaceCatalogSource source,
                             std::chrono::milliseconds refresh_interval) override {
         app_.catalog_ = std::make_unique<SessionCatalogReader>(
@@ -2499,6 +2600,11 @@ public:
 
     void seed_workspace(const WorkspaceModel& workspace) override {
         app_.model_.workspaces[workspace.id] = workspace;
+    }
+
+    void seed_active_workspace(const WorkspaceModel& workspace) override {
+        app_.model_.workspaces[workspace.id] = workspace;
+        app_.model_.activeWorkspaceId = workspace.id;
     }
 
     void open_permission_dialog(const SessionId& session, const PermissionRequestId& request,

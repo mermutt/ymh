@@ -527,6 +527,8 @@ inline constexpr std::string_view kSessionSetMode   = "session.set_mode";
 inline constexpr std::string_view kSkillsList       = "skills.list";
 inline constexpr std::string_view kSkillsShow       = "skills.show";
 inline constexpr std::string_view kContextShow      = "context.show";
+// 45-D6: read-only, session-less MCP inventory (both profiles).
+inline constexpr std::string_view kMcpStatus        = "mcp.status";
 } // namespace method
 
 // The full catalog, in the order of 05 §7. `host.hello` is first.

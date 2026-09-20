@@ -541,6 +541,12 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
                                    "name must be a string");
             }
             respond(conn, request.id, host_.showSkill(it->get<std::string>()));
+        } else if (method_name == method::kMcpStatus) {
+            if (!request.params.is_object() || !request.params.empty()) {
+                throw RpcException(code_value(RpcCode::InvalidParams),
+                                   "mcp.status takes no parameters");
+            }
+            respond(conn, request.id, host_.mcpStatus());
         } else {
             respond_error(conn, request.id, code_value(RpcCode::MethodNotFound),
                           "unhandled method");

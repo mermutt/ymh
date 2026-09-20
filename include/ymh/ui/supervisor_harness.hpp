@@ -56,6 +56,11 @@ public:
     // The FTXUI loop's action pump; runs every action queued so far.
     virtual void drain_actions() = 0;
 
+    // 45-D6/D7: drives the real slash-command dispatch directly (bypassing the
+    // composer's auto-create path) so the session-less `/mcp`/`/status`
+    // fallbacks are testable.
+    virtual bool dispatch_command_line(const std::string& line) = 0;
+
     // Replaces the app's catalog reader with one built from `source` and starts
     // it (SW-U19/SW-I10 need a blocking read). The app owns it and stops+joins
     // it in its destructor.
@@ -74,6 +79,10 @@ public:
     virtual void seed_pending_resume(const WorkspaceId& workspace, const SessionId& session) = 0;
     virtual void seed_ensure_in_flight(const WorkspaceId& workspace) = 0;
     virtual void seed_workspace(const WorkspaceModel& workspace) = 0;
+    // 45-D6/D7: seeds a workspace and makes it active with no modeled session,
+    // so the session-less `/mcp`/`/status` paths can be driven through the real
+    // command dispatch.
+    virtual void seed_active_workspace(const WorkspaceModel& workspace) = 0;
 
     // RB-12 addendum (2026-09-17): permission-dialog key semantics. Opens the
     // dialog through the same model fields the adapter writes, then drives FTXUI

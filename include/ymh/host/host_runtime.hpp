@@ -190,6 +190,10 @@ public:
     nlohmann::json listSkills() override;
     nlohmann::json showSkill(const std::string& name) override;
 
+    // 45-D6: the mcp.status serializer (shared base schema + connected +
+    // skipped_tools); it never reads `last_error` into the JSON.
+    nlohmann::json mcpStatus() override;
+
     bool decidePermission(const std::string& request_id, protocol::PermissionAnswer decision,
                           protocol::PermissionScope scope) override;
 

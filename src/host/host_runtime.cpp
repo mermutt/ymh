@@ -230,6 +230,28 @@ nlohmann::json skill_show_json(const Skill& skill) {
                           {"body", skill.body}};
 }
 
+// 45-D6.9: the mcp.status serializer. It emits the shared base schema
+// ({id,state,tool_count,skipped:<int>,has_error}) plus the mcp.status-only
+// `connected` and `skipped_tools`. `last_error` is never read into the JSON.
+nlohmann::json mcp_status_json(const std::vector<McpServerStatus>& statuses) {
+    nlohmann::json servers = nlohmann::json::array();
+    std::size_t    tool_total = 0;
+    for (const McpServerStatus& status : statuses) {
+        const bool connected = status.state == McpServerState::Ready;
+        tool_total += status.tool_count;
+        servers.push_back(nlohmann::json{
+            {"id", status.id.value},
+            {"state", std::string{mcp_state_token(status.state)}},
+            {"connected", connected},
+            {"tool_count", status.tool_count},
+            {"skipped", status.skipped_tools.size()},
+            {"skipped_tools", status.skipped_tools},
+            {"has_error", !status.last_error.empty()},
+        });
+    }
+    return nlohmann::json{{"servers", std::move(servers)}, {"tool_total", tool_total}};
+}
+
 } // namespace
 
 HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
@@ -990,6 +1012,10 @@ nlohmann::json HostRuntime::showSkill(const std::string& name) {
         }
         return skill_show_json(*skill);
     });
+}
+
+nlohmann::json HostRuntime::mcpStatus() {
+    return translate([&]() -> nlohmann::json { return mcp_status_json(runtime_.mcp_statuses()); });
 }
 
 bool HostRuntime::sessionExists(const SessionId& id) const {

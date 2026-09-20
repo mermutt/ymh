@@ -278,6 +278,14 @@ public:
     nlohmann::json                        skills_list = nlohmann::json::object();
     std::map<std::string, nlohmann::json> skill_bodies;
 
+    nlohmann::json mcpStatus() override {
+        calls.push_back("mcp.status");
+        return mcp_status_result;
+    }
+
+    nlohmann::json mcp_status_result =
+        nlohmann::json{{"servers", nlohmann::json::array()}, {"tool_total", 0}};
+
     bool sessionExists(const SessionId& id) const override {
         return logs_.find(id.value) != logs_.end();
     }

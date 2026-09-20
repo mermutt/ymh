@@ -1503,4 +1503,31 @@ TEST(UiModel, UI45_D10_SingleMutator) {
         (std::is_member_function_pointer_v<decltype(&WorkspaceModel::activeSessionId)>));
 }
 
+// 45-D7.3/45-I18: connectivity is a derived last-outcome, never a probe.
+// AssistantMessageStarted must not mark Ok; ErrorOccurred sets Error; a later
+// AssistantMessageFinished or TokenUsageUpdated sets Ok.
+TEST(UiModel, UI45_D7_ConnectivityTransitions) {
+    UiModel model = make_model();
+    ASSERT_NE(model.session(kSession), nullptr);
+    EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Unknown);
+
+    model.apply(UiEvent{AssistantMessageStarted{kSession, "a1"}});
+    EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Unknown)
+        << "a started message can still fail";
+
+    model.apply(UiEvent{ErrorOccurred{kSession, "boom"}});
+    EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Error);
+
+    model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "ok", std::nullopt}});
+    EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Ok);
+
+    model.apply(UiEvent{ErrorOccurred{kSession, "again"}});
+    EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Error);
+
+    Usage usage;
+    usage.input_tokens = 1;
+    model.apply(UiEvent{TokenUsageUpdated{kSession, usage}});
+    EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Ok);
+}
+
 } // namespace

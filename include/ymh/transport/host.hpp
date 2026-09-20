@@ -116,6 +116,10 @@ public:
     virtual nlohmann::json listSkills() = 0;
     virtual nlohmann::json showSkill(const std::string& name) = 0;
 
+    // 45-D6: read-only, session-less MCP inventory (both profiles), backed by
+    // the shared MCP JSON schema (45-D6.9).
+    virtual nlohmann::json mcpStatus() = 0;
+
     virtual SetModeResult setSessionMode(const nlohmann::json& params) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,

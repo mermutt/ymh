@@ -856,6 +856,48 @@ TEST(SupervisorHarnessTest, UI45_D5_SlashReopensAfterEsc) {
     EXPECT_FALSE(fixture.state()->hints_dismissed);
 }
 
+// 45-D6 §8.2/45-F10: `/mcp` is session-less: with no modeled session it still
+// runs `mcp.status` and routes the block to the notice ring.
+TEST(SupervisorHarnessTest, UI45_D6_McpWorksWithoutSession) {
+    ShortTempRoot root("ymh45d6nosession");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    harness->seed_active_workspace(workspace_model(WorkspaceId{"ws-mcp"}));
+
+    ASSERT_TRUE(harness->dispatch_command_line("/mcp"));
+    const std::string notice = wait_for_notice(
+        *harness, [](const std::string& text) { return text.rfind("mcp", 0) == 0; });
+    EXPECT_FALSE(notice.empty()) << "mcp must render without a session";
+}
+
+// 45-D7.1/45-D7.2/45-I17: `/status` with no modeled session renders the local
+// lines (version + effective model) to the notice ring with a `(no session)`
+// note.
+TEST(SupervisorHarnessTest, UI45_D7_StatusUsesEffectiveModel) {
+    ShortTempRoot root("ymh45d7model");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    options.version  = "0.1.0";
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    harness->seed_active_workspace(workspace_model(WorkspaceId{"ws-status"}));
+
+    ASSERT_TRUE(harness->dispatch_command_line("/status"));
+    const std::string notice = wait_for_notice(
+        *harness, [](const std::string& text) { return text.rfind("ymh status", 0) == 0; });
+    ASSERT_FALSE(notice.empty());
+    EXPECT_NE(notice.find("version:  0.1.0"), std::string::npos);
+    EXPECT_NE(notice.find("model:    deepseek-flash"), std::string::npos)
+        << "agent.model is empty by default; effective_model must be used";
+    EXPECT_NE(notice.find("(no session)"), std::string::npos);
+}
+
 // UX-U15 (25-D9/UX25): Enter accepts the highlighted candidate and dispatches
 // it (not the raw draft). `/he` + Enter runs `/help`.
 TEST(SupervisorHarnessTest, UX_U15_EnterAcceptsHighlightAndDispatches) {

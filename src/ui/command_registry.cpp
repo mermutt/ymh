@@ -238,6 +238,20 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "mcp", "list configured MCP servers and their tools",
+        [](CommandContext& context, const std::string&) {
+            if (context.mcp) {
+                context.mcp();
+            }
+        }});
+    registry.add(Command{
+        "status", "show version, model, API connectivity, tools, and MCP state",
+        [](CommandContext& context, const std::string&) {
+            if (context.status) {
+                context.status();
+            }
+        }});
+    registry.add(Command{
         "plan", "enter plan mode (/plan off to leave)",
         [](CommandContext& context, const std::string& args) {
             if (context.session == nullptr) {
