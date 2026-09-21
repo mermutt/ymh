@@ -195,6 +195,38 @@ std::vector<protocol::SessionEnvelope> replay_session(const std::filesystem::pat
     return envelopes;
 }
 
+// The stored-session catalog the daemon serves over `session.list` (ordinal
+// ASC), used to prove the reconnect created no stray session.
+nlohmann::json list_sessions(const std::filesystem::path& socket) {
+    protocol::HostConnection connection;
+    connection.connect(socket.string());
+    static_cast<void>(connection.handshake(protocol::ServerProfile::Interactive,
+                                           protocol::ClientInstanceId{generate_uuid_v4()}));
+    const nlohmann::json listed =
+        connection.request(std::string(protocol::method::kSessionList), nlohmann::json::object());
+    connection.close();
+    return listed;
+}
+
+// 46-D7: a fresh launch never auto-restores, so the prior conversation is
+// reachable only through an explicit `/sessions` resume. This polls the
+// *current* conversation region of the rendered frame (not the accumulated
+// buffer), so a match proves the transcript replayed rather than an echo of the
+// overlay or composer.
+bool wait_for_conversation(PtyChild& tui, const std::string& needle,
+                           std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        tui.read_available();
+        if (conversation_body(tui.last_frame()).find(needle) != std::string::npos) {
+            return true;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    tui.read_available();
+    return conversation_body(tui.last_frame()).find(needle) != std::string::npos;
+}
+
 TEST(LiveE2E, SupervisorReadsFileAndReplies) {
     if (!live_enabled()) {
         GTEST_SKIP() << "opt-in: set YMH_LIVE_LLM=1 and DEEPSEEK_API_KEY to run";
@@ -249,21 +281,52 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
     first.write("/exit\r");
     first.terminate();
 
+    // 46-D7 supersedes the startup auto-resume this test originally asserted: a
+    // fresh launch now opens a CLEAN session and never restores stored history.
+    // The no-duplicate invariant is unchanged — the prior conversation must be
+    // reachable only by an explicit `/sessions` resume, and that reconnect must
+    // not copy the session.
     PtyChild second;
     ASSERT_TRUE(second.spawn(resolve_ymh_binary(), workspace.path(), workspace.child_env()));
-    ASSERT_TRUE(second.wait_for(kSecret, 60s)) << second.plain();
+    ASSERT_TRUE(second.wait_for(kSessionActive, 60s)) << second.plain();
+    std::this_thread::sleep_for(500ms);
+    second.read_available();
+    const std::string clean_frame = second.last_frame();
+    EXPECT_EQ(conversation_body(clean_frame).find(kSecret), std::string::npos)
+        << "D7: a fresh launch auto-restored the prior conversation:\n"
+        << clean_frame;
+
+    // Explicit resume through `/sessions` (22 §5, the SwP5 interaction): the
+    // History overlay lists the stored prior session (the focused clean session
+    // is hidden), the cursor starts on the workspace row, one "j" descends onto
+    // the prior session, and Enter resumes it.
+    second.write("/sessions\r");
+    ASSERT_TRUE(second.wait_for(kPrompt, 20s))
+        << "the prior session is missing from /sessions:\n"
+        << second.plain();
+    second.write("j");
+    std::this_thread::sleep_for(300ms);
+    second.write("\r");
+    ASSERT_TRUE(wait_for_conversation(second, kSecret, 30s))
+        << "the explicitly resumed transcript did not replay:\n"
+        << second.last_frame();
     std::this_thread::sleep_for(500ms);
     second.read_available();
 
     const std::string frame = second.last_frame();
     const std::string body  = conversation_body(frame);
     EXPECT_NE(body.find(kSecret), std::string::npos)
-        << "prior messages missing after reconnect:\n"
+        << "prior messages missing after explicit resume:\n"
+        << frame;
+    EXPECT_EQ(count_occurrences(body, kSecret), 1u)
+        << "the resumed conversation rendered the secret more than once:\n"
         << frame;
     EXPECT_EQ(count_occurrences(body, kPrompt), 1u)
         << "prior user message rendered more than once after reconnect:\n"
         << frame;
 
+    // The prior session is the earliest-created row, so `session.list` (ordinal
+    // ASC) reports it first; replaying it proves no duplicate committed events.
     const std::string session = first_session_id(workspace.socket());
     ASSERT_FALSE(session.empty()) << "respawned daemon reported no session";
     const std::vector<protocol::SessionEnvelope> replay =
@@ -280,6 +343,25 @@ TEST(LiveE2E, CrashRespawnReconnectNoDuplicate) {
         }
     }
     EXPECT_EQ(user_messages, 1u) << "user message duplicated in the session log";
+
+    // No stray session: D7's clean startup session and the resumed prior one are
+    // the only rows, and exactly one carries the prior conversation's auto-title
+    // (`derive_auto_title(kPrompt)`), so the reconnect copied nothing.
+    const nlohmann::json listed = list_sessions(workspace.socket());
+    ASSERT_TRUE(listed.is_array()) << listed.dump();
+    std::size_t carrying_prior = 0;
+    std::string titles;
+    for (const nlohmann::json& entry : listed) {
+        const std::string title = entry.value("title", std::string{});
+        titles += "\n  [" + title + "]";
+        if (title == kPrompt) {
+            ++carrying_prior;
+        }
+    }
+    EXPECT_EQ(listed.size(), 2u)
+        << "expected the D7 clean session plus the resumed prior session:" << titles;
+    EXPECT_EQ(carrying_prior, 1u)
+        << "the reconnect duplicated the prior conversation session:" << titles;
 
     // 25-D10: `/exit` exits immediately with no dialog; the daemon is torn down.
     second.write("/exit\r");
