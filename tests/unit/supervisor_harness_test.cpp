@@ -1305,3 +1305,38 @@ TEST(SupervisorHarnessTest, UI45_D10_UnknownSessionCreatesFallback) {
     ASSERT_FALSE(harness->model().notices.empty());
     EXPECT_EQ(harness->model().notices.back().text, "session no longer exists");
 }
+
+// 22 §5.3 (SW-F2) + 45-D10: a resume that fails must surface the error and leave
+// the previously focused session usable — no cleared model, no dangling focus.
+TEST(SupervisorHarnessTest, UI45_D10_ResumeFailureKeepsUsableFocus) {
+    ShortTempRoot root("ymh45d10fail");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(harness_registry_config(root.path()));
+    SupervisorRunOptions options;
+    options.registry = registry.get();
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    const WorkspaceId workspace{"ws-fail"};
+    const SessionId prior{"session-prior"};
+    const SessionId doomed{"session-doomed"};
+    harness->seed_workspace(live_workspace_model(workspace));
+    harness->apply_resume_success(workspace, prior);
+    ASSERT_NE(harness->model().session(prior), nullptr);
+    ASSERT_EQ(harness->model().workspaces.at(workspace).activeSessionId(), prior);
+
+    harness->seed_pending_resume(workspace, doomed);
+    harness->on_link_state(workspace, ui::SupervisorLinkState::Attached, "test");
+
+    const std::string notice = wait_for_notice(*harness, [](const std::string& text) {
+        return text.rfind("resume failed: ", 0) == 0;
+    });
+    EXPECT_EQ(notice, "resume failed: no supervisor connection");
+
+    EXPECT_EQ(harness->model().workspaces.at(workspace).activeSessionId(), prior);
+    ASSERT_NE(harness->model().session(prior), nullptr);
+    EXPECT_FALSE(harness->model().session(prior)->status.model.empty())
+        << "the failed resume cleared the focused session's model";
+    harness->dispatch_key("x");
+    EXPECT_EQ(harness->model().session(prior)->input.draft, "x");
+}

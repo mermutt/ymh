@@ -1066,6 +1066,24 @@ private:
                   });
     }
 
+    // The stored header's model (the value `/sessions` shows), falling back to
+    // the effective config model when the catalog has not delivered the row yet.
+    std::string stored_session_model(const WorkspaceId& workspace,
+                                     const SessionId& session) const {
+        for (const WorkspaceHistory& history : model_.catalog.workspaces) {
+            if (history.id != workspace) {
+                continue;
+            }
+            for (const SessionHistoryEntry& entry : history.sessions) {
+                if (entry.id == session && !entry.model.empty()) {
+                    return entry.model;
+                }
+            }
+            break;
+        }
+        return effective_model(options_.config);
+    }
+
     // 22 §5.2 (SW25, MEDIUM-1): the success branch must never inject a workspace.
     // A workspace evicted between the submit and its reply is reported through
     // `surface_notice` and left unmodeled.
@@ -1075,8 +1093,21 @@ private:
                            "session resumed in a workspace that is no longer open");
             return;
         }
-        model_.ensureSessionIn(workspace, session);
+        SessionUiState& state = model_.ensureSessionIn(workspace, session);
+        // Hydrate the display model here: a stored session resumed into a fresh
+        // process is unmodeled, and `refresh_sessions` is not guaranteed to run
+        // for it (it only hydrates sessions the daemon reports as `live`).
+        if (state.status.model.empty()) {
+            state.status.model = stored_session_model(workspace, session);
+        }
         model_.ensureCellIn(workspace, session);
+        // Subscribe here, not only via the `SessionCreated` notice: that notice
+        // refreshes `session.list`, which tracks only daemon-reported `live`
+        // sessions. A daemon predating that flag leaves the resume unsubscribed.
+        if (const auto connection = connections_.find(workspace);
+            connection != connections_.end()) {
+            connection->second->track(session);
+        }
         // 22 §5.2 "focus only; no session.activate": `focusSession` sets the
         // workspace's active session and switches `activeWorkspaceId`, so a
         // session selected in another workspace becomes the visible one.
