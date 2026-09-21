@@ -209,6 +209,7 @@ add_library(ymh_llm STATIC
     src/llm/sha256.cpp
     src/llm/model_profile.cpp
     src/llm/provider_registry.cpp
+    src/llm/leaked_call_detector.cpp
     src/llm/tool_call_assembler.cpp
     src/llm/sse_parser.cpp
     src/llm/redaction.cpp

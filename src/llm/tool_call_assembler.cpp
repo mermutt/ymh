@@ -15,8 +15,9 @@ bool is_blank(std::string_view text) noexcept {
 
 } // namespace
 
-ToolCallAssembler::ToolCallAssembler(std::size_t max_arguments_bytes)
-    : max_arguments_bytes_(max_arguments_bytes) {}
+ToolCallAssembler::ToolCallAssembler(std::size_t max_arguments_bytes,
+                                     ToolArgumentPolicy policy)
+    : max_arguments_bytes_(max_arguments_bytes), policy_(policy) {}
 
 ToolCallAssembler::CallState* ToolCallAssembler::find(std::uint32_t index) noexcept {
     for (auto& entry : calls_) {
@@ -32,6 +33,28 @@ void ToolCallAssembler::fail(LLMErrorCode code, std::string detail) {
         error_.code = code;
         error_.detail = std::move(detail);
     }
+}
+
+std::optional<nlohmann::json> ToolCallAssembler::parse_arguments(const std::string& raw) {
+    if (raw.empty() || is_blank(raw)) {
+        return nlohmann::json::object();
+    }
+    nlohmann::json parsed = nlohmann::json::parse(raw, nullptr, false);
+    if (parsed.is_discarded()) {
+        if (policy_ == ToolArgumentPolicy::NonObjectToEmpty) {
+            return nlohmann::json::object();
+        }
+        fail(LLMErrorCode::MalformedToolCall, "tool-call arguments are not valid JSON");
+        return std::nullopt;
+    }
+    if (!parsed.is_object()) {
+        if (policy_ == ToolArgumentPolicy::NonObjectToEmpty) {
+            return nlohmann::json::object();
+        }
+        fail(LLMErrorCode::MalformedToolCall, "tool-call arguments are not a JSON object");
+        return std::nullopt;
+    }
+    return parsed;
 }
 
 std::optional<ToolCallAssembled> ToolCallAssembler::onStarted(std::uint32_t index,
@@ -91,21 +114,11 @@ std::optional<ToolCallAssembled> ToolCallAssembler::onFinished(std::uint32_t ind
     }
     call->finished = true;
 
-    if (call->arguments.empty() || is_blank(call->arguments)) {
-        return ToolCallAssembled{call->id, call->name, nlohmann::json::object()};
-    }
-
-    nlohmann::json parsed = nlohmann::json::parse(call->arguments, nullptr, false);
-    if (parsed.is_discarded()) {
-        fail(LLMErrorCode::MalformedToolCall, "tool-call arguments are not valid JSON");
+    std::optional<nlohmann::json> arguments = parse_arguments(call->arguments);
+    if (!arguments.has_value()) {
         return std::nullopt;
     }
-    if (!parsed.is_object()) {
-        fail(LLMErrorCode::MalformedToolCall, "tool-call arguments are not a JSON object");
-        return std::nullopt;
-    }
-
-    return ToolCallAssembled{call->id, call->name, std::move(parsed)};
+    return ToolCallAssembled{call->id, call->name, std::move(*arguments)};
 }
 
 std::vector<ToolCallAssembled> ToolCallAssembler::take_ordered() && {
@@ -120,17 +133,13 @@ std::vector<ToolCallAssembled> ToolCallAssembler::take_ordered() && {
         if (!entry.second.finished || has_error()) {
             continue;
         }
-        nlohmann::json arguments = nlohmann::json::object();
-        if (!entry.second.arguments.empty() && !is_blank(entry.second.arguments)) {
-            nlohmann::json parsed =
-                nlohmann::json::parse(entry.second.arguments, nullptr, false);
-            if (parsed.is_object()) {
-                arguments = std::move(parsed);
-            }
+        std::optional<nlohmann::json> arguments = parse_arguments(entry.second.arguments);
+        if (!arguments.has_value()) {
+            continue;
         }
         assembled.push_back(ToolCallAssembled{entry.second.id,
                                               entry.second.name,
-                                              std::move(arguments)});
+                                              std::move(*arguments)});
     }
     return assembled;
 }
