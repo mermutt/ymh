@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "ymh/llm/llm_provider.hpp"
+#include "ymh/llm/model_profile.hpp"
 
 namespace ymh {
 
@@ -38,6 +39,7 @@ struct LLMProviderConfig {
     RetryPolicy  retry;
     std::size_t  max_arguments_bytes = 1u << 20;  // tool-arg assembly cap (08 §4.2)
     std::size_t  sse_line_bytes = 1u << 20;       // max single SSE data line (L-F16)
+    ModelProfile profile;                         // 47-D1/D9 (inert by default)
 };
 
 using ProviderFactory =
@@ -73,5 +75,11 @@ void register_builtin_providers(ProviderRegistry& registry);
 // the v1 DeepSeek target (tools + reasoning + streamed usage); a different
 // endpoint can be constructed with explicit capabilities.
 [[nodiscard]] ProviderCapabilities openai_compatible_capabilities();
+
+// 47-D9: overlay the profile's declared capability flags onto `capabilities`.
+// `nullopt` keeps the base value; `true`/`false` overrides it. Total and
+// additive: an inert profile leaves `capabilities` untouched.
+void apply_profile_capabilities(ProviderCapabilities& capabilities,
+                                const ModelProfile& profile) noexcept;
 
 } // namespace ymh

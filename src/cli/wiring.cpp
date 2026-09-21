@@ -73,6 +73,10 @@ LLMProviderConfig to_provider_config(const Config& config) {
     provider.retry.max_delay         = config.llm.retry.max_delay;
     provider.retry.jitter            = config.llm.retry.jitter;
     provider.retry.honor_retry_after = config.llm.retry.honor_retry_after;
+    if (const ModelProfile* profile = find_model_profile(config.llm.profile);
+        profile != nullptr) {
+        provider.profile = *profile;
+    }
     return provider;
 }
 
@@ -201,6 +205,12 @@ AgentConfig to_agent_config(const Config& config) {
         config.agent.system_prompt.empty() ? default_system_prompt() : config.agent.system_prompt;
     agent.plan_section =
         config.agent.plan_section.empty() ? default_plan_section() : config.agent.plan_section;
+
+    const ModelProfile* profile = find_model_profile(config.llm.profile);
+    if (profile != nullptr) {
+        agent.profile = *profile;
+    }
+
     if (config.agent.reasoning_effort.has_value()) {
         agent.parameters.reasoning_effort = config.agent.reasoning_effort;
     } else if (config.llm.reasoning_effort.has_value()) {
@@ -208,6 +218,30 @@ AgentConfig to_agent_config(const Config& config) {
     }
     if (config.llm.max_tokens.has_value()) {
         agent.parameters.max_output_tokens = config.llm.max_tokens;
+    }
+    if (config.llm.temperature.has_value()) {
+        agent.parameters.temperature = config.llm.temperature;
+    } else if (profile != nullptr) {
+        agent.parameters.temperature = profile->temperature;
+    }
+    if (config.llm.top_p.has_value()) {
+        agent.parameters.top_p = config.llm.top_p;
+    } else if (profile != nullptr) {
+        agent.parameters.top_p = profile->top_p;
+    }
+    if (config.llm.top_k.has_value()) {
+        agent.parameters.top_k = config.llm.top_k;
+    } else if (profile != nullptr) {
+        agent.parameters.top_k = profile->top_k;
+    }
+    if (config.llm.tool_choice.has_value()) {
+        agent.parameters.tool_choice = config.llm.tool_choice;
+    }
+    if (!config.llm.stop.empty()) {
+        agent.parameters.stop = config.llm.stop;
+    }
+    if (config.llm.seed.has_value()) {
+        agent.parameters.seed = config.llm.seed;
     }
     return agent;
 }

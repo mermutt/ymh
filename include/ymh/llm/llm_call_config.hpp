@@ -40,6 +40,7 @@ struct LlmCallConfig {
     // wire (src/llm/openai_adapter.cpp:736-752), so they are logged and covered
     // by canonical_json() (26 §4.3.1 :188-194).
     std::optional<double>        top_p;
+    std::optional<std::uint32_t> top_k;
     std::optional<std::uint32_t> seed;
     std::optional<std::string>   tool_choice;
 };
@@ -97,6 +98,9 @@ inline void to_json(nlohmann::json& json, const LlmCallConfig& config) {
     if (config.top_p.has_value()) {
         json["top_p"] = *config.top_p;
     }
+    if (config.top_k.has_value()) {
+        json["top_k"] = *config.top_k;
+    }
     if (config.seed.has_value()) {
         json["seed"] = *config.seed;
     }
@@ -123,6 +127,9 @@ inline void from_json(const nlohmann::json& json, LlmCallConfig& config) {
     }
     if (json.contains("top_p")) {
         config.top_p = json.at("top_p").get<double>();
+    }
+    if (json.contains("top_k")) {
+        config.top_k = json.at("top_k").get<std::uint32_t>();
     }
     if (json.contains("seed")) {
         config.seed = json.at("seed").get<std::uint32_t>();

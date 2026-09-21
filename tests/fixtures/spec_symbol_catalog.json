@@ -1753,6 +1753,90 @@
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
       "section": "7.4"
+    },
+    {
+      "symbol": "config::llm.profile",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "4.2"
+    },
+    {
+      "symbol": "config::llm.default.profile",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "4.2"
+    },
+    {
+      "symbol": "config::llm.temperature",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.default.temperature",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.top_p",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.default.top_p",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.top_k",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.default.top_k",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.tool_choice",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.default.tool_choice",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.stop",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.default.stop",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.seed",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
+    },
+    {
+      "symbol": "config::llm.default.seed",
+      "category": "config_key",
+      "spec": "47-muse-glimmer-support.md",
+      "section": "10.2"
     }
   ]
 }

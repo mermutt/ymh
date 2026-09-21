@@ -128,8 +128,8 @@ bool call_config_equals(const LlmCallConfig& left, const LlmCallConfig& right) n
     return left.provider == right.provider && left.model == right.model &&
            left.reasoning_effort == right.reasoning_effort &&
            left.temperature == right.temperature && left.max_tokens == right.max_tokens &&
-           left.stop == right.stop && left.top_p == right.top_p && left.seed == right.seed &&
-           left.tool_choice == right.tool_choice;
+           left.stop == right.stop && left.top_p == right.top_p && left.top_k == right.top_k &&
+           left.seed == right.seed && left.tool_choice == right.tool_choice;
 }
 
 nlohmann::json canonical_tool_schema(const ToolSchema& schema) {

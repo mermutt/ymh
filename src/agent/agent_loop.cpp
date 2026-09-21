@@ -539,6 +539,7 @@ FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
     config.max_tokens       = config_.parameters.max_output_tokens;
     config.stop             = config_.parameters.stop;
     config.top_p            = config_.parameters.top_p;
+    config.top_k            = config_.parameters.top_k;
     config.seed             = config_.parameters.seed;
     config.tool_choice      = config_.parameters.tool_choice;
 
