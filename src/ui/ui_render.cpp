@@ -581,6 +581,12 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
         }
         left_cells.push_back(std::move(element));
     };
+    if (model.has_active_turn()) {
+        left_cells.push_back(ftxui::text(
+            std::string(kReasoningSpinnerFrames[model.spinner.frame %
+                                                kReasoningSpinnerFrames.size()]) +
+            " "));
+    }
     append_segment(status.plan_active ? paint(ftxui::text(mode), ftxui::Color::Yellow, theme)
                                       : ftxui::text(mode));
     if (include_state) {
@@ -660,7 +666,8 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
     }
     rows.push_back(ftxui::text("↑/↓ select · Enter confirm · Esc cancel") | ftxui::dim);
     (void)theme;
-    return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) | ftxui::center;
+    return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) |
+           ftxui::clear_under | ftxui::center;
 }
 
 Element render_exit_confirm(const UiModel& model, const Theme& theme) {
@@ -699,7 +706,8 @@ Element render_exit_confirm(const UiModel& model, const Theme& theme) {
                                "Esc cancel") |
                    ftxui::dim);
     (void)theme;
-    return ftxui::window(ftxui::text("Exiting"), ftxui::vbox(std::move(rows))) | ftxui::center;
+    return ftxui::window(ftxui::text("Exiting"), ftxui::vbox(std::move(rows))) |
+           ftxui::clear_under | ftxui::center;
 }
 
 std::string relative_age_label(std::int64_t delta_ms) {
@@ -844,7 +852,17 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
     }
     return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"),
                          ftxui::vbox(std::move(rows))) |
-           ftxui::center;
+           ftxui::clear_under | ftxui::center;
+}
+
+Element render_notice(const UiModel& model, const Theme& theme) {
+    Elements rows;
+    rows.push_back(ftxui::text(model.message.text));
+    rows.push_back(ftxui::separator());
+    rows.push_back(ftxui::text("[ OK ]") | ftxui::inverted);
+    (void)theme;
+    return ftxui::window(ftxui::text("workspaces"), ftxui::vbox(std::move(rows))) |
+           ftxui::clear_under | ftxui::center;
 }
 
 Element render_header(const UiModel& model, const Theme& theme) {
@@ -1210,6 +1228,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     }
     if (model.mode == UiMode::Context && model.context.open) {
         return ftxui::dbox({main, render_context_overlay(model, size, theme)});
+    }
+    if (model.mode == UiMode::Notice && model.message.open) {
+        return ftxui::dbox({main, render_notice(model, theme)});
     }
     if (model.mode == UiMode::Switcher) {
         return ftxui::dbox({main, render_switcher(model, theme)});

@@ -12,6 +12,7 @@
 
 #include <ctime>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -59,5 +60,11 @@ bool write_export_file(const std::filesystem::path& path, std::string_view markd
 // argument, inheriting the caller's stdio, then waits for it. Returns the
 // child's exit status, or -1 when it could not be launched.
 int run_editor(const std::filesystem::path& file, const std::string& editor);
+
+// 46-D13: writes `initial` to a 0600 scratch file, hands the terminal to the
+// editor, reads it back, and unlinks the file. Returns std::nullopt on
+// launch/exit failure (the draft is left unchanged) with `error` set.
+[[nodiscard]] std::optional<std::string> edit_text_in_editor(const std::string& initial,
+                                                             std::string& error);
 
 } // namespace ymh::ui

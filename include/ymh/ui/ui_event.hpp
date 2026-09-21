@@ -48,6 +48,8 @@ enum class UiMode : std::uint8_t {
     Dialog,
     ExitConfirm,
     Context,
+    // 46-D3: the single-OK notice popup (the empty Live switcher's replacement).
+    Notice,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {

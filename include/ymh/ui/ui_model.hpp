@@ -414,6 +414,12 @@ public:
     void armOnEdge(AgentState oldState, AgentState newState);
 };
 
+// 46-D3: the single-OK notice popup shown instead of an empty Live switcher.
+struct MessageDialogModel {
+    bool        open = false;
+    std::string text;
+};
+
 struct PermissionDialogModel {
     bool                open = false;
     SessionId           session;
@@ -484,6 +490,7 @@ struct UiModel {
     AggregateStatusModel                  aggregate;
     SwitcherOverlayModel                  switcher;
     PermissionDialogModel                 dialog;
+    MessageDialogModel                    message;
     ExitConfirmState                      exitConfirm;
     ContextOverlayModel                   context;
     SessionCatalogModel                   catalog;
@@ -551,6 +558,14 @@ struct UiModel {
     // iff the frame changed. With no streaming reasoning the clock is reset and
     // the frame is left untouched, so an idle TUI never animates.
     bool advance_reasoning_spinner(std::chrono::milliseconds delta);
+
+    // 46-D9: the ACTIVE session's turn is running (Thinking || CallingTool).
+    [[nodiscard]] bool has_active_turn() const;
+    // 46-D9: the ACTIVE session has a streaming reasoning block.
+    [[nodiscard]] bool active_has_streaming_reasoning() const;
+    // 46-D9: advances the shared frame clock while a turn is active OR the active
+    // session streams reasoning; returns true when the frame changed.
+    bool advance_spinner(std::chrono::milliseconds delta);
 
     // 25-D6: injects the TPS clock; defaults to `std::chrono::steady_clock::now`.
     void set_now_reader(ClockReader reader);

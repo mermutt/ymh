@@ -341,4 +341,69 @@ int run_editor(const std::filesystem::path& file, const std::string& editor) {
     return -1;
 }
 
+std::optional<std::string> edit_text_in_editor(const std::string& initial, std::string& error) {
+    error.clear();
+    namespace fs = std::filesystem;
+
+    std::error_code     code;
+    const fs::path      directory = fs::temp_directory_path(code);
+    if (code) {
+        error = "cannot locate the temp directory";
+        return std::nullopt;
+    }
+
+    std::string       pattern = (directory / "ymh-edit-XXXXXX").string();
+    std::vector<char> buffer(pattern.begin(), pattern.end());
+    buffer.push_back('\0');
+    const int descriptor = ::mkstemp(buffer.data());
+    if (descriptor < 0) {
+        error = "cannot create the editor scratch file";
+        return std::nullopt;
+    }
+    const fs::path scratch{buffer.data()};
+
+    struct UnlinkGuard {
+        fs::path path;
+        ~UnlinkGuard() {
+            std::error_code remove_error;
+            fs::remove(path, remove_error);
+        }
+    } guard{scratch};
+
+    const char*  data = initial.data();
+    std::size_t  remaining = initial.size();
+    while (remaining > 0) {
+        const ssize_t written = ::write(descriptor, data, remaining);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ::close(descriptor);
+            error = "cannot write the editor scratch file";
+            return std::nullopt;
+        }
+        data += written;
+        remaining -= static_cast<std::size_t>(written);
+    }
+    if (::close(descriptor) != 0) {
+        error = "cannot close the editor scratch file";
+        return std::nullopt;
+    }
+
+    const int status = run_editor(scratch, editor_from_environment());
+    if (status != 0) {
+        error = "editor exited with status " + std::to_string(status);
+        return std::nullopt;
+    }
+
+    std::ifstream input(scratch, std::ios::binary);
+    if (!input) {
+        error = "cannot read the editor scratch file";
+        return std::nullopt;
+    }
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+}
+
 } // namespace ymh::ui
