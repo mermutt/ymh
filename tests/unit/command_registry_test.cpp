@@ -2,6 +2,8 @@
 
 #include <optional>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "ymh/ui/command_registry.hpp"
@@ -36,10 +38,22 @@ TEST(CommandRegistryTest, QuitIsAnAliasOfExit) {
     EXPECT_TRUE(exited);
 }
 
-TEST(CommandRegistryTest, AliasesAreNotCompleted) {
+// 46-D5 (46-I10): completion matches canonical names and aliases, reporting the
+// matched spelling. Rewritten from `AliasesAreNotCompleted` (46-D5/46-S1).
+TEST(CommandRegistryTest, UI46_D5_CompleteMatchesAliases) {
     const CommandRegistry registry = CommandRegistry::builtin();
-    EXPECT_TRUE(registry.complete("qu").empty());
-    EXPECT_EQ(registry.complete("exit").size(), 1u);
+    const std::vector<CompletionCandidate> qu = registry.complete_candidates("qu");
+    ASSERT_EQ(qu.size(), 1u);
+    ASSERT_NE(qu.front().command, nullptr);
+    EXPECT_EQ(qu.front().command->name, "exit");
+    EXPECT_EQ(qu.front().spelling, "quit");
+    EXPECT_EQ(registry.find("quit"), qu.front().command);
+
+    const std::vector<CompletionCandidate> exi = registry.complete_candidates("exi");
+    ASSERT_EQ(exi.size(), 1u);
+    EXPECT_EQ(exi.front().command->name, "exit");
+    EXPECT_EQ(exi.front().spelling, "exit");
+    EXPECT_EQ(registry.complete_candidates("exit").size(), 1u);
 }
 
 TEST(CommandRegistryTest, HelpRendersAlias) {
@@ -63,9 +77,9 @@ TEST(CommandRegistryTest, SkillCommandRemovedAndSkillsDescriptionPinned) {
     const Command* skills = registry.find("skills");
     ASSERT_NE(skills, nullptr);
     EXPECT_EQ(skills->description, "list available skills");
-    const std::vector<const Command*> matches = registry.complete("sk");
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("sk");
     ASSERT_EQ(matches.size(), 1u);
-    EXPECT_EQ(matches.front()->name, "skills");
+    EXPECT_EQ(matches.front().command->name, "skills");
 }
 
 TEST(CommandRegistryTest, PlanCommandSelectsMode) {
@@ -125,17 +139,80 @@ TEST(CommandRegistryTest, UI45_D8_QuitNotSeparateRow) {
         EXPECT_NE(command.name, "quit");
     }
     EXPECT_EQ(registry.find("quit"), registry.find("exit"));
-    EXPECT_TRUE(registry.complete("qu").empty());
+    EXPECT_EQ(registry.complete_candidates("qu").size(), 1u);
 }
 
-// 45-D8.5: completion matches the canonical name, never the displayed alias.
+// 46-D5: a canonical prefix completes to the canonical spelling, while the
+// displayed label still folds the alias (45-D8 retained). Rewritten from the
+// canonical-only contract (46-D5/46-S1).
 TEST(CommandRegistryTest, UI45_D8_TabCompletesCanonicalName) {
     const CommandRegistry registry = CommandRegistry::builtin();
-    const std::vector<const Command*> matches = registry.complete("exi");
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("exi");
     ASSERT_EQ(matches.size(), 1u);
-    EXPECT_EQ(matches.front()->name, "exit");
-    EXPECT_EQ(command_display_name(*matches.front()), "exit(quit)");
-    EXPECT_TRUE(registry.complete("quit").empty());
+    ASSERT_NE(matches.front().command, nullptr);
+    EXPECT_EQ(matches.front().command->name, "exit");
+    EXPECT_EQ(matches.front().spelling, "exit");
+    EXPECT_EQ(command_display_name(*matches.front().command), "exit(quit)");
+    EXPECT_EQ(registry.complete_candidates("quit").size(), 1u);
+}
+
+// 46-D5 (46-I10): a command matched by both its name and an alias yields exactly
+// one candidate.
+TEST(CommandRegistryTest, UI46_D5_CompleteDedupesByCommand) {
+    CommandRegistry registry;
+    registry.add(Command{"foo", "foo desc", {}, {"foobar"}});
+    registry.add(Command{"fizz", "fizz desc", {}, {"fizzy"}});
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("foo");
+    ASSERT_EQ(matches.size(), 1u);
+    ASSERT_NE(matches.front().command, nullptr);
+    EXPECT_EQ(matches.front().command->name, "foo");
+}
+
+// 46-D5 (46-I10): when a command's name and an alias both match, the reported
+// spelling is the canonical name.
+TEST(CommandRegistryTest, UI46_D5_CompleteCanonicalPreferred) {
+    CommandRegistry registry;
+    registry.add(Command{"build", "build desc", {}, {"builder"}});
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("build");
+    ASSERT_EQ(matches.size(), 1u);
+    EXPECT_EQ(matches.front().spelling, "build");
+}
+
+// 46-D5 (46-I10): candidates preserve registration order, not alphabetical.
+TEST(CommandRegistryTest, UI46_D5_CompleteOrderRegistration) {
+    CommandRegistry registry;
+    registry.add(Command{"charlie", "c", {}, {}});
+    registry.add(Command{"alpha", "a", {}, {}});
+    registry.add(Command{"bravo", "b", {}, {}});
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("");
+    ASSERT_EQ(matches.size(), 3u);
+    EXPECT_EQ(matches[0].command->name, "charlie");
+    EXPECT_EQ(matches[1].command->name, "alpha");
+    EXPECT_EQ(matches[2].command->name, "bravo");
+}
+
+// 46-D6 (46-I32): `/q` completes to the `quit` alias spelling of `exit`.
+TEST(CommandRegistryTest, UI46_D6_QCompletesToQuit) {
+    const CommandRegistry registry = CommandRegistry::builtin();
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("q");
+    ASSERT_EQ(matches.size(), 1u);
+    ASSERT_NE(matches.front().command, nullptr);
+    EXPECT_EQ(matches.front().command->name, "exit");
+    EXPECT_EQ(matches.front().spelling, "quit");
+}
+
+// 46-D6 (46-I10, compile-level): `CommandRegistry::complete` is retired.
+template <typename T, typename = void>
+struct HasCompleteMember : std::false_type {};
+template <typename T>
+struct HasCompleteMember<
+    T, std::void_t<decltype(std::declval<const T&>().complete(std::declval<std::string>()))>>
+    : std::true_type {};
+
+TEST(CommandRegistryTest, UI46_D6_CompleteRetired) {
+    static_assert(!HasCompleteMember<CommandRegistry>::value,
+                  "CommandRegistry::complete must be retired (46-D6)");
+    SUCCEED();
 }
 
 // 45-D8.4 (45-S3): `/help` renders the display name with the " - " separator,

@@ -210,9 +210,10 @@ TEST(SessionExport, RegistryDispatchesExport) {
     EXPECT_EQ(command->description,
               "write the session transcript to a markdown file (--edit to open it)");
 
-    const std::vector<const Command*> matches = registry.complete("exp");
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("exp");
     ASSERT_EQ(matches.size(), 1u);
-    EXPECT_EQ(matches.front()->name, "export");
+    ASSERT_NE(matches.front().command, nullptr);
+    EXPECT_EQ(matches.front().command->name, "export");
 
     UiModel        model;
     CommandContext context{model};

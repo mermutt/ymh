@@ -771,8 +771,8 @@ TEST(SupervisorHarnessTest, UI45_D2_TabAfterEscRecomputes) {
     EXPECT_TRUE(fixture.state()->command_hints.empty());
 }
 
-// 45-D2.5 (45-D8): both pinned CommandHint sites pass `{name, display,
-// description}`; completion uses `name`, rendering uses `display`.
+// 45-D2.5 (45-D8)/46-D5.3: both pinned CommandHint sites pass `{name, display,
+// insert, description}`; completion uses `insert`, rendering uses `display`.
 TEST(SupervisorHarnessTest, UI45_D2_BothCommandHintSitesPinned) {
     ComposerFixture fixture("ymh45d2sites");
     fixture.type("/exi");
@@ -782,10 +782,160 @@ TEST(SupervisorHarnessTest, UI45_D2_BothCommandHintSitesPinned) {
     const CommandHint& hint = state->command_hints.front();
     EXPECT_EQ(hint.name, "exit");
     EXPECT_EQ(hint.display, "exit(quit)");
+    EXPECT_EQ(hint.insert, "exit");
     EXPECT_EQ(hint.description, "quit the supervisor");
 
     ASSERT_TRUE(fixture.harness->dispatch_key("tab"));
     EXPECT_EQ(fixture.state()->input.draft, "/exit ");
+}
+
+// 46-D5 (46-I12): typing `/quit` yields the same hint row as `/exit`.
+TEST(SupervisorHarnessTest, UI46_D5_QuitShowsExitRow) {
+    ComposerFixture exit_fixture("ymh46d5exit");
+    exit_fixture.type("/exit");
+    const SessionUiState* exit_state = exit_fixture.state();
+    ASSERT_NE(exit_state, nullptr);
+    ASSERT_EQ(exit_state->command_hints.size(), 1u);
+    const CommandHint exit_row = exit_state->command_hints.front();
+
+    ComposerFixture quit_fixture("ymh46d5quit");
+    quit_fixture.type("/quit");
+    const SessionUiState* quit_state = quit_fixture.state();
+    ASSERT_NE(quit_state, nullptr);
+    ASSERT_EQ(quit_state->command_hints.size(), 1u);
+    const CommandHint& quit_row = quit_state->command_hints.front();
+
+    EXPECT_EQ(quit_row.name, "exit");
+    EXPECT_EQ(quit_row.display, "exit(quit)");
+    EXPECT_EQ(quit_row.insert, "quit");
+    EXPECT_EQ(quit_row.description, "quit the supervisor");
+    EXPECT_EQ(quit_row.name, exit_row.name);
+    EXPECT_EQ(quit_row.display, exit_row.display);
+    EXPECT_EQ(quit_row.description, exit_row.description);
+}
+
+// 46-D6 (46-I32): `/q` + Enter completes in place to `/quit ` and must NEVER
+// quit; a second Enter executes it.
+TEST(SupervisorHarnessTest, UI46_D6_QEnterCompletesOnly) {
+    ComposerFixture fixture("ymh46d6qenter");
+    fixture.type("/q");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(state->input.draft, "/quit ");
+    EXPECT_EQ(state->input.cursor, state->input.draft.size());
+    EXPECT_FALSE(fixture.harness->quit_requested()) << "/q + Enter must not quit";
+    const bool unknown =
+        std::any_of(state->conversation.entries.begin(), state->conversation.entries.end(),
+                    [](const ConversationEntry& entry) {
+                        return entry.text.find("unknown command") != std::string::npos;
+                    });
+    EXPECT_FALSE(unknown) << "completion must not dispatch the raw /q";
+}
+
+// 46-D6 (46-I32): the second Enter on the completed `/quit ` executes it.
+TEST(SupervisorHarnessTest, UI46_D6_QTwoEnterExecutes) {
+    ComposerFixture fixture("ymh46d6qtwo");
+    fixture.type("/q");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    ASSERT_EQ(fixture.state()->input.draft, "/quit ");
+    ASSERT_FALSE(fixture.harness->quit_requested());
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    EXPECT_TRUE(fixture.harness->quit_requested());
+}
+
+// 46-D6 (46-I11): Tab inserts the matched alias spelling, not the canonical one.
+TEST(SupervisorHarnessTest, UI46_D6_QTabInsertsSpelling) {
+    ComposerFixture fixture("ymh46d6qtab");
+    fixture.type("/q");
+    const SessionUiState* before = fixture.state();
+    ASSERT_NE(before, nullptr);
+    ASSERT_EQ(before->command_hints.size(), 1u);
+    EXPECT_EQ(before->command_hints.front().insert, "quit");
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("tab"));
+    EXPECT_EQ(fixture.state()->input.draft, "/quit ");
+    EXPECT_FALSE(fixture.harness->quit_requested());
+}
+
+// 46-D6 (46-I32): an exact command dispatches on the first Enter.
+TEST(SupervisorHarnessTest, UI46_D6_ExactCommandDispatchesOnFirstEnter) {
+    ComposerFixture fixture("ymh46d6exact");
+    fixture.type("/help");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    EXPECT_TRUE(state->input.draft.empty());
+    const bool help_ran =
+        std::any_of(state->conversation.entries.begin(), state->conversation.entries.end(),
+                    [](const ConversationEntry& entry) { return entry.text == "commands:"; });
+    EXPECT_TRUE(help_ran) << "an exact command must dispatch on the first Enter";
+}
+
+// 46-D6 (46-I32, G2-L18): an exact alias (`/quit`) dispatches on the first
+// Enter, unlike the partial `/q`.
+TEST(SupervisorHarnessTest, UI46_D6_QuitExactOneEnter) {
+    ComposerFixture fixture("ymh46d6quitone");
+    fixture.type("/quit");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    EXPECT_TRUE(fixture.harness->quit_requested());
+}
+
+// 46-D6 (46-I32, G2-M18): a multi-match prefix completes to the arrow-highlighted
+// candidate, not the first unconditionally.
+TEST(SupervisorHarnessTest, UI46_D6_MultiCandidateEnterUsesHighlight) {
+    ComposerFixture fixture("ymh46d6multi");
+    fixture.type("/s");
+    const SessionUiState* before = fixture.state();
+    ASSERT_NE(before, nullptr);
+    ASSERT_GE(before->command_hints.size(), 2u);
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("down"));
+    const std::size_t selected = fixture.state()->command_hint_selected;
+    ASSERT_GE(selected, 1u);
+    const std::string expected = "/" + fixture.state()->command_hints[selected].insert + " ";
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    EXPECT_EQ(fixture.state()->input.draft, expected);
+}
+
+// 46-D6 (46-F25): a command-shaped draft with no candidates falls through to the
+// existing `unknown command` notice.
+TEST(SupervisorHarnessTest, UI46_D6_UnknownPartialFallsThrough) {
+    ComposerFixture fixture("ymh46d6unknown");
+    fixture.type("/zz");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    EXPECT_TRUE(state->input.draft.empty());
+    const bool unknown =
+        std::any_of(state->conversation.entries.begin(), state->conversation.entries.end(),
+                    [](const ConversationEntry& entry) {
+                        return entry.text.find("unknown command: /zz") != std::string::npos;
+                    });
+    EXPECT_TRUE(unknown);
+}
+
+// 46-D10 (46-I20, 46-F14): after Esc dismisses the list, continuing to type a
+// command prefix rebuilds it.
+TEST(SupervisorHarnessTest, UI46_D10_SlashEscThenTypeRebuildsList) {
+    ComposerFixture fixture("ymh46d10esc");
+    fixture.type("/");
+    ASSERT_FALSE(fixture.state()->command_hints.empty());
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    ASSERT_TRUE(fixture.state()->command_hints.empty());
+    ASSERT_TRUE(fixture.state()->hints_dismissed);
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("h"));
+    const SessionUiState* state = fixture.state();
+    ASSERT_NE(state, nullptr);
+    EXPECT_FALSE(state->hints_dismissed);
+    ASSERT_FALSE(state->command_hints.empty());
+    EXPECT_EQ(state->command_hints.front().name, "help");
 }
 
 // 45-D5.1 (45-I8): Esc hides a visible list without touching the draft.
@@ -1032,39 +1182,33 @@ TEST(SupervisorHarnessTest, UI45_D9_MethodNotFoundDegradation) {
     EXPECT_TRUE(fixture.state()->status.agent.empty());
 }
 
-// UX-U15 (25-D9/UX25): Enter accepts the highlighted candidate and dispatches
-// it (not the raw draft). `/he` + Enter runs `/help`.
-TEST(SupervisorHarnessTest, UX_U15_EnterAcceptsHighlightAndDispatches) {
-    ShortTempRoot root("ymh_ux_u15");
-    std::unique_ptr<WorkspaceRegistry> registry =
-        WorkspaceRegistry::open(harness_registry_config(root.path()));
-
-    SupervisorRunOptions options;
-    options.registry = registry.get();
-    options.identity  = harness_identity();
-
-    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-    const WorkspaceId workspace{"ws-palette"};
-    const SessionId   session{"session-palette"};
-    harness->seed_workspace(workspace_model(workspace));
-    harness->apply_resume_success(workspace, session);
-
-    for (const char c : std::string("/he")) {
-        ASSERT_TRUE(harness->dispatch_key(std::string(1, c)));
-    }
-    const SessionUiState* before = harness->model().session(session);
+// 46-D6 (46-I11): `/he` + Enter completes in place to the canonical `/help `
+// and does NOT dispatch; the second Enter runs `/help`. Rewritten from the
+// superseded `UX_U15_EnterAcceptsHighlightAndDispatches` (46-S12).
+TEST(SupervisorHarnessTest, UI46_D6_CanonicalPrefixInsertsCanonical) {
+    ComposerFixture fixture("ymh46d6canon");
+    fixture.type("/he");
+    const SessionUiState* before = fixture.state();
     ASSERT_NE(before, nullptr);
     ASSERT_FALSE(before->command_hints.empty());
     EXPECT_EQ(before->command_hints[0].name, "help");
+    EXPECT_EQ(before->command_hints[0].insert, "help");
 
-    ASSERT_TRUE(harness->dispatch_key("enter"));
-    const SessionUiState* after = harness->model().session(session);
-    ASSERT_NE(after, nullptr);
-    EXPECT_TRUE(after->input.draft.empty());
-    const bool help_ran =
-        std::any_of(after->conversation.entries.begin(), after->conversation.entries.end(),
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    EXPECT_EQ(fixture.state()->input.draft, "/help ");
+    const bool help_ran_early =
+        std::any_of(fixture.state()->conversation.entries.begin(),
+                    fixture.state()->conversation.entries.end(),
                     [](const ConversationEntry& entry) { return entry.text == "commands:"; });
-    EXPECT_TRUE(help_ran) << "Enter did not dispatch the highlighted /help";
+    EXPECT_FALSE(help_ran_early) << "the first Enter must not dispatch /help";
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+    EXPECT_TRUE(fixture.state()->input.draft.empty());
+    const bool help_ran =
+        std::any_of(fixture.state()->conversation.entries.begin(),
+                    fixture.state()->conversation.entries.end(),
+                    [](const ConversationEntry& entry) { return entry.text == "commands:"; });
+    EXPECT_TRUE(help_ran) << "the second Enter did not run /help";
 }
 
 // ── 45-D3/D4/D10: the switcher subset, focus exclusion, and the lockout ──────
