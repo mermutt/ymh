@@ -219,28 +219,47 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
                         std::string{"invalid regex: "} + error.what()};
     }
 
+    // Bound the scan by BYTES, not lines: a binary file has few newlines but
+    // many megabytes, and a line bound does not bound the regex work.
+    constexpr std::uintmax_t kMaxFileBytes     = 8u * 1024u * 1024u;
+    constexpr std::uintmax_t kMaxTotalBytes    = 64u * 1024u * 1024u;
+    constexpr std::size_t    kBinarySniffBytes = 8u * 1024u;
+
     std::vector<std::filesystem::path> files;
-    std::error_code ec;
-    if (std::filesystem::is_regular_file(query.base, ec)) {
-        files.push_back(query.base);
-    } else {
-        std::filesystem::recursive_directory_iterator it(
-            query.base, std::filesystem::directory_options::skip_permission_denied, ec);
-        const std::filesystem::recursive_directory_iterator end;
-        for (; it != end; it.increment(ec)) {
-            if (ec) {
-                break;
-            }
-            if (it->is_regular_file(ec)) {
-                files.push_back(it->path());
+    {
+        std::error_code probe_ec;
+        const bool single = std::filesystem::is_regular_file(query.base, probe_ec) && !probe_ec;
+        if (single) {
+            files.push_back(query.base);
+        } else {
+            std::error_code walk_ec;
+            std::filesystem::recursive_directory_iterator it(
+                query.base, std::filesystem::directory_options::skip_permission_denied,
+                walk_ec);
+            const std::filesystem::recursive_directory_iterator end;
+            while (it != end) {
+                std::error_code entry_ec;
+                if (it->is_regular_file(entry_ec) && !entry_ec) {
+                    std::error_code size_ec;
+                    const std::uintmax_t size = std::filesystem::file_size(it->path(), size_ec);
+                    if (!size_ec && size <= kMaxFileBytes) {
+                        files.push_back(it->path());
+                    }
+                }
+                std::error_code advance_ec;
+                it.increment(advance_ec);
+                if (advance_ec) {
+                    break;
+                }
             }
         }
     }
     std::sort(files.begin(), files.end());
 
     std::vector<GrepMatch> matches;
+    std::uintmax_t         scanned_bytes = 0;
     for (const auto& file : files) {
-        if (matches.size() >= query.max_results) {
+        if (matches.size() >= query.max_results || scanned_bytes >= kMaxTotalBytes) {
             break;
         }
         if (!query.glob.empty() && !glob_match(query.glob, file.filename().string())) {
@@ -250,11 +269,21 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
         if (!in) {
             continue;
         }
+        char                sniff[kBinarySniffBytes];
+        in.read(sniff, static_cast<std::streamsize>(sizeof(sniff)));
+        const std::streamsize sniffed = in.gcount();
+        if (sniffed > 0 &&
+            std::memchr(sniff, '\0', static_cast<std::size_t>(sniffed)) != nullptr) {
+            continue;
+        }
+        in.clear();
+        in.seekg(0);
         std::string line;
         std::size_t line_number = 0;
         while (std::getline(in, line)) {
             ++line_number;
-            if (line_number > 1'000'000) {
+            scanned_bytes += line.size() + 1;
+            if (line_number > 1'000'000 || scanned_bytes >= kMaxTotalBytes) {
                 break;
             }
             if (!line.empty() && line.back() == '\r') {

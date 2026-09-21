@@ -168,6 +168,21 @@ TEST(BuiltinTools, GrepInvalidRegexIsInvalidArguments) {
     EXPECT_EQ(*result.error, "InvalidArguments");
 }
 
+TEST(BuiltinTools, GrepSkipsLargeBinaryAndStaysBounded) {
+    ymh::test::ToolEnv env("tools_grep_binary");
+    env.workspace.write("hit.txt", "alpha\nYMH_LIVE_LLM\nomega\n");
+    std::string blob(4u * 1024u * 1024u, '\0');
+    blob += "YMH_LIVE_LLM\n";
+    env.workspace.write("blob.bin", blob);
+    ToolRegistry registry;
+    auto registrations = register_builtins(registry);
+
+    const ToolResult result = run(registry, env, "grep", {{"pattern", "YMH_LIVE_LLM"}});
+    EXPECT_EQ(result.outcome, payload::ToolOutcome::Ok);
+    EXPECT_NE(result.output.find("hit.txt"), std::string::npos);
+    EXPECT_EQ(result.output.find("blob.bin"), std::string::npos);
+}
+
 TEST(BuiltinTools, GlobMatchesPaths) {
     ymh::test::ToolEnv env("tools_glob");
     env.workspace.write("src/a.cpp", "a");
