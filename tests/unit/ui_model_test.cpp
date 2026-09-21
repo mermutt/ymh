@@ -1530,4 +1530,12 @@ TEST(UiModel, UI45_D7_ConnectivityTransitions) {
     EXPECT_EQ(model.session(kSession)->status.api_state, ApiConnectivity::Ok);
 }
 
+TEST(UiModel, UI46_D12_ApiKeyNeverRendered) {
+    UiModel model;
+    model.pushNotice(R"({"api_key": "SECRET123"})");
+    ASSERT_FALSE(model.notices.empty());
+    EXPECT_EQ(model.notices.back().text.find("SECRET123"), std::string::npos);
+    EXPECT_NE(model.notices.back().text.find("[REDACTED]"), std::string::npos);
+}
+
 } // namespace

@@ -5,6 +5,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "ymh/llm/redaction.hpp"
+
 namespace ymh::ui {
 namespace {
 
@@ -592,7 +594,7 @@ void UiModel::setMcpStatus(std::string detail) {
 }
 
 void UiModel::pushNotice(std::string text) {
-    notices.push_back(UiNotice{std::move(text), 0});
+    notices.push_back(UiNotice{redact_secrets(text), 0});
     while (notices.size() > kMaxNotices) {
         notices.pop_front();
     }

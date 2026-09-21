@@ -42,6 +42,7 @@
 #include "ymh/host/host_runtime.hpp"
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
+#include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/transport/host_connection.hpp"
 #include "ymh/transport/protocol_server.hpp"
@@ -350,6 +351,7 @@ private:
     asio::io_context                  io_;
     std::unique_ptr<AsioExecutor>     executor_;
 
+    std::unique_ptr<GrantStore>             grant_store_;
     std::unique_ptr<WorkspaceRuntime>       runtime_;
     std::unique_ptr<WorkspaceRegistry>      registry_;
     std::unique_ptr<TransportServerAdapter> permission_adapter_;
@@ -486,27 +488,6 @@ HostExitCode WorkspaceHost::Impl::startup() {
         std::filesystem::exists(canonical_root_ / ".ymh" / "sessions.db", error) && !error;
     error.clear();
 
-    WorkspaceRuntimeOptions runtime_options;
-    runtime_options.config                = config_.config;
-    runtime_options.root                  = canonical_root_;
-    runtime_options.boot_id               = to_boot_id(boot_id_);
-    runtime_options.attach_permission_gate = false;
-    runtime_options.attach_permission_resolver = true;
-    runtime_options.store_factory         = config_.store_factory;
-    runtime_options.provider_factory      = config_.provider_factory;
-    runtime_options.executor              = executor_.get();
-
-    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
-        WorkspaceRuntime::create(std::move(runtime_options));
-    if (!created.has_value()) {
-        return mapRuntimeError(created.error().code);
-    }
-    runtime_ = std::move(*created);
-
-    if (!runtime_->has_provider()) {
-        return HostExitCode::StartupRejected;
-    }
-
     try {
         registry_ = WorkspaceRegistry::open(config_.registry);
         registry_->resolvePendingMutations();
@@ -518,6 +499,40 @@ HostExitCode WorkspaceHost::Impl::startup() {
     if (!ensureWorkspaceRegistered()) {
         std::fprintf(stderr, "ymh --host: workspace registration failed\n");
         return HostExitCode::RegistryFailed;
+    }
+
+    // 46-D2.3 / NEW-4: resolve the workspace id before building the runtime;
+    // `ensureWorkspaceRegistered` may have matched by id without a row at this
+    // canonical path, so the optional must be guarded.
+    const std::optional<WorkspaceRecord> record =
+        registry_->findByCanonicalPath(canonical_root_);
+    if (!record.has_value()) {
+        std::fprintf(stderr, "ymh --host: workspace id is not registered at this path\n");
+        return HostExitCode::RegistryFailed;
+    }
+    grant_store_ = open_file_grant_store(canonical_root_ / ".ymh" / "permissions.jsonc",
+                                         record->id.value);
+
+    WorkspaceRuntimeOptions runtime_options;
+    runtime_options.config                = config_.config;
+    runtime_options.root                  = canonical_root_;
+    runtime_options.boot_id               = to_boot_id(boot_id_);
+    runtime_options.attach_permission_gate = false;
+    runtime_options.attach_permission_resolver = true;
+    runtime_options.store_factory         = config_.store_factory;
+    runtime_options.provider_factory      = config_.provider_factory;
+    runtime_options.executor              = executor_.get();
+    runtime_options.grant_store           = grant_store_.get();
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+        WorkspaceRuntime::create(std::move(runtime_options));
+    if (!created.has_value()) {
+        return mapRuntimeError(created.error().code);
+    }
+    runtime_ = std::move(*created);
+
+    if (!runtime_->has_provider()) {
+        return HostExitCode::StartupRejected;
     }
 
     permission_adapter_ = std::make_unique<TransportServerAdapter>();

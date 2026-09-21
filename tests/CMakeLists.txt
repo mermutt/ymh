@@ -29,6 +29,8 @@ add_executable(ymh_tests
     unit/git_tools_test.cpp
     unit/permissions_test.cpp
     unit/permission_broker_test.cpp
+    unit/errata46_permissions_test.cpp
+    unit/errata46_localcode_test.cpp
     unit/agent_loop_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp

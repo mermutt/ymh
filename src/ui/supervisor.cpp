@@ -27,6 +27,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/llm/redaction.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
 #include "ymh/transport/protocol.hpp"
@@ -944,6 +945,7 @@ private:
     void surface_notice(const WorkspaceId& workspace, const SessionId& session,
                         std::string text) {
         (void)workspace;
+        text = redact_secrets(text);
         if (model_.sessions.count(session) != 0) {
             model_.apply(UiEvent{ErrorOccurred{session, std::move(text)}});
             return;

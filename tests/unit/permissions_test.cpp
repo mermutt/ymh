@@ -145,7 +145,9 @@ TEST(Policy, InvalidRulesFailLoudAtLoad) {
     EXPECT_THROW(RulePermissionPolicy{malformed}, PolicyConfigError);
 }
 
-TEST(Policy, SessionGrantNarrowsToItsPath) {
+// 46-D2 / O-H1: a grant carries `tool` (+ `command`) only, never a path, so a
+// session grant on a path tool is tool-wide within the workspace.
+TEST(Policy, SessionGrantIsToolWide) {
     RulePermissionPolicy policy(PermissionConfig{});
     ymh::test::TempWorkspace workspace("policy_grant");
     const PermissionRequest grant_request =
@@ -158,11 +160,6 @@ TEST(Policy, SessionGrantNarrowsToItsPath) {
     EXPECT_EQ(policy.evaluate(grant_request), PolicyVerdict::Allow);
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file",
                                           workspace.path() / "docs" / "x")),
-              PolicyVerdict::Ask);
-    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file",
-                                          workspace.path() / "src" / "x",
-                                          SandboxMode::Workspace,
-                                          nlohmann::json::object())),
               PolicyVerdict::Allow);
 }
 

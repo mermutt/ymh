@@ -45,6 +45,18 @@ std::size_t count_type(const EventRange& events, EventType type) {
     return count;
 }
 
+class RecordingGrantStore final : public GrantStore {
+public:
+    std::vector<PolicyRule> appended;
+
+    std::vector<PolicyRule> load() override { return {}; }
+
+    bool append(const PolicyRule& grant) override {
+        appended.push_back(grant);
+        return true;
+    }
+};
+
 std::size_t terminal_count(const EventRange& events) {
     return count_type(events, EventType::TurnEnded) + count_type(events, EventType::TurnCancelled) +
            count_type(events, EventType::TurnFailed);
@@ -632,6 +644,33 @@ TEST(AgentLoop, AskPermissionIsResolvedThroughGate) {
     }
     EXPECT_TRUE(sawOk);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 1u);
+}
+
+TEST(AgentLoop, UI46_D2_AlwaysPersistsThroughLoop) {
+    RecordingGrantStore store;
+    PermissionConfig    permission;
+    permission.default_verdict = PolicyVerdict::Ask;
+
+    AgentEnv env("agent_always_loop",
+                 std::make_unique<FakeLLM>(
+                     script_of({tool_step("read_file", {{"path", "a.txt"}}), text_step("ok")})),
+                 AgentConfig{}, permission, {}, true, 4, nullptr, true, std::nullopt,
+                 std::chrono::system_clock::now, false, nullptr, nullptr, &store);
+    env.workspace.write("a.txt", "x");
+    ASSERT_NE(env.gate, nullptr);
+    env.gate->set_attention_hook([&env](const PermissionRequestId& id, const PermissionRequest&) {
+        env.gate->decide(id, payload::PermissionDecisionKind::AllowAlways, GrantScope::Always,
+                         "approved");
+    });
+
+    auto  agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    ASSERT_EQ(store.appended.size(), 1u);
+    EXPECT_EQ(store.appended[0].tool, "read_file");
+    EXPECT_EQ(store.appended[0].layer, PolicyRule::Layer::LocalGrant);
+    EXPECT_TRUE(store.appended[0].literal);
 }
 
 TEST(AgentLoop, DeniedToolYieldsDeniedResultAndContinues) {    PermissionConfig permission;

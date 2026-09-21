@@ -3,12 +3,16 @@
 #include <algorithm>
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "ymh/execution/glob.hpp"
 
 namespace ymh {
+
+void validate_glob(const std::string& pattern);
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -78,30 +82,15 @@ bool rule_greater(const PolicyRule& left, const PolicyRule& right) {
     return effect_rank(left.effect) > effect_rank(right.effect);
 }
 
-void validate_glob(const std::string& pattern) {
-    std::size_t open = 0;
-    for (char c : pattern) {
-        if (c == '[') {
-            ++open;
-        } else if (c == ']') {
-            if (open == 0) {
-                throw PolicyConfigError{"malformed glob: " + pattern};
-            }
-            --open;
-        }
-    }
-    if (open != 0) {
-        throw PolicyConfigError{"malformed glob: " + pattern};
-    }
-}
-
 void validate_rule(const PolicyRule& rule) {
     if (rule.tool.empty() && rule.path.empty() && rule.command.empty()) {
         throw PolicyConfigError{"rule has no match dimensions: " + rule.id};
     }
     validate_glob(rule.tool);
     validate_glob(rule.path);
-    validate_glob(rule.command);
+    if (!rule.literal) {
+        validate_glob(rule.command);
+    }
 }
 
 bool rule_sort_less(const PolicyRule& left, const PolicyRule& right) {
@@ -155,6 +144,48 @@ std::string command_pattern(const PermissionRequest& request) {
     return {};
 }
 
+bool rule_matches(const PolicyRule& rule, const PermissionRequest& request) {
+    if (!rule.tool.empty() && !glob_match(rule.tool, request.tool)) {
+        return false;
+    }
+    if (!rule.path.empty()) {
+        if (!request.path.has_value() ||
+            !path_glob_match(rule.path, path_pattern(request))) {
+            return false;
+        }
+    }
+    if (!rule.command.empty()) {
+        const std::string command = command_pattern(request);
+        if (rule.literal) {
+            if (command != rule.command) {
+                return false;
+            }
+        } else if (!glob_match(rule.command, command)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::uint64_t fnv1a64(std::string_view text) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char c : text) {
+        hash ^= static_cast<std::uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+std::string grant_id(const std::string& tool, const std::string& command) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    const std::uint64_t   hash   = fnv1a64(command);
+    std::string           id     = "grant:" + tool + ":";
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        id.push_back(kHex[(hash >> shift) & 0xFU]);
+    }
+    return id;
+}
+
 } // namespace
 
 bool tool_is_mutating(const PermissionRequest& request) noexcept {
@@ -172,8 +203,36 @@ bool tool_is_mutating(const PermissionRequest& request) noexcept {
     return false;
 }
 
-RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config)
-    : config_(std::move(config)), generation_{1} {
+void validate_glob(const std::string& pattern) {
+    std::size_t open = 0;
+    for (char c : pattern) {
+        if (c == '[') {
+            ++open;
+        } else if (c == ']') {
+            if (open == 0) {
+                throw PolicyConfigError{"malformed glob: " + pattern};
+            }
+            --open;
+        }
+    }
+    if (open != 0) {
+        throw PolicyConfigError{"malformed glob: " + pattern};
+    }
+}
+
+void validate_rule(std::string_view tool, std::string_view command) {
+    if (tool.empty() && command.empty()) {
+        throw PolicyConfigError{"rule has no match dimensions"};
+    }
+    if (!command.empty() && tool.empty()) {
+        throw PolicyConfigError{"rule with a command must also set tool"};
+    }
+    validate_glob(std::string{tool});
+    validate_glob(std::string{command});
+}
+
+RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* store)
+    : config_(std::move(config)), generation_{1}, store_(store) {
     for (const PolicyRule& rule : config_.rules) {
         validate_rule(rule);
     }
@@ -181,6 +240,9 @@ RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config)
         if (fallback.prefix.empty() || fallback.prefix.back() != '.') {
             throw PolicyConfigError{"tool default prefix must end with '.': " + fallback.id};
         }
+    }
+    if (store_ != nullptr) {
+        local_grants_ = store_->load();
     }
     reorder();
 }
@@ -221,21 +283,25 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request) c
 
     const PolicyRule* winner = nullptr;
     for (const PolicyRule& rule : candidates) {
-        if (!rule.tool.empty() && !glob_match(rule.tool, request.tool)) {
-            continue;
-        }
-        if (!rule.path.empty()) {
-            if (!request.path.has_value() ||
-                !path_glob_match(rule.path, path_pattern(request))) {
-                continue;
-            }
-        }
-        if (!rule.command.empty() &&
-            !glob_match(rule.command, command_pattern(request))) {
+        if (!rule_matches(rule, request)) {
             continue;
         }
         if (winner == nullptr || rule_greater(rule, *winner)) {
             winner = &rule;
+        }
+    }
+
+    // 46-D2.13: a matching non-grant deny vetoes an Allow durable grant,
+    // regardless of specificity (LocalGrant outranks Project in rule_greater).
+    if (winner != nullptr && winner->effect == PolicyVerdict::Allow &&
+        winner->layer == PolicyRule::Layer::LocalGrant) {
+        for (const PolicyRule& candidate : candidates) {
+            if (candidate.effect == PolicyVerdict::Deny &&
+                candidate.layer != PolicyRule::Layer::LocalGrant &&
+                candidate.layer != PolicyRule::Layer::SessionGrant &&
+                rule_matches(candidate, request)) {
+                return PolicyVerdict::Deny;
+            }
         }
     }
 
@@ -254,30 +320,64 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request) c
     return winner->effect;
 }
 
-void RulePermissionPolicy::remember(const PermissionRequest& request,
-                                    payload::PermissionDecisionKind kind,
-                                    GrantScope scope) {
+PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
+                                          payload::PermissionDecisionKind kind,
+                                          GrantScope scope) {
+    // 46-D2.6 / O-M5: the force_ask guard lives inside the single mutation seam,
+    // so no call site can re-open it.
+    if (request.force_ask) {
+        return {};
+    }
     if (kind == payload::PermissionDecisionKind::Deny || scope == GrantScope::Once) {
-        return;
+        return {};
     }
 
     PolicyRule grant;
-    grant.tool = request.tool;
-    grant.path = path_pattern(request);
-    grant.command = command_pattern(request);
-    grant.effect = PolicyVerdict::Allow;
-    grant.id = "grant:" + request.tool;
+    grant.tool     = request.tool;
+    grant.command  = command_pattern(request);
+    grant.effect   = PolicyVerdict::Allow;
+    grant.id       = grant_id(grant.tool, grant.command);
+    grant.literal  = true;
+    grant.layer    = scope == GrantScope::Always ? PolicyRule::Layer::LocalGrant
+                                                 : PolicyRule::Layer::SessionGrant;
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (scope == GrantScope::Always) {
-        grant.layer = PolicyRule::Layer::LocalGrant;
-        local_grants_.push_back(grant);
-    } else {
-        grant.layer = PolicyRule::Layer::SessionGrant;
-        session_grants_[request.session.value].push_back(grant);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (scope == GrantScope::Always) {
+            local_grants_.push_back(grant);
+        } else {
+            session_grants_[request.session.value].push_back(grant);
+        }
+        ++generation_.value;
+        reorder();
     }
-    ++generation_.value;
-    reorder();
+
+    if (scope != GrantScope::Always || store_ == nullptr) {
+        return grant;
+    }
+    if (store_->append(grant)) {
+        return grant;
+    }
+
+    // 46-D2.7 / 46-I7: the append is non-fatal; keep the in-memory grant but
+    // degrade it to Session so it is not mistaken for durable.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = std::find_if(local_grants_.begin(), local_grants_.end(),
+                                     [&grant](const PolicyRule& rule) {
+                                         return rule.id == grant.id;
+                                     });
+        if (it != local_grants_.end()) {
+            local_grants_.erase(it);
+        }
+        PolicyRule degraded = grant;
+        degraded.layer      = PolicyRule::Layer::SessionGrant;
+        session_grants_[request.session.value].push_back(std::move(degraded));
+        ++generation_.value;
+        reorder();
+    }
+    grant.layer = PolicyRule::Layer::SessionGrant;
+    return grant;
 }
 
 PermissionGate::PermissionGate(PermissionPolicy& policy, PermissionConfig config)
@@ -410,7 +510,9 @@ bool PermissionGate::decide(const PermissionRequestId& id,
         request = it->second.request;
     }
     cv_.notify_all();
-    policy_.remember(request, decision, scope);
+    if (!request.force_ask) {
+        policy_.remember(request, decision, scope);
+    }
     return true;
 }
 

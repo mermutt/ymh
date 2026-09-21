@@ -353,7 +353,16 @@ TEST(WorkspaceHostStartup, WorkspaceBusyOnHeldFlock) {
     daemon.start();
     ASSERT_TRUE(daemon.waitReady());
 
+    // 46-D2.3: registration now precedes the runtime build, so the second
+    // daemon must present the id the first actually registered (production
+    // supervisors pass a consistent (id, canonical path) pair).
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::openReadOnly(registry_config_for(root.path()));
+    const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
+    ASSERT_TRUE(row.has_value());
+
     HostConfig second = base_config(canonical);
+    second.workspace = row->id;
     second.store_factory = {};
     std::unique_ptr<WorkspaceHost> blocked = WorkspaceHost::create(std::move(second));
     EXPECT_EQ(blocked->run(), HostExitCode::WorkspaceBusy);

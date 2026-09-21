@@ -64,6 +64,7 @@ LLMProviderConfig to_provider_config(const Config& config) {
     provider.base_url     = config.llm.base_url;
     provider.model        = effective_model(config);
     provider.api_key_env  = config.llm.api_key_env;
+    provider.api_key      = config.llm.api_key;
     provider.connect_timeout = config.llm.connect_timeout;
     provider.idle_timeout    = config.llm.idle_timeout;
     provider.request_timeout = config.llm.request_timeout;
@@ -77,11 +78,18 @@ LLMProviderConfig to_provider_config(const Config& config) {
 
 PermissionConfig to_permission_config(const Config& config) {
     PermissionConfig permissions;
-    permissions.default_verdict = PolicyVerdict::Ask;
 
-    const PolicyVerdict read  = parse_verdict(config.permissions.read, "read");
-    const PolicyVerdict write = parse_verdict(config.permissions.write, "write");
-    const PolicyVerdict shell = parse_verdict(config.permissions.shell, "shell");
+    const PolicyVerdict default_verdict =
+        parse_verdict(config.permissions.default_verdict, "default");
+    const bool master = default_verdict == PolicyVerdict::Allow;
+    permissions.default_verdict = default_verdict;
+
+    const PolicyVerdict read =
+        master ? PolicyVerdict::Allow : parse_verdict(config.permissions.read, "read");
+    const PolicyVerdict write =
+        master ? PolicyVerdict::Allow : parse_verdict(config.permissions.write, "write");
+    const PolicyVerdict shell =
+        master ? PolicyVerdict::Allow : parse_verdict(config.permissions.shell, "shell");
 
     add_rule(permissions, "read_file", read, "default.read_file");
     add_rule(permissions, "grep", read, "default.grep");
@@ -96,9 +104,20 @@ PermissionConfig to_permission_config(const Config& config) {
         }
         ToolDefault fallback;
         fallback.prefix = "mcp." + server.id + ".";
-        fallback.verdict = parse_verdict(server.default_verdict, "mcp.default_verdict");
+        fallback.verdict = master ? PolicyVerdict::Allow
+                                  : parse_verdict(server.default_verdict, "mcp.default_verdict");
         fallback.id = "mcp." + server.id + ".default";
         permissions.tool_defaults.push_back(std::move(fallback));
+    }
+
+    for (const PermissionRuleSettings& settings : config.permissions.rules) {
+        PolicyRule rule;
+        rule.tool    = settings.tool.value_or("");
+        rule.command = settings.command.value_or("");
+        rule.effect  = parse_verdict(settings.effect, "rules.effect");
+        rule.layer   = PolicyRule::Layer::Project;
+        rule.id      = settings.id;
+        permissions.rules.push_back(std::move(rule));
     }
     return permissions;
 }
@@ -186,6 +205,9 @@ AgentConfig to_agent_config(const Config& config) {
         agent.parameters.reasoning_effort = config.agent.reasoning_effort;
     } else if (config.llm.reasoning_effort.has_value()) {
         agent.parameters.reasoning_effort = config.llm.reasoning_effort;
+    }
+    if (config.llm.max_tokens.has_value()) {
+        agent.parameters.max_output_tokens = config.llm.max_tokens;
     }
     return agent;
 }

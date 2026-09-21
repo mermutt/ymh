@@ -893,7 +893,7 @@ TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {
       "auto_compact_percent": 80,
       "max_concurrent_tasks": 3,
       "skip_permissions": true,
-      "permission": [{ "match": "*.sh", "decision": "allow" }],
+      "permission": { "bash": [{ "match": "*.sh", "decision": "allow" }] },
       "default_profile": "p",
       "profiles": { "p": { "provider": "prov", "model": "m", "max_tokens": 5,
                            "context_window": 128000 } },
@@ -913,16 +913,21 @@ TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {
     EXPECT_EQ(server["env"]["TOKEN"].get<std::string>(), "secret");
     EXPECT_EQ(server["env"]["REF"].get<std::string>(), "${HOST}");
     EXPECT_FALSE(doc.contains("providers"));
-    EXPECT_FALSE(doc.contains("permission"));
-    EXPECT_FALSE(doc.contains("skip_permissions"));
     EXPECT_FALSE(doc.contains("orchestrate"));
     EXPECT_TRUE(doc["agent"]["compaction"]["enabled"].get<bool>());
     EXPECT_DOUBLE_EQ(doc["agent"]["compaction"]["threshold_ratio"].get<double>(), 0.8);
     EXPECT_EQ(doc["agent"]["compaction"]["context_window_tokens"].get<std::int64_t>(), 128000);
     EXPECT_EQ(doc["llm"]["default"]["base_url"].get<std::string>(), "https://x.test/v1");
     EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
-    EXPECT_FALSE(doc["llm"]["default"].contains("api_key"));
+    EXPECT_EQ(doc["llm"]["default"]["api_key"].get<std::string>(), "SECRET");
+    EXPECT_EQ(doc["llm"]["default"]["max_tokens"].get<std::int64_t>(), 5);
     EXPECT_EQ(doc["llm"]["default"]["max_concurrency"].get<std::int64_t>(), 3);
+    EXPECT_EQ(doc["permissions"]["default"].get<std::string>(), "allow");
+    ASSERT_EQ(doc["permissions"]["rules"].size(), 1u);
+    EXPECT_EQ(doc["permissions"]["rules"][0]["tool"].get<std::string>(), "shell");
+    EXPECT_EQ(doc["permissions"]["rules"][0]["command"].get<std::string>(), "*.sh");
+    EXPECT_EQ(doc["permissions"]["rules"][0]["effect"].get<std::string>(), "allow");
+    EXPECT_EQ(doc["permissions"]["rules"][0]["id"].get<std::string>(), "localcode.rule.bash.0");
 }
 
 TEST(Config, BuildLocalcodeImportEscapesLiteralDollarBrace) {

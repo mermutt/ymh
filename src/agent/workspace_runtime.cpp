@@ -103,7 +103,8 @@ public:
          bool attach_permission_gate,
          bool attach_permission_resolver,
          Executor* executor,
-         McpClientFactory mcp_client_factory)
+         McpClientFactory mcp_client_factory,
+         GrantStore* grant_store)
         : root_(std::move(root)),
           store_(std::move(store)),
           persistence_(persistence),
@@ -119,7 +120,7 @@ public:
           skill_catalog_(make_skill_catalog(config, *environment_,
                                             category_logger(LogCategory::Tool))),
           permission_config_(to_permission_config(config)),
-          policy_(permission_config_),
+          policy_(permission_config_, grant_store),
           gate_(policy_, permission_config_),
           agent_config_(make_agent_config(config, *skill_catalog_, policy_,
                                           attach_permission_gate ||
@@ -336,7 +337,8 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
                                            std::move(provider_config), std::move(provider),
                                            options.attach_permission_gate,
                                            options.attach_permission_resolver, options.executor,
-                                           std::move(options.mcp_client_factory));
+                                           std::move(options.mcp_client_factory),
+                                           options.grant_store);
         return std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
     } catch (const std::exception& build_error) {
         return std::unexpected(

@@ -65,7 +65,8 @@ std::expected<std::unique_ptr<LLMProvider>, LLMError> ProviderRegistry::create(
     if (!is_http_url(config.base_url)) {
         return std::unexpected(config_error("invalid base_url: " + config.base_url));
     }
-    if (!is_valid_env_name(config.api_key_env)) {
+    const bool has_literal_key = config.api_key.has_value() && !config.api_key->empty();
+    if (!has_literal_key && !is_valid_env_name(config.api_key_env)) {
         return std::unexpected(config_error("invalid api_key_env: " + config.api_key_env));
     }
     if (config.max_arguments_bytes == 0) {
