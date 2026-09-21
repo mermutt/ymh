@@ -59,6 +59,11 @@ add_executable(ymh_tests
     unit/config_test.cpp
     unit/muse_profile_test.cpp
     unit/muse_sampling_test.cpp
+    unit/muse_d2_test.cpp
+    unit/muse_d3_test.cpp
+    unit/muse_d4_d5_test.cpp
+    unit/muse_d6_test.cpp
+    unit/muse_replay_test.cpp
     unit/logging_test.cpp
     unit/cli_test.cpp
     unit/headless_test.cpp

@@ -484,6 +484,17 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
     if (member(*section, "stop") != nullptr) {
         config.llm.stop = read_string_array(*section, "stop", "llm.default", source);
     }
+    if (const ModelProfile* profile = find_model_profile(config.llm.profile);
+        profile != nullptr) {
+        for (const std::string& entry : config.llm.stop) {
+            if (std::find(profile->forbidden_stop_tokens.begin(),
+                          profile->forbidden_stop_tokens.end(),
+                          entry) != profile->forbidden_stop_tokens.end()) {
+                fail(source, "llm.default.stop must not contain '" + entry +
+                                 "': it ends a message, not the turn");
+            }
+        }
+    }
     if (member(*section, "seed") != nullptr) {
         const std::int64_t value = read_int64(*section, "seed", "llm.default", 0, source);
         if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {

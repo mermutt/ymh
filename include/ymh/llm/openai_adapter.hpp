@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,10 +22,20 @@
 #include "ymh/core/task.hpp"
 #include "ymh/llm/llm_provider.hpp"
 #include "ymh/llm/llm_request.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/llm/stream.hpp"
+#include "ymh/tools/tool.hpp"
 
 namespace ymh {
+
+// 47-O-M3: the decoder's profile/offered-name inputs. `profile == nullptr` is
+// inert (no detection, no normalization); `offered` is built from
+// `request.tools` by `OpenAICompatibleProvider::stream()`.
+struct ToolCallPolicy {
+    const ModelProfile*       profile = nullptr;
+    std::span<const ToolName> offered;
+};
 
 // Fully-qualified streaming POST (08 §6.1).
 struct HttpRequest {

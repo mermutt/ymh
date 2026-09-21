@@ -167,7 +167,7 @@ private:
     CompactionOutcome         runCompactionNow(const std::vector<Message>& messages, TurnId turn);
     CompactionOutcome         commitCompactionResult(const CompactionResult& result, TurnId turn);
     [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,
-                                             TurnId turn, StepId step);
+                                             TurnId turn, StepId step, std::size_t turn_step);
     void                      flushIdleCallbacks();
 
     // 40 §2.4: the per-call body split so the scheduler can overlap only the

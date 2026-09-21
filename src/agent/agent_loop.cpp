@@ -520,7 +520,7 @@ CompactionOutcome AgentLoop::runCompactionNow(const std::vector<Message>& messag
 }
 
 FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
-                                      TurnId turn, StepId step) {
+                                      TurnId turn, StepId step, std::size_t turn_step) {
     (void)pruner_.prune_session(session_);
     LLMRequest request;
     request.model    = config_.model;
@@ -530,6 +530,11 @@ FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
     }
     request.parameters = config_.parameters;
     request.session_id = session_.id();
+
+    if (config_.profile.force_first_tool_call && turn_step == 1 && !request.tools.empty() &&
+        !config_.parameters.tool_choice.has_value()) {
+        request.parameters.tool_choice = std::string{"required"};
+    }
 
     LlmCallConfig config;
     config.provider         = config_.provider;
@@ -541,7 +546,7 @@ FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
     config.top_p            = config_.parameters.top_p;
     config.top_k            = config_.parameters.top_k;
     config.seed             = config_.parameters.seed;
-    config.tool_choice      = config_.parameters.tool_choice;
+    config.tool_choice      = request.parameters.tool_choice;
 
     FrozenRequest     frozen          = FrozenRequest::freeze(std::move(request), config);
     const std::string template_digest = frozen.template_digest();
@@ -968,7 +973,7 @@ void AgentLoop::runTurn() {
         }
 
         std::optional<FrozenRequest> request;
-        request.emplace(buildRequest(messages, turn, step));
+        request.emplace(buildRequest(messages, turn, step, stepNumber));
 
         const MessageId      messageId = make_event_id().value;
         std::optional<Usage> settledUsage;
@@ -1100,7 +1105,7 @@ void AgentLoop::runTurn() {
                 appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
                 return;
             }
-            request.emplace(buildRequest(messages, turn, step));
+            request.emplace(buildRequest(messages, turn, step, stepNumber));
         }
         if (slotCancelled) {
             response         = LLMResponse{};

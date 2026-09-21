@@ -20,6 +20,7 @@
 
 #include <curl/curl.h>
 
+#include "ymh/llm/leaked_call_detector.hpp"
 #include "ymh/llm/redaction.hpp"
 #include "ymh/llm/sse_parser.hpp"
 #include "ymh/llm/tool_call_assembler.hpp"
@@ -277,7 +278,9 @@ nlohmann::json map_message(const Message& message) {
                                        {"type", "function"},
                                        {"function",
                                         {{"name", block.tool_name},
-                                         {"arguments", block.arguments.dump()}}}});
+                                         {"arguments", block.arguments.is_object()
+                                                           ? block.arguments.dump()
+                                                           : std::string{"{}"}}}}});
                 }
             }
             nlohmann::json result{{"role", "assistant"}};
@@ -299,11 +302,17 @@ class OpenAiStreamDecoder {
 public:
     OpenAiStreamDecoder(StreamSink& sink,
                         ProviderCapabilities capabilities,
+                        ToolCallPolicy policy,
                         std::size_t max_arguments_bytes,
                         std::size_t sse_line_bytes)
         : sink_(sink),
           capabilities_(capabilities),
-          assembler_(max_arguments_bytes),
+          policy_(policy),
+          max_arguments_bytes_(max_arguments_bytes),
+          assembler_(max_arguments_bytes,
+                     policy.profile != nullptr && policy.profile->normalize_tool_arguments
+                         ? ToolArgumentPolicy::NonObjectToEmpty
+                         : ToolArgumentPolicy::Strict),
           parser_(sse_line_bytes) {}
 
     bool on_bytes(const char* data, std::size_t len) {
@@ -335,6 +344,9 @@ public:
 
     LLMResponse finalize() {
         finalize_tool_calls();
+        if (terminal_error_.code == LLMErrorCode::None) {
+            detect_leaked_content();
+        }
 
         LLMResponse response;
         if (terminal_error_.code != LLMErrorCode::None) {
@@ -347,8 +359,11 @@ public:
         }
 
         const FinishReason reason =
-            finish_seen_ ? finish_
-                         : (tool_calls_.empty() ? FinishReason::Stop : FinishReason::ToolCalls);
+            converted_ ? FinishReason::ToolCalls
+                       : (finish_seen_
+                              ? finish_
+                              : (tool_calls_.empty() ? FinishReason::Stop
+                                                     : FinishReason::ToolCalls));
         emit(StreamEvent{Finished{reason, usage_, std::nullopt}});
         terminal_ = true;
 
@@ -429,10 +444,22 @@ private:
         emit(StreamEvent{UsageEvent{*usage_}});
     }
 
+    void accumulate_content(std::string_view text) {
+        if (content_overflow_) {
+            return;
+        }
+        if (content_text_.size() + text.size() > max_arguments_bytes_) {
+            content_overflow_ = true;
+            return;
+        }
+        content_text_.append(text);
+    }
+
     void handle_delta(const nlohmann::json& delta) {
         if (delta.contains("content") && delta["content"].is_string()) {
             std::string text = delta["content"].get<std::string>();
             if (!text.empty()) {
+                accumulate_content(text);
                 emit(StreamEvent{TextDelta{std::move(text)}});
             }
         }
@@ -472,9 +499,13 @@ private:
         std::string arguments;
         if (tool_call.contains("function") && tool_call["function"].is_object()) {
             name = tool_call["function"].value("name", std::string{});
-            if (tool_call["function"].contains("arguments") &&
-                tool_call["function"]["arguments"].is_string()) {
-                arguments = tool_call["function"]["arguments"].get<std::string>();
+            if (tool_call["function"].contains("arguments")) {
+                const nlohmann::json& raw = tool_call["function"]["arguments"];
+                if (raw.is_string()) {
+                    arguments = raw.get<std::string>();
+                } else if (raw.is_object()) {
+                    arguments = raw.dump();
+                }
             }
         }
 
@@ -519,8 +550,130 @@ private:
         unfinished_.clear();
     }
 
+    [[nodiscard]] bool is_offered(std::string_view name) const {
+        for (const ToolName& tool : policy_.offered) {
+            if (tool.value == name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool normalize_leaked_arguments(const nlohmann::json& value,
+                                    nlohmann::json&       out) const {
+        if (value.is_object()) {
+            out = value;
+            return true;
+        }
+        const bool normalize = policy_.profile != nullptr &&
+                               policy_.profile->normalize_tool_arguments;
+        if (!normalize) {
+            return false;
+        }
+        if (value.is_null()) {
+            out = nlohmann::json::object();
+            return true;
+        }
+        if (value.is_string()) {
+            const std::string text = value.get<std::string>();
+            if (text.find_first_not_of(" \t\r\n") == std::string::npos) {
+                out = nlohmann::json::object();
+                return true;
+            }
+            nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+            if (parsed.is_discarded()) {
+                return false;
+            }
+            out = parsed.is_object() ? std::move(parsed) : nlohmann::json::object();
+            return true;
+        }
+        out = nlohmann::json::object();
+        return true;
+    }
+
+    void convert_leaked_calls(LeakedParse& parse) {
+        std::vector<LeakedCall> normalized;
+        normalized.reserve(parse.calls.size());
+        for (const LeakedCall& call : parse.calls) {
+            if (!is_offered(call.name)) {
+                terminal_error_ = make_error(
+                    LLMErrorCode::MalformedToolCall,
+                    "leaked tool call names un-offered tool '" + call.name + "'");
+                return;
+            }
+            LeakedCall entry;
+            entry.name = call.name;
+            if (!normalize_leaked_arguments(call.arguments, entry.arguments)) {
+                terminal_error_ = make_error(
+                    LLMErrorCode::MalformedToolCall,
+                    "leaked tool call for '" + call.name + "' has unparseable arguments");
+                return;
+            }
+            normalized.push_back(std::move(entry));
+        }
+        if (normalized.empty()) {
+            terminal_error_ = make_error(LLMErrorCode::MalformedToolCall,
+                                         "leaked tool-call block carries no call");
+            return;
+        }
+
+        for (std::size_t i = 0; i < normalized.size(); ++i) {
+            const std::uint32_t index = static_cast<std::uint32_t>(i);
+            const ToolCallId    id    = "leaked_" + std::to_string(i);
+            ToolCallAssembled   assembled{id, normalized[i].name, normalized[i].arguments};
+            tool_calls_.push_back(assembled);
+            emit(StreamEvent{ToolCallStarted{index, id, normalized[i].name}});
+            emit(StreamEvent{ToolCallDelta{index, normalized[i].arguments.dump()}});
+            emit(StreamEvent{ToolCallFinished{index, assembled}});
+        }
+        converted_ = true;
+    }
+
+    void detect_leaked_content() {
+        const ModelProfile* profile = policy_.profile;
+        if (profile == nullptr || !tool_calls_.empty()) {
+            return;
+        }
+
+        if (profile->detect_leaked_tool_calls) {
+            LeakedParse parse = parse_leaked_json_call(content_text_);
+            if (parse.complete_block_seen) {
+                if (parse.malformed_block_seen) {
+                    terminal_error_ =
+                        make_error(LLMErrorCode::MalformedToolCall,
+                                   "leaked tool-call block is malformed");
+                    return;
+                }
+                convert_leaked_calls(parse);
+                if (terminal_error_.code != LLMErrorCode::None) {
+                    return;
+                }
+            }
+        }
+
+        if (profile->detect_atem_tool_calls) {
+            const std::optional<std::vector<std::string>> names =
+                detect_native_atem_calls(content_text_);
+            if (names.has_value()) {
+                std::string joined;
+                for (std::size_t i = 0; i < names->size(); ++i) {
+                    if (i != 0) {
+                        joined += ", ";
+                    }
+                    joined += (*names)[i];
+                }
+                terminal_error_ = make_error(
+                    LLMErrorCode::MalformedToolCall,
+                    "native ATEM tool call(s) [" + joined +
+                        "] detected in content for profile '" + profile->id + "'");
+            }
+        }
+    }
+
     StreamSink&         sink_;
     ProviderCapabilities capabilities_;
+    ToolCallPolicy      policy_;
+    std::size_t         max_arguments_bytes_;
     ToolCallAssembler   assembler_;
     SseParser           parser_;
     std::optional<Usage> usage_;
@@ -533,6 +686,9 @@ private:
     std::vector<ToolCallAssembled> tool_calls_;
     std::vector<std::uint32_t>     started_;
     std::vector<std::uint32_t>     unfinished_;
+    std::string                    content_text_;
+    bool                           content_overflow_ = false;
+    bool                           converted_ = false;
 };
 
 struct CurlWriteContext {
@@ -895,6 +1051,15 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
     if (request.model.empty()) {
         return failed(make_error(LLMErrorCode::ConfigError, "empty effective model"));
     }
+    for (const std::string& stop : request.parameters.stop) {
+        if (std::find(config_.profile.forbidden_stop_tokens.begin(),
+                      config_.profile.forbidden_stop_tokens.end(),
+                      stop) != config_.profile.forbidden_stop_tokens.end()) {
+            return failed(make_error(
+                LLMErrorCode::BadRequest,
+                "stop token '" + stop + "' is forbidden by profile '" + config_.profile.id + "'"));
+        }
+    }
     if (!request.tools.empty() && !capabilities_.tool_calls) {
         return failed(make_error(LLMErrorCode::UnsupportedModel,
                                  "provider does not support tool calls"));
@@ -930,12 +1095,20 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
 
     const std::uint32_t max_attempts = std::max<std::uint32_t>(1, config_.retry.max_attempts);
 
+    std::vector<ToolName> offered_names;
+    offered_names.reserve(request.tools.size());
+    for (const ToolSchema& tool : request.tools) {
+        offered_names.push_back(tool.name);
+    }
+    const ModelProfile*  active_profile = config_.profile.id.empty() ? nullptr : &config_.profile;
+    const ToolCallPolicy policy{active_profile, offered_names};
+
     for (std::uint32_t attempt = 1; attempt <= max_attempts; ++attempt) {
         if (cancel.cancelled()) {
             return cancelled();
         }
 
-        OpenAiStreamDecoder decoder(sink, capabilities_, config_.max_arguments_bytes,
+        OpenAiStreamDecoder decoder(sink, capabilities_, policy, config_.max_arguments_bytes,
                                     config_.sse_line_bytes);
 
         HttpRequest http;

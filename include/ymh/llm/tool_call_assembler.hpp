@@ -21,9 +21,18 @@
 
 namespace ymh {
 
+// 47-D6/47-I15: how a fully concatenated `arguments` string is treated at
+// finalize. `Strict` is the shipped behaviour; `NonObjectToEmpty` is the
+// profile-gated normalization (a non-object or unparseable value becomes `{}`).
+enum class ToolArgumentPolicy : std::uint8_t {
+    Strict,
+    NonObjectToEmpty,
+};
+
 class ToolCallAssembler {
 public:
-    explicit ToolCallAssembler(std::size_t max_arguments_bytes);
+    explicit ToolCallAssembler(std::size_t max_arguments_bytes,
+                               ToolArgumentPolicy policy = ToolArgumentPolicy::Strict);
 
     // Returns nullopt while the call is incomplete. A duplicate start for an
     // index is a `ProviderInternal` protocol violation.
@@ -56,8 +65,10 @@ private:
 
     CallState* find(std::uint32_t index) noexcept;
     void fail(LLMErrorCode code, std::string detail);
+    std::optional<nlohmann::json> parse_arguments(const std::string& raw);
 
     std::size_t                          max_arguments_bytes_;
+    ToolArgumentPolicy                   policy_;
     std::vector<std::pair<std::uint32_t, CallState>> calls_;
     LLMError                             error_;
 };
