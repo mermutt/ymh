@@ -2206,6 +2206,34 @@ open question. No item blocks the gate.
   `include/ymh/tools/tool.hpp:34-37`, `:45-52`.
   **Verification status: awaiting the Oracle delta re-gate.**
 
+### 21.1 Addendum — import pre-sets the profile via the seam
+
+The localcode import (`build_localcode_import`) now pre-sets `llm.default.profile`
+whenever the imported provider is openai-compatible, **regardless of the imported
+model** (the user's explicit requirement: the profile is added even when the model
+is not Muse, and is adjusted from there). The pre-set is skipped when the supplied
+id is empty, and the "no `llm` section" outcomes for a non-openai-compatible
+provider or a document with no default profile are unchanged
+(`UI46_D12_BedrockTypeSkipped`, `UI46_D12_NoProfileNoImport`).
+
+The id is not named in `src/config/config.cpp`. It is obtained through a
+neutrally-named accessor, `default_import_profile_id()` (declared in
+`include/ymh/llm/model_profile.hpp`, defined in `src/llm/model_profile.cpp`), and
+passed into the import as the `default_profile_id` parameter by the CLI layer
+(`maybe_import_localcode_config`). The literal therefore remains confined to
+`src/llm/model_profile.cpp` and the Muse test files, and
+`MuseProfile.MuseNamesConfinedToProfileTable` (47-I6) still passes honestly.
+
+**Consequence for the revert.** This pre-set writes the literal
+`profile: "muse-glimmer"` into a generated `config.jsonc`, which is user state
+outside the tree. If the Muse code is ever reverted (47-D11, §19), that leftover
+key would name a profile the reverted binary no longer knows, and config load
+would fail with an unknown-profile `ConfigError` (`src/config/config.cpp`). A
+revert must therefore also clean the key from any config it generated (or the
+user must remove `llm.default.profile` first). This addendum does not change
+47-D11's one-commit contract; it records the generated-state caveat that contract
+must account for.
+
 ---
 
 ## 22. dsh mapping

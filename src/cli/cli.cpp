@@ -37,6 +37,7 @@
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/llm/redaction.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
@@ -972,7 +973,8 @@ bool maybe_import_localcode_config(const CliInvocation& invocation,
     }
 
     std::string                   import_error;
-    std::optional<nlohmann::json> document = build_localcode_import(*localcode_doc, import_error);
+    std::optional<nlohmann::json> document =
+        build_localcode_import(*localcode_doc, default_import_profile_id(), import_error);
     if (!document.has_value()) {
         err << "ymh: import failed: " << redact_secrets(import_error)
             << "; writing the default config instead\n";

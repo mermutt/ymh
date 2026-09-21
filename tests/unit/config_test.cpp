@@ -15,6 +15,7 @@
 #include "ymh/cli/wiring.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/core/logger.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_types.hpp"
 
@@ -903,7 +904,7 @@ TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {
     })JSON");
 
     std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
     ASSERT_TRUE(document.has_value()) << error;
     const nlohmann::json& doc = *document;
 
@@ -937,7 +938,7 @@ TEST(Config, BuildLocalcodeImportEscapesLiteralDollarBrace) {
       }
     })JSON");
     std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
     ASSERT_TRUE(document.has_value()) << error;
     EXPECT_EQ((*document)["mcp_servers"]["s"]["command"].get<std::string>(), "echo $${not_a_ref");
     EXPECT_EQ((*document)["mcp_servers"]["s"]["env"]["K"].get<std::string>(), "a$${1}");
@@ -950,7 +951,7 @@ TEST(Config, BuildLocalcodeImportSkipsNonOpenAiProvider) {
       "providers": { "prov": { "type": "anthropic", "base_url": "https://x.test/v1" } }
     })JSON");
     std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
     ASSERT_TRUE(document.has_value()) << error;
     EXPECT_FALSE(document->contains("llm"));
 }
@@ -982,7 +983,7 @@ TEST(Config, BuildLocalcodeImportRejectsNonStringEnvAndHeaders) {
       }
     })JSON");
     std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
     EXPECT_FALSE(document.has_value());
     EXPECT_NE(error.find("mcp_servers.brave-search"), std::string::npos) << error;
     EXPECT_NE(error.find("PORT"), std::string::npos) << error;
@@ -991,7 +992,7 @@ TEST(Config, BuildLocalcodeImportRejectsNonStringEnvAndHeaders) {
       "mcp_servers": { "s": { "url": "https://x", "headers": { "Authorization": 5 } } }
     })JSON");
     error.clear();
-    EXPECT_FALSE(build_localcode_import(bad_headers, error).has_value());
+    EXPECT_FALSE(build_localcode_import(bad_headers, default_import_profile_id(), error).has_value());
     EXPECT_NE(error.find("mcp_servers.s"), std::string::npos) << error;
     EXPECT_NE(error.find("Authorization"), std::string::npos) << error;
 }

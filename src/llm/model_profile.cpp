@@ -49,4 +49,8 @@ bool is_known_model_profile(std::string_view id) noexcept {
     return find_model_profile(id) != nullptr;
 }
 
+std::string_view default_import_profile_id() noexcept {
+    return kMuseGlimmerProfileId;
+}
+
 } // namespace ymh

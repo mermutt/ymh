@@ -1561,7 +1561,9 @@ Json map_localcode_mcp_server(const Json& entry) {
 
 } // namespace
 
-std::optional<Json> build_localcode_import(const Json& localcode, std::string& error) {
+std::optional<Json> build_localcode_import(const Json& localcode,
+                                           std::string_view default_profile_id,
+                                           std::string& error) {
     error.clear();
     if (!localcode.is_object()) {
         error = "localcode config must be a JSON object";
@@ -1678,6 +1680,12 @@ std::optional<Json> build_localcode_import(const Json& localcode, std::string& e
             }
         }
         if (openai_compatible) {
+            // Pre-set for any openai-compatible provider, regardless of the
+            // imported model; the caller supplies the id so no profile
+            // identity lives in this file (47-I6). `profile: ""` disables it.
+            if (!default_profile_id.empty()) {
+                document["llm"]["default"]["profile"] = std::string{default_profile_id};
+            }
             if (const Json* key = member(*provider, "api_key");
                 key != nullptr && key->is_string() && !key->get<std::string>().empty()) {
                 document["llm"]["default"]["api_key"] = key->get<std::string>();
