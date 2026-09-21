@@ -1091,6 +1091,12 @@ private:
     }
 
     void resume_after_attach(const WorkspaceId& workspace, const SessionId& session) {
+        // 46-D7.2 (G2-H1; refcounted Rev 5 / O-M6): the SINGLE increment site.
+        // Every resume path funnels through here — the `pending_resume_` consume
+        // site in `on_link_state`, the explicit already-attached
+        // `resume_from_history` branch, and the `--resume` startup path (via
+        // `pending_resume_`) — so no call site can omit the marker.
+        ++resume_in_flight_[workspace];
         submit_to(workspace, std::string(protocol::method::kSessionResume),
                   nlohmann::json{{"session", session.value}},
                   [this, workspace, session](SupervisorReply reply) {
@@ -1101,7 +1107,13 @@ private:
                           const bool unknown =
                               reply.error_code ==
                               static_cast<int>(protocol::AppCode::UnknownSession);
+                          // 46-D7.2 (Rev 6 / NEW-1): the failure terminal releases
+                          // the marker on entry to the UI action, before the
+                          // `unknown`/`surface_notice` split, so BOTH sub-exits are
+                          // covered. `recover_unknown_session` must not touch the
+                          // marker (it has non-resume callers).
                           enqueue([this, workspace, session, error = reply.error, unknown] {
+                              release_resume(workspace);
                               if (unknown) {
                                   recover_unknown_session(workspace, session);
                                   return;
@@ -1115,6 +1127,20 @@ private:
                           refresh_status_context(workspace, session);
                       });
                   });
+    }
+
+    // 46-D7.2 (Rev 6 / NEW-1): the single release seam. Decrements the entry iff
+    // it exists and is > 0, erases it at 0, and is a no-op otherwise — so the
+    // decrement can never underflow, even if a future caller misuses it. The
+    // marker gates the `session.list` reply branch (`count(workspace) == 0`).
+    void release_resume(const WorkspaceId& workspace) {
+        const auto it = resume_in_flight_.find(workspace);
+        if (it == resume_in_flight_.end() || it->second == 0) {
+            return;
+        }
+        if (--it->second == 0) {
+            resume_in_flight_.erase(it);
+        }
     }
 
     // The stored header's model (the value `/sessions` shows), falling back to
@@ -1139,6 +1165,10 @@ private:
     // A workspace evicted between the submit and its reply is reported through
     // `surface_notice` and left unmodeled.
     void apply_resume_success(const WorkspaceId& workspace, const SessionId& session) {
+        // 46-D7.2 (Rev 6 / NEW-1): the success terminal releases the marker on
+        // entry, before the "workspace no longer open" early return, so a single
+        // decrement covers both exits.
+        release_resume(workspace);
         if (model_.workspaces.count(workspace) == 0) {
             surface_notice(workspace, session,
                            "session resumed in a workspace that is no longer open");
@@ -1337,21 +1367,19 @@ private:
     // The Live switcher's session source is the daemon's OPEN/LIVE set, never
     // stored-but-closed history. `session.list` still enumerates every stored
     // session (its pinned contract) and tags each with a `live` flag; only live
-    // entries become cells and are subscribed. The focus/create/resume decision
-    // is scoped to the user's ACTIVE workspace: a background workspace is only
-    // observed (its live sessions render as leaves) and never steals focus. For
-    // the active workspace with no open session but stored history, the first
-    // stored session is resumed (the History selection path) so the focus is
-    // always a usable, live session.
+    // entries become cells and are subscribed. The focus/create decision is
+    // scoped to the user's ACTIVE workspace: a background workspace is only
+    // observed (its live sessions render as leaves) and never steals focus. A
+    // fresh launch with no live session creates a clean, empty session (46-D7);
+    // the reply is gated while a resume is in flight so a list reply that lands
+    // between a resume submit and its reply can never create a stray session.
     void refresh_sessions(const WorkspaceId& workspace) {
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
             return;
         }
-        connection->second->submit(
-            std::string(protocol::method::kSessionList), nlohmann::json::object(),
-            [this, workspace](SupervisorReply reply) {
-                std::vector<std::pair<SessionId, std::string>> stored;
+        submit_session_list(
+            workspace, [this, workspace](SupervisorReply reply) {
                 std::vector<std::pair<SessionId, std::string>> live;
                 if (reply.ok && reply.result.is_array()) {
                     for (const nlohmann::json& entry : reply.result) {
@@ -1359,9 +1387,8 @@ private:
                         if (id.empty()) {
                             continue;
                         }
-                        const std::string title = entry.value("title", std::string{});
-                        stored.emplace_back(SessionId{id}, title);
                         if (entry.value("live", false)) {
+                            const std::string title = entry.value("title", std::string{});
                             live.emplace_back(SessionId{id}, title);
                         }
                     }
@@ -1372,7 +1399,7 @@ private:
                         connection_it->second->track(entry.first);
                     }
                 }
-                enqueue([this, workspace, stored, live] {
+                enqueue([this, workspace, live] {
                     const auto it = model_.workspaces.find(workspace);
                     if (it == model_.workspaces.end()) {
                         return;
@@ -1386,14 +1413,13 @@ private:
                         model_.setCellTitle(workspace, session, title);
                     }
                     if (it->second.activeSessionId().value.empty() &&
-                        model_.activeWorkspaceId == workspace) {
+                        model_.activeWorkspaceId == workspace &&
+                        resume_in_flight_.count(workspace) == 0) {
                         if (!live.empty()) {
                             // A live session can be focused directly.
                             activate_session(workspace, live.front().first);
                             // 25 review M3: plain attach must refresh the context.
                             refresh_status_context(workspace, live.front().first);
-                        } else if (!stored.empty()) {
-                            resume_after_attach(workspace, stored.front().first);
                         } else {
                             // Attach (existing daemon) and spawn paths both
                             // converge here, so auto-create the first session.
@@ -1402,6 +1428,23 @@ private:
                     }
                 });
             });
+    }
+
+    // 46-D7 test seam (N6), mirroring `submit_agent`: when
+    // `session_list_replies_installed_`, deliver the canned reply instead of
+    // hitting the connection. `refresh_sessions` submits through this.
+    void submit_session_list(const WorkspaceId& workspace, SupervisorConnection::ReplyFn reply) {
+        if (!session_list_replies_installed_) {
+            submit_to(workspace, std::string(protocol::method::kSessionList),
+                      nlohmann::json::object(), std::move(reply));
+            return;
+        }
+        SupervisorReply canned;
+        canned.ok         = session_list_error_ == 0;
+        canned.result     = session_list_reply_;
+        canned.error_code = session_list_error_;
+        canned.error      = canned.ok ? std::string{} : "stubbed error";
+        reply(std::move(canned));
     }
 
     // Creates a session through the daemon and activates it. De-duplicated per
@@ -1505,6 +1548,16 @@ private:
 
     void submit_to(const WorkspaceId& workspace, std::string method, nlohmann::json params,
                    SupervisorConnection::ReplyFn reply) {
+        // Test seam (46-D7): a canned reply installed for this method short-
+        // circuits the connection, so the resume/prompt reply terminals are
+        // drivable without a live daemon. Production installs none.
+        const auto canned = method_replies_.find(method);
+        if (canned != method_replies_.end()) {
+            if (reply) {
+                reply(canned->second);
+            }
+            return;
+        }
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
             if (reply) {
@@ -2890,6 +2943,22 @@ private:
     std::deque<EnsureRequest> ensure_requests_;
     std::set<WorkspaceId>     ensure_in_flight_;
     std::map<WorkspaceId, SessionId> pending_resume_;
+    // 46-D7 (G2-H1; refcounted Rev 5 / O-M6; guarded Rev 6 / NEW-1): a
+    // per-workspace count of outstanding resumes. Incremented only in
+    // `resume_after_attach` and released only at the two genuine resume
+    // terminals through `release_resume`. `recover_unknown_session` must never
+    // touch it: it has non-resume callers that never incremented, and an
+    // unguarded decrement would wrap a zero entry to `SIZE_MAX` and close the
+    // gate forever. The gate is `count(workspace) == 0`.
+    std::map<WorkspaceId, std::size_t> resume_in_flight_;
+    // 46-D7 test seam (N6): canned `session.list` replies installed by the
+    // harness, so the focus/create/resume decision is drivable without a daemon.
+    bool           session_list_replies_installed_ = false;
+    nlohmann::json session_list_reply_             = nlohmann::json::array();
+    int            session_list_error_             = 0;
+    // 46-D7 test seam (N6): canned per-method replies installed by the harness,
+    // so the resume/prompt failure terminals are drivable without a daemon.
+    std::map<std::string, SupervisorReply> method_replies_;
     std::atomic<bool> quit_{false};
     // RB-17/RB-18: set on the UI thread after every `adapter_.onTick` and read by
     // the frame timer. True only while the flash or the reasoning spinner is
@@ -3027,6 +3096,37 @@ public:
         app_.agent_list_error_        = list_error;
         app_.agent_select_reply_      = std::move(select_result);
         app_.agent_select_error_      = select_error;
+    }
+
+    void install_session_list_reply(nlohmann::json result, int error) override {
+        app_.session_list_replies_installed_ = true;
+        app_.session_list_reply_             = std::move(result);
+        app_.session_list_error_             = error;
+    }
+
+    void install_method_reply(std::string method, nlohmann::json result, int error) override {
+        SupervisorReply canned;
+        canned.ok         = error == 0;
+        canned.result     = std::move(result);
+        canned.error_code = error;
+        canned.error      = canned.ok ? std::string{} : "stubbed error";
+        app_.method_replies_[std::move(method)] = std::move(canned);
+    }
+
+    void seed_resume_in_flight(const WorkspaceId& workspace) override {
+        ++app_.resume_in_flight_[workspace];
+    }
+
+    [[nodiscard]] const std::map<WorkspaceId, std::size_t>& resume_in_flight()
+        const override {
+        return app_.resume_in_flight_;
+    }
+
+    void drop_connection(const WorkspaceId& workspace) override {
+        const auto it = app_.connections_.find(workspace);
+        if (it != app_.connections_.end()) {
+            it->second->stop();
+        }
     }
 
     void open_permission_dialog(const SessionId& session, const PermissionRequestId& request,

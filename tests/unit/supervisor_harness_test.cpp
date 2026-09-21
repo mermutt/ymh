@@ -1484,3 +1484,350 @@ TEST(SupervisorHarnessTest, UI45_D10_ResumeFailureKeepsUsableFocus) {
     harness->dispatch_key("x");
     EXPECT_EQ(harness->model().session(prior)->input.draft, "x");
 }
+
+// ── 46-D7: a fresh launch opens a clean session ─────────────────────────────
+
+// One workspace connection plus the active workspace modeled, so the
+// `session.list` reply decision and the resume terminals are drivable without a
+// live daemon. `on_scan` installs the connection; `seed_active_workspace` makes
+// it the focus target.
+struct D7Fixture {
+    explicit D7Fixture(const std::string& name)
+        : root(name), registry(WorkspaceRegistry::open(harness_registry_config(root.path()))) {
+        std::filesystem::create_directories(root.path() / "ws");
+        row       = registry->registerWorkspace(root.path() / "ws", "ws");
+        workspace = row.id;
+        SupervisorRunOptions options;
+        options.registry = registry.get();
+        options.identity = harness_identity();
+        harness          = make_supervisor_harness(std::move(options));
+        harness->on_scan({spec_for(row, "boot-a")});
+        harness->drain_actions();
+        harness->seed_active_workspace(workspace_model(workspace));
+    }
+
+    ShortTempRoot                      root;
+    std::unique_ptr<WorkspaceRegistry> registry;
+    WorkspaceRecord                    row;
+    WorkspaceId                        workspace;
+    std::unique_ptr<SupervisorHarness> harness;
+};
+
+nlohmann::json stored_session_list(const SessionId& session, bool live) {
+    nlohmann::json entry = {{"id", session.value}, {"title", "stored"}, {"live", live}};
+    return nlohmann::json::array({entry});
+}
+
+void drain_fully(SupervisorHarness& harness, int times = 4) {
+    for (int i = 0; i < times; ++i) {
+        harness.drain_actions();
+    }
+}
+
+bool has_notice(const SupervisorHarness& harness, const std::string& fragment) {
+    return std::any_of(harness.model().notices.begin(), harness.model().notices.end(),
+                       [&fragment](const UiNotice& notice) {
+                           return notice.text.find(fragment) != std::string::npos;
+                       });
+}
+
+// 46-I13 / 46-D7.1: a fresh launch with stored history creates a clean session;
+// it never resumes `stored.front()`. The create is observed through its failure
+// notice (the connection is stopped so the submit replies synchronously).
+TEST(SupervisorHarnessTest, UI46_D7_FreshStartCreatesEmptySession) {
+    D7Fixture     fixture("ymh46d7fresh");
+    const SessionId stored{"stored-session"};
+    fixture.harness->drop_connection(fixture.workspace);
+    fixture.harness->install_session_list_reply(stored_session_list(stored, false), 0);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->model().sessions.count(stored), 0u)
+        << "a fresh launch resumed stored history";
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "a fresh launch started a resume";
+    EXPECT_TRUE(has_notice(*fixture.harness, "cannot create session"))
+        << "the clean-session create was not attempted";
+}
+
+// 46-I13: the stored session is never auto-resumed. On the pre-D7 tree the list
+// reply called `resume_after_attach(stored.front())`, which sets the marker.
+TEST(SupervisorHarnessTest, UI46_D7_NoResumeOfStored) {
+    D7Fixture     fixture("ymh46d7nostored");
+    const SessionId stored{"stored-session"};
+    fixture.harness->install_session_list_reply(stored_session_list(stored, false), 0);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "the list reply auto-resumed stored history";
+    EXPECT_EQ(fixture.harness->model().sessions.count(stored), 0u);
+    EXPECT_TRUE(fixture.harness->model()
+                    .workspaces.at(fixture.workspace)
+                    .activeSessionId()
+                    .value.empty());
+}
+
+// 46-I14 (pin): `--resume` still resumes; the marker is released at the success
+// terminal.
+TEST(SupervisorHarnessTest, UI46_D7_ResumeFlagStillResumes) {
+    D7Fixture     fixture("ymh46d7resumeflag");
+    const SessionId session{"resume-me"};
+    fixture.harness->install_method_reply(std::string(protocol::method::kSessionResume),
+                                          nlohmann::json::object(), 0);
+    fixture.harness->seed_pending_resume(fixture.workspace, session);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->pending_resume().count(fixture.workspace), 0u)
+        << "the pending resume was not consumed";
+    ASSERT_NE(fixture.harness->model().session(session), nullptr)
+        << "the explicit resume did not focus the stored session";
+    EXPECT_EQ(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(),
+              session);
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "the success terminal did not release the marker";
+}
+
+// 46-I14 / 46-F26: a `session.list` reply that lands while a resume is in flight
+// must not take the focus/create decision. The canned reply is delivered
+// synchronously inside `refresh_sessions`; its decision action runs on the next
+// drain with the marker already set. No sleep, no wall-clock timing.
+TEST(SupervisorHarnessTest, UI46_D7_ResumeInFlightBeatsListReply) {
+    D7Fixture     fixture("ymh46d7gate");
+    const SessionId stored{"stored-session"};
+    const SessionId resumed{"resumed-session"};
+    fixture.harness->install_session_list_reply(stored_session_list(stored, false), 0);
+    fixture.harness->seed_resume_in_flight(fixture.workspace);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    ASSERT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 1u)
+        << "the list reply consumed the in-flight resume";
+    EXPECT_EQ(fixture.harness->model().sessions.count(stored), 0u)
+        << "a list reply racing a resume created a stray session";
+
+    fixture.harness->apply_resume_success(fixture.workspace, resumed);
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "the success terminal did not erase the marker";
+    EXPECT_EQ(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(),
+              resumed);
+}
+
+// 46-D7.1: a live session is still focused directly on attach.
+TEST(SupervisorHarnessTest, UI46_D7_LiveSessionStillFocused) {
+    D7Fixture     fixture("ymh46d7live");
+    const SessionId live{"live-session"};
+    fixture.harness->install_session_list_reply(stored_session_list(live, true), 0);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(), live);
+    ASSERT_NE(fixture.harness->model().session(live), nullptr);
+}
+
+// 46-F9: a failed `session.create` on a fresh launch surfaces the create notice.
+TEST(SupervisorHarnessTest, UI46_D7_CreateFailureNotice) {
+    D7Fixture fixture("ymh46d7createfail");
+    fixture.harness->drop_connection(fixture.workspace);
+    fixture.harness->install_session_list_reply(nlohmann::json::array(), 0);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_TRUE(has_notice(*fixture.harness, "cannot create session"));
+}
+
+// 46-I14 / 46-D7.2 (N1): the marker is incremented inside `resume_after_attach`,
+// so every resume entry point sets it. Here the resume stays in flight on the
+// real connection and the success terminal releases it.
+TEST(SupervisorHarnessTest, UI46_D7_ExplicitResumeSetsMarker) {
+    D7Fixture     fixture("ymh46d7explicit");
+    const SessionId session{"explicit-session"};
+    fixture.harness->seed_pending_resume(fixture.workspace, session);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    ASSERT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 1u)
+        << "resume_after_attach did not set the marker";
+    EXPECT_EQ(fixture.harness->pending_resume().count(fixture.workspace), 0u);
+
+    fixture.harness->apply_resume_success(fixture.workspace, session);
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u);
+}
+
+// 46-I14 / 46-F32 (N2): an `UnknownSession` resume reply for a workspace evicted
+// between submit and reply releases the marker in the failure terminal, even
+// though `recover_unknown_session` then takes its workspace-gone early return.
+TEST(SupervisorHarnessTest, UI46_D7_UnknownSessionEvictedClearsMarker) {
+    D7Fixture     fixture("ymh46d7unknown");
+    const SessionId session{"evicted-session"};
+    fixture.harness->install_method_reply(
+        std::string(protocol::method::kSessionResume), nlohmann::json::object(),
+        static_cast<int>(protocol::AppCode::UnknownSession));
+    fixture.harness->seed_pending_resume(fixture.workspace, session);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    fixture.harness->drain_actions();
+    ASSERT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 1u);
+
+    fixture.harness->drop_connection(fixture.workspace);
+    fixture.harness->evict_dead_workspaces({});
+    ASSERT_EQ(fixture.harness->model().workspaces.count(fixture.workspace), 0u)
+        << "the workspace was not evicted";
+
+    fixture.harness->drain_actions();
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "the UnknownSession terminal did not release the marker";
+}
+
+// 46-I14 / 46-F32 (N9): a non-transport resume failure releases the marker,
+// leaves no focus, and the first keystroke retries through the create path.
+TEST(SupervisorHarnessTest, UI46_D7_NonTransportResumeFailureFirstKeystrokeRecovers) {
+    D7Fixture     fixture("ymh46d7nontransport");
+    const SessionId session{"failed-session"};
+    fixture.harness->install_method_reply(
+        std::string(protocol::method::kSessionResume), nlohmann::json::object(),
+        static_cast<int>(protocol::RpcCode::InternalError));
+    fixture.harness->seed_pending_resume(fixture.workspace, session);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "the failure terminal leaked the marker";
+    EXPECT_TRUE(fixture.harness->model()
+                    .workspaces.at(fixture.workspace)
+                    .activeSessionId()
+                    .value.empty());
+    EXPECT_TRUE(has_notice(*fixture.harness, "resume failed"));
+
+    fixture.harness->drop_connection(fixture.workspace);
+    fixture.harness->dispatch_key("h");
+    fixture.harness->dispatch_key("i");
+    fixture.harness->dispatch_key("enter");
+    drain_fully(*fixture.harness);
+    EXPECT_TRUE(has_notice(*fixture.harness, "cannot create session"))
+        << "the first keystroke did not retry the create path";
+}
+
+// 46-I14 / 46-F39 (O-M6): two overlapping resumes keep the refcount >= 1 until
+// both resolve, so a list reply in between creates no stray session. A set would
+// clear on the first terminal and fail the count assertion.
+TEST(SupervisorHarnessTest, UI46_D7_OverlappingResumesKeepGateClosed) {
+    D7Fixture     fixture("ymh46d7overlap");
+    const SessionId stored{"stored-session"};
+    const SessionId second{"second-resume"};
+    fixture.harness->drop_connection(fixture.workspace);
+    fixture.harness->install_session_list_reply(stored_session_list(stored, false), 0);
+    fixture.harness->install_method_reply(
+        std::string(protocol::method::kSessionResume), nlohmann::json::object(),
+        static_cast<int>(protocol::RpcCode::InternalError));
+
+    // Resume A is already in flight; resume B starts while A is outstanding.
+    fixture.harness->seed_resume_in_flight(fixture.workspace);
+    fixture.harness->seed_pending_resume(fixture.workspace, second);
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+    ASSERT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 1u)
+        << "the refcount was not 1 after one of two resumes resolved";
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+    EXPECT_EQ(fixture.harness->model().sessions.count(stored), 0u)
+        << "a list reply created a stray session while a resume was still in flight";
+
+    fixture.harness->apply_resume_success(fixture.workspace, SessionId{"first-resume"});
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u);
+}
+
+// 46-I14 / 46-F32 (Rev 6 / NEW-1): `recover_unknown_session` never touches the
+// marker. An `UnknownSession` from `prompt()` and from `agent.select` leaves the
+// count at zero, so the D7.2 focus/create branch still runs.
+TEST(SupervisorHarnessTest, UI46_D7_NonResumeUnknownSessionDoesNotDecrement) {
+    const int unknown = static_cast<int>(protocol::AppCode::UnknownSession);
+
+    // (a) via `prompt()`.
+    {
+        D7Fixture       fixture("ymh46d7nrp");
+        const SessionId session{"prompt-session"};
+        fixture.harness->apply_resume_success(fixture.workspace, session);
+        ASSERT_NE(fixture.harness->model().session(session), nullptr);
+        fixture.harness->install_method_reply(
+            std::string(protocol::method::kAgentPrompt), nlohmann::json::object(), unknown);
+
+        fixture.harness->dispatch_key("h");
+        fixture.harness->dispatch_key("i");
+        fixture.harness->dispatch_key("enter");
+        drain_fully(*fixture.harness);
+
+        EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+            << "a non-resume UnknownSession underflowed the marker";
+        ASSERT_FALSE(fixture.harness->model().notices.empty());
+        EXPECT_EQ(fixture.harness->model().notices.back().text, "session no longer exists");
+
+        fixture.harness->drop_connection(fixture.workspace);
+        fixture.harness->install_session_list_reply(nlohmann::json::array(), 0);
+        fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+        drain_fully(*fixture.harness);
+        EXPECT_TRUE(has_notice(*fixture.harness, "cannot create session"))
+            << "the D7.2 focus/create branch did not run";
+    }
+
+    // (b) via `agent.select`.
+    {
+        D7Fixture       fixture("ymh46d7nrs");
+        const SessionId session{"select-session"};
+        fixture.harness->apply_resume_success(fixture.workspace, session);
+        ASSERT_NE(fixture.harness->model().session(session), nullptr);
+        fixture.harness->install_agent_replies(
+            nlohmann::json{
+                {"agents",
+                 nlohmann::json::array(
+                     {{{"id", "standard"},
+                       {"display_name", "standard"},
+                       {"blank", true},
+                       {"can_select", false}},
+                      {{"id", "second"},
+                       {"display_name", "second"},
+                       {"blank", true},
+                       {"can_select", true}}})},
+                {"active", "standard"},
+                {"default", "standard"}},
+            0, nlohmann::json{{"agent", "second"}}, unknown);
+
+        fixture.harness->dispatch_key("tab");
+        drain_fully(*fixture.harness);
+
+        EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+            << "a non-resume UnknownSession underflowed the marker";
+        ASSERT_FALSE(fixture.harness->model().notices.empty());
+        EXPECT_EQ(fixture.harness->model().notices.back().text, "session no longer exists");
+    }
+}
+
+// 46-I14 / 46-F38 (O-H3): stopping the connection drains a pending resume with a
+// terminal reply, so the failure terminal releases the marker (no leak).
+TEST(SupervisorHarnessTest, UI46_D7_DisconnectReleasesMarker) {
+    D7Fixture     fixture("ymh46d7disconnect");
+    const SessionId session{"queued-resume"};
+    fixture.harness->seed_pending_resume(fixture.workspace, session);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    fixture.harness->drain_actions();
+    ASSERT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 1u);
+
+    fixture.harness->drop_connection(fixture.workspace);
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->resume_in_flight().count(fixture.workspace), 0u)
+        << "the disconnect left the resume marker stranded";
+    EXPECT_TRUE(has_notice(*fixture.harness, "resume failed"));
+}
+
