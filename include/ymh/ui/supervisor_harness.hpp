@@ -97,6 +97,20 @@ public:
                                        nlohmann::json select_result,
                                        int select_error) = 0;
 
+    // 46-D7 (N6): installs a canned `session.list` reply so the
+    // focus/create/resume decision is drivable without a live daemon.
+    virtual void install_session_list_reply(nlohmann::json result, int error) = 0;
+    // 46-D7 (N6): installs a canned reply for one method (`session.resume`,
+    // `agent.prompt`), so its reply terminal is drivable without a live daemon.
+    virtual void install_method_reply(std::string method, nlohmann::json result, int error) = 0;
+    // 46-D7 (N6): seeds the per-workspace resume refcount directly, so the
+    // `session.list` gate can be exercised while a resume is in flight.
+    virtual void seed_resume_in_flight(const WorkspaceId& workspace) = 0;
+    [[nodiscard]] virtual const std::map<WorkspaceId, std::size_t>& resume_in_flight() const = 0;
+    // 46-D7 / O-H3: stops the workspace connection, forcing the link dead and
+    // draining its pending requests with a reply.
+    virtual void drop_connection(const WorkspaceId& workspace) = 0;
+
     // RB-12 addendum (2026-09-17): permission-dialog key semantics. Opens the
     // dialog through the same model fields the adapter writes, then drives FTXUI
     // events through the real handler so the swallow contract and the

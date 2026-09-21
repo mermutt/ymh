@@ -1682,14 +1682,16 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
             WorkspaceRegistry::open(pty_registry_config(state));
         alpha_id = registry->registerWorkspace(alpha, "alpha").id;
     }
-    // `orderSessions` is ordinal-ascending, so the attach auto-resume focuses the
-    // OLDEST stored session and the newer one stays selectable in History. The
+    // 46-D7: a fresh launch opens a CLEAN session and never auto-resumes stored
+    // history; the explicit `/sessions` selection below is the resume path. The
     // newer session carries a distinct stored model, so its status-bar hydration
     // proves the resume reply applied the stored value (not the config fallback).
     const SessionId older =
         write_stored_session(alpha, "zz-older", "zzoldermarker", "deepseek-flash", true);
     const SessionId newer =
         write_stored_session(alpha, "zz-newer", "zznewermarker", "deepseek-reasoner", true);
+    (void)older;
+    (void)newer;
 
     HostHarnessOptions alpha_options;
     alpha_options.binary                = resolve_ymh_binary();
@@ -1706,11 +1708,14 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
     HostDaemonGuard guard(alpha_id.value);
     PtyChild        child;
     ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
-    ASSERT_TRUE(child.wait_for("zzoldermarker", 25s))
-        << "the attach auto-resume did not replay the oldest session: " << child.text();
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+    EXPECT_EQ(child.text().find("zzoldermarker"), std::string::npos)
+        << "a fresh launch auto-resumed stored history";
 
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("zz-newer", 20s)) << child.text();
+    // The focused (clean) session is hidden; History lists stored sessions
+    // updated_at desc, so one "j" lands on zz-newer.
     child.write("j");
     std::this_thread::sleep_for(300ms);
     child.write("\r");

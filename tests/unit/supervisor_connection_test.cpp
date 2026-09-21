@@ -8,6 +8,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -110,6 +111,20 @@ public:
 
     void set_invalid_cursor_once() { invalid_cursor_once_.store(true); }
     void set_reject_second_decide(bool value) { reject_second_decide_.store(value); }
+
+    // 46-D7 / O-H3: leave `method` unanswered until the client link is dropped,
+    // so a second request can be queued behind it.
+    void hang_on(std::string method) {
+        const std::lock_guard lock(request_mutex_);
+        hang_method_ = std::move(method);
+    }
+
+    bool wait_for_request(const std::string& method, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(request_mutex_);
+        return request_cv_.wait_for(lock, timeout, [&] {
+            return request_counts_.find(method) != request_counts_.end();
+        });
+    }
 
     void push_stream(const SessionId& session, EventType type, const std::string& cursor,
                      bool replay = false) {
@@ -216,6 +231,14 @@ private:
         if (request == nullptr) {
             return;
         }
+        {
+            const std::lock_guard lock(request_mutex_);
+            ++request_counts_[request->method];
+            request_cv_.notify_all();
+            if (hang_method_.has_value() && *hang_method_ == request->method) {
+                return;
+            }
+        }
         if (request->method == protocol::method::kHostHello) {
             hello_count_.fetch_add(1);
             {
@@ -320,6 +343,10 @@ private:
     mutable std::mutex clients_mutex_;
     std::vector<int> clients_;
     std::mutex write_mutex_;
+    std::mutex              request_mutex_;
+    std::condition_variable request_cv_;
+    std::map<std::string, int> request_counts_;
+    std::optional<std::string> hang_method_;
 };
 
 struct Collected {
@@ -664,6 +691,49 @@ TEST(SupervisorConnection, RejectsRoleProfileMismatchBeforeHello) {
     connection.start();
     ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Dead, 3s));
     EXPECT_EQ(server.hello_count(), 0);
+    connection.stop();
+}
+
+// 46-D7 / O-H3 (46-F38): a `session.resume` queued behind a request that never
+// completes must still receive a terminal reply when the link drops. Before the
+// drain fix, `process_requests` abandoned its remaining batch and
+// `handle_disconnect` did not drain `requests_`, stranding the resume (and the
+// supervisor's marker) forever.
+TEST(SupervisorConnection, UI46_D7_DisconnectDrainsPendingResume) {
+    test::ShortTempRoot root("ymh_sup_d7");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected      collected;
+
+    SupervisorConnection connection(config_for(socket_path), sink_for(collected));
+    connection.track(kSession);
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Attached, 3s));
+
+    server.hang_on(std::string(protocol::method::kSessionList));
+    std::atomic<int> replies{0};
+    std::atomic<int> failures{0};
+    auto             record = [&replies, &failures](SupervisorReply reply) {
+        if (!reply.ok && !reply.error.empty()) {
+            failures.fetch_add(1);
+        }
+        replies.fetch_add(1);
+    };
+    connection.submit(std::string(protocol::method::kSessionList), nlohmann::json::object(),
+                      record);
+    // Wait until the hung request is in flight; the resume then lands in
+    // `requests_` behind it and is drained by `handle_disconnect`, not by the
+    // normal per-request loop.
+    ASSERT_TRUE(server.wait_for_request(std::string(protocol::method::kSessionList), 3s));
+    connection.submit(std::string(protocol::method::kSessionResume),
+                      nlohmann::json{{"session", kSession.value}}, record);
+
+    server.drop_client();
+
+    ASSERT_TRUE(connection.waitUntil([&replies] { return replies.load() == 2; }, 5s))
+        << "a pending request was abandoned without a reply";
+    EXPECT_EQ(failures.load(), 2) << "a drained reply was not a connection-lost failure";
     connection.stop();
 }
 

@@ -1,6 +1,7 @@
 #include "ymh/ui/supervisor_connection.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -379,7 +380,8 @@ void SupervisorConnection::process_requests() {
         std::lock_guard lock(mutex_);
         batch.swap(requests_);
     }
-    for (PendingRequest& request : batch) {
+    for (std::size_t index = 0; index < batch.size(); ++index) {
+        PendingRequest& request = batch[index];
         SupervisorReply reply;
         try {
             reply.ok = true;
@@ -404,6 +406,16 @@ void SupervisorConnection::process_requests() {
         }
         cv_.notify_all();
         if (connection_ == nullptr || !connection_->isConnected()) {
+            // 46-D7 / O-H3: the reply guarantee is structural, not assumed.
+            // Answer every remaining request in this batch so a `session.resume`
+            // queued behind a failing request always gets a terminal reply (and
+            // the supervisor's resume refcount is released); `handle_disconnect`
+            // then drains anything submitted while this batch was processing.
+            for (std::size_t rest = index + 1; rest < batch.size(); ++rest) {
+                if (batch[rest].reply) {
+                    batch[rest].reply(SupervisorReply{false, {}, 0, "connection lost"});
+                }
+            }
             handle_disconnect("connection lost while awaiting a reply");
             return;
         }
@@ -436,6 +448,18 @@ void SupervisorConnection::handle_disconnect(const std::string& detail) {
         std::lock_guard lock(mutex_);
         subscribed_.clear();
         client_id_ = protocol::ClientId{};
+    }
+    // 46-D7 / O-H3: drain requests submitted while a batch was in flight, with
+    // the same terminal reply, so no request is ever abandoned without a reply.
+    std::vector<PendingRequest> pending;
+    {
+        std::lock_guard lock(mutex_);
+        pending.swap(requests_);
+    }
+    for (PendingRequest& request : pending) {
+        if (request.reply) {
+            request.reply(SupervisorReply{false, {}, 0, "connection lost"});
+        }
     }
     set_state(SupervisorLinkState::Dead, detail);
 }
