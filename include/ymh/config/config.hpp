@@ -69,7 +69,7 @@ struct CompactionSettings {
 struct AgentDefaults {
     std::string                model;   // may be empty; resolved with llm.model
     std::size_t                max_steps = 100;
-    std::optional<std::string> reasoning_effort;  // "low" | "medium" | "high"
+    std::optional<std::string> reasoning_effort;  // "low" | "medium" | "high" | "xhigh"
     std::string                system_prompt;     // empty => built-in default
     std::string                plan_section;      // empty => built-in default (25-D3)
     CompactionSettings         compaction;
@@ -133,6 +133,15 @@ struct LlmSettings {
     // `to_agent_config` -> `GenerationParameters::max_output_tokens`.
     std::optional<std::uint32_t> max_tokens;
     std::optional<std::string> reasoning_effort;
+    // 47-D1/47-D7: the model-profile id ("" = inert) and the sampling /
+    // tool-choice surface mapped onto `GenerationParameters`.
+    std::string                  profile;
+    std::optional<double>        temperature;
+    std::optional<double>        top_p;
+    std::optional<std::uint32_t> top_k;
+    std::optional<std::string>   tool_choice;
+    std::vector<std::string>     stop;
+    std::optional<std::uint32_t> seed;
     std::size_t                max_concurrency = 4;
     std::chrono::milliseconds  connect_timeout{10'000};
     std::chrono::milliseconds  idle_timeout{60'000};

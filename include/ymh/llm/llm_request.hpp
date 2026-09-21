@@ -41,10 +41,11 @@ using RequestId = std::uint64_t;
 struct GenerationParameters {
     std::optional<double>        temperature;
     std::optional<double>        top_p;
+    std::optional<std::uint32_t> top_k;             // 47-D8
     std::optional<std::uint32_t> max_output_tokens;
     std::vector<std::string>     stop;
     std::optional<std::string>   tool_choice;       // "auto"|"none"|"required"|name
-    std::optional<std::string>   reasoning_effort;  // "low"|"medium"|"high"
+    std::optional<std::string>   reasoning_effort;  // "low"|"medium"|"high"|"xhigh" (47-D10)
     std::optional<std::uint32_t> seed;              // best-effort determinism
 };
 

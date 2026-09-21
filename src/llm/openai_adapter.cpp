@@ -736,6 +736,9 @@ nlohmann::json build_chat_completions_body(const LLMRequest& request,
     if (parameters.top_p.has_value()) {
         body["top_p"] = *parameters.top_p;
     }
+    if (parameters.top_k.has_value()) {
+        body["top_k"] = *parameters.top_k;
+    }
     if (parameters.max_output_tokens.has_value()) {
         body["max_tokens"] = *parameters.max_output_tokens;
     }

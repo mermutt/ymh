@@ -99,13 +99,38 @@ ProviderCapabilities openai_compatible_capabilities() {
     return capabilities;
 }
 
+void apply_profile_capabilities(ProviderCapabilities& capabilities,
+                                const ModelProfile& profile) noexcept {
+    const ProfileCapabilities& declared = profile.capabilities;
+    if (declared.streaming.has_value()) {
+        capabilities.streaming = *declared.streaming;
+    }
+    if (declared.tool_calls.has_value()) {
+        capabilities.tool_calls = *declared.tool_calls;
+    }
+    if (declared.parallel_tool_calls.has_value()) {
+        capabilities.parallel_tool_calls = *declared.parallel_tool_calls;
+    }
+    if (declared.reasoning.has_value()) {
+        capabilities.reasoning = *declared.reasoning;
+    }
+    if (declared.usage_streaming.has_value()) {
+        capabilities.usage_streaming = *declared.usage_streaming;
+    }
+    if (declared.prompt_caching.has_value()) {
+        capabilities.prompt_caching = *declared.prompt_caching;
+    }
+}
+
 void register_builtin_providers(ProviderRegistry& registry) {
     registry.registerProvider(
         "openai-compatible",
         [](const LLMProviderConfig& config)
             -> std::expected<std::unique_ptr<LLMProvider>, LLMError> {
+            ProviderCapabilities capabilities = openai_compatible_capabilities();
+            apply_profile_capabilities(capabilities, config.profile);
             auto provider = std::make_unique<OpenAICompatibleProvider>(
-                config, openai_compatible_capabilities(), std::make_shared<CurlHttpTransport>());
+                config, capabilities, std::make_shared<CurlHttpTransport>());
             return std::unique_ptr<LLMProvider>{std::move(provider)};
         });
 }

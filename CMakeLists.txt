@@ -207,6 +207,7 @@ add_library(ymh_llm STATIC
     src/llm/llm_provider.cpp
     src/llm/llm_runtime.cpp
     src/llm/sha256.cpp
+    src/llm/model_profile.cpp
     src/llm/provider_registry.cpp
     src/llm/tool_call_assembler.cpp
     src/llm/sse_parser.cpp
@@ -496,6 +497,7 @@ target_link_libraries(ymh_config
     PUBLIC
         nlohmann_json::nlohmann_json
     PRIVATE
+        ymh::llm
         ymh::mcp
         ymh::policy
         ymh::warnings

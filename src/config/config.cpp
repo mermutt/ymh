@@ -27,6 +27,7 @@
 
 #include "ymh/config/jsonc.hpp"
 #include "ymh/core/logger.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/mcp/mcp_types.hpp"
 #include "ymh/policy/permission_policy.hpp"
 
@@ -189,6 +190,25 @@ std::optional<std::string> read_optional_string(const Json& obj,
         fail(source, "invalid type for '" + std::string{table_name} + "." + std::string{key} + "'");
     }
     return node->get<std::string>();
+}
+
+std::optional<double> read_optional_double(const Json& obj,
+                                           std::string_view key,
+                                           std::string_view table_name,
+                                           const std::filesystem::path& source) {
+    const Json* node = member(obj, key);
+    if (node == nullptr) {
+        return std::nullopt;
+    }
+    if (!node->is_number()) {
+        fail(source, "invalid type for '" + std::string{table_name} + "." + std::string{key} + "'");
+    }
+    const double value = node->get<double>();
+    if (!std::isfinite(value)) {
+        fail(source, "value must be finite for '" + std::string{table_name} + "." +
+                         std::string{key} + "'");
+    }
+    return value;
 }
 
 std::vector<std::string> read_string_array(const Json& obj,
@@ -387,7 +407,8 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
                bool global_layer) {
     reject_unknown(table, "llm",
                    {"default", "provider", "base_url", "model", "api_key_env", "api_key",
-                    "max_tokens", "reasoning_effort", "max_concurrency", "connect_timeout_ms",
+                    "max_tokens", "reasoning_effort", "profile", "temperature", "top_p", "top_k",
+                    "tool_choice", "stop", "seed", "max_concurrency", "connect_timeout_ms",
                     "idle_timeout_ms", "request_timeout_ms", "retry"},
                    source);
 
@@ -398,7 +419,8 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
         }
         reject_unknown(*nested, "llm.default",
                        {"provider", "base_url", "model", "api_key_env", "api_key", "max_tokens",
-                        "reasoning_effort", "max_concurrency", "connect_timeout_ms",
+                        "reasoning_effort", "profile", "temperature", "top_p", "top_k",
+                        "tool_choice", "stop", "seed", "max_concurrency", "connect_timeout_ms",
                         "idle_timeout_ms", "request_timeout_ms", "retry"},
                        source);
         section = nested;
@@ -421,6 +443,53 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
             fail(source, "value out of range for 'llm.default.max_tokens'");
         }
         config.llm.max_tokens = static_cast<std::uint32_t>(value);
+    }
+
+    config.llm.profile =
+        read_string(*section, "profile", "llm.default", config.llm.profile, source);
+    if (member(*section, "temperature") != nullptr) {
+        const std::optional<double> value =
+            read_optional_double(*section, "temperature", "llm.default", source);
+        if (!value.has_value() || *value < 0.0 || *value > 2.0) {
+            fail(source, "'llm.default.temperature' must be in [0.0, 2.0]");
+        }
+        config.llm.temperature = value;
+    }
+    if (member(*section, "top_p") != nullptr) {
+        const std::optional<double> value =
+            read_optional_double(*section, "top_p", "llm.default", source);
+        if (!value.has_value() || *value <= 0.0 || *value > 1.0) {
+            fail(source, "'llm.default.top_p' must be in (0.0, 1.0]");
+        }
+        config.llm.top_p = value;
+    }
+    if (member(*section, "top_k") != nullptr) {
+        const std::int64_t value = read_int64(*section, "top_k", "llm.default", 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for 'llm.default.top_k'");
+        }
+        if (value == 0) {
+            config.llm.top_k = std::nullopt;
+        } else {
+            config.llm.top_k = static_cast<std::uint32_t>(value);
+        }
+    }
+    if (member(*section, "tool_choice") != nullptr) {
+        const std::string value = read_string(*section, "tool_choice", "llm.default", "", source);
+        if (value.empty()) {
+            fail(source, "'llm.default.tool_choice' must not be empty");
+        }
+        config.llm.tool_choice = value;
+    }
+    if (member(*section, "stop") != nullptr) {
+        config.llm.stop = read_string_array(*section, "stop", "llm.default", source);
+    }
+    if (member(*section, "seed") != nullptr) {
+        const std::int64_t value = read_int64(*section, "seed", "llm.default", 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for 'llm.default.seed'");
+        }
+        config.llm.seed = static_cast<std::uint32_t>(value);
     }
 
     config.llm.provider =
@@ -981,7 +1050,7 @@ constexpr std::string_view kDefaultConfigJsonc =
   "agent": {
     "model": "",                 // empty => use llm.default.model
     "max_steps": 100             // max tool-calling steps per task
-    // optional: "reasoning_effort": "low"   // "low" | "medium" | "high"
+    // optional: "reasoning_effort": "low"   // "low" | "medium" | "high" | "xhigh"
     // optional: "system_prompt": ""         // empty => built-in default
   },
   "workspace": {
@@ -1003,7 +1072,14 @@ constexpr std::string_view kDefaultConfigJsonc =
       "base_url": "https://api.deepseek.com/v1",
       "model": "deepseek-flash",
       "api_key_env": "DEEPSEEK_API_KEY",
-      // optional: "reasoning_effort": "low"   // "low" | "medium" | "high"
+      // optional: "profile": ""              // "" = no profile
+      // optional: "temperature": 1.0         // 0.0 .. 2.0
+      // optional: "top_p": 0.95              // (0.0, 1.0]
+      // optional: "top_k": 64                // 0 = omit; otherwise a positive integer
+      // optional: "tool_choice": "auto"      // "auto" | "none" | "required" | <function name>
+      // optional: "stop": []                 // array of stop strings
+      // optional: "seed": 0                  // [0, 2^32)
+      // optional: "reasoning_effort": "low"   // "low" | "medium" | "high" | "xhigh"
       "max_concurrency": 4,
       "connect_timeout_ms": 10000,
       "idle_timeout_ms": 60000,
@@ -1311,6 +1387,9 @@ Config load_config(const ConfigPaths& paths) {
     apply_jsonc_file(config, paths.global, /*required=*/true);
     apply_jsonc_file(config, paths.workspace, /*required=*/false);
     apply_env_overrides(config);
+    if (!config.llm.profile.empty() && !is_known_model_profile(config.llm.profile)) {
+        throw ConfigError("unknown llm.default.profile: " + config.llm.profile);
+    }
     return config;
 }
 

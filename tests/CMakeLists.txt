@@ -57,6 +57,8 @@ add_executable(ymh_tests
     unit/transport_server_test.cpp
     unit/transport_socket_test.cpp
     unit/config_test.cpp
+    unit/muse_profile_test.cpp
+    unit/muse_sampling_test.cpp
     unit/logging_test.cpp
     unit/cli_test.cpp
     unit/headless_test.cpp

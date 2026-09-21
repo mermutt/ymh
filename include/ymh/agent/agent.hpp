@@ -17,6 +17,7 @@
 #include "ymh/core/event.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/llm/llm_request.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/llm/stream.hpp"
 #include "ymh/session/ids.hpp"
 
@@ -111,6 +112,7 @@ struct AgentConfig {
     ProviderId               provider;
     ModelId                  model;
     GenerationParameters     parameters;
+    ModelProfile             profile;   // 47-D1/D2 (inert by default)
     std::size_t              max_steps = 100;
     std::size_t              max_inbox = 64;
     std::size_t              max_chunk_batch = 32;
