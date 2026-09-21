@@ -313,6 +313,19 @@ public:
         return strip_ansi(buffer_).find(needle) != std::string::npos;
     }
 
+    bool wait_for_frame_contains(const std::string& needle, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            read_available();
+            if (last_frame().find(needle) != std::string::npos) {
+                return true;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        read_available();
+        return last_frame().find(needle) != std::string::npos;
+    }
+
     bool wait_for_since(std::size_t offset, const std::string& needle,
                         std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -1180,7 +1193,9 @@ TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
 // the session id. `marker`, when non-empty, is a user-message event that must
 // replay once the session is resumed.
 SessionId write_stored_session(const std::filesystem::path& workspace,
-                               const std::string& title, const std::string& marker) {
+                               const std::string& title, const std::string& marker,
+                               const std::string& model = "deepseek-flash",
+                               bool               close_turn = false) {
     const std::filesystem::path ymh_dir = workspace / ".ymh";
     std::filesystem::create_directories(ymh_dir);
     PersistenceConfig config;
@@ -1198,7 +1213,7 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
         header.createdAt     = now;
         header.updatedAt     = now;
         header.title         = title;
-        header.model         = "deepseek-flash";
+        header.model         = model;
         header.serverProfile = "interactive";
         header.kind          = SessionKind::Root;
         store->create(header);
@@ -1216,6 +1231,20 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
             typed.payload    = std::move(message);
             store->append(header.id, encode(typed));
         }
+        if (close_turn) {
+            payload::AssistantMessage reply;
+            reply.id = MessageId{generate_uuid_v4()};
+            ContentBlock block;
+            block.kind = ContentBlockKind::Text;
+            block.text = "ack";
+            reply.content.push_back(std::move(block));
+            TypedEvent<payload::AssistantMessage> typed_reply;
+            typed_reply.id         = EventId{generate_uuid_v4()};
+            typed_reply.session_id = header.id;
+            typed_reply.timestamp  = std::chrono::system_clock::now();
+            typed_reply.payload    = std::move(reply);
+            store->append(header.id, encode(typed_reply));
+        }
         const SessionId session = header.id;
         store->releaseLease(session);
         // Drop the WAL sidecars after close so the read-only catalog open does
@@ -1226,6 +1255,7 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
         return session;
     }
 }
+
 
 // Opens a session in a running daemon so it becomes OPEN (a resident agent)
 // without going through a supervisor. Used to seed another workspace's live
@@ -1626,5 +1656,79 @@ TEST(UiSupervisorPty, UX_I2_TabThenEnterExecutesHighlightedCommand) {
 
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
+
+// SW-P5 (the reported repro): in an ALREADY-ATTACHED workspace, selecting a
+// stored session from `/sessions` must focus it, replay its transcript, hydrate
+// its stored model into the status bar, and keep accepting input. The resume is
+// async and its subscription must not depend on the later `SessionCreated`
+// notice, which only tracks daemon-reported `live` sessions.
+TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates) {
+    ShortTempRoot root("ymh_pty_p5");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    std::filesystem::create_directories(alpha);
+
+    WorkspaceId alpha_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+    }
+    // `orderSessions` is ordinal-ascending, so the attach auto-resume focuses the
+    // OLDEST stored session and the newer one stays selectable in History. The
+    // newer session carries a distinct stored model, so its status-bar hydration
+    // proves the resume reply applied the stored value (not the config fallback).
+    const SessionId older =
+        write_stored_session(alpha, "zz-older", "zzoldermarker", "deepseek-flash", true);
+    const SessionId newer =
+        write_stored_session(alpha, "zz-newer", "zznewermarker", "deepseek-reasoner", true);
+
+    HostHarnessOptions alpha_options;
+    alpha_options.binary                = resolve_ymh_binary();
+    alpha_options.workspace_root        = alpha;
+    alpha_options.workspace_id          = alpha_id.value;
+    alpha_options.socket_path           = alpha / ".ymh" / "host.sock";
+    alpha_options.log_sink              = alpha / ".ymh" / "host.log";
+    alpha_options.env["XDG_STATE_HOME"] = state.string();
+    alpha_options.env["HOME"]           = root.path().string();
+    HostHarness alpha_host(std::move(alpha_options));
+    alpha_host.start();
+    ASSERT_TRUE(alpha_host.wait_ready(20s)) << alpha_host.read_log();
+
+    HostDaemonGuard guard(alpha_id.value);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("zzoldermarker", 25s))
+        << "the attach auto-resume did not replay the oldest session: " << child.text();
+
+    child.write("/sessions\r");
+    ASSERT_TRUE(child.wait_for("zz-newer", 20s)) << child.text();
+    child.write("j");
+    std::this_thread::sleep_for(300ms);
+    child.write("\r");
+
+    ASSERT_TRUE(child.wait_for_frame_contains("zznewermarker", 25s))
+        << "the selected session transcript did not replay: " << child.last_frame();
+    ASSERT_TRUE(child.wait_for_frame_contains("deepseek-reasoner", 15s))
+        << "the selected session's stored model was not hydrated into the status bar: "
+        << child.last_frame();
+
+    std::this_thread::sleep_for(700ms);
+    child.write("zzprobe");
+    EXPECT_TRUE(child.wait_for("zzprobe", 10s))
+        << "the composer dropped keystrokes after resume: " << child.text();
+    EXPECT_EQ(child.last_frame().find("(no active session)"), std::string::npos)
+        << "typing after resume reported no active session";
+
+    child.terminate();
+    guard.stop();
+    alpha_host.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
 
 } // namespace
