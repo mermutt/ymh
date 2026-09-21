@@ -203,8 +203,15 @@ public:
             {"name", std::string(remote_tool)},
             {"arguments", arguments},
         };
-        const std::chrono::milliseconds timeout =
+        const std::chrono::milliseconds configured =
             options.timeout.count() > 0 ? options.timeout : config_.call_timeout;
+        std::chrono::milliseconds timeout = configured;
+        if (options.deadline.has_value()) {
+            if (options.deadline->count() == 0) {
+                throw McpError{McpErrorCode::CallTimeout, "deadline expired"};
+            }
+            timeout = std::min(configured, *options.deadline);
+        }
         nlohmann::json response =
             sendRequest("tools/call", std::move(params), timeout, cancel);
         if (response.contains("error")) {

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "ymh/mcp/schema_translation.hpp"
+#include "ymh/execution/errors.hpp"
 #include "ymh/tools/tool_context.hpp"
 
 namespace ymh {
@@ -41,6 +42,9 @@ Task<ToolResult> McpTool::execute(const ToolContext& context,
     options.call_id = context.callId();
     options.timeout = server_.call_timeout;
     options.max_bytes = result_max_bytes_;
+    if (context.has_deadline()) {
+        options.deadline = context.remaining();
+    }
 
     try {
         McpCallResult call =
@@ -57,6 +61,8 @@ Task<ToolResult> McpTool::execute(const ToolContext& context,
     } catch (const McpError& error) {
         if (error.code() == McpErrorCode::Cancelled) {
             result.outcome = payload::ToolOutcome::Cancelled;
+        } else if (error.code() == McpErrorCode::CallTimeout) {
+            throw ToolError{ToolErrorCode::Timeout, "mcp call timed out"};
         } else {
             result.outcome = payload::ToolOutcome::Error;
             result.error = std::string{to_string(error.code())};

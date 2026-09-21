@@ -42,7 +42,8 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
       mode_(mode),
       fs_(std::filesystem::path{}, config),
       process_(config.terminate_grace),
-      pty_(pty != nullptr ? pty : &pty_fallback_) {
+      pty_(pty != nullptr ? pty : &pty_fallback_),
+      config_(config) {
     std::error_code ec;
     if (!std::filesystem::exists(root_, ec) ||
         !std::filesystem::is_directory(root_, ec)) {

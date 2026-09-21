@@ -338,6 +338,9 @@ Task<ToolResult> ToolRegistry::execute(const payload::ToolCall& call,
     if (!schema_validate(tool->schema().input_schema, call.arguments)) {
         return finish(error_result(call, ToolErrorCode::InvalidArguments));
     }
+    if (context.expired()) {
+        return finish(error_result(call, ToolErrorCode::Timeout));
+    }
 
     const ToolArguments arguments{call.arguments};
     try {

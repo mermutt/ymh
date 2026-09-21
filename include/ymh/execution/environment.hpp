@@ -41,6 +41,10 @@ public:
     virtual PtyService&      pty() = 0;
     virtual GitService&      git() = 0;
     virtual LspService*      lsp() = 0;      // nullptr until Phase 2
+
+    // 46-D8: the tunable bounds the tools/execution layer consumes, exposed so
+    // the agent loop can derive the per-tool-run deadline.
+    [[nodiscard]] virtual const ToolConfig& toolConfig() const noexcept = 0;
 };
 
 class LocalEnvironment final : public ExecutionEnvironment {
@@ -63,6 +67,10 @@ public:
     GitService&     git() override { return git_; }
     LspService*     lsp() override { return nullptr; }
 
+    [[nodiscard]] const ToolConfig& toolConfig() const noexcept override {
+        return config_;
+    }
+
 private:
     std::filesystem::path root_;
     SandboxMode           mode_;
@@ -71,6 +79,7 @@ private:
     UnavailablePtyService pty_fallback_;
     PtyService*           pty_ = nullptr;
     LibGit2GitService     git_;
+    ToolConfig            config_;
 };
 
 // Component-wise containment over weakly-canonical operands (07 §6.2). Never a

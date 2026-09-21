@@ -260,6 +260,73 @@ TEST(McpClientTest, CallTimeoutUsesInjectedClockAndSendsCancellation) {
     EXPECT_TRUE(cancelled);
 }
 
+TEST(McpClientTest, UI46_D8_McpExpiredDeadlineTimesOut) {
+    Harness harness;
+    harness.client->start({}).get();
+
+    McpCallOptions options;
+    options.deadline = 0ms;
+    EXPECT_TRUE(throws_code(
+        [&] {
+            (void)harness.client->callTool("echo", nlohmann::json::object(), options, {}).get();
+        },
+        McpErrorCode::CallTimeout));
+}
+
+TEST(McpClientTest, UI46_D8_McpDeadlineClamped) {
+    auto clock = std::make_shared<ymh::test::ManualClock>();
+    Harness harness(clock.get());
+    harness.client->start({}).get();
+    harness.transport_->responder = [](const nlohmann::json& request) -> std::optional<nlohmann::json> {
+        if (request.value("method", std::string{}) == "tools/call") {
+            return std::nullopt;
+        }
+        return response_for(request);
+    };
+    int polls = 0;
+    harness.transport_->on_poll = [clock, &polls] {
+        ++polls;
+        clock->advance(100ms);
+    };
+
+    McpCallOptions options;
+    options.timeout = 60s;
+    options.deadline = 100ms;
+    EXPECT_TRUE(throws_code(
+        [&] {
+            (void)harness.client->callTool("echo", nlohmann::json::object(), options, {}).get();
+        },
+        McpErrorCode::CallTimeout));
+    EXPECT_LE(polls, 2);
+}
+
+TEST(McpClientTest, UI46_D8_McpConfiguredTimeoutIsCeiling) {
+    auto clock = std::make_shared<ymh::test::ManualClock>();
+    Harness harness(clock.get());
+    harness.client->start({}).get();
+    harness.transport_->responder = [](const nlohmann::json& request) -> std::optional<nlohmann::json> {
+        if (request.value("method", std::string{}) == "tools/call") {
+            return std::nullopt;
+        }
+        return response_for(request);
+    };
+    int polls = 0;
+    harness.transport_->on_poll = [clock, &polls] {
+        ++polls;
+        clock->advance(100ms);
+    };
+
+    McpCallOptions options;
+    options.timeout = 100ms;
+    options.deadline = 10s;
+    EXPECT_TRUE(throws_code(
+        [&] {
+            (void)harness.client->callTool("echo", nlohmann::json::object(), options, {}).get();
+        },
+        McpErrorCode::CallTimeout));
+    EXPECT_LE(polls, 2);
+}
+
 TEST(McpClientTest, CancellationSendsNotification) {
     Harness harness;
     harness.client->start({}).get();

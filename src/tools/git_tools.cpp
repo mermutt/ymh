@@ -59,10 +59,16 @@ public:
 
     Task<ToolResult> execute(const ToolContext& context,
                              const ToolArguments& arguments) override {
+        if (context.expired()) {
+            throw ToolError{ToolErrorCode::Timeout, "git_status deadline expired"};
+        }
         GitQuery query;
         query.path = resolve_base(context, arguments);
 
         const GitStatus status = context.execution().git().status(query).get();
+        if (context.expired()) {
+            throw ToolError{ToolErrorCode::Timeout, "git_status deadline expired"};
+        }
 
         ToolResult result;
         result.id = context.callId();
@@ -90,12 +96,18 @@ public:
 
     Task<ToolResult> execute(const ToolContext& context,
                              const ToolArguments& arguments) override {
+        if (context.expired()) {
+            throw ToolError{ToolErrorCode::Timeout, "git_diff deadline expired"};
+        }
         GitQuery query;
         query.path = resolve_base(context, arguments);
         query.staged = arguments.value.value("staged", false);
         query.ref = arguments.value.value("ref", std::string{});
 
         const GitDiff diff = context.execution().git().diff(query).get();
+        if (context.expired()) {
+            throw ToolError{ToolErrorCode::Timeout, "git_diff deadline expired"};
+        }
 
         bool truncated = false;
         std::string output =

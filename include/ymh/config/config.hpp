@@ -199,6 +199,8 @@ struct PromptSettings {
 struct ToolsSettings {
     ToolPresentationMode     presentation = ToolPresentationMode::Native;
     std::vector<std::string> tool_order;
+    // 46-D8: the generic per-tool-run deadline in milliseconds; 0 disables.
+    std::int64_t             timeout_ms = 300'000;
 };
 
 // [skills] — the skill subsystem (20 §5.6). Additive.

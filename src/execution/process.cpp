@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -331,6 +332,21 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
         throw ToolError{ToolErrorCode::InvalidArguments, "empty argv"};
     }
 
+    std::optional<std::chrono::milliseconds> budget;
+    if (request.deadline.has_value()) {
+        if (request.deadline->count() == 0) {
+            ProcessResult expired;
+            expired.timed_out = true;
+            return Task<ProcessResult>(expired);
+        }
+        budget = request.timeout.count() > 0
+                     ? std::optional<std::chrono::milliseconds>{
+                           std::min(request.timeout, *request.deadline)}
+                     : request.deadline;
+    } else if (request.timeout.count() > 0) {
+        budget = request.timeout;
+    }
+
     Pipe out = make_pipe();
     Pipe err = make_pipe();
     Pipe errsig = make_pipe();
@@ -403,8 +419,8 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
     bool out_open = out.read_fd >= 0;
     bool err_open = err.read_fd >= 0;
     bool terminated = false;
-    const auto deadline = request.timeout.count() > 0
-                              ? Clock::now() + request.timeout
+    const auto deadline = budget.has_value()
+                              ? Clock::now() + *budget
                               : Clock::time_point::max();
 
     while (out_open || err_open) {

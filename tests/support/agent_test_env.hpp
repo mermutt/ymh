@@ -111,10 +111,11 @@ struct AgentEnv {
              bool enable_plan_mode = false,
              SystemPrompt* prompt = nullptr,
              InstructionLoader* instructions = nullptr,
-             GrantStore* grant_store = nullptr)
+             GrantStore* grant_store = nullptr,
+             ToolConfig tool_config = {})
         : workspace(prefix),
           sessions(store, bus),
-          env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
+          env(workspace.path(), SandboxMode::Workspace, tool_config),
           provider(std::move(provider)),
           runtime(),
           adapter_handle(register_test_adapter(runtime, this->provider)),

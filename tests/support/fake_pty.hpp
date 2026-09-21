@@ -38,8 +38,10 @@ public:
     PtyState state() const noexcept override;
     Task<PtyRead> read(std::size_t max_bytes,
                        std::chrono::milliseconds wait,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) override;
     Task<PtyExit> wait(std::chrono::milliseconds timeout,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) override;
 
 private:
@@ -88,9 +90,14 @@ public:
 
     Task<PtyRead> read(std::size_t max_bytes,
                        std::chrono::milliseconds wait,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) {
         (void)wait;
         PtyRead result;
+        if (deadline.has_value() && deadline->count() == 0) {
+            result.timed_out = true;
+            return Task<PtyRead>(std::move(result));
+        }
         if (cancel.cancelled()) {
             result.cancelled = true;
             return Task<PtyRead>(std::move(result));
@@ -102,8 +109,14 @@ public:
     }
 
     Task<PtyExit> wait(std::chrono::milliseconds timeout,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) {
         (void)timeout;
+        if (deadline.has_value() && deadline->count() == 0) {
+            PtyExit result;
+            result.timed_out = true;
+            return Task<PtyExit>(result);
+        }
         if (cancel.cancelled()) {
             throw CancellationError{};
         }
@@ -145,12 +158,14 @@ inline int FakePtyHandle::pid() const noexcept { return inner_->pid(); }
 inline PtyState FakePtyHandle::state() const noexcept { return inner_->state(); }
 inline Task<PtyRead> FakePtyHandle::read(std::size_t max_bytes,
                                          std::chrono::milliseconds wait,
+                                         std::optional<std::chrono::milliseconds> deadline,
                                          CancellationToken cancel) {
-    return inner_->read(max_bytes, wait, cancel);
+    return inner_->read(max_bytes, wait, deadline, cancel);
 }
 inline Task<PtyExit> FakePtyHandle::wait(std::chrono::milliseconds timeout,
+                                         std::optional<std::chrono::milliseconds> deadline,
                                          CancellationToken cancel) {
-    return inner_->wait(timeout, cancel);
+    return inner_->wait(timeout, deadline, cancel);
 }
 
 class FakePtyService final : public PtyService {

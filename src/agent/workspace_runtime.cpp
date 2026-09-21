@@ -67,6 +67,12 @@ AgentConfig make_agent_config(const Config& config,
     return agent;
 }
 
+ToolConfig make_tool_config(const Config& config) {
+    ToolConfig tool_config;
+    tool_config.tool_timeout = std::chrono::milliseconds{config.tools.timeout_ms};
+    return tool_config;
+}
+
 PresetConfig make_preset_config(const Config& config) {
     PresetConfig preset;
     preset.root                 = config.presets.root;
@@ -108,7 +114,7 @@ public:
         : root_(std::move(root)),
           store_(std::move(store)),
           persistence_(persistence),
-          tool_config_(),
+          tool_config_(make_tool_config(config)),
           governor_(),
           pty_events_(),
           pty_(executor != nullptr

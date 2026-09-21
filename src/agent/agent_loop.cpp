@@ -765,9 +765,15 @@ payload::ToolResult AgentLoop::runToolCall(const PreparedToolCall& plan) {
     }
 
     StaticPermissionHandle handle(plan.decision);
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    const std::chrono::milliseconds tool_timeout =
+        services_.execution->toolConfig().tool_timeout;
+    if (tool_timeout.count() > 0) {
+        deadline = std::chrono::steady_clock::now() + tool_timeout;
+    }
     ToolContext context(*services_.execution, session_, *services_.logger, plan.token,
                         *services_.governor, *services_.output, handle, plan.call.id,
-                        plan.call.turn, plan.call.step);
+                        plan.call.turn, plan.call.step, deadline);
     try {
         result = services_.tools->execute(plan.call, context).get();
     } catch (const std::exception& error) {

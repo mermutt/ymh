@@ -164,9 +164,11 @@ struct ToolEnv {
 
     ToolContext context(const std::string& call_id = "call-1",
                         TurnId turn = 1,
-                        StepId step = 1) {
+                        StepId step = 1,
+                        std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt,
+                        ToolContext::ClockReader clock = std::chrono::steady_clock::now) {
         return ToolContext(env, *session, logger, CancellationToken{}, governor, sink,
-                           permission, call_id, turn, step);
+                           permission, call_id, turn, step, deadline, std::move(clock));
     }
 
     TempWorkspace workspace;

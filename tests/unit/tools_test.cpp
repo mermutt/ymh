@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -223,6 +225,71 @@ TEST(BuiltinTools, ShellTimeoutIsAnError) {
     EXPECT_EQ(result.outcome, payload::ToolOutcome::Error);
     ASSERT_TRUE(result.error.has_value());
     EXPECT_EQ(*result.error, "Timeout");
+}
+
+TEST(BuiltinTools, UI46_D8_ShellDeadlineKillsProcess) {
+    ToolConfig config;
+    config.tool_timeout = std::chrono::milliseconds{200};
+    ymh::test::ToolEnv env("tools_d8_shell", SandboxMode::Workspace, config);
+    ToolRegistry registry;
+    auto registrations = register_builtins(registry, config);
+
+    const auto start = std::chrono::steady_clock::now();
+    const ToolResult result =
+        registry
+            .execute(call("shell", {{"command", "sleep 5"}}),
+                     env.context("call-1", 1, 1,
+                                 std::chrono::steady_clock::now() + std::chrono::milliseconds{200}))
+            .get();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    EXPECT_EQ(result.outcome, payload::ToolOutcome::Error);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(*result.error, "Timeout");
+    EXPECT_LT(elapsed, std::chrono::milliseconds{3000});
+}
+
+TEST(BuiltinTools, UI46_D8_TimeoutResultIsErrorAndTurnContinues) {
+    ToolConfig config;
+    config.tool_timeout = std::chrono::milliseconds{200};
+    ymh::test::ToolEnv env("tools_d8_continue", SandboxMode::Workspace, config);
+    ToolRegistry registry;
+    auto registrations = register_builtins(registry, config);
+
+    const ToolResult timed_out =
+        registry
+            .execute(call("shell", {{"command", "sleep 5"}}),
+                     env.context("call-1", 1, 1,
+                                 std::chrono::steady_clock::now() + std::chrono::milliseconds{200}))
+            .get();
+    EXPECT_EQ(timed_out.outcome, payload::ToolOutcome::Error);
+    ASSERT_TRUE(timed_out.error.has_value());
+    EXPECT_EQ(*timed_out.error, "Timeout");
+
+    env.ring.clear();
+    const ToolResult next =
+        registry.execute(call("shell", {{"command", "printf ok"}}), env.context("call-2")).get();
+    EXPECT_EQ(next.outcome, payload::ToolOutcome::Ok);
+    EXPECT_EQ(next.output, "ok\nexit_code: 0");
+}
+
+TEST(BuiltinTools, UI46_D8_DeadlineExpiredPreDispatch) {
+    ymh::test::ToolEnv env("tools_d8_predispatch");
+    ToolRegistry registry;
+    auto registrations = register_builtins(registry);
+
+    const ToolResult result =
+        registry
+            .execute(call("write_file", {{"path", "created.txt"}, {"content", "hi"}}),
+                     env.context("call-1", 1, 1,
+                                 std::chrono::steady_clock::now() - std::chrono::seconds{1}))
+            .get();
+
+    EXPECT_EQ(result.outcome, payload::ToolOutcome::Error);
+    ASSERT_TRUE(result.error.has_value());
+    EXPECT_EQ(*result.error, "Timeout");
+    EXPECT_FALSE(std::filesystem::exists(env.workspace.path() / "created.txt"));
 }
 
 TEST(BuiltinTools, ShellCapExhaustionIsResourceExhausted) {

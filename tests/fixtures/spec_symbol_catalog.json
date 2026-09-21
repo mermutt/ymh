@@ -1719,6 +1719,12 @@
       "section": "5"
     },
     {
+      "symbol": "config::tools.timeout_ms",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "10.2.1"
+    },
+    {
       "symbol": "config::ui.show_activity",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",

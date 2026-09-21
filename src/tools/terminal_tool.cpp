@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/execution/deadline.hpp"
 #include "ymh/execution/pty.hpp"
 #include "ymh/tools/tool_context.hpp"
 
@@ -218,8 +219,17 @@ private:
             }
         }
 
-        PtyRead read = session->read(max_bytes, wait, context.cancellation()).get();
+        const std::optional<std::chrono::milliseconds> budget = clamp_timeout(
+            context.has_deadline()
+                ? std::optional<std::chrono::steady_clock::time_point>{context.deadline()}
+                : std::nullopt,
+            wait, std::chrono::steady_clock::now());
+        PtyRead read =
+            session->read(max_bytes, wait, budget, context.cancellation()).get();
         ToolResult result = makeResult(context);
+        if (read.timed_out) {
+            throw ToolError{ToolErrorCode::Timeout, "pty read timed out"};
+        }
         if (read.cancelled) {
             result.outcome = payload::ToolOutcome::Cancelled;
             return Task<ToolResult>(std::move(result));
@@ -260,9 +270,17 @@ private:
         } else {
             session->terminate();
         }
-        const PtyExit status = session->wait(std::chrono::milliseconds{0},
+        const std::optional<std::chrono::milliseconds> budget = clamp_timeout(
+            context.has_deadline()
+                ? std::optional<std::chrono::steady_clock::time_point>{context.deadline()}
+                : std::nullopt,
+            std::chrono::milliseconds{0}, std::chrono::steady_clock::now());
+        const PtyExit status = session->wait(std::chrono::milliseconds{0}, budget,
                                              context.cancellation())
                                    .get();
+        if (status.timed_out) {
+            throw ToolError{ToolErrorCode::Timeout, "pty wait timed out"};
+        }
 
         ToolResult result = makeResult(context);
         result.output = nlohmann::json{{"exit_code", status.exit_code},
