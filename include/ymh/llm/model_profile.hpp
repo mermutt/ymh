@@ -43,4 +43,9 @@ struct ModelProfile {
 [[nodiscard]] const ModelProfile* find_model_profile(std::string_view id) noexcept;
 [[nodiscard]] bool is_known_model_profile(std::string_view id) noexcept;
 
+// The profile id a caller pre-sets when it has no explicit user choice. The
+// value lives in `src/llm/model_profile.cpp` only (47-I6), so callers outside
+// the profile layer never name a built-in profile. Empty means "pre-set none".
+[[nodiscard]] std::string_view default_import_profile_id() noexcept;
+
 } // namespace ymh

@@ -15,6 +15,7 @@
 #include "ymh/cli/cli.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/config/config.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/llm/redaction.hpp"
 
@@ -55,7 +56,8 @@ void write_file(const std::filesystem::path& path, const std::string& body, mode
 
 nlohmann::json import(const nlohmann::json& localcode) {
     std::string                   error;
-    std::optional<nlohmann::json> document = build_localcode_import(localcode, error);
+    std::optional<nlohmann::json> document =
+        build_localcode_import(localcode, default_import_profile_id(), error);
     EXPECT_TRUE(document.has_value()) << error;
     return document.value_or(nlohmann::json::object());
 }
@@ -161,6 +163,7 @@ TEST(Errata46D12, UI46_D12_OpenAiCompatTypeAccepted) {
       "providers": { "prov": { "type": "openai-compat", "base_url": "https://x.test/v1" } }
     })JSON"));
     EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
+    EXPECT_EQ(doc["llm"]["default"]["profile"].get<std::string>(), "muse-glimmer");
 }
 
 TEST(Errata46D12, UI46_D12_BedrockTypeSkipped) {

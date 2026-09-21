@@ -336,11 +336,14 @@ void apply_mcp_servers_object(McpSettings& mcp, const nlohmann::json& table,
 // localcode document, including all mapped servers, the provider `api_key`,
 // `skip_permissions`/`permission` rules, and profile `max_tokens`. Pure mapping:
 // no logging, no filesystem; escapes a literal `${` as `$${` in every copied MCP
-// value and forces `required=false` on every copied server. Returns `std::nullopt`
-// and fills `error` on an unrecoverable shape problem. Semantic MCP validation
-// lives in the CLI layer (25-D16).
+// value and forces `required=false` on every copied server. When the provider is
+// openai-compatible and `default_profile_id` is non-empty, that id is written to
+// `llm.default.profile` regardless of the imported model; the caller supplies it
+// so no built-in profile identity lives in this layer (47-I6). Returns
+// `std::nullopt` and fills `error` on an unrecoverable shape problem. Semantic MCP
+// validation lives in the CLI layer (25-D16).
 [[nodiscard]] std::optional<nlohmann::json> build_localcode_import(
-    const nlohmann::json& localcode, std::string& error);
+    const nlohmann::json& localcode, std::string_view default_profile_id, std::string& error);
 
 // `$HOME/.localcode/config.json`.
 [[nodiscard]] std::filesystem::path localcode_config_path();
