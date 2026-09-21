@@ -77,7 +77,7 @@ std::string read_until_eof(PtySession& session) {
     std::string output;
     for (int attempt = 0; attempt < 400; ++attempt) {
         const PtyRead read =
-            session.read(64 * 1024, 250ms, CancellationToken{}).get();
+            session.read(64 * 1024, 250ms, std::nullopt, CancellationToken{}).get();
         output += read.data;
         if (read.eof) {
             break;
@@ -100,7 +100,7 @@ TEST(PtyIntegration, BasicIoAndExitStatus) {
     const std::string output = read_until_eof(*session);
     EXPECT_NE(output.find("hello"), std::string::npos);
 
-    const PtyExit exit = session->wait(2s, CancellationToken{}).get();
+    const PtyExit exit = session->wait(2s, std::nullopt, CancellationToken{}).get();
     EXPECT_FALSE(exit.signalled);
     EXPECT_EQ(exit.exit_code, 3);
 }
@@ -118,7 +118,7 @@ TEST(PtyIntegration, WriteReadRoundTripThroughCat) {
 
     std::string output;
     for (int attempt = 0; attempt < 100; ++attempt) {
-        const PtyRead read = session->read(64 * 1024, 100ms, CancellationToken{}).get();
+        const PtyRead read = session->read(64 * 1024, 100ms, std::nullopt, CancellationToken{}).get();
         output += read.data;
         if (output.find("round-trip") != std::string::npos) {
             break;
@@ -127,7 +127,7 @@ TEST(PtyIntegration, WriteReadRoundTripThroughCat) {
     EXPECT_NE(output.find("round-trip"), std::string::npos);
 
     session->kill();
-    (void)session->wait(2s, CancellationToken{}).get();
+    (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
 }
 
 TEST(PtyIntegration, InitialGeometryIsApplied) {
@@ -156,7 +156,7 @@ TEST(PtyIntegration, TerminateDeliversSighupAndReaps) {
                        .get();
     wait_running(*session);
     session->terminate();
-    const PtyExit exit = session->wait(5s, CancellationToken{}).get();
+    const PtyExit exit = session->wait(5s, std::nullopt, CancellationToken{}).get();
     EXPECT_TRUE(exit.signalled);
     EXPECT_EQ(exit.signal, SIGHUP);
 }
@@ -176,7 +176,7 @@ TEST(PtyIntegration, KillForcePathSkipsTheGrace) {
 
     std::string output;
     for (int attempt = 0; attempt < 200; ++attempt) {
-        const PtyRead read = session->read(64 * 1024, 50ms, CancellationToken{}).get();
+        const PtyRead read = session->read(64 * 1024, 50ms, std::nullopt, CancellationToken{}).get();
         output += read.data;
         if (output.find("ready") != std::string::npos) {
             break;
@@ -185,7 +185,7 @@ TEST(PtyIntegration, KillForcePathSkipsTheGrace) {
     ASSERT_NE(output.find("ready"), std::string::npos);
 
     session->kill();
-    const PtyExit exit = session->wait(5s, CancellationToken{}).get();
+    const PtyExit exit = session->wait(5s, std::nullopt, CancellationToken{}).get();
     EXPECT_TRUE(exit.signalled);
     EXPECT_EQ(exit.signal, SIGKILL);
 }
@@ -206,7 +206,7 @@ TEST(PtyIntegration, NoZombiesAfterOpenCloseCycles) {
         children.push_back(session->pid());
         (void)read_until_eof(*session);
         session->terminate();
-        (void)session->wait(2s, CancellationToken{}).get();
+        (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
     }
 
     // A global `waitpid(-1)` sweep is forbidden (execution/signal_policy.hpp):
@@ -260,7 +260,7 @@ TEST(PtyIntegration, CapEnforcementRejectsTheNextOpen) {
     }
 
     first->kill();
-    (void)first->wait(2s, CancellationToken{}).get();
+    (void)first->wait(2s, std::nullopt, CancellationToken{}).get();
 }
 
 TEST(PtyIntegration, ConcurrentFacadeCallsAreSafe) {
@@ -276,7 +276,7 @@ TEST(PtyIntegration, ConcurrentFacadeCallsAreSafe) {
     std::atomic<bool> stop{false};
     std::thread       reader([&] {
         while (!stop.load()) {
-            (void)session->read(1024, 10ms, CancellationToken{}).get();
+            (void)session->read(1024, 10ms, std::nullopt, CancellationToken{}).get();
         }
     });
     std::thread writer([&] {
@@ -302,7 +302,7 @@ TEST(PtyIntegration, ConcurrentFacadeCallsAreSafe) {
     reader.join();
 
     session->kill();
-    (void)session->wait(2s, CancellationToken{}).get();
+    (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
 }
 
 TEST(PtyIntegration, ReadCancellationLeavesSessionUsable) {
@@ -320,7 +320,7 @@ TEST(PtyIntegration, ReadCancellationLeavesSessionUsable) {
         std::this_thread::sleep_for(50ms);
         source.cancel();
     });
-    const PtyRead read = session->read(1024, 5s, source.token()).get();
+    const PtyRead read = session->read(1024, 5s, std::nullopt, source.token()).get();
     canceller.join();
 
     EXPECT_TRUE(read.cancelled);
@@ -330,7 +330,7 @@ TEST(PtyIntegration, ReadCancellationLeavesSessionUsable) {
     session->write("still-alive\n");
     std::string output;
     for (int attempt = 0; attempt < 100; ++attempt) {
-        const PtyRead next = session->read(1024, 100ms, CancellationToken{}).get();
+        const PtyRead next = session->read(1024, 100ms, std::nullopt, CancellationToken{}).get();
         output += next.data;
         if (output.find("still-alive") != std::string::npos) {
             break;
@@ -339,7 +339,7 @@ TEST(PtyIntegration, ReadCancellationLeavesSessionUsable) {
     EXPECT_NE(output.find("still-alive"), std::string::npos);
 
     session->kill();
-    (void)session->wait(2s, CancellationToken{}).get();
+    (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
 }
 
 TEST(PtyIntegration, WaitCancellationThrowsAndLeavesSessionOpen) {
@@ -355,11 +355,11 @@ TEST(PtyIntegration, WaitCancellationThrowsAndLeavesSessionOpen) {
 
     CancellationSource source;
     source.cancel();
-    EXPECT_THROW((void)session->wait(0ms, source.token()).get(), CancellationError);
+    EXPECT_THROW((void)session->wait(0ms, std::nullopt, source.token()).get(), CancellationError);
     EXPECT_NE(session->state(), PtyState::Closed);
 
     session->kill();
-    (void)session->wait(2s, CancellationToken{}).get();
+    (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
 }
 
 TEST(PtyIntegration, ExecFailureSurfacesExit127) {
@@ -374,8 +374,58 @@ TEST(PtyIntegration, ExecFailureSurfacesExit127) {
     request.argv = {request.executable};
 
     auto session = pty.open(request, CancellationToken{}).get();
-    const PtyExit exit = session->wait(5s, CancellationToken{}).get();
+    const PtyExit exit = session->wait(5s, std::nullopt, CancellationToken{}).get();
     EXPECT_EQ(exit.exit_code, 127);
+}
+
+TEST(PtyIntegration, UI46_D8_PtyExpiredDeadlineReturnsImmediately) {
+    PtyIoFixture          fixture;
+    ymh::test::TempWorkspace workspace("pty_d8_expired");
+    ResourceGovernor      governor;
+    NoopPtyEventSink      sink;
+    LocalPtyService       pty(fixture.executor(), governor, sink);
+
+    auto session = pty.open(shell_request(workspace.path(), "cat"), CancellationToken{}).get();
+    wait_running(*session);
+
+    const auto start = std::chrono::steady_clock::now();
+    const PtyRead read = session->read(64 * 1024, 0ms,
+                                       std::optional<std::chrono::milliseconds>{0ms},
+                                       CancellationToken{})
+                             .get();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    EXPECT_TRUE(read.timed_out);
+    EXPECT_TRUE(read.data.empty());
+    EXPECT_LT(elapsed, std::chrono::milliseconds{500});
+
+    session->kill();
+    (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
+}
+
+TEST(PtyIntegration, UI46_D8_PtyDisabledDeadlineKeepsWaitMs) {
+    PtyIoFixture          fixture;
+    ymh::test::TempWorkspace workspace("pty_d8_disabled");
+    ResourceGovernor      governor;
+    NoopPtyEventSink      sink;
+    LocalPtyService       pty(fixture.executor(), governor, sink);
+
+    auto session = pty.open(shell_request(workspace.path(), "cat"), CancellationToken{}).get();
+    wait_running(*session);
+
+    const auto start = std::chrono::steady_clock::now();
+    const PtyRead read =
+        session->read(64 * 1024, 0ms, std::nullopt, CancellationToken{}).get();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    EXPECT_FALSE(read.timed_out);
+    EXPECT_FALSE(read.cancelled);
+    EXPECT_LT(elapsed, std::chrono::milliseconds{500});
+
+    session->kill();
+    (void)session->wait(2s, std::nullopt, CancellationToken{}).get();
 }
 
 } // namespace

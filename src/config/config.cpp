@@ -822,7 +822,7 @@ void apply_prompt(Config& config, const Json& table, const std::filesystem::path
 }
 
 void apply_tools(Config& config, const Json& table, const std::filesystem::path& source) {
-    reject_unknown(table, "tools", {"presentation", "tool_order"}, source);
+    reject_unknown(table, "tools", {"presentation", "tool_order", "timeout_ms"}, source);
     const std::string presentation =
         read_string(table, "presentation", "tools",
                     std::string{tool_presentation_name(config.tools.presentation)}, source);
@@ -852,6 +852,8 @@ void apply_tools(Config& config, const Json& table, const std::filesystem::path&
             fail(source, "tools.tool_order must contain <unlisted-tools> exactly once");
         }
     }
+    config.tools.timeout_ms =
+        read_int64(table, "timeout_ms", "tools", config.tools.timeout_ms, source);
 }
 
 void apply_document(Config& config, const Json& table, const std::filesystem::path& source,

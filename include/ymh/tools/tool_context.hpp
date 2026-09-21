@@ -5,7 +5,10 @@
 // constructed by a tool. Accessors are const so a `const ToolContext&` — the
 // Tool::execute parameter — is usable.
 
+#include <chrono>
 #include <filesystem>
+#include <functional>
+#include <optional>
 #include <string_view>
 
 #include "ymh/core/cancellation.hpp"
@@ -21,6 +24,9 @@ namespace ymh {
 
 class ToolContext {
 public:
+    using Clock       = std::chrono::steady_clock;
+    using ClockReader = std::function<Clock::time_point()>;
+
     ToolContext(ExecutionEnvironment& execution,
                 Session&              session,
                 Logger&               logger,
@@ -30,7 +36,9 @@ public:
                 PermissionHandle&     permission,
                 ToolCallId            call_id,
                 TurnId                turn,
-                StepId                step);
+                StepId                step,
+                std::optional<Clock::time_point> deadline,
+                ClockReader                      clock = Clock::now);
 
     ExecutionEnvironment& execution() const noexcept { return *execution_; }
     Session&              session() const noexcept { return *session_; }
@@ -42,6 +50,14 @@ public:
     SessionId  sessionId() const noexcept { return session_->id(); }
     TurnId     turn() const noexcept { return turn_; }
     StepId     step() const noexcept { return step_; }
+
+    // 46-D8: an absent optional is the only "disabled" sentinel. A
+    // default-constructed time_point is not (the steady clock's epoch is past).
+    [[nodiscard]] bool has_deadline() const noexcept { return deadline_.has_value(); }
+    [[nodiscard]] Clock::time_point deadline() const { return *deadline_; }
+    // Total: max() when disabled, duration_cast-clamped at zero otherwise.
+    [[nodiscard]] std::chrono::milliseconds remaining() const noexcept;
+    [[nodiscard]] bool expired() const noexcept;
 
     const std::filesystem::path& root() const noexcept { return execution_->root(); }
     std::filesystem::path        resolve(std::string_view path) const {
@@ -63,6 +79,8 @@ private:
     ToolCallId            call_id_;
     TurnId                turn_;
     StepId                step_;
+    std::optional<Clock::time_point> deadline_;
+    ClockReader                      clock_;
 };
 
 } // namespace ymh

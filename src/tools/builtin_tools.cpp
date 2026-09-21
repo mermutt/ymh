@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "ymh/execution/deadline.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/tools/git_tools.hpp"
 #include "ymh/tools/tool_context.hpp"
@@ -392,6 +393,11 @@ public:
             request.timeout = std::chrono::milliseconds{
                 arguments.value["timeout_ms"].get<long long>()};
         }
+        request.deadline = clamp_timeout(
+            context.has_deadline()
+                ? std::optional<std::chrono::steady_clock::time_point>{context.deadline()}
+                : std::nullopt,
+            request.timeout, std::chrono::steady_clock::now());
 
         const ProcessResult process =
             context.execution().process().run(request, context.cancellation()).get();

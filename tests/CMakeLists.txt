@@ -31,6 +31,7 @@ add_executable(ymh_tests
     unit/permission_broker_test.cpp
     unit/errata46_permissions_test.cpp
     unit/errata46_localcode_test.cpp
+    unit/errata46_deadline_test.cpp
     unit/agent_loop_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp

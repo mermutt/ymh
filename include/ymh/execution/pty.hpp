@@ -18,6 +18,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -54,6 +55,9 @@ struct PtyExit {
     int  exit_code = -1;
     bool signalled = false;
     int  signal    = 0;
+    // 46-D8: the deadline budget was the binding bound and the child had not
+    // exited; derived only from the deadline parameter, never from `timeout == 0`.
+    bool timed_out = false;
 };
 
 struct PtySize {
@@ -97,6 +101,9 @@ struct PtyRead {
     bool        truncated = false;   // ring evicted older bytes since last read
     bool        eof       = false;   // child exited and ring drained
     bool        cancelled = false;   // wait cancelled: data empty, nothing consumed
+    // 46-D8: the deadline budget was the binding bound and no data/eof/cancel
+    // occurred; derived only from the deadline parameter, never from `wait == 0`.
+    bool        timed_out = false;
 };
 
 // ---- 14 §3.3 — the `Stream<T>` model ---------------------------------------
@@ -350,9 +357,11 @@ public:
 
     virtual Task<PtyRead> read(std::size_t max_bytes,
                                std::chrono::milliseconds wait,
+                               std::optional<std::chrono::milliseconds> deadline,
                                CancellationToken cancel) = 0;
 
     virtual Task<PtyExit> wait(std::chrono::milliseconds timeout,
+                               std::optional<std::chrono::milliseconds> deadline,
                                CancellationToken cancel) = 0;
 };
 

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -7,10 +8,12 @@
 #include <utility>
 #include <vector>
 
+#include "support/manual_clock.hpp"
 #include "support/test_env.hpp"
 #include "ymh/execution/config.hpp"
 #include "ymh/execution/errors.hpp"
 #include "ymh/tools/builtin_tools.hpp"
+#include "ymh/tools/git_tools.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
 namespace {
@@ -210,6 +213,48 @@ TEST(GitTools, StatusOnNonRepositoryFails) {
     ASSERT_EQ(result.outcome, payload::ToolOutcome::Error);
     ASSERT_TRUE(result.error.has_value());
     EXPECT_EQ(*result.error, "NotFound");
+}
+
+TEST(GitTools, UI46_D8_GitPrecheckTimesOut) {
+    ymh::test::ToolEnv env("git_d8_precheck");
+    init_repo(env.workspace.path());
+    auto tool = make_git_status_tool(ToolConfig{});
+
+    const ToolArguments arguments{nlohmann::json::object()};
+    ToolContext context =
+        env.context("call-1", 1, 1,
+                    std::chrono::steady_clock::now() - std::chrono::seconds{1});
+    try {
+        (void)tool->execute(context, arguments);
+        FAIL() << "expected a Timeout ToolError";
+    } catch (const ToolError& error) {
+        EXPECT_EQ(error.code(), ToolErrorCode::Timeout);
+    }
+}
+
+TEST(GitTools, UI46_D8_GitPostcheckTimesOut) {
+    ymh::test::ToolEnv env("git_d8_postcheck");
+    init_repo(env.workspace.path());
+    env.workspace.write("tracked.txt", "hello\n");
+    ASSERT_EQ(git(env.workspace.path(), "add tracked.txt"), 0);
+    auto tool = make_git_status_tool(ToolConfig{});
+
+    auto clock = std::make_shared<ymh::test::ManualClock>();
+    const auto start = clock->now();
+    int calls = 0;
+    ToolContext::ClockReader reader = [clock, &calls] {
+        return calls++ == 0 ? clock->now() : clock->now() + std::chrono::seconds{20};
+    };
+
+    const ToolArguments arguments{nlohmann::json::object()};
+    ToolContext context = env.context("call-1", 1, 1, start + std::chrono::seconds{10},
+                                      std::move(reader));
+    try {
+        (void)tool->execute(context, arguments);
+        FAIL() << "expected a post-call Timeout ToolError";
+    } catch (const ToolError& error) {
+        EXPECT_EQ(error.code(), ToolErrorCode::Timeout);
+    }
 }
 
 } // namespace

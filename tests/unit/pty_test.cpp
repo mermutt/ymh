@@ -361,7 +361,8 @@ TEST(TerminalTool, ReadCancellationIsReportedAsCancelled) {
     CancellationSource source;
     source.cancel();
     ToolContext cancelling(env.env, *env.session, env.logger, source.token(),
-                           env.governor, env.sink, env.permission, "call-2", 1, 1);
+                           env.governor, env.sink, env.permission, "call-2", 1, 1,
+                           std::nullopt);
     const ToolResult result =
         registry
             .execute(tool_call("terminal", {{"action", "read"},

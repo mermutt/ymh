@@ -35,6 +35,10 @@ struct ToolConfig {
     // Outbound PTY write queue bound (14 §3.2, E-P8). A `write` is admitted
     // only if the whole payload fits; the pump drains in <= 64 KiB chunks.
     std::size_t pty_write_queue_cap{256u * 1024u};
+
+    // 46-D8: the generic per-tool-run deadline. `0` disables the tool-deadline
+    // layer entirely; it is never an immediate timeout.
+    std::chrono::milliseconds tool_timeout{300'000};
 };
 
 } // namespace ymh

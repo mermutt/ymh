@@ -264,8 +264,13 @@ public:
 
     Task<PtyRead> read(std::size_t max_bytes,
                        std::chrono::milliseconds wait,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) override {
         PtyRead result;
+        if (deadline.has_value() && deadline->count() == 0) {
+            result.timed_out = true;
+            return Task<PtyRead>(std::move(result));
+        }
         if (cancel.cancelled()) {
             result.cancelled = true;
             return Task<PtyRead>(std::move(result));
@@ -279,8 +284,21 @@ public:
 
         std::unique_lock<std::mutex> lock(mutex_);
         const auto ready = [this] { return !ring_.empty() || child_exited_; };
-        if (wait.count() > 0) {
-            cv_.wait_for(lock, wait, [&] { return ready() || cancel.cancelled(); });
+
+        bool deadline_binding = false;
+        std::optional<std::chrono::milliseconds> bound;
+        if (deadline.has_value()) {
+            if (wait.count() > 0) {
+                bound = std::min(wait, *deadline);
+                deadline_binding = *deadline <= wait;
+            } else {
+                bound = std::chrono::milliseconds{0};
+            }
+        } else if (wait.count() > 0) {
+            bound = wait;
+        }
+        if (bound.has_value() && bound->count() > 0) {
+            cv_.wait_for(lock, *bound, [&] { return ready() || cancel.cancelled(); });
         }
         if (cancel.cancelled() && ring_.empty()) {
             result.cancelled = true;
@@ -291,11 +309,20 @@ public:
         result.truncated = truncated || utf8_loss_pending_;
         utf8_loss_pending_ = false;
         result.eof = child_exited_ && ring_.empty();
+        if (deadline_binding && result.data.empty() && !result.eof) {
+            result.timed_out = true;
+        }
         return Task<PtyRead>(std::move(result));
     }
 
     Task<PtyExit> wait(std::chrono::milliseconds timeout,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) override {
+        if (deadline.has_value() && deadline->count() == 0) {
+            PtyExit timed_out;
+            timed_out.timed_out = true;
+            return Task<PtyExit>(timed_out);
+        }
         if (cancel.cancelled()) {
             throw CancellationError{};
         }
@@ -308,7 +335,17 @@ public:
 
         std::unique_lock<std::mutex> lock(mutex_);
         const auto ready = [this] { return exit_ready_; };
-        if (timeout.count() == 0) {
+        bool deadline_binding = false;
+        if (deadline.has_value()) {
+            if (timeout.count() == 0) {
+                cv_.wait_for(lock, *deadline, [&] { return ready() || cancel.cancelled(); });
+                deadline_binding = true;
+            } else {
+                deadline_binding = *deadline <= timeout;
+                cv_.wait_for(lock, std::min(timeout, *deadline),
+                             [&] { return ready() || cancel.cancelled(); });
+            }
+        } else if (timeout.count() == 0) {
             cv_.wait(lock, [&] { return ready() || cancel.cancelled(); });
         } else {
             cv_.wait_for(lock, timeout, [&] { return ready() || cancel.cancelled(); });
@@ -317,7 +354,9 @@ public:
             throw CancellationError{};
         }
         if (!exit_ready_) {
-            return Task<PtyExit>(PtyExit{});
+            PtyExit result;
+            result.timed_out = deadline_binding;
+            return Task<PtyExit>(result);
         }
         return Task<PtyExit>(exit_);
     }
@@ -860,12 +899,14 @@ public:
     PtyState state() const noexcept override { return inner_->state(); }
     Task<PtyRead> read(std::size_t max_bytes,
                        std::chrono::milliseconds wait,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) override {
-        return inner_->read(max_bytes, wait, cancel);
+        return inner_->read(max_bytes, wait, deadline, cancel);
     }
     Task<PtyExit> wait(std::chrono::milliseconds timeout,
+                       std::optional<std::chrono::milliseconds> deadline,
                        CancellationToken cancel) override {
-        return inner_->wait(timeout, cancel);
+        return inner_->wait(timeout, deadline, cancel);
     }
 
 private:

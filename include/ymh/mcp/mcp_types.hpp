@@ -134,6 +134,10 @@ struct McpCallOptions {
     ToolCallId                call_id;
     std::chrono::milliseconds timeout{0};
     std::size_t               max_bytes{0};
+    // 46-D8: the remaining per-tool-run budget. `nullopt` => no tool deadline;
+    // `0ms` => already expired (immediate CallTimeout); `>0` => a ceiling the
+    // client combines with the configured server timeout via min().
+    std::optional<std::chrono::milliseconds> deadline;
 };
 
 struct McpServerStatus {

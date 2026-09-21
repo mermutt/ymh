@@ -29,6 +29,10 @@ struct ProcessRequest {
     std::filesystem::path     cwd;             // MUST be resolve()d under root()
     std::vector<std::pair<std::string, std::string>> environment;
     std::chrono::milliseconds timeout{0};      // 0 => no deadline
+    // 46-D8: the clamped per-tool-run budget. `nullopt` => the deadline layer is
+    // disabled (`timeout` applies); `0ms` => already expired, the child is NOT
+    // started and `timed_out` is returned; `>0` => the wait budget.
+    std::optional<std::chrono::milliseconds> deadline;
     bool                      capture_stdout{true};
     bool                      capture_stderr{true};
     OutputSink*               sink{nullptr};   // streaming; null => buffered

@@ -240,6 +240,7 @@ add_library(ymh_execution STATIC
     src/execution/glob.cpp
     src/execution/output.cpp
     src/execution/filesystem.cpp
+    src/execution/deadline.cpp
     src/execution/process.cpp
     src/execution/environment.cpp
     src/execution/git_service.cpp

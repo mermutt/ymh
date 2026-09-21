@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -190,6 +191,57 @@ TEST(ReapGuard, AbortsAndNeverClearsWhenTheSidecarLockIsHeld) {
 
     EXPECT_FALSE(reaped);
     EXPECT_FALSE(clear_ran);
+}
+
+TEST(ProcessService, UI46_D8_ProcessExpiredDeadlineNotStarted) {
+    ymh::test::TempWorkspace workspace("proc_d8_expired");
+    LocalProcessService service;
+
+    ProcessRequest request = shell_request(workspace.path(), "touch marker");
+    request.deadline = std::chrono::milliseconds{0};
+
+    const auto start = Clock::now();
+    const ProcessResult result = service.run(request, {}).get();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - start);
+
+    EXPECT_TRUE(result.timed_out);
+    EXPECT_LT(elapsed, std::chrono::milliseconds{500});
+    EXPECT_FALSE(std::filesystem::exists(workspace.path() / "marker"));
+}
+
+TEST(ProcessService, UI46_D8_DisabledDeadlineNeverTimesOut) {
+    ymh::test::TempWorkspace workspace("proc_d8_disabled");
+    LocalProcessService service;
+    OutputRing ring(4096);
+    RingOutputSink sink(ring);
+
+    ProcessRequest request = shell_request(workspace.path(), "printf hi", &sink);
+    request.deadline = std::nullopt;
+    request.timeout = std::chrono::milliseconds{0};
+
+    const ProcessResult result = service.run(request, {}).get();
+
+    EXPECT_FALSE(result.timed_out);
+    EXPECT_EQ(result.exit_code, 0);
+    EXPECT_EQ(sink.materialize(4096), "hi");
+}
+
+TEST(ProcessService, UI46_D8_ModelTimeoutNeverExceedsDeadline) {
+    ymh::test::TempWorkspace workspace("proc_d8_ceiling");
+    LocalProcessService service;
+
+    ProcessRequest request = shell_request(workspace.path(), "sleep 5");
+    request.timeout = std::chrono::seconds{10};
+    request.deadline = std::chrono::milliseconds{150};
+
+    const auto start = Clock::now();
+    const ProcessResult result = service.run(request, {}).get();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - start);
+
+    EXPECT_TRUE(result.timed_out);
+    EXPECT_LT(elapsed, std::chrono::milliseconds{3000});
 }
 
 } // namespace

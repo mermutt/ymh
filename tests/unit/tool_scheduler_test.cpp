@@ -136,6 +136,31 @@ private:
     std::shared_ptr<std::atomic<std::size_t>> throw_at_;
 };
 
+class DeadlineProbeTool final : public Tool {
+public:
+    explicit DeadlineProbeTool(std::string name) : name_(std::move(name)) {}
+
+    ToolSchema schema() const override {
+        ToolSchema schema;
+        schema.name         = ToolName{name_};
+        schema.version      = ToolVersion{1, 0};
+        schema.description  = name_;
+        schema.input_schema = empty_schema();
+        schema.concurrency  = ToolConcurrencyMode::ParallelSafe;
+        return schema;
+    }
+
+    Task<ToolResult> execute(const ToolContext& context, const ToolArguments&) override {
+        while (!context.expired()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        throw ToolError{ToolErrorCode::Timeout, "deadline expired"};
+    }
+
+private:
+    std::string name_;
+};
+
 Message user_message(std::string text) {
     Message message;
     message.role = Role::User;
@@ -337,6 +362,44 @@ TEST(ToolScheduler, ReminderIsInjectedThroughTheAcceptor) {
         }
     }
     EXPECT_TRUE(reminder);
+}
+
+TEST(ToolScheduler, UI46_D8_ParallelWorkerJoinedAfterKill) {
+    ToolConfig tool_config;
+    tool_config.tool_timeout = std::chrono::milliseconds{150};
+    AgentEnv env("sched_d8_join",
+                 std::make_unique<FakeLLM>(
+                     script_of({tool_step({call("deadline")}), text_step("done")})),
+                 AgentConfig{},
+                 allow_all_permission_config(),
+                 {},
+                 false,
+                 4,
+                 nullptr,
+                 false,
+                 std::nullopt,
+                 std::chrono::system_clock::now,
+                 false,
+                 nullptr,
+                 nullptr,
+                 nullptr,
+                 tool_config);
+    env.keeper.add(std::make_unique<DeadlineProbeTool>("deadline"));
+    auto agent = env.createAgent();
+    ASSERT_EQ(agent->send(user_message("go")), InboxResult::Accepted);
+
+    auto session = env.sessionOf(*agent);
+    bool timed_out = false;
+    for (const EventRecord& record : session->events()) {
+        if (record.event.type != EventType::ToolResult) {
+            continue;
+        }
+        const auto& result = record.event.payload.get<payload::ToolResult>();
+        if (result.error.has_value() && *result.error == "Timeout") {
+            timed_out = true;
+        }
+    }
+    EXPECT_TRUE(timed_out);
 }
 
 } // namespace
