@@ -171,11 +171,12 @@ struct InputModel {
 
 // One entry of the slash-command completion list, snapshotted into the model so
 // the renderer stays pure (10 §8.2 refinement). 45-D8: `display` is the rendered
-// label (`name` + aliases, e.g. "exit(quit)"); `name` stays the canonical
-// completion name.
+// label (`name` + aliases, e.g. "exit(quit)"). 46-D6: `name` stays the canonical
+// name (identity); `insert` is the matched spelling completion writes.
 struct CommandHint {
     std::string name;
     std::string display;
+    std::string insert;
     std::string description;
 };
 

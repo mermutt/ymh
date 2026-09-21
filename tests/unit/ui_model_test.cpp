@@ -577,9 +577,10 @@ TEST(UiModel, CommandRegistryDispatchesBuiltins) {
     EXPECT_TRUE(registry.dispatch("/exit", context));
     EXPECT_TRUE(exited);
 
-    const std::vector<const Command*> matches = registry.complete("he");
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("he");
     ASSERT_EQ(matches.size(), 1u);
-    EXPECT_EQ(matches.front()->name, "help");
+    ASSERT_NE(matches.front().command, nullptr);
+    EXPECT_EQ(matches.front().command->name, "help");
 }
 
 TEST(UiModel, CommandRegistryDispatchesCompact) {
@@ -594,7 +595,7 @@ TEST(UiModel, CommandRegistryDispatchesCompact) {
     EXPECT_TRUE(compacted);
 
     // 18 §4.1 adds `/context`, so the "co" prefix now completes both commands.
-    const std::vector<const Command*> matches = registry.complete("co");
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("co");
     ASSERT_EQ(matches.size(), 2u);
     const Command* compact = registry.find("compact");
     ASSERT_NE(compact, nullptr);
@@ -670,11 +671,20 @@ TEST(UiModel, LongestCommonPrefixOverZeroOneAndManyMatches) {
     const CommandRegistry registry = CommandRegistry::builtin();
     EXPECT_EQ(CommandRegistry::longest_common_prefix({}), std::string{});
 
-    const std::vector<const Command*> one = registry.complete("he");
+    const auto commands_of = [](const std::vector<CompletionCandidate>& candidates) {
+        std::vector<const Command*> commands;
+        commands.reserve(candidates.size());
+        for (const CompletionCandidate& candidate : candidates) {
+            commands.push_back(candidate.command);
+        }
+        return commands;
+    };
+
+    const std::vector<const Command*> one = commands_of(registry.complete_candidates("he"));
     ASSERT_EQ(one.size(), 1u);
     EXPECT_EQ(CommandRegistry::longest_common_prefix(one), "help");
 
-    const std::vector<const Command*> many = registry.complete("c");
+    const std::vector<const Command*> many = commands_of(registry.complete_candidates("c"));
     ASSERT_EQ(many.size(), 3u);
     EXPECT_EQ(CommandRegistry::longest_common_prefix(many), "c");
 }
@@ -767,9 +777,10 @@ TEST(UiModel, CommandRegistryDispatchesRename) {
     EXPECT_TRUE(registry.dispatch("/rename my title", context));
     EXPECT_EQ(renamed, "my title");
 
-    const std::vector<const Command*> matches = registry.complete("re");
+    const std::vector<CompletionCandidate> matches = registry.complete_candidates("re");
     ASSERT_EQ(matches.size(), 1u);
-    EXPECT_EQ(matches.front()->name, "rename");
+    ASSERT_NE(matches.front().command, nullptr);
+    EXPECT_EQ(matches.front().command->name, "rename");
 }
 
 TEST(UiModel, CommandRegistryRenameWithoutSessionMakesNoCall) {

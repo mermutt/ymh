@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ymh/ui/ui_model.hpp"
@@ -58,12 +59,25 @@ struct Command {
 // are present, else `name`; for `/exit` it returns "exit(quit)".
 [[nodiscard]] std::string command_display_name(const Command& command);
 
+// 46-D5: one completion match. `command` is the owning command; `spelling` is
+// the exact string the prefix matched — the canonical name, or the matched
+// alias when only an alias matches. Completion inserts `spelling`, so `/q`
+// completes to `quit` while `/quit` still resolves to the `exit` command.
+struct CompletionCandidate {
+    const Command* command = nullptr;
+    std::string    spelling;
+};
+
 class CommandRegistry {
 public:
     void add(Command command);
     [[nodiscard]] const std::vector<Command>& commands() const noexcept { return commands_; }
     [[nodiscard]] const Command* find(const std::string& name) const;
-    [[nodiscard]] std::vector<const Command*> complete(const std::string& prefix) const;
+    // 46-D5: matches canonical names first, then aliases; one candidate per
+    // command; registration order preserved. An exact-prefix, case-sensitive
+    // match (unchanged semantics). `complete()` is retired (46-S1).
+    [[nodiscard]] std::vector<CompletionCandidate>
+    complete_candidates(std::string_view prefix) const;
     [[nodiscard]] static std::string longest_common_prefix(
         const std::vector<const Command*>& commands);
     // True when `line` is a command line (leading '/'), recognized or not. A

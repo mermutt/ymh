@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <ctime>
 #include <deque>
 #include <filesystem>
@@ -2070,10 +2071,11 @@ private:
         if (prefix.find_first_of(" \t") != std::string::npos) {
             return;
         }
-        for (const Command* command : registry_.complete(prefix)) {
-            state.command_hints.push_back(CommandHint{command->name,
-                                                      command_display_name(*command),
-                                                      command->description});
+        for (const CompletionCandidate& candidate : registry_.complete_candidates(prefix)) {
+            state.command_hints.push_back(CommandHint{candidate.command->name,
+                                                      command_display_name(*candidate.command),
+                                                      candidate.spelling,
+                                                      candidate.command->description});
         }
     }
 
@@ -2102,51 +2104,68 @@ private:
                 draft.find_first_of(" \t") != std::string::npos) {
                 return false;
             }
-            const std::vector<const Command*> matches = registry_.complete(draft.substr(1));
+            const std::vector<CompletionCandidate> matches =
+                registry_.complete_candidates(draft.substr(1));
             if (matches.empty()) {
                 return false;
             }
-            state.input.draft  = "/" + matches.front()->name + " ";
+            state.input.draft  = "/" + matches.front().spelling + " ";
             state.input.cursor = state.input.draft.size();
             state.command_hint_selected = 0;
             return true;
         }
         const std::size_t count = state.command_hints.size();
         const std::size_t index = std::min(state.command_hint_selected, count - 1);
-        state.input.draft  = "/" + state.command_hints[index].name + " ";
+        state.input.draft  = "/" + state.command_hints[index].insert + " ";
         state.input.cursor = state.input.draft.size();
         state.command_hints.clear();
         state.command_hint_selected = 0;
         return true;
     }
 
-    // 45-D2.5: the second pinned `CommandHint` construction site.
+    // 45-D2.5/46-D5.3: the second pinned `CommandHint` construction site.
     void set_command_hints(SessionUiState& state, const std::vector<std::string>& names) {
         state.command_hints.clear();
         for (const std::string& name : names) {
-            const Command* command = registry_.find(name);
-            if (command != nullptr) {
-                state.command_hints.push_back(CommandHint{command->name,
-                                                          command_display_name(*command),
-                                                          command->description});
+            for (const CompletionCandidate& candidate : registry_.complete_candidates(name)) {
+                if (candidate.spelling != name) {
+                    continue;
+                }
+                state.command_hints.push_back(CommandHint{candidate.command->name,
+                                                          command_display_name(*candidate.command),
+                                                          candidate.spelling,
+                                                          candidate.command->description});
+                break;
             }
         }
     }
 
-    bool accept_highlight(const SessionUiState& state, std::string& text) const {
-        if (text.size() < 2 || text.front() != '/' || text == "/") {
-            return false;
+    // 46-D6: exact -> Dispatch; partial-with-candidates -> Complete; else Submit.
+    enum class EnterAction : std::uint8_t { Dispatch, Complete, Submit };
+
+    // 46-D6.1: an exact name/alias dispatches on the first Enter; a partial
+    // command-shaped draft with candidates is completed in place and never
+    // dispatched. `state` is part of the pinned signature; the classification is
+    // independent of it.
+    [[nodiscard]] EnterAction classify_enter(const SessionUiState& state,
+                                             const std::string& draft) const {
+        (void)state;
+        if (draft.empty() || draft.front() != '/') {
+            return EnterAction::Submit;
         }
-        if (text.find_first_of(" \t") != std::string::npos) {
-            return false;
+        const std::string body  = draft.substr(1);
+        const std::size_t split = body.find_first_of(" \t");
+        const std::string token = split == std::string::npos ? body : body.substr(0, split);
+        if (!token.empty() && registry_.find(token) != nullptr) {
+            return EnterAction::Dispatch;
         }
-        if (state.command_hints.empty()) {
-            return false;
+        if (split == std::string::npos && !token.empty() &&
+            !registry_.complete_candidates(token).empty()) {
+            return EnterAction::Complete;
         }
-        const std::size_t selected =
-            std::min(state.command_hint_selected, state.command_hints.size() - 1);
-        text = "/" + state.command_hints[selected].name;
-        return true;
+        // A command-shaped draft that is not a partial completion (a bare `/` or
+        // an unknown command) keeps today's `dispatch_command` notice path.
+        return EnterAction::Dispatch;
     }
 
     void scroll_by(bool up, bool page) {
@@ -2355,21 +2374,33 @@ private:
             return false;
         }
         if (event == ftxui::Event::Return) {
-            std::string text = input.draft;
-            if (accept_highlight(*state, text)) {
-                input.draft = text;
+            const std::string text = input.draft;
+            switch (classify_enter(*state, text)) {
+                case EnterAction::Complete:
+                    // 46-D6.3: completion is non-destructive; a second Enter
+                    // dispatches the now-exact draft.
+                    complete_selected_command(*state);
+                    refresh_hints(*state);
+                    model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                    return true;
+                case EnterAction::Dispatch:
+                    if (dispatch_command(text)) {
+                        input.push_history(text);
+                        input.draft.clear();
+                        input.cursor = 0;
+                        input.saved_draft.clear();
+                        state->command_hints.clear();
+                        state->command_hint_selected = 0;
+                        model_.dirty.mark(state->id,
+                                          UiDirtyFlag::Input | UiDirtyFlag::Conversation);
+                        return true;
+                    }
+                    submit(text);
+                    return true;
+                case EnterAction::Submit:
+                    submit(text);
+                    return true;
             }
-            if (dispatch_command(text)) {
-                input.push_history(text);
-                input.draft.clear();
-                input.cursor = 0;
-                input.saved_draft.clear();
-                state->command_hints.clear();
-                state->command_hint_selected = 0;
-                model_.dirty.mark(state->id, UiDirtyFlag::Input | UiDirtyFlag::Conversation);
-                return true;
-            }
-            submit(text);
             return true;
         }
         if (event == ftxui::Event::Tab) {

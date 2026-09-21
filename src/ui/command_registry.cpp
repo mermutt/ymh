@@ -85,12 +85,23 @@ const Command* CommandRegistry::find(const std::string& name) const {
     return by_alias == commands_.end() ? nullptr : &*by_alias;
 }
 
-std::vector<const Command*> CommandRegistry::complete(const std::string& prefix) const {
-    std::vector<const Command*> matches;
+std::vector<CompletionCandidate>
+CommandRegistry::complete_candidates(std::string_view prefix) const {
+    const auto has_prefix = [prefix](std::string_view text) {
+        return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
+    };
+    std::vector<CompletionCandidate> matches;
     for (const Command& command : commands_) {
-        if (command.name.size() >= prefix.size() &&
-            command.name.compare(0, prefix.size(), prefix) == 0) {
-            matches.push_back(&command);
+        if (has_prefix(command.name)) {
+            matches.push_back(CompletionCandidate{&command, command.name});
+            continue;
+        }
+        const auto alias = std::find_if(command.aliases.begin(), command.aliases.end(),
+                                        [&has_prefix](const std::string& candidate) {
+                                            return has_prefix(candidate);
+                                        });
+        if (alias != command.aliases.end()) {
+            matches.push_back(CompletionCandidate{&command, *alias});
         }
     }
     return matches;
