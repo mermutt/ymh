@@ -664,6 +664,9 @@ void UiModel::apply(const UiEvent& event) {
                 entry.text   = e.text;
                 entry.source = e.source;
                 state.conversation.entries.push_back(std::move(entry));
+                if (e.source.kind == MessageSource::Kind::User) {
+                    state.input.push_history(e.text);
+                }
                 dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, AssistantMessageStarted>) {
                 if (state.conversation.find_message(e.message) == kNoEntry) {
@@ -1273,6 +1276,51 @@ bool UiModel::has_streaming_reasoning() const {
 bool UiModel::advance_reasoning_spinner(std::chrono::milliseconds delta) {
     constexpr std::chrono::milliseconds kFrameStep{120};
     if (!has_streaming_reasoning()) {
+        spinner.elapsed = std::chrono::milliseconds::zero();
+        return false;
+    }
+    spinner.elapsed += delta;
+    bool changed = false;
+    while (spinner.elapsed >= kFrameStep) {
+        spinner.elapsed -= kFrameStep;
+        ++spinner.frame;
+        changed = true;
+    }
+    return changed;
+}
+
+bool UiModel::has_active_turn() const {
+    const auto workspace = workspaces.find(activeWorkspaceId);
+    if (workspace == workspaces.end()) {
+        return false;
+    }
+    const auto state = sessions.find(workspace->second.activeSessionId());
+    if (state == sessions.end()) {
+        return false;
+    }
+    return is_active_state(state->second.agent_state);
+}
+
+bool UiModel::active_has_streaming_reasoning() const {
+    const auto workspace = workspaces.find(activeWorkspaceId);
+    if (workspace == workspaces.end()) {
+        return false;
+    }
+    const auto state = sessions.find(workspace->second.activeSessionId());
+    if (state == sessions.end()) {
+        return false;
+    }
+    for (const ConversationEntry& entry : state->second.conversation.entries) {
+        if (entry.role == ConversationRole::Reasoning && entry.streaming) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool UiModel::advance_spinner(std::chrono::milliseconds delta) {
+    constexpr std::chrono::milliseconds kFrameStep{120};
+    if (!has_active_turn() && !active_has_streaming_reasoning()) {
         spinner.elapsed = std::chrono::milliseconds::zero();
         return false;
     }

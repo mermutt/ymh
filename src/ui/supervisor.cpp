@@ -930,6 +930,54 @@ private:
 
     void push_notice(std::string text) { model_.pushNotice(std::move(text)); }
 
+    // 46-D3: true when the Live switcher has at least one actionable target:
+    // another live-renderable workspace, or a visible session leaf in the active
+    // workspace after the focused-session exclusion.
+    [[nodiscard]] bool switcher_has_targets() const {
+        for (const auto& [id, workspace] : model_.workspaces) {
+            if (id != model_.activeWorkspaceId && live_switcher_renderable(workspace)) {
+                return true;
+            }
+        }
+        const auto active = model_.workspaces.find(model_.activeWorkspaceId);
+        if (active == model_.workspaces.end()) {
+            return false;
+        }
+        const SessionId focused = active->second.activeSessionId();
+        for (const SessionCell& cell : active->second.sessions) {
+            if (!focused.value.empty() && cell.id == focused) {
+                continue;
+            }
+            if (model_.catalog_has_session(active->first, cell.id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 46-D3: opens the notice instead of the switcher when there is no target.
+    void openSwitcher() {
+        if (!switcher_has_targets()) {
+            model_.message.text = "No other workspaces available";
+            model_.message.open = true;
+            model_.mode = UiMode::Notice;
+            model_.dirty.markAggregate();
+            return;
+        }
+        model_.openSwitcher();
+    }
+
+    // 46-D3: Enter/Esc/Ctrl+C dismiss; every other key is swallowed.
+    bool handle_notice(const ftxui::Event& event) {
+        if (event == ftxui::Event::Return || event == ftxui::Event::Escape ||
+            event == ftxui::Event::CtrlC) {
+            model_.message.open = false;
+            model_.mode = UiMode::Conversation;
+            model_.dirty.markAggregate();
+        }
+        return true;
+    }
+
     // 22 §3.3: the switcher overlay is a snapshot. Rebuild it in place (not via
     // `openSwitcher()`, so `mode`/`source` survive) whenever the live set
     // changes while a Live-source switcher is open.
@@ -1496,7 +1544,8 @@ private:
         adapter_.onTick(delta);
         tick_presence();
         animation_active_.store(model_.aggregate.flash.isFlashing() ||
-                                model_.has_streaming_reasoning());
+                                model_.has_streaming_reasoning() ||
+                                model_.has_active_turn());
     }
 
     SessionUiState* active() {
@@ -1514,7 +1563,7 @@ private:
     [[nodiscard]] bool modal_owns_input() const {
         return model_.exitConfirm.open || model_.dialog.open ||
                (model_.mode == UiMode::Context && model_.context.open) ||
-               model_.mode == UiMode::Switcher;
+               model_.message.open || model_.mode == UiMode::Switcher;
     }
 
     // RB-12: composer snapshot taken when a modal opens, restored when it
@@ -1586,6 +1635,33 @@ private:
         screen_->WithRestoredIO(
             [&status, &file] { status = run_editor(file, editor_from_environment()); })();
         return status;
+    }
+
+    // 46-D13: hands the composer to $EDITOR and copies the result back. The
+    // terminal is restored for the child; a non-zero status leaves the draft
+    // untouched and surfaces a notice.
+    void edit_prompt(SessionUiState& state) {
+        if (screen_ == nullptr && !with_restored_io_) {
+            push_notice("editor unavailable");
+            return;
+        }
+        std::optional<std::string> edited;
+        std::string                error;
+        const auto run = [&] { edited = edit_text_in_editor(state.input.draft, error); };
+        if (with_restored_io_) {
+            with_restored_io_(run);
+        } else {
+            screen_->WithRestoredIO(run)();
+        }
+        if (!edited.has_value()) {
+            push_notice(error.empty() ? std::string("editor failed") : error);
+            return;
+        }
+        state.input.draft = *edited;
+        state.input.cursor = state.input.draft.size();
+        state.hints_dismissed = false;
+        refresh_hints(state);
+        model_.dirty.mark(state.id, UiDirtyFlag::Input);
     }
 
     // /export: reads the active session's durable event log from the workspace
@@ -2497,6 +2573,10 @@ private:
             }
             return true;
         }
+        if (event == ftxui::Event::CtrlE) {
+            edit_prompt(*state);
+            return true;
+        }
         if (event.is_character()) {
             input.draft.insert(input.cursor, event.character());
             input.cursor += event.character().size();
@@ -2655,11 +2735,14 @@ private:
         if (model_.mode == UiMode::Context && model_.context.open) {
             return handle_context(event);
         }
+        if (model_.mode == UiMode::Notice && model_.message.open) {
+            return handle_notice(event);
+        }
         if (model_.mode == UiMode::Switcher) {
             return handle_switcher(event);
         }
         if (event == ftxui::Event::CtrlS || event == ftxui::Event::CtrlP) {
-            model_.openSwitcher();
+            openSwitcher();
             catalog_visible_.store(false);
             if (catalog_ != nullptr) {
                 catalog_->refreshNow();
@@ -2791,6 +2874,9 @@ private:
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
+    // 46-D13 test seam: overrides the terminal hand-off around the prompt
+    // editor. Production leaves it null and uses `screen_->WithRestoredIO`.
+    std::function<void(const std::function<void()>&)> with_restored_io_;
     // 22 §4.2 (SW26): declared after `action_mutex_`/`actions_`/`screen_` so
     // reverse destruction stops+joins the catalog worker before them even if
     // the explicit destructor join is bypassed.
@@ -2879,6 +2965,12 @@ public:
     }
 
     void drain_actions() override { app_.drain(); }
+
+    void open_switcher() override { app_.openSwitcher(); }
+
+    void install_prompt_editor_io() override {
+        app_.with_restored_io_ = [](const std::function<void()>& run) { run(); };
+    }
 
     bool dispatch_command_line(const std::string& line) override {
         return app_.dispatch_command(line);
@@ -2982,6 +3074,9 @@ public:
         }
         if (key == "ctrl-p") {
             return app_.handle_event(ftxui::Event::CtrlP);
+        }
+        if (key == "ctrl-e") {
+            return app_.handle_event(ftxui::Event::CtrlE);
         }
         return app_.handle_event(ftxui::Event::Character(key));
     }

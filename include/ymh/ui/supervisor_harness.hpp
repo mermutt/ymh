@@ -56,6 +56,13 @@ public:
     // The FTXUI loop's action pump; runs every action queued so far.
     virtual void drain_actions() = 0;
 
+    // 46-D3: drives the real Ctrl+S open path (the target predicate and the
+    // notice-vs-switcher decision).
+    virtual void open_switcher() = 0;
+    // 46-D13: installs a pass-through terminal hand-off so the editor runs
+    // without an FTXUI loop.
+    virtual void install_prompt_editor_io() = 0;
+
     // 45-D6/D7: drives the real slash-command dispatch directly (bypassing the
     // composer's auto-create path) so the session-less `/mcp`/`/status`
     // fallbacks are testable.

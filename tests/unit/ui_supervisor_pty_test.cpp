@@ -1322,8 +1322,9 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
         registry->registerWorkspace(beta, "beta");
     }
     // A prompted root is required for `/sessions` to list it under spec 23 §6.1
-    // (the catalog hides unprompted roots); the Live switcher still hides the
-    // stopped workspace's session regardless.
+    // (the catalog hides unprompted roots). 46-D3: the lone live workspace has
+    // no target, so Ctrl-S shows the notice instead of the switcher; the stopped
+    // workspace's session is hidden either way.
     write_stored_session(beta, "beta-stored", "zzswp4markerzz");
 
     HostDaemonGuard alpha_guard(alpha_id.value);
@@ -1332,13 +1333,13 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
-    ASSERT_TRUE(child.wait_for("Switcher", 10s)) << child.text();
+    ASSERT_TRUE(child.wait_for("No other workspaces available", 10s)) << child.text();
     EXPECT_EQ(child.text().find("beta-stored"), std::string::npos)
-        << "Live switcher showed a stopped workspace's stored session";
+        << "the Live surface showed a stopped workspace's stored session";
 
     child.write("\x1b");
-    ASSERT_TRUE(child.wait_for_frame_absent("Switcher", 10s))
-        << "switcher overlay did not close\n" << child.text();
+    ASSERT_TRUE(child.wait_for_frame_absent("No other workspaces available", 10s))
+        << "notice did not close\n" << child.text();
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
 
@@ -1349,8 +1350,9 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
 
 // Bug regression (Live source = daemon OPEN sessions): a LIVE workspace whose
 // daemon has no open session but holds stored-but-closed history must not leak
-// those rows into the Ctrl-S Live switcher. The focused session is the resumed
-// stored session (hidden), and `/sessions` still lists every stored session.
+// those rows into the Ctrl-S Live surface. 46-D3: the lone live workspace has no
+// target, so Ctrl-S shows the notice instead of the switcher; `/sessions` still
+// lists every stored session.
 TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
     ShortTempRoot root("ymh_pty_live_hide");
     const std::filesystem::path state = root.state_dir();
@@ -1376,15 +1378,17 @@ TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
-    ASSERT_TRUE(child.wait_for("(current session hidden)", 20s))
-        << "the Live switcher must hide the focused live session: " << child.text();
+    ASSERT_TRUE(child.wait_for("No other workspaces available", 20s))
+        << "a lone live workspace with a hidden focused session must show the notice: "
+        << child.text();
     EXPECT_EQ(child.text().find("[zzstoredone"), std::string::npos)
-        << "Live switcher leaked a stored-but-closed session: " << child.text();
+        << "the Live surface leaked a stored-but-closed session: " << child.text();
     EXPECT_EQ(child.text().find("[zzstoredtwo"), std::string::npos)
-        << "Live switcher leaked a stored-but-closed session: " << child.text();
+        << "the Live surface leaked a stored-but-closed session: " << child.text();
 
     child.write("\x1b");
-    ASSERT_TRUE(child.wait_for_frame_absent("Switcher", 10s)) << child.text();
+    ASSERT_TRUE(child.wait_for_frame_absent("No other workspaces available", 10s))
+        << child.text();
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("zzstoredone", 20s)) << child.text();
     ASSERT_TRUE(child.wait_for("zzstoredtwo", 20s)) << child.text();

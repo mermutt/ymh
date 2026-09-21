@@ -1667,4 +1667,135 @@ TEST(UiRenderGolden, UI45_D4_WholeListPlaceholder) {
     EXPECT_NE(loading_rendered.find("loading stored sessions"), std::string::npos);
 }
 
+std::string line_with(const std::string& text, const std::string& needle) {
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = text.find('\n', start);
+        const std::string line =
+            text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (line.find(needle) != std::string::npos) {
+            return line;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return {};
+}
+
+// Fills the active session's transcript with wrapping marker lines so every
+// vertical position an overlay can occupy has a distinctive cell underneath it.
+void seed_marker_conversation(UiModel& model, const std::string& marker) {
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string line;
+    for (int index = 0; index < 8; ++index) {
+        line += marker;
+        line += ' ';
+    }
+    for (int index = 0; index < 40; ++index) {
+        ConversationEntry entry;
+        entry.role = ConversationRole::User;
+        entry.text = line;
+        state->conversation.entries.push_back(std::move(entry));
+    }
+}
+
+void expect_opaque_row(const std::string& rendered, const std::string& row_text,
+                       const std::string& marker) {
+    const std::string line = line_with(rendered, row_text);
+    ASSERT_FALSE(line.empty()) << "row not rendered: " << row_text << "\n" << rendered;
+    EXPECT_EQ(line.find(marker), std::string::npos) << line;
+}
+
+// 46-G1 (46-I8): Ctrl+S with a single live workspace renders exactly the notice
+// window — the message plus one `[ OK ]` row, no workspace rows and no
+// `(current session hidden)` leaf.
+TEST(UiRenderGolden, UI46_G1_NoticePopup) {
+    UiModel model = build_model();
+    model.message.open = true;
+    model.message.text = "No other workspaces available";
+    model.mode         = UiMode::Notice;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("No other workspaces available"), std::string::npos);
+    EXPECT_NE(rendered.find("[ OK ]"), std::string::npos);
+    EXPECT_EQ(rendered.find("(current session hidden)"), std::string::npos);
+    EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
+}
+
+// 46-G2 (46-I27, 46-D4): the permission dialog is composited opaquely; no
+// transcript cell is visible to the right of any option row on a wide summary.
+TEST(UiRenderGolden, UI46_G2_PermissionDialogOpaque) {
+    UiModel model = build_model();
+    seed_marker_conversation(model, "BLEEDMARK");
+    model.dialog.open    = true;
+    model.dialog.session = kSession;
+    model.dialog.request = PermissionRequestId{"p1"};
+    model.dialog.tool    = "shell";
+    model.dialog.summary = std::string(80, 'S');
+    model.dialog.selected = 0;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    ASSERT_NE(rendered.find("BLEEDMARK"), std::string::npos);
+    ASSERT_NE(rendered.find("Allow once"), std::string::npos);
+    expect_opaque_row(rendered, "Allow once", "BLEEDMARK");
+    expect_opaque_row(rendered, "Allow for session", "BLEEDMARK");
+    expect_opaque_row(rendered, "Always allow", "BLEEDMARK");
+    expect_opaque_row(rendered, "Deny", "BLEEDMARK");
+}
+
+// 46-G3 (46-I27, 46-D4): the same opacity assertion for the exit confirmation.
+TEST(UiRenderGolden, UI46_G3_ExitConfirmOpaque) {
+    UiModel model = build_model();
+    seed_marker_conversation(model, "BLEEDMARK");
+    model.exitConfirm.open      = true;
+    model.exitConfirm.orphaning = {WorkspaceId{std::string(70, 'W')}};
+    model.exitConfirm.sessions  = 1;
+    model.exitConfirm.running   = 0;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    ASSERT_NE(rendered.find("BLEEDMARK"), std::string::npos);
+    expect_opaque_row(rendered, "[ Terminate and exit ]", "BLEEDMARK");
+    expect_opaque_row(rendered, "[ Cancel ]", "BLEEDMARK");
+}
+
+// 46-G4 (46-I27, 46-D4): the same opacity assertion for the switcher.
+TEST(UiRenderGolden, UI46_G4_SwitcherOpaque) {
+    UiModel model = build_model();
+    seed_marker_conversation(model, "BLEEDMARK");
+    model.workspaces[model.activeWorkspaceId].title = std::string(70, 'T');
+    model.openSwitcher();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    ASSERT_NE(rendered.find("BLEEDMARK"), std::string::npos);
+    expect_opaque_row(rendered, "j/k move", "BLEEDMARK");
+}
+
+// 46-G6 (46-D9.4): a turn-active status line renders the spinner glyph as the
+// first cell of the bottom-left group, before `build`, with the exact prefix
+// `<glyph>  · build`.
+TEST(UiRenderGolden, UI46_G6_StatusSpinner) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->agent_state  = AgentState::Thinking;
+    model.spinner.frame = 0;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    const std::string line = line_with(rendered, "0 active");
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(line.find("│⠋  · build"), 0u);
+}
+
 } // namespace
