@@ -110,14 +110,15 @@ struct AgentEnv {
              WallClock wall_clock = std::chrono::system_clock::now,
              bool enable_plan_mode = false,
              SystemPrompt* prompt = nullptr,
-             InstructionLoader* instructions = nullptr)
+             InstructionLoader* instructions = nullptr,
+             GrantStore* grant_store = nullptr)
         : workspace(prefix),
           sessions(store, bus),
           env(workspace.path(), SandboxMode::Workspace, ToolConfig{}),
           provider(std::move(provider)),
           runtime(),
           adapter_handle(register_test_adapter(runtime, this->provider)),
-          policy(std::move(permission)),
+          policy(std::move(permission), grant_store),
           gate(use_permission_gate ? std::make_unique<PermissionGate>(policy, PermissionConfig{})
                                    : nullptr),
           assembler(tools, config.system_prompt),

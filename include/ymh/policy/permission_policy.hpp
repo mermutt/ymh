@@ -1,10 +1,11 @@
 #pragma once
 
-// Permissions and policy (09 §2-§5). The policy is pure: it classifies a request
-// and reads its own rule/grant state, performs no I/O, never blocks, and never
-// touches the UI (Q1/Q15). The waiting, timeout, and durable-decision machinery
-// lives in `PermissionGate` (the v1, transport-free core of the broker, §4.2),
-// which fails closed on timeout/cancel (Q3/Q8).
+// Permissions and policy (09 §2-§5). `evaluate()` is total and performs no I/O;
+// `remember()` is the single mutation seam and may perform one best-effort
+// durable append through an injected `GrantStore` (46-D2.4). The waiting,
+// timeout, and durable-decision machinery lives in `PermissionGate` (the v1,
+// transport-free core of the broker, §4.2), which fails closed on
+// timeout/cancel (Q3/Q8).
 
 #include <chrono>
 #include <condition_variable>
@@ -12,10 +13,12 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -91,7 +94,40 @@ struct PolicyRule {
     } layer = Layer::Global;
 
     std::string   id;        // stable, human-readable rule id for `reason`
+
+    // 46-D2 / O-M1: when true a non-empty `command` must equal
+    // `command_pattern(request)` exactly, never via `glob_match`. A
+    // `remember()`-derived durable grant sets it; config rules leave it false.
+    bool          literal = false;
 };
+
+// 46-D1: exported so the config parser can validate a rule (F-10). Throws
+// `PolicyConfigError` for an empty match dimension, a `command` without `tool`,
+// or a malformed glob. Takes raw strings so the policy layer does not depend on
+// the config layer; the parser translates the error to `ConfigError` (O-M4).
+void validate_glob(const std::string& pattern);
+void validate_rule(std::string_view tool, std::string_view command);
+
+// 46-D2: the durable `Always` grants seam. `load()` is called once by the
+// policy constructor; `append()` is the single best-effort durable write.
+class GrantStore {
+public:
+    virtual ~GrantStore() = default;
+
+    // Returns the LocalGrant rules; a failure degrades to {} (fail-safe re-ask).
+    [[nodiscard]] virtual std::vector<PolicyRule> load() = 0;
+
+    // Atomic (temp+fsync+rename) flock(LOCK_EX)-guarded read-modify-write;
+    // returns false on failure.
+    virtual bool append(const PolicyRule& grant) = 0;
+};
+
+// 46-D2.2: opens `<workspace>/.ymh/permissions.jsonc`. `expected_workspace_id`
+// is the workspace's registry id; a recorded id that does not equal it (or no
+// expected id) makes the file ignored.
+[[nodiscard]] std::unique_ptr<GrantStore>
+open_file_grant_store(std::filesystem::path grants_path,
+                      std::optional<std::string> expected_workspace_id);
 
 // Additive (15 §6.1, AM-3). A NO-MATCH fallback for a tool-name prefix: it is
 // consulted only when no PolicyRule matches, so an operator rule always
@@ -123,9 +159,10 @@ public:
 
     virtual PolicyVerdict evaluate(const PermissionRequest&) const = 0;
 
-    virtual void remember(const PermissionRequest&,
-                          payload::PermissionDecisionKind,
-                          GrantScope) = 0;
+    // 46-D2: returns the created grant (was `void`); callers may ignore it.
+    virtual PolicyRule remember(const PermissionRequest&,
+                                payload::PermissionDecisionKind,
+                                GrantScope) = 0;
 
     virtual PolicyGeneration generation() const noexcept = 0;
 
@@ -136,10 +173,12 @@ public:
 // (PolicyConfigError at load, never at execution — Q-F4/Q-F12).
 class RulePermissionPolicy final : public PermissionPolicy {
 public:
-    explicit RulePermissionPolicy(PermissionConfig config);
+    // 46-D2: nullable; null disables persistence (tests). When non-null, the
+    // constructor loads `store->load()` into `local_grants_` before `reorder()`.
+    explicit RulePermissionPolicy(PermissionConfig config, GrantStore* store = nullptr);
 
     PolicyVerdict evaluate(const PermissionRequest& request) const override;
-    void          remember(const PermissionRequest& request,
+    PolicyRule    remember(const PermissionRequest& request,
                            payload::PermissionDecisionKind kind,
                            GrantScope scope) override;
     PolicyGeneration generation() const noexcept override { return generation_; }
@@ -150,6 +189,7 @@ private:
 
     PermissionConfig   config_;
     PolicyGeneration   generation_;
+    GrantStore*        store_ = nullptr;
     std::vector<PolicyRule> ordered_rules_;
     std::vector<PolicyRule> base_rules_;
 

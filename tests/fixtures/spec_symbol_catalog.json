@@ -1485,6 +1485,66 @@
       "section": "7.5"
     },
     {
+      "symbol": "config::permissions.default",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "config::permissions.rules",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "config::permissions.rules.tool",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "config::permissions.rules.command",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "config::permissions.rules.effect",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "config::permissions.rules.id",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "3.2"
+    },
+    {
+      "symbol": "config::llm.api_key",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "14.2"
+    },
+    {
+      "symbol": "config::llm.default.api_key",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "14.2"
+    },
+    {
+      "symbol": "config::llm.max_tokens",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "14.2"
+    },
+    {
+      "symbol": "config::llm.default.max_tokens",
+      "category": "config_key",
+      "spec": "46-permissions-ui-errata.md",
+      "section": "14.2"
+    },
+    {
       "symbol": "config::goals.blocked_after_consecutive_rounds",
       "category": "config_key",
       "spec": "44-goals-jobs-commands.md",

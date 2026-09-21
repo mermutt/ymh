@@ -66,6 +66,39 @@ TEST(Logging, PromptLoggedOnlyWhenOptedIn) {
     EXPECT_EQ(contents.find("sk-secret123456"), std::string::npos);
 }
 
+TEST(Logging, UI46_D12_LogSinkRedacts) {
+    test::TempWorkspace         workspace("logging_sink_redact");
+    const std::filesystem::path log_path = workspace.path() / "ymh.log";
+
+    LoggingOptions options;
+    options.level = LogLevel::Debug;
+    options.file  = log_path;
+    init_logging(options);
+
+    category_logger(LogCategory::Agent).info(R"({"api_key": "SECRET123"})");
+    shutdown_logging();
+
+    const std::string contents = read_file(log_path);
+    EXPECT_EQ(contents.find("SECRET123"), std::string::npos);
+    EXPECT_NE(contents.find("[REDACTED]"), std::string::npos);
+}
+
+TEST(Logging, UI46_D12_ApiKeyNeverLogged) {
+    test::TempWorkspace         workspace("logging_never_logged");
+    const std::filesystem::path log_path = workspace.path() / "ymh.log";
+
+    LoggingOptions options;
+    options.level = LogLevel::Debug;
+    options.file  = log_path;
+    init_logging(options);
+
+    category_logger(LogCategory::Tool).info("provider call api_key=SECRET123 done");
+    shutdown_logging();
+
+    const std::string contents = read_file(log_path);
+    EXPECT_EQ(contents.find("SECRET123"), std::string::npos);
+}
+
 TEST(Logging, LevelParsing) {
     EXPECT_EQ(parse_log_level("debug"), LogLevel::Debug);
     EXPECT_EQ(parse_log_level("warn"), LogLevel::Warn);

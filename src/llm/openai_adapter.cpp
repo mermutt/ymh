@@ -901,7 +901,12 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                                  "provider does not support reasoning"));
     }
 
-    const std::optional<std::string> api_key = get_env(config_.api_key_env);
+    std::optional<std::string> api_key;
+    if (config_.api_key.has_value() && !config_.api_key->empty()) {
+        api_key = config_.api_key;
+    } else {
+        api_key = get_env(config_.api_key_env);
+    }
     if (!api_key.has_value() || api_key->empty()) {
         return failed(make_error(LLMErrorCode::Auth,
                                  "missing API key in " + config_.api_key_env));

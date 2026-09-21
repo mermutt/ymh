@@ -55,6 +55,35 @@ std::string redact_secrets(std::string_view text) {
 
     std::size_t i = 0;
     while (i < text.size()) {
+        // 46-D12.11: the JSON form the key takes in a config document,
+        // `"api_key"\s*:\s*"…"` -> `"api_key": "[REDACTED]"`.
+        if (is_boundary_before(text, i) && text[i] == '"' &&
+            starts_with_ci(text, i + 1, "api_key") && i + 8 < text.size() &&
+            text[i + 8] == '"') {
+            std::size_t cursor = skip_spaces(text, i + 9);
+            if (cursor < text.size() && text[cursor] == ':') {
+                cursor = skip_spaces(text, cursor + 1);
+                if (cursor < text.size() && text[cursor] == '"') {
+                    const std::size_t value_start = cursor + 1;
+                    cursor                        = value_start;
+                    while (cursor < text.size() && text[cursor] != '"') {
+                        if (text[cursor] == '\\') {
+                            cursor += 2;
+                            continue;
+                        }
+                        ++cursor;
+                    }
+                    if (cursor < text.size()) {
+                        out.append(text.substr(i, value_start - i));
+                        out.append(kRedacted);
+                        out.push_back('"');
+                        i = cursor + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         if (starts_with_ci(text, i, "bearer") && is_boundary_before(text, i)) {
             std::size_t after = skip_spaces(text, i + 6);
             if (after < text.size() && is_token_char(text[after])) {

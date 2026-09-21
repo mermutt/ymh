@@ -1,10 +1,12 @@
 #include "ymh/config/config.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -16,13 +18,17 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/config/jsonc.hpp"
 #include "ymh/core/logger.hpp"
 #include "ymh/mcp/mcp_types.hpp"
+#include "ymh/policy/permission_policy.hpp"
 
 namespace ymh {
 namespace {
@@ -43,77 +49,31 @@ constexpr std::string_view kConfigFile = "config.jsonc";
     throw ConfigError("config " + source.string() + ": " + std::string{detail});
 }
 
-// True iff `text` contains only whitespace and `//` / `/* */` comments (no JSON
-// token at all), ignoring a single optional leading UTF-8 BOM. This needs no
-// string-literal handling: any non-whitespace byte that is not a comment opener
-// makes it return false before any string is entered. Used so an empty,
-// comments-only, or BOM-only config is a no-op `{}`, matching the retired TOML
-// loader where an empty file parsed to an empty table (J-L2).
-bool blank_or_comments_only(std::string_view text) {
-    std::size_t i = 0;
-    // A leading UTF-8 BOM (EF BB BF) is not a JSON token: skip it so BOM-only,
-    // BOM+whitespace and BOM+comments files are blank (the "BOM accepted" rule,
-    // §4.3). Only at byte 0; a BOM anywhere else is left to `parse`, which
-    // rejects it.
-    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
-        static_cast<unsigned char>(text[1]) == 0xBB &&
-        static_cast<unsigned char>(text[2]) == 0xBF) {
-        i = 3;
+// 46-D12.2: a literal `llm.api_key` may only be read from a file with no
+// group/other permission bits, so a chmod'd config cannot silently leak it.
+void require_private_config_file(const std::filesystem::path& source) {
+    struct stat info {};
+    if (::stat(source.c_str(), &info) != 0) {
+        return;
     }
-    while (i < text.size()) {
-        const char c = text[i];
-        // RFC 8259 whitespace only: space, tab, LF, CR. `\f` (0x0C) and `\v`
-        // (0x0B) are NOT JSON whitespace, so a file containing only them is not
-        // blank and reaches `parse`, which rejects it (J-F1) instead of being
-        // silently no-op'd. A literal `{}` is likewise not blank: `{` is not
-        // whitespace, so it is parsed normally.
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            ++i;
-        } else if (c == '/' && i + 1 < text.size() && text[i + 1] == '/') {
-            i += 2;
-            while (i < text.size() && text[i] != '\n') {
-                ++i;
-            }
-        } else if (c == '/' && i + 1 < text.size() && text[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < text.size() && !(text[i] == '*' && text[i + 1] == '/')) {
-                ++i;
-            }
-            if (i + 1 >= text.size()) {
-                return false;  // unterminated block comment is malformed, not blank
-            }
-            i += 2;
-        } else {
-            return false;
-        }
+    if ((info.st_mode & 077) != 0) {
+        fail(source, "'llm.api_key' requires a 0600 config file");
     }
-    return true;
 }
 
-// Byte offset -> 1-based line, for the error message.
-std::size_t line_for_byte(std::string_view text, std::size_t byte) {
-    const std::size_t end = std::min(byte, text.size());
-    return 1 + static_cast<std::size_t>(std::count(text.begin(), text.begin() + end, '\n'));
-}
-
-// Parse a JSONC document with comments tolerated. Exceptions are enabled so the
-// caller can report line/column (parity with the retired TOML path).
+// Parse a JSONC document with comments tolerated. The shared
+// `parse_jsonc_document` reports line/column; this path-aware wrapper raises
+// `ConfigError` (parity with the retired TOML path).
 Json parse_jsonc(const std::filesystem::path& path, std::string_view text) {
     if (blank_or_comments_only(text)) {
         return Json::object();  // empty / comments-only => no-op (J-L2)
     }
-    try {
-        return Json::parse(text,
-                           /*cb=*/nullptr,
-                           /*allow_exceptions=*/true,
-                           /*ignore_comments=*/true);
-    } catch (const Json::parse_error& error) {
-        std::ostringstream message;
-        message << error.what() << " (line " << line_for_byte(text, error.byte) << ')';
-        fail(path, message.str());
-    } catch (const std::exception& other) {
-        fail(path, other.what());
+    std::string         error;
+    std::optional<Json> parsed = parse_jsonc_document(text, error);
+    if (!parsed.has_value()) {
+        fail(path, error);
     }
+    return std::move(*parsed);
 }
 
 void reject_unknown(const Json& table,
@@ -347,13 +307,50 @@ void apply_workspace(Config& config, const Json& table, const std::filesystem::p
 }
 
 void apply_permissions(Config& config, const Json& table, const std::filesystem::path& source) {
-    reject_unknown(table, "permissions", {"shell", "write", "read"}, source);
+    reject_unknown(table, "permissions", {"shell", "write", "read", "default", "rules"}, source);
     config.permissions.shell =
         read_string(table, "shell", "permissions", config.permissions.shell, source);
     config.permissions.write =
         read_string(table, "write", "permissions", config.permissions.write, source);
     config.permissions.read =
         read_string(table, "read", "permissions", config.permissions.read, source);
+    config.permissions.default_verdict = read_string(
+        table, "default", "permissions", config.permissions.default_verdict, source);
+
+    const Json* rules = member(table, "rules");
+    if (rules == nullptr) {
+        return;
+    }
+    if (!rules->is_array()) {
+        fail(source, "invalid type for 'permissions.rules'");
+    }
+    config.permissions.rules.clear();
+    std::size_t index = 0;
+    for (const Json& entry : *rules) {
+        if (!entry.is_object()) {
+            fail(source, "invalid type for 'permissions.rules[" + std::to_string(index) + "]'");
+        }
+        reject_unknown(entry, "permissions.rules", {"tool", "command", "effect", "id"}, source);
+        PermissionRuleSettings rule;
+        rule.tool    = read_optional_string(entry, "tool", "permissions.rules", source);
+        rule.command = read_optional_string(entry, "command", "permissions.rules", source);
+        if (member(entry, "effect") == nullptr) {
+            fail(source, "missing 'permissions.rules.effect'");
+        }
+        rule.effect = read_string(entry, "effect", "permissions.rules", "", source);
+        if (rule.effect != "allow" && rule.effect != "ask" && rule.effect != "deny") {
+            fail(source, "invalid effect for 'permissions.rules.effect': '" + rule.effect + "'");
+        }
+        rule.id = read_string(entry, "id", "permissions.rules",
+                              "config.rule." + std::to_string(index), source);
+        try {
+            validate_rule(rule.tool.value_or(""), rule.command.value_or(""));
+        } catch (const PolicyConfigError& error) {
+            fail(source, error.what());
+        }
+        config.permissions.rules.push_back(std::move(rule));
+        ++index;
+    }
 }
 
 void apply_logging(Config& config, const Json& table, const std::filesystem::path& source) {
@@ -386,11 +383,12 @@ void apply_retry(Config& config, const Json& table, const std::filesystem::path&
         table, "honor_retry_after", "llm.default.retry", config.llm.retry.honor_retry_after, source);
 }
 
-void apply_llm(Config& config, const Json& table, const std::filesystem::path& source) {
+void apply_llm(Config& config, const Json& table, const std::filesystem::path& source,
+               bool global_layer) {
     reject_unknown(table, "llm",
-                   {"default", "provider", "base_url", "model", "api_key_env", "reasoning_effort",
-                    "max_concurrency", "connect_timeout_ms", "idle_timeout_ms", "request_timeout_ms",
-                    "retry"},
+                   {"default", "provider", "base_url", "model", "api_key_env", "api_key",
+                    "max_tokens", "reasoning_effort", "max_concurrency", "connect_timeout_ms",
+                    "idle_timeout_ms", "request_timeout_ms", "retry"},
                    source);
 
     const Json* section = &table;
@@ -399,11 +397,30 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
             fail(source, "invalid type for 'llm.default'");
         }
         reject_unknown(*nested, "llm.default",
-                       {"provider", "base_url", "model", "api_key_env", "reasoning_effort",
-                        "max_concurrency", "connect_timeout_ms", "idle_timeout_ms",
-                        "request_timeout_ms", "retry"},
+                       {"provider", "base_url", "model", "api_key_env", "api_key", "max_tokens",
+                        "reasoning_effort", "max_concurrency", "connect_timeout_ms",
+                        "idle_timeout_ms", "request_timeout_ms", "retry"},
                        source);
         section = nested;
+    }
+
+    if (member(*section, "api_key") != nullptr) {
+        if (!global_layer) {
+            fail(source, "'llm.api_key' is global-layer only");
+        }
+        const std::string value = read_string(*section, "api_key", "llm.default", "", source);
+        if (!value.empty()) {
+            require_private_config_file(source);
+            config.llm.api_key = value;
+        }
+    }
+    if (member(*section, "max_tokens") != nullptr) {
+        const std::int64_t value =
+            read_int64(*section, "max_tokens", "llm.default", 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for 'llm.default.max_tokens'");
+        }
+        config.llm.max_tokens = static_cast<std::uint32_t>(value);
     }
 
     config.llm.provider =
@@ -886,7 +903,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         apply_logging(config, *logging, source);
     }
     if (const Json* llm = section("llm"); llm != nullptr) {
-        apply_llm(config, *llm, source);
+        apply_llm(config, *llm, source, global_layer);
     }
     if (const Json* mcp = section("mcp"); mcp != nullptr) {
         apply_mcp(config, *mcp, source);
@@ -1041,15 +1058,34 @@ bool write_default_config(const std::filesystem::path& file, Logger* logger, boo
         }
         return true;
     }
-    std::ofstream output{file, std::ios::binary | std::ios::trunc};
-    if (!output) {
+    const int fd = ::open(file.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        if (errno == EEXIST) {
+            return true;
+        }
         scaffold_warn(logger, "config: cannot write '" + file.string() + "'");
         return false;
     }
-    output << kDefaultConfigJsonc;
-    output.flush();
-    if (!output) {
+    const std::string body{kDefaultConfigJsonc};
+    bool              ok   = true;
+    std::size_t       written = 0;
+    while (written < body.size()) {
+        const ssize_t count = ::write(fd, body.data() + written, body.size() - written);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        written += static_cast<std::size_t>(count);
+    }
+    if (::close(fd) != 0) {
+        ok = false;
+    }
+    if (!ok) {
         scaffold_warn(logger, "config: cannot write '" + file.string() + "'");
+        (void)::unlink(file.c_str());
         return false;
     }
     created = true;
@@ -1342,6 +1378,24 @@ std::optional<std::int64_t> read_non_negative_integer(const Json& value) {
     return std::nullopt;
 }
 
+std::optional<std::string> map_localcode_tool(const std::string& tool) {
+    static constexpr std::string_view kKnown[] = {
+        "read_file", "write_file", "edit_file", "grep", "glob", "shell", "terminal"};
+    if (tool == "bash") {
+        return std::string{"shell"};
+    }
+    for (std::string_view known : kKnown) {
+        if (tool == known) {
+            return tool;
+        }
+    }
+    return std::nullopt;
+}
+
+bool is_valid_localcode_decision(const std::string& decision) {
+    return decision == "allow" || decision == "ask" || decision == "deny";
+}
+
 void copy_mcp_string(const Json& entry, std::string_view key, Json& out) {
     const Json* node = member(entry, key);
     if (node != nullptr && node->is_string()) {
@@ -1463,6 +1517,41 @@ std::optional<Json> build_localcode_import(const Json& localcode, std::string& e
         }
     }
 
+    if (const Json* skip = member(localcode, "skip_permissions");
+        skip != nullptr && skip->is_boolean() && skip->get<bool>()) {
+        document["permissions"]["default"] = "allow";
+    }
+
+    if (const Json* permission = member(localcode, "permission");
+        permission != nullptr && permission->is_object()) {
+        Json rules = Json::array();
+        for (auto it = permission->begin(); it != permission->end(); ++it) {
+            const std::optional<std::string> mapped = map_localcode_tool(it.key());
+            if (!mapped.has_value() || !it.value().is_array()) {
+                continue;
+            }
+            std::size_t index = 0;
+            for (const Json& entry : it.value()) {
+                const Json* match    = entry.is_object() ? member(entry, "match") : nullptr;
+                const Json* decision = entry.is_object() ? member(entry, "decision") : nullptr;
+                if (match != nullptr && match->is_string() && decision != nullptr &&
+                    decision->is_string() &&
+                    is_valid_localcode_decision(decision->get<std::string>())) {
+                    Json rule;
+                    rule["tool"]    = *mapped;
+                    rule["command"] = match->get<std::string>();
+                    rule["effect"]  = decision->get<std::string>();
+                    rule["id"]      = "localcode.rule." + it.key() + "." + std::to_string(index);
+                    rules.push_back(std::move(rule));
+                }
+                ++index;
+            }
+        }
+        if (!rules.empty()) {
+            document["permissions"]["rules"] = std::move(rules);
+        }
+    }
+
     const Json* default_profile = member(localcode, "default_profile");
     if (default_profile != nullptr && default_profile->is_string()) {
         const std::string profile_name = default_profile->get<std::string>();
@@ -1491,10 +1580,22 @@ std::optional<Json> build_localcode_import(const Json& localcode, std::string& e
         bool openai_compatible = false;
         if (provider != nullptr) {
             const Json* type = member(*provider, "type");
-            openai_compatible = type != nullptr && type->is_string() &&
-                                type->get<std::string>() == "openai-compatible";
+            if (type != nullptr && type->is_string()) {
+                const std::string name = type->get<std::string>();
+                openai_compatible = name == "openai-compatible" || name == "openai-compat";
+            }
         }
         if (openai_compatible) {
+            if (const Json* key = member(*provider, "api_key");
+                key != nullptr && key->is_string() && !key->get<std::string>().empty()) {
+                document["llm"]["default"]["api_key"] = key->get<std::string>();
+            }
+            if (const Json* tokens = member(*profile, "max_tokens"); tokens != nullptr) {
+                if (const auto value = read_non_negative_integer(*tokens);
+                    value.has_value() && *value > 0) {
+                    document["llm"]["default"]["max_tokens"] = *value;
+                }
+            }
             if (const Json* window = member(*profile, "context_window"); window != nullptr) {
                 if (const auto value = read_non_negative_integer(*window); value.has_value()) {
                     document["agent"]["compaction"]["context_window_tokens"] = *value;

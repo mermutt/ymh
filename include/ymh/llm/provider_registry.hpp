@@ -10,6 +10,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +28,9 @@ struct LLMProviderConfig {
     std::string  base_url;                 // e.g. "https://api.deepseek.com/v1"
     ModelId      model;                    // default model (may be empty)
     std::string  api_key_env;              // NAME of the env var, never the secret
+    // 46-D12.3: the literal key; when non-empty it outranks `api_key_env` and
+    // `api_key_env` becomes optional. Never logged or rendered.
+    std::optional<std::string> api_key;
     std::vector<std::pair<std::string, std::string>> headers;  // extra, non-secret
     std::chrono::milliseconds connect_timeout{10'000};
     std::chrono::milliseconds idle_timeout{60'000};

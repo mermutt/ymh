@@ -643,6 +643,32 @@ TEST_F(OpenAiAdapterTest, CurlHappyPathAgainstMockServer) {
     EXPECT_EQ(server.requests(), 1u);
 }
 
+TEST_F(OpenAiAdapterTest, UI46_D12_ApiKeyReachesProvider) {
+    ymh::test::MockHttpServer server({ymh::test::MockHttpServer::Response{
+        200,
+        {{"Content-Type", "text/event-stream"}},
+        sse_body({text_frame("Hi"), finish_frame("stop")}),
+        std::numeric_limits<std::size_t>::max()}});
+
+    ymh::LLMProviderConfig config;
+    config.provider    = "openai-compatible";
+    config.base_url    = server.base_url();
+    config.model       = "test-model";
+    config.api_key     = std::string{"SECRET"};
+    config.api_key_env = std::string{};
+    config.retry.base_delay    = std::chrono::milliseconds{1};
+    config.retry.max_delay     = std::chrono::milliseconds{2};
+    config.retry.jitter        = 0.0;
+    config.retry.max_attempts  = 1;
+    ymh::OpenAICompatibleProvider provider(
+        config, ymh::openai_compatible_capabilities(),
+        std::make_shared<ymh::CurlHttpTransport>());
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Completed);
+    EXPECT_EQ(server.requests(), 1u);
+}
+
 TEST_F(OpenAiAdapterTest, CurlRetriesServerErrorThenSucceeds) {
     ymh::test::MockHttpServer server(
         {ymh::test::MockHttpServer::Response{500, {}, "{}",

@@ -481,6 +481,8 @@ target_link_libraries(ymh_agent
 
 add_library(ymh_config STATIC
     src/config/config.cpp
+    src/config/jsonc.cpp
+    src/config/grant_store.cpp
 )
 add_library(ymh::config ALIAS ymh_config)
 
@@ -494,6 +496,7 @@ target_link_libraries(ymh_config
         nlohmann_json::nlohmann_json
     PRIVATE
         ymh::mcp
+        ymh::policy
         ymh::warnings
 )
 

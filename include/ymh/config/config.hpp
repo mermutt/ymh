@@ -12,9 +12,12 @@
 //         -> command-line      (applied by the CLI layer)
 //
 // The loader is strict: an unknown key in a JSONC file is a `ConfigError`, so a
-// typo can never be silently ignored (08 §5.3). Secrets are never stored in
-// `Config`; `llm.api_key_env` names the environment variable that holds the
-// secret, and the value is read per request by the provider (08 §6.4).
+// typo can never be silently ignored (08 §5.3). `llm.api_key` (46-D12.2) is the
+// one permitted literal secret; it is accepted only in the global config layer,
+// the file is `0600`, and the value is never logged, rendered, or event-logged.
+// All other credentials stay environment references: `llm.api_key_env` names the
+// environment variable that holds the secret, read per request by the provider
+// (08 §6.4).
 
 #include <chrono>
 #include <cstddef>
@@ -78,11 +81,26 @@ struct WorkspaceSettings {
     std::vector<std::string> workspace_roots;  // first-run discovery roots (§9.10)
 };
 
+// 46-D1: one `permissions.rules` entry. Rev 5 / O-H1: no `path` field — the
+// shipped loop never populates `PermissionRequest::path`, so a path rule would
+// be dead code. `effect` is required; `id` defaults to `config.rule.<n>`.
+struct PermissionRuleSettings {
+    std::optional<std::string> tool;
+    std::optional<std::string> command;
+    std::string                effect;
+    std::string                id;
+};
+
 // [permissions] — mapped onto `PermissionConfig` by the CLI wiring.
 struct PermissionDefaults {
     std::string shell = "ask";
     std::string write = "ask";
     std::string read = "allow";
+    // 46-D1: the master switch; `"allow"` upgrades every builtin/MCP rule and
+    // the fallback verdict to Allow (never bypassing a hard deny or force_ask).
+    std::string default_verdict = "ask";
+    // 46-D1: the general rule list; becomes Layer::Project rules.
+    std::vector<PermissionRuleSettings> rules;
 };
 
 // [logging] — §40. `log_prompts` is off by default and must never be enabled
@@ -106,6 +124,14 @@ struct LlmSettings {
     std::string                base_url = "https://api.deepseek.com/v1";
     std::string                model = "deepseek-flash";
     std::string                api_key_env = "DEEPSEEK_API_KEY";
+    // 46-D12.2: the one permitted literal secret; accepted only in the global
+    // config layer (a workspace-layer `api_key` is a ConfigError). The file must
+    // be 0600; the value is never logged, rendered, or event-logged. A literal
+    // key outranks `api_key_env`.
+    std::optional<std::string>   api_key;
+    // 46-D12.4: imported from the localcode profile; reaches the wire through
+    // `to_agent_config` -> `GenerationParameters::max_output_tokens`.
+    std::optional<std::uint32_t> max_tokens;
     std::optional<std::string> reasoning_effort;
     std::size_t                max_concurrency = 4;
     std::chrono::milliseconds  connect_timeout{10'000};
@@ -295,12 +321,13 @@ void apply_jsonc_file(Config& config, const std::filesystem::path& path,
 void apply_mcp_servers_object(McpSettings& mcp, const nlohmann::json& table,
                               const std::filesystem::path& source);
 
-// 25-D15: builds a ymh config document (JSON object) from a parsed localcode
-// document, including all mapped servers. Pure mapping: no logging, no
-// filesystem, no provider api_key copy; escapes a literal `${` as `$${` in every
-// copied MCP value and forces `required=false` on every copied server. Returns
-// `std::nullopt` and fills `error` on an unrecoverable shape problem. Semantic
-// MCP validation lives in the CLI layer (25-D16).
+// 25-D15 / 46-D12: builds a ymh config document (JSON object) from a parsed
+// localcode document, including all mapped servers, the provider `api_key`,
+// `skip_permissions`/`permission` rules, and profile `max_tokens`. Pure mapping:
+// no logging, no filesystem; escapes a literal `${` as `$${` in every copied MCP
+// value and forces `required=false` on every copied server. Returns `std::nullopt`
+// and fills `error` on an unrecoverable shape problem. Semantic MCP validation
+// lives in the CLI layer (25-D16).
 [[nodiscard]] std::optional<nlohmann::json> build_localcode_import(
     const nlohmann::json& localcode, std::string& error);
 

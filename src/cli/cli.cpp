@@ -37,6 +37,7 @@
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
+#include "ymh/llm/redaction.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/execution/config.hpp"
@@ -728,24 +729,27 @@ const nlohmann::json* localcode_provider(const nlohmann::json& localcode) {
 }
 
 void print_localcode_notes(const nlohmann::json& localcode, std::ostream& err) {
-    if (const auto skip = localcode.find("skip_permissions");
-        skip != localcode.end() && skip->is_boolean() && skip->get<bool>()) {
-        err << "ymh: note: localcode 'skip_permissions' is not imported; permission prompts stay "
-               "enabled\n";
-    }
-    if (const auto rules = localcode.find("permission");
-        rules != localcode.end() && rules->is_array() && !rules->empty()) {
-        err << "ymh: note: localcode permission rules are not imported (ymh uses coarse "
-               "permission modes)\n";
+    const auto note = [&err](const std::string& text) {
+        err << "ymh: note: " << redact_secrets(text) << "\n";
+    };
+    if (const auto permission = localcode.find("permission");
+        permission != localcode.end() && permission->is_array() && !permission->empty()) {
+        note("localcode 'permission' is a flat array, not the supported object shape; "
+             "permission rules are not imported");
     }
     if (const nlohmann::json* provider = localcode_provider(localcode); provider != nullptr) {
-        const auto type = provider->find("type");
+        const auto type     = provider->find("type");
         const auto base_url = provider->find("base_url");
-        if (type != provider->end() && type->is_string() &&
-            type->get<std::string>() == "openai-compatible" && base_url != provider->end() &&
-            base_url->is_string() && !is_http_url(base_url->get<std::string>())) {
-            err << "ymh: note: localcode provider base_url is not an http(s) URL; model settings "
-                   "not imported\n";
+        if (type != provider->end() && type->is_string()) {
+            const std::string name = type->get<std::string>();
+            if (name != "openai-compatible" && name != "openai-compat") {
+                note("localcode provider type '" + name +
+                     "' is not supported; model settings not imported");
+            } else if (base_url != provider->end() && base_url->is_string() &&
+                       !is_http_url(base_url->get<std::string>())) {
+                note("localcode provider base_url is not an http(s) URL; model settings not "
+                     "imported");
+            }
         }
     }
 }
@@ -953,15 +957,14 @@ bool maybe_import_localcode_config(const CliInvocation& invocation,
     std::string                         reason;
     const std::optional<nlohmann::json> localcode_doc = read_localcode_document(localcode, reason);
     if (!localcode_doc.has_value()) {
-        err << "ymh: localcode config at " << localcode.string() << " is " << reason
-            << "; skipping import\n";
+        err << "ymh: localcode config at " << localcode.string() << " is "
+            << redact_secrets(reason) << "; skipping import\n";
         return false;
     }
 
     out << "ymh: first run — no config at " << global_config.string() << ".\n"
         << "     Found localcode settings at " << localcode.string() << ".\n"
-        << "     Import MCP servers, model, compaction, and concurrency? (Permission rules\n"
-        << "     and API keys are not imported; ymh keeps its own permission prompts.)\n"
+        << "     Import MCP servers, model parameters, API keys, and permission rules?\n"
         << "     [Y/n] ";
     out.flush();
     if (!prompt_import_yes(in, out)) {
@@ -971,7 +974,8 @@ bool maybe_import_localcode_config(const CliInvocation& invocation,
     std::string                   import_error;
     std::optional<nlohmann::json> document = build_localcode_import(*localcode_doc, import_error);
     if (!document.has_value()) {
-        err << "ymh: import failed: " << import_error << "; writing the default config instead\n";
+        err << "ymh: import failed: " << redact_secrets(import_error)
+            << "; writing the default config instead\n";
         return false;
     }
 

@@ -42,7 +42,7 @@ public:
     explicit SpdlogLogger(std::shared_ptr<spdlog::logger> logger) : logger_(std::move(logger)) {}
 
     void log(LogLevel level, std::string_view message) override {
-        logger_->log(to_spdlog(level), "{}", std::string{message});
+        logger_->log(to_spdlog(level), "{}", redact_secrets(message));
     }
 
 private:

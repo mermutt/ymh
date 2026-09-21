@@ -41,6 +41,7 @@ class AgentRegistry;
 class ToolRegistry;
 class PermissionPolicy;
 class PermissionGate;
+class GrantStore;
 class ContextAssembler;
 class LLMProvider;
 class LLMPool;
@@ -110,6 +111,11 @@ struct WorkspaceRuntimeOptions {
     // instead of the production stdio factory, so tests can inject a scripted
     // client. Never set in production.
     McpClientFactory mcp_client_factory;
+
+    // 46-D2.3: the daemon-owned durable grants store, injected as a non-owning
+    // pointer (exactly like `executor`). The caller owns it and must keep it
+    // alive for the runtime's lifetime; null disables persistence.
+    GrantStore* grant_store = nullptr;
 };
 
 class WorkspaceRuntime {
