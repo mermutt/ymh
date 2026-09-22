@@ -353,7 +353,7 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
             Element body = with_left_bar(
                 markdown.render(MarkdownBlock{entry.text}, user_context), theme);
             rows.push_back(
-                paint_bg(std::move(body), ftxui::Color::RGB(40, 42, 54), theme));
+                paint_bg(std::move(body), theme.user_block_background, theme));
             break;
         }
         case ConversationRole::Assistant:
@@ -507,7 +507,9 @@ Element render_input(const UiModel& model, const Theme& theme) {
     if (active != nullptr && active->esc_arm == EscArm::Armed) {
         cells.push_back(ftxui::text("  - one more <Esc> to interrupt") | ftxui::dim);
     }
-    return ftxui::hbox(std::move(cells));
+    // 51-D2.3: the composer carries the same gutter + tint as the transcript.
+    Element line = with_left_bar(ftxui::hbox(std::move(cells)), theme);
+    return paint_bg(std::move(line), theme.user_block_background, theme);
 }
 
 std::string format_percent(std::uint64_t tokens, std::uint64_t window);

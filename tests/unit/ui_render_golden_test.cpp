@@ -232,8 +232,8 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 │                                                                      │
 │                                                                      │
 │                                                                      │
-├──────────────────────────────────────────────────────────────────────┤
-│>                                                                     │
+├┬─────────────────────────────────────────────────────────────────────┤
+││ >                                                                   │
 │build · test-model · ↑12 ↓3 ⚡0 · [░░░░░░░░░░] —  0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
@@ -890,6 +890,90 @@ TEST(UiRenderGolden, UserBlockBackgroundGatedByTheme) {
         render_to_ansi(model, TerminalSize{72, 20}, Theme{true, false});
     EXPECT_EQ(no_block.find("\x1b[48;2;"), std::string::npos);
     EXPECT_NE(no_block.find("│"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D2_ThemeDefaultsPinned) {
+    const Theme dark;
+    EXPECT_EQ(dark.user_bar, ftxui::Color::RGB(92, 156, 245));
+    EXPECT_EQ(dark.user_block_background, ftxui::Color::RGB(40, 42, 54));
+    EXPECT_EQ(dark.variant, ThemeVariant::Dark);
+
+    const Theme light = make_theme(true, ThemeVariant::Light);
+    EXPECT_TRUE(light.color);
+    EXPECT_EQ(light.variant, ThemeVariant::Light);
+    EXPECT_EQ(light.user_bar, ftxui::Color::RGB(59, 125, 216));
+    EXPECT_EQ(light.user_block_background, ftxui::Color::RGB(238, 240, 244));
+
+    const Theme mono = make_theme(false, ThemeVariant::Dark);
+    EXPECT_FALSE(mono.color);
+    EXPECT_EQ(mono.user_bar, ftxui::Color::RGB(92, 156, 245));
+    EXPECT_EQ(mono.user_block_background, ftxui::Color::RGB(40, 42, 54));
+}
+
+TEST(UiRenderGolden, UI51_D2_ThemeFieldOrderPreserved) {
+    const Theme both{true, true};
+    EXPECT_TRUE(both.color);
+    EXPECT_TRUE(both.user_block);
+    const Theme no_block{true, false};
+    EXPECT_TRUE(no_block.color);
+    EXPECT_FALSE(no_block.user_block);
+    EXPECT_EQ(both.user_block_background, ftxui::Color::RGB(40, 42, 54));
+    EXPECT_EQ(both.variant, ThemeVariant::Dark);
+}
+
+TEST(UiRenderGolden, UI51_D2_UserBoldUnchanged) {
+    const UiModel model = build_message_model(ConversationRole::User, "hello there");
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    const std::size_t user_text = raw.find("hello there");
+    ASSERT_NE(user_text, std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[1m", user_text), std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[97m", user_text), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D2_UserMessageTintAndBarGolden) {
+    const UiModel model = build_message_model(ConversationRole::User, "hello there");
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    const std::size_t user_text = raw.find("hello there");
+    ASSERT_NE(user_text, std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[38;2;92;156;245m", user_text), std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[48;2;40;42;54m", user_text), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D2_ComposerTintAndBarGolden) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->input.draft = "hi";
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    EXPECT_NE(normalize(raw).find("││ > hi"), std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[38;2;92;156;245m"), std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[48;2;40;42;54m"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D2_MonochromeUserGolden) {
+    const UiModel model = build_message_model(ConversationRole::User, "hello there");
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_NE(normalize(raw).find("││ hello there"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[38;2;"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[48;2;"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[38;5;"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[48;5;"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[97m"), std::string::npos);
+    EXPECT_EQ(raw.find("\x1b[32m"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D2_UserBlockGatedGolden) {
+    const UiModel model = build_message_model(ConversationRole::User, "hello there");
+
+    const std::string tinted =
+        render_to_ansi(model, TerminalSize{72, 20}, Theme{true, true});
+    EXPECT_NE(tinted.find("\x1b[48;2;40;42;54m"), std::string::npos);
+    EXPECT_NE(tinted.find("\x1b[38;2;92;156;245m"), std::string::npos);
+
+    const std::string no_tint =
+        render_to_ansi(model, TerminalSize{72, 20}, Theme{true, false});
+    EXPECT_EQ(no_tint.find("\x1b[48;2;"), std::string::npos);
+    EXPECT_NE(no_tint.find("\x1b[38;2;92;156;245m"), std::string::npos);
 }
 
 UiModel exit_prompt_model(std::vector<WorkspaceId> orphaning, int sessions, int running,
@@ -2077,7 +2161,7 @@ TEST(UiRenderGolden, CaretCursorLandsAtInputPosition) {
             render_screen(model, TerminalSize{40, 12}, Theme{false});
         const std::string before = state->input.draft.substr(0, cursor);
         EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar) << cursor;
-        EXPECT_EQ(screen.cursor().x, 3 + ftxui::string_width(before)) << cursor;
+        EXPECT_EQ(screen.cursor().x, 5 + ftxui::string_width(before)) << cursor;
     }
 }
 
@@ -2092,7 +2176,7 @@ TEST(UiRenderGolden, CaretCursorHandlesCjkLeadingCell) {
             render_screen(model, TerminalSize{40, 12}, Theme{false});
         const std::string before = state->input.draft.substr(0, cursor);
         EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar) << cursor;
-        EXPECT_EQ(screen.cursor().x, 3 + ftxui::string_width(before)) << cursor;
+        EXPECT_EQ(screen.cursor().x, 5 + ftxui::string_width(before)) << cursor;
     }
 }
 
@@ -2134,8 +2218,9 @@ TEST(UiRenderGolden, UserBrightAndIntermediateDimmedInTranscript) {
     ASSERT_NE(user_text, std::string::npos);
     // 48-I14: user text is bold, never dimmed.
     EXPECT_NE(raw.rfind("\x1b[1m", user_text), std::string::npos);
-    // The user bar is painted green (48-D6.5).
-    EXPECT_NE(raw.rfind("\x1b[32m", user_text), std::string::npos);
+    // 51-D2.1: the user bar is the pinned opencode blue, not green (51-A3
+    // supersedes 48-D6.5).
+    EXPECT_NE(raw.rfind("\x1b[38;2;92;156;245m", user_text), std::string::npos);
 
     // 48-D6: the assistant is intermediate (a tool follows it) and dimmed.
     const std::size_t assistant = raw.find("Hello world");
