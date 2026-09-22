@@ -582,7 +582,7 @@ void apply_mcp(Config& config, const Json& table, const std::filesystem::path& s
                     "reconnect_max_attempts", "reconnect_initial_backoff_ms",
                     "reconnect_max_backoff_ms", "reconnect_jitter", "reconnect_stable_window_ms",
                     "ping_interval_ms", "shutdown_grace_ms", "max_frame_bytes",
-                    "allow_network_servers", "server"},
+                    "allow_network_servers", "log_child_stderr", "server"},
                    source);
     McpSettings& mcp = config.mcp;
     mcp.enabled = read_bool(table, "enabled", "mcp", mcp.enabled, source);
@@ -617,6 +617,8 @@ void apply_mcp(Config& config, const Json& table, const std::filesystem::path& s
         table, "max_frame_bytes", "mcp", static_cast<std::int64_t>(mcp.max_frame_bytes), source));
     mcp.allow_network_servers =
         read_bool(table, "allow_network_servers", "mcp", mcp.allow_network_servers, source);
+    mcp.log_child_stderr =
+        read_bool(table, "log_child_stderr", "mcp", mcp.log_child_stderr, source);
 
     if (const Json* node = member(table, "server"); node != nullptr) {
         if (!node->is_array()) {
@@ -956,6 +958,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
 
     const Json* mcp_servers = nullptr;
     if (const Json* node = member(table, "mcp_servers"); node != nullptr) {
+        if (!global_layer) {
+            fail(source, "'mcp_servers' is global-layer only");
+        }
         if (!node->is_object()) {
             fail(source, "invalid type for 'mcp_servers'");
         }
@@ -988,6 +993,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         apply_llm(config, *llm, source, global_layer);
     }
     if (const Json* mcp = section("mcp"); mcp != nullptr) {
+        if (!global_layer) {
+            fail(source, "'mcp' is global-layer only");
+        }
         apply_mcp(config, *mcp, source);
     }
     if (const Json* skills = section("skills"); skills != nullptr) {

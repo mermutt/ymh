@@ -1732,6 +1732,92 @@ TEST(UiRenderGolden, UI46_G1_NoticePopup) {
     EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
 }
 
+// 49-G1 (49-D6/49-I9): the sessionless-other-workspace notice renders the
+// message plus exactly one `[ OK ]` row, with no workspace/session rows.
+TEST(UiRenderGolden, UI49_G1_NoticeNoOtherSessions) {
+    UiModel model = build_model();
+    model.message.open = true;
+    model.message.text = "No other sessions available";
+    model.mode         = UiMode::Notice;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("No other sessions available"), std::string::npos);
+    EXPECT_NE(rendered.find("[ OK ]"), std::string::npos);
+    EXPECT_EQ(rendered.find("(current session hidden)"), std::string::npos);
+    EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
+}
+
+// 49-G2 (regression guard): two live workspaces each with a catalogued session
+// still render the normal switcher tree, not a notice.
+TEST(UiRenderGolden, UI49_G2_MultiWorkspaceSwitcherUnchanged) {
+    UiModel model = build_model();
+    model.workspaces[model.activeWorkspaceId].title = "alpha";
+    WorkspaceModel beta;
+    beta.id           = WorkspaceId{"workspace-beta"};
+    beta.title        = "beta";
+    beta.cwd          = "/work/beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live         = true;
+    SessionCell beta_cell;
+    beta_cell.id = SessionId{"beta-session"};
+    beta.sessions.push_back(beta_cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    seed_catalog_session(model, model.activeWorkspaceId, kSession);
+    model.openSwitcher();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("Switcher"), std::string::npos);
+    EXPECT_NE(rendered.find("alpha"), std::string::npos);
+    EXPECT_NE(rendered.find("beta"), std::string::npos);
+    EXPECT_EQ(rendered.find("[ OK ]"), std::string::npos);
+}
+
+// 49-G4 (49-D2/49-I2): an empty `UiModel` renders the empty screen: header
+// `ymh`, an empty transcript, the prompt box, and the empty-state status bar.
+TEST(UiRenderGolden, UI49_G4_EmptyScreen) {
+    UiModel model;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("ymh"), std::string::npos);
+    EXPECT_NE(rendered.find("no workspace attached — type a prompt to start"),
+              std::string::npos);
+    EXPECT_NE(rendered.find("0 active · 0 waiting"), std::string::npos);
+    EXPECT_EQ(rendered.find("(no active session)"), std::string::npos);
+    EXPECT_EQ(rendered.find("[ OK ]"), std::string::npos);
+    EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
+}
+
+// 49-G5 (49-D1): after the first prompt the modeled workspace and its session
+// render (the header gains the cwd and the transcript shows the user message).
+TEST(UiRenderGolden, UI49_G5_LazyFirstSubmit) {
+    UiModel model;
+    const WorkspaceId workspace{"lazy-ws"};
+    model.activeWorkspaceId = workspace;
+    WorkspaceModel ws;
+    ws.id           = workspace;
+    ws.cwd          = "/lazy/work";
+    ws.daemonStatus = DaemonStatus::Attached;
+    ws.live         = true;
+    model.workspaces.emplace(workspace, std::move(ws));
+    model.focusSessionIn(workspace, kSession);
+    model.apply(UiEvent{UserMessage{kSession, "m1", "first lazy prompt"}});
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("ymh · /lazy/work"), std::string::npos);
+    EXPECT_NE(rendered.find("first lazy prompt"), std::string::npos);
+    EXPECT_EQ(rendered.find("no workspace attached"), std::string::npos);
+}
+
 // 46-G2 (46-I27, 46-D4): the permission dialog is composited opaquely; no
 // transcript cell is visible to the right of any option row on a wide summary.
 TEST(UiRenderGolden, UI46_G2_PermissionDialogOpaque) {

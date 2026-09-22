@@ -483,6 +483,11 @@ Element render_input(const UiModel& model, const Theme& theme) {
             active = &session->second;
         }
     }
+    // 49-D1: the empty screen has no workspace/session; the draft is held in the
+    // zero-workspace composer so the prompt box stays typeable.
+    if (active == nullptr && model.workspaces.empty()) {
+        active = &model.pendingComposer;
+    }
     std::string draft = active == nullptr ? std::string{} : active->input.draft;
     const std::size_t raw_cursor = active == nullptr ? 0 : active->input.cursor;
     const std::size_t cursor = glyph_floor(draft, raw_cursor);
@@ -603,6 +608,13 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
         // The global notice ring is workspace-independent (22-A8): it must stay
         // visible even with no active session (25 review M2).
         if (notice.empty()) {
+            if (model.workspaces.empty()) {
+                // 49-D2: the empty screen's left segment prompts for the first
+                // prompt; it is not a notice.
+                return ftxui::hbox(
+                    {ftxui::text("no workspace attached — type a prompt to start") | ftxui::dim,
+                     ftxui::filler(), aggregate});
+            }
             return ftxui::hbox({ftxui::text(""), ftxui::filler(), aggregate});
         }
         return ftxui::hbox({ftxui::text(notice), ftxui::filler(), aggregate});
@@ -1299,6 +1311,12 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
             active = &session->second;
         }
     }
+    // 49-D1: the zero-workspace empty screen has a composer (draft + hints) but
+    // no conversation; `composer` is that state, `active` stays the transcript.
+    const SessionUiState* composer = active;
+    if (composer == nullptr && model.workspaces.empty()) {
+        composer = &model.pendingComposer;
+    }
 
     Elements rows;
     rows.push_back(render_header(model, theme));
@@ -1312,7 +1330,13 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
                                 .theme = theme,
                                 .compact = false,
                                 .spinner_frame = model.spinner.frame};
-    rows.push_back(render_conversation(active, context) | ftxui::flex);
+    // 49-D2: with zero workspaces the transcript is empty (no `(no active
+    // session)` placeholder); the prompt box and status bar remain.
+    if (model.workspaces.empty()) {
+        rows.push_back(ftxui::text("") | ftxui::flex);
+    } else {
+        rows.push_back(render_conversation(active, context) | ftxui::flex);
+    }
     if (active != nullptr && !active->scroll.following) {
         rows.push_back(render_scroll_hint(active, theme));
     }
@@ -1320,8 +1344,8 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     if (active != nullptr && !active->subagents.agents.empty()) {
         rows.push_back(render_subagents(active, theme));
     }
-    if (active != nullptr && !active->command_hints.empty()) {
-        rows.push_back(render_command_hints(active, theme));
+    if (composer != nullptr && !composer->command_hints.empty()) {
+        rows.push_back(render_command_hints(composer, theme));
     }
     rows.push_back(render_input(model, theme));
     // The vbox below is wrapped in `ftxui::border`, so the row content has

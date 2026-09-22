@@ -202,6 +202,10 @@ struct McpConfig {
     std::size_t                  max_frame_bytes{8u * 1024u * 1024u};
 
     bool                         allow_network_servers{false};
+
+    // 50-D3.5: capture each stdio child's raw stderr to a per-server 0600 file
+    // under <workspace>/.ymh/mcp/. Off by default; global-layer only.
+    bool                         log_child_stderr{false};
 };
 
 namespace payload {

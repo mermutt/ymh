@@ -76,7 +76,10 @@ struct RosterEnv {
         : workspace(prefix),
           env(workspace.path()),
           user_root(make_dir(workspace.path() / "user_skills")),
-          skills(SkillCatalogConfig{}, env, user_root, logger) {
+          skills(SkillCatalogConfig{}, env,
+                 std::vector<SkillRoot>{
+                     SkillRoot{user_root, SkillSource::User, SkillTrust::Trusted}},
+                 logger) {
         std::error_code error;
         std::filesystem::remove_all(default_presets_user_root(), error);
         std::filesystem::create_directories(presets_root, error);

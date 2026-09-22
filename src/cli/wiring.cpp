@@ -147,6 +147,7 @@ McpConfig to_mcp_config(const Config& config) {
     mcp.shutdown_grace = std::chrono::milliseconds{config.mcp.shutdown_grace_ms};
     mcp.max_frame_bytes = config.mcp.max_frame_bytes;
     mcp.allow_network_servers = config.mcp.allow_network_servers;
+    mcp.log_child_stderr = config.mcp.log_child_stderr;
     if (mcp.max_frame_bytes > protocol::TransportLimits{}.max_frame_bytes) {
         throw ConfigError(
             "[mcp].max_frame_bytes must be <= protocol::TransportLimits::max_frame_bytes");

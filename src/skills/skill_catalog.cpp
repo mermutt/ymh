@@ -193,11 +193,11 @@ std::filesystem::path default_skills_root() {
 
 SkillCatalog::SkillCatalog(SkillCatalogConfig          config,
                            const ExecutionEnvironment& environment,
-                           std::filesystem::path       user_root,
+                           std::vector<SkillRoot>      roots,
                            Logger&                     logger)
     : config_(config),
       environment_(&environment),
-      user_root_(std::move(user_root)),
+      roots_(std::move(roots)),
       logger_(&logger) {}
 
 void SkillCatalog::discover() {
@@ -209,21 +209,9 @@ void SkillCatalog::discover() {
         return;
     }
 
-    std::vector<ScanItem> user_items;
-    if (user_root_.is_absolute()) {
-        user_items = scan(user_root_, SkillSource::User, SkillTrust::Trusted, config_,
-                          environment_, false);
-    } else {
-        warnings_.push_back(
-            SkillLoadWarning{user_root_, "relative user root: user tier disabled"});
-    }
-    std::vector<ScanItem> workspace_items =
-        scan(environment_->root() / ".ymh" / "skills", SkillSource::Workspace,
-             SkillTrust::Untrusted, config_, environment_, true);
-
-    std::vector<Skill>                ordered;
-    std::map<std::string, std::size_t> by_name;
-    const auto consider = [&](ScanItem&& item) {
+    std::vector<std::pair<std::size_t, Skill>> entries;
+    std::map<std::string, std::size_t>         by_name;
+    const auto consider = [&](std::size_t root_index, ScanItem&& item) {
         for (SkillLoadWarning& warning : item.warnings) {
             warnings_.push_back(std::move(warning));
         }
@@ -233,27 +221,57 @@ void SkillCatalog::discover() {
         Skill skill = std::move(*item.skill);
         const auto existing = by_name.find(skill.meta.name.value);
         if (existing != by_name.end()) {
-            warnings_.push_back(
-                SkillLoadWarning{skill.file, "shadowed by " + ordered[existing->second].file.string()});
+            warnings_.push_back(SkillLoadWarning{
+                skill.file, "shadowed by " + entries[existing->second].second.file.string()});
             return;
         }
-        by_name.emplace(skill.meta.name.value, ordered.size());
-        ordered.push_back(std::move(skill));
+        by_name.emplace(skill.meta.name.value, entries.size());
+        entries.emplace_back(root_index, std::move(skill));
     };
-    for (ScanItem& item : user_items) {
-        consider(std::move(item));
-    }
-    for (ScanItem& item : workspace_items) {
-        consider(std::move(item));
+
+    for (std::size_t index = 0; index < roots_.size(); ++index) {
+        const SkillRoot& root = roots_[index];
+        const bool       workspace_tier = root.trust == SkillTrust::Untrusted;
+        if (workspace_tier && !config_.workspace_trusted) {
+            warnings_.push_back(
+                SkillLoadWarning{root.path, "workspace is not trusted: workspace tier disabled"});
+            continue;
+        }
+        if (!root.path.is_absolute()) {
+            warnings_.push_back(SkillLoadWarning{
+                root.path,
+                "relative " + std::string{skill_source_name(root.source)} + " root: tier disabled"});
+            continue;
+        }
+        const bool optional_root =
+            root.source == SkillSource::Home || root.source == SkillSource::Claude;
+        if (optional_root) {
+            std::error_code exists_ec;
+            if (!std::filesystem::exists(root.path, exists_ec) || exists_ec) {
+                continue;
+            }
+        }
+        std::vector<ScanItem> items =
+            scan(root.path, root.source, root.trust, config_, environment_, workspace_tier);
+        for (ScanItem& item : items) {
+            consider(index, std::move(item));
+        }
     }
 
-    const auto order_key = [](const Skill& skill) {
-        const int tier = skill.source == SkillSource::User ? 0 : 1;
-        return std::make_tuple(tier, skill.meta.name.value, skill.file.string());
-    };
-    std::sort(ordered.begin(), ordered.end(), [&](const Skill& left, const Skill& right) {
-        return order_key(left) < order_key(right);
-    });
+    std::sort(entries.begin(), entries.end(),
+              [](const std::pair<std::size_t, Skill>& left,
+                 const std::pair<std::size_t, Skill>& right) {
+                  return std::make_tuple(left.first, left.second.meta.name.value,
+                                         left.second.file.string()) <
+                         std::make_tuple(right.first, right.second.meta.name.value,
+                                         right.second.file.string());
+              });
+
+    std::vector<Skill> ordered;
+    ordered.reserve(entries.size());
+    for (auto& entry : entries) {
+        ordered.push_back(std::move(entry.second));
+    }
 
     if (ordered.size() > config_.max_skills) {
         for (std::size_t index = config_.max_skills; index < ordered.size(); ++index) {

@@ -279,8 +279,10 @@ TEST_F(SkillsWiringTest, ToolPathInjectsBodyIntoContext) {
     const std::filesystem::path user_root = config_root.path() / "skills";
     write_skill(user_root, "git-commit", "Commit helper.", "Use conventional commits.\n");
 
-    auto catalog = std::make_shared<SkillCatalog>(SkillCatalogConfig{}, env.env, user_root,
-                                                  env.logger);
+    auto catalog = std::make_shared<SkillCatalog>(
+        SkillCatalogConfig{}, env.env,
+        std::vector<SkillRoot>{SkillRoot{user_root, SkillSource::User, SkillTrust::Trusted}},
+        env.logger);
     catalog->discover();
     ASSERT_EQ(catalog->all().size(), 1u);
     env.keeper.add(make_skill_tool(catalog));
@@ -328,8 +330,15 @@ TEST_F(SkillsWiringTest, UntrustedSkillNeverReachesContext) {
     std::filesystem::create_directories(user_root);
     write_skill(env.workspace.path() / ".ymh" / "skills", "repo", "Repo skill.", "Hostile.\n");
 
-    auto catalog = std::make_shared<SkillCatalog>(SkillCatalogConfig{}, env.env, user_root,
-                                                  env.logger);
+    SkillCatalogConfig catalog_config;
+    catalog_config.workspace_trusted = true;
+    auto catalog = std::make_shared<SkillCatalog>(
+        catalog_config, env.env,
+        std::vector<SkillRoot>{
+            SkillRoot{user_root, SkillSource::User, SkillTrust::Trusted},
+            SkillRoot{env.workspace.path() / ".ymh" / "skills", SkillSource::Workspace,
+                      SkillTrust::Untrusted}},
+        env.logger);
     catalog->discover();
     env.keeper.add(make_skill_tool(catalog));
     env.tools.freeze();

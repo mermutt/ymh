@@ -32,8 +32,16 @@ struct SkillToolEnv {
         std::filesystem::create_directories(user_root);
     }
 
+    std::vector<SkillRoot> roots() const {
+        return {SkillRoot{user_root, SkillSource::User, SkillTrust::Trusted},
+                SkillRoot{tools.workspace.path() / ".ymh" / "skills", SkillSource::Workspace,
+                          SkillTrust::Untrusted}};
+    }
+
     void discover() {
-        catalog = std::make_shared<SkillCatalog>(SkillCatalogConfig{}, tools.env, user_root, logger);
+        SkillCatalogConfig config;
+        config.workspace_trusted = true;
+        catalog = std::make_shared<SkillCatalog>(config, tools.env, roots(), logger);
         catalog->discover();
         registration = registry.add(make_skill_tool(catalog));
     }
@@ -110,8 +118,8 @@ TEST(SkillTool, WorkspaceSkillLoadsWhenExposed) {
     SkillToolEnv env("skill_tool_exposed");
     write_skill(env.tools.workspace.path() / ".ymh" / "skills", "repo", "Repo skill.", "Visible.\n");
     env.catalog = std::make_shared<SkillCatalog>(
-        SkillCatalogConfig{.enabled = true, .expose_workspace = true}, env.tools.env,
-        env.user_root, env.logger);
+        SkillCatalogConfig{.enabled = true, .expose_workspace = true, .workspace_trusted = true},
+        env.tools.env, env.roots(), env.logger);
     env.catalog->discover();
     env.registration = env.registry.add(make_skill_tool(env.catalog));
 

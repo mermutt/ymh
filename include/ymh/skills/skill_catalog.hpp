@@ -12,6 +12,7 @@
 
 #include "ymh/core/logger.hpp"
 #include "ymh/execution/environment.hpp"
+#include "ymh/skills/skill_roots.hpp"
 #include "ymh/skills/skill_types.hpp"
 
 namespace ymh {
@@ -24,6 +25,9 @@ struct SkillLoadWarning {
 struct SkillCatalogConfig {
     bool        enabled = true;
     bool        expose_workspace = false;  // untrusted tier visible to the model
+    // 50-D5: the workspace tier is loaded only when the operator has trusted
+    // this workspace (a record outside the workspace). Untrusted => skipped.
+    bool        workspace_trusted = false;
     std::size_t max_skills = 256;
     std::size_t max_skill_bytes = 64u * 1024u;
     std::size_t max_description_bytes = 512;
@@ -33,9 +37,11 @@ struct SkillCatalogConfig {
 
 class SkillCatalog {
 public:
+    // 50-D1.2: ordered roots (user-tier candidates first, workspace last),
+    // resolved by the caller. `discover()` uses the list verbatim.
     SkillCatalog(SkillCatalogConfig       config,
                  const ExecutionEnvironment& environment,
-                 std::filesystem::path    user_root,
+                 std::vector<SkillRoot>   roots,
                  Logger&                  logger);
 
     // Non-copyable, non-movable (L7): `model_visible_` stores `const Skill*`
@@ -71,7 +77,7 @@ public:
 private:
     SkillCatalogConfig          config_;
     const ExecutionEnvironment* environment_;
-    std::filesystem::path       user_root_;
+    std::vector<SkillRoot>      roots_;
     Logger*                     logger_;
     std::vector<Skill>          all_;
     std::vector<const Skill*>   model_visible_;

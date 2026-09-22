@@ -524,6 +524,11 @@ struct UiModel {
     std::map<WorkspaceId, WorkspaceModel> workspaces;
     WorkspaceId                           activeWorkspaceId;
     std::map<SessionId, SessionUiState>   sessions;
+    // 49-D1: the zero-workspace composer. Before the first prompt creates a
+    // workspace/session there is no `SessionUiState` in `sessions`; the draft and
+    // its command hints live here so the empty screen is typeable. Never a
+    // session cell and never persisted. Read only while `workspaces` is empty.
+    SessionUiState                        pendingComposer;
     AggregateStatusModel                  aggregate;
     SwitcherOverlayModel                  switcher;
     PermissionDialogModel                 dialog;
