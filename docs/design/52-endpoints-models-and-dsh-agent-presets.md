@@ -2,8 +2,7 @@
 
 ```
 Status: verified (Rev 2) — the five-reviewer adversarial gate PASSED (0 open
-        HIGH / 0 MEDIUM). Design only; no code may be written for
-        either part until this spec is `verified` (AGENTS.md, the rule).
+        HIGH / 0 MEDIUM); implementation may now proceed (AGENTS.md, the rule).
         Rev 2 applies the first independent adversarial review (five reviewers:
         scope, schema, import, Part B, completeness); every finding is recorded
         in §12 with its fix. Seven HIGH, fourteen MEDIUM, eighteen LOW.
@@ -629,9 +628,9 @@ Pinned properties:
   check applies when any endpoint entry has `headers`. Header *values* are added
   to the redaction surface: the 46-D12.11 redactor (`src/llm/redaction.cpp:52`)
   is extended so a `"headers"` object's string values are masked in the same way
-  `"api_key"` is. This is stricter than §3.1's "NON-secret" comment, which is
-  corrected: headers are *usually* non-secret, but the schema cannot tell, so the
-  safe rule is global-only + redacted.
+  `"api_key"` is. This is stricter than §3.1's original "NON-secret" comment,
+  which Rev 2 corrected: headers are *usually* non-secret, but the schema cannot
+  tell, so the safe rule is global-only + redacted.
 - **Failure-path prints are redacted (52-I4).** The import failure paths that
   print `error.what()` — `validate_imported_mcp`'s `fail_import`
   (`src/cli/cli.cpp:770-774`), `write_imported_config`'s `fail_import`
