@@ -213,7 +213,8 @@ TEST(OwnershipTwoSupervisor, AutomationGuardKeepsDaemonThroughSupervisorExit) {
 
     const std::filesystem::path binary = resolve_ymh_binary();
     PtyChild supervisor;
-    ASSERT_TRUE(supervisor.spawn(binary, workspace, child_env(root, workspace / "fake.json")));
+    ASSERT_TRUE(supervisor.spawn(binary, workspace, child_env(root, workspace / "fake.json"), 30,
+                                 100, {"--new"}));
     ASSERT_TRUE(supervisor.wait_for("Type a message and press Enter", 30s))
         << supervisor.plain();
     ASSERT_EQ(host_processes(&workspace_id).size(), 1u);

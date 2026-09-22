@@ -206,7 +206,7 @@ TEST(OwnershipCrashInjection, SigkillSupervisorDaemonExitsWithinBound) {
     env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
 
     PtyChild supervisor;
-    ASSERT_TRUE(supervisor.spawn(binary, workspace, env));
+    ASSERT_TRUE(supervisor.spawn(binary, workspace, env, 30, 100, {"--new"}));
     ASSERT_TRUE(supervisor.wait_for("Type a message and press Enter", 30s))
         << supervisor.plain();
     ASSERT_EQ(host_processes(&workspace_id.value).size(), 1u);
