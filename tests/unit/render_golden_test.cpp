@@ -100,12 +100,14 @@ std::string render_element(ftxui::Element element, int width, int height) {
 }
 
 std::string render_markdown_sample() {
-    const RenderContext context{60, Theme{false}, false};
+    const RenderContext context{
+        .width = 60, .content_width = 60, .theme = Theme{false}, .compact = false};
     return render_element(MarkdownRenderer{}.render(kSampleMarkdown, context), 60, 30);
 }
 
 std::string render_diff_sample() {
-    const RenderContext context{60, Theme{false}, false};
+    const RenderContext context{
+        .width = 60, .content_width = 60, .theme = Theme{false}, .compact = false};
     return render_element(DiffRenderer{}.render(DiffModel::parse(kSampleDiff), context), 60,
                           30);
 }
@@ -197,7 +199,7 @@ TEST(RenderGolden, TuiCollapsedToolRendersOneLineAndNoBody) {
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{60, 40}, Theme{false}));
-    EXPECT_NE(rendered.find("tool: git_diff"), std::string::npos);
+    EXPECT_NE(rendered.find("▸ git_diff"), std::string::npos);
     EXPECT_EQ(rendered.find("(expanded)"), std::string::npos);
     EXPECT_EQ(rendered.find("src/foo.cpp"), std::string::npos);
     EXPECT_EQ(rendered.find("-    return 1;"), std::string::npos);

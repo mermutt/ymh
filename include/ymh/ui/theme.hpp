@@ -16,6 +16,12 @@ struct Theme {
     // `paint()` still suppresses it when `color` is false. Brighter than the
     // unselected rows (which stay `Color::Green`).
     ftxui::Color completion_selected = ftxui::Color::CyanLight;
+    // 48-D6.6: the text-hierarchy and tool-line seams. `paint()` no-ops when
+    // `color` is false, so a monochrome terminal degrades to plain text.
+    ftxui::Color user_foreground = ftxui::Color::White;
+    ftxui::Color user_bar = ftxui::Color::Green;
+    ftxui::Color tool_name = ftxui::Color::CyanLight;
+    ftxui::Color tool_args = ftxui::Color::GrayLight;
 };
 
 } // namespace ymh::ui

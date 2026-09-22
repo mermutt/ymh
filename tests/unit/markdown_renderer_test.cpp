@@ -30,7 +30,8 @@ std::string strip_ansi(const std::string& input) {
 }
 
 std::string render_text(const std::string& markdown) {
-    const RenderContext context{80, Theme{false}, false};
+    const RenderContext context{
+        .width = 80, .content_width = 80, .theme = Theme{false}, .compact = false};
     ftxui::Element element = MarkdownRenderer{}.render(markdown, context);
     ftxui::Screen screen = ftxui::Screen::Create(ftxui::Dimensions{80, 40});
     ftxui::Render(screen, element);
@@ -103,7 +104,8 @@ TEST(MarkdownRenderer, StreamingPartialDoesNotThrow) {
 }
 
 TEST(MarkdownRenderer, BlockOverloadMatchesStringOverload) {
-    const RenderContext context{80, Theme{false}, false};
+    const RenderContext context{
+        .width = 80, .content_width = 80, .theme = Theme{false}, .compact = false};
     const std::string direct = render_text("plain text\n");
     ftxui::Element element =
         MarkdownRenderer{}.render(MarkdownBlock{"plain text\n"}, context);

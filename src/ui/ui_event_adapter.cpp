@@ -4,11 +4,11 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/ui/ui_render.hpp"
 
 namespace ymh::ui {
 namespace {
 
-constexpr std::size_t kMaxArgumentsPreview = 512;
 constexpr std::size_t kMaxAppliedEventIds = 8192;
 
 std::string flatten_content(const std::vector<ContentBlock>& content) {
@@ -26,16 +26,6 @@ std::string flatten_content(const std::vector<ContentBlock>& content) {
 }
 
 } // namespace
-
-std::string summarize_tool_arguments(const std::string& name, const nlohmann::json& arguments) {
-    (void)name;
-    std::string dumped = arguments.dump();
-    if (dumped.size() > kMaxArgumentsPreview) {
-        dumped.resize(kMaxArgumentsPreview);
-        dumped += "...";
-    }
-    return dumped;
-}
 
 UiEventAdapter::UiEventAdapter(UiModel& model) : model_(model) {}
 
@@ -116,8 +106,7 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
         case EventType::ToolCall: {
             const auto payload = event.payload.get<payload::ToolCall>();
             events.push_back(UiEvent{ToolStarted{session, payload.id, payload.name,
-                                                 summarize_tool_arguments(payload.name,
-                                                                          payload.arguments)}});
+                                                 payload.arguments.dump()}});
             break;
         }
         case EventType::ToolResult: {
@@ -314,7 +303,7 @@ void UiEventAdapter::onPermissionRequest(const SessionId& session,
     requested.session = session;
     requested.request = id;
     requested.tool = request.tool;
-    requested.summary = summarize_tool_arguments(request.tool, request.arguments);
+    requested.summary = summarize_tool_arguments(request.tool, request.arguments.dump());
     requested.force_ask = request.force_ask;
     applyAndMark(UiEvent{std::move(requested)});
 
@@ -336,7 +325,7 @@ void UiEventAdapter::onPermissionRequest(const WorkspaceId& workspace,
     requested.request = id;
     requested.tool = request.tool;
     requested.summary = request.summary.empty()
-                            ? summarize_tool_arguments(request.tool, request.arguments)
+                            ? summarize_tool_arguments(request.tool, request.arguments.dump())
                             : request.summary;
     requested.force_ask = request.force_ask;
     applyAndMark(UiEvent{std::move(requested)});

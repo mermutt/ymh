@@ -24,7 +24,8 @@ void expect_token(const std::vector<SyntaxToken>& tokens, const std::string& tex
 }
 
 std::string render_text(std::string_view code, std::string_view language) {
-    const RenderContext context{80, Theme{false}, false};
+    const RenderContext context{
+        .width = 80, .content_width = 80, .theme = Theme{false}, .compact = false};
     ftxui::Element element = SyntaxRenderer{}.render(code, language, context);
     ftxui::Screen screen = ftxui::Screen::Create(ftxui::Dimensions{80, 20});
     ftxui::Render(screen, element);

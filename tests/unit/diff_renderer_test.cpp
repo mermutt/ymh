@@ -23,7 +23,8 @@ const char* kSampleDiff =
     "+another line\n";
 
 std::string render_text(const DiffModel& model) {
-    const RenderContext context{80, Theme{false}, false};
+    const RenderContext context{
+        .width = 80, .content_width = 80, .theme = Theme{false}, .compact = false};
     ftxui::Element element = DiffRenderer{}.render(model, context);
     ftxui::Screen screen = ftxui::Screen::Create(ftxui::Dimensions{80, 40});
     ftxui::Render(screen, element);

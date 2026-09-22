@@ -35,6 +35,26 @@ void append_bounded(std::string& target, const std::string& chunk, std::size_t m
     }
 }
 
+// 48-D4.1: the pinned character-class word model. Continuation bytes inherit
+// the class of the glyph's lead byte so a multi-byte glyph is never split.
+enum class WordClass : std::uint8_t { Word, Space, Punct };
+
+WordClass byte_class(std::string_view text, std::size_t index) {
+    std::size_t lead = index;
+    while (lead > 0 && (static_cast<unsigned char>(text[lead]) & 0xC0) == 0x80) {
+        --lead;
+    }
+    const unsigned char byte = static_cast<unsigned char>(text[lead]);
+    if (byte == ' ' || byte == '\t') {
+        return WordClass::Space;
+    }
+    if ((byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+        (byte >= '0' && byte <= '9') || byte == '_') {
+        return WordClass::Word;
+    }
+    return WordClass::Punct;
+}
+
 // 17 §4 (RB-02, U-RB02-1): route a reasoning delta into one folded Reasoning
 // entry per message, ordered immediately before that message's Assistant entry
 // whether the Assistant entry already exists (empty or non-empty) or not.
@@ -241,16 +261,127 @@ void InputModel::clear_line() {
 }
 
 bool InputModel::delete_word() {
-    const std::size_t before = draft.size();
-    while (cursor > 0 && draft[cursor - 1] == ' ') {
-        draft.erase(cursor - 1, 1);
-        --cursor;
+    if (cursor == 0) {
+        return false;
     }
-    while (cursor > 0 && draft[cursor - 1] != ' ') {
-        draft.erase(cursor - 1, 1);
-        --cursor;
+    std::size_t boundary = cursor;
+    while (boundary > 0 && byte_class(draft, boundary - 1) == WordClass::Space) {
+        --boundary;
     }
-    return draft.size() != before;
+    if (boundary > 0) {
+        const WordClass run = byte_class(draft, boundary - 1);
+        while (boundary > 0 && byte_class(draft, boundary - 1) == run) {
+            --boundary;
+        }
+    }
+    if (boundary == cursor) {
+        return false;
+    }
+    draft.erase(boundary, cursor - boundary);
+    cursor = boundary;
+    return true;
+}
+
+std::size_t InputModel::word_left_boundary(std::size_t position) const {
+    if (position == 0 || draft.empty()) {
+        return 0;
+    }
+    std::size_t boundary = position;
+    while (boundary > 0 && byte_class(draft, boundary - 1) == WordClass::Space) {
+        --boundary;
+    }
+    if (boundary == 0) {
+        return 0;
+    }
+    const WordClass run = byte_class(draft, boundary - 1);
+    while (boundary > 0 && byte_class(draft, boundary - 1) == run) {
+        --boundary;
+    }
+    return boundary;
+}
+
+std::size_t InputModel::word_right_boundary(std::size_t position) const {
+    const std::size_t size = draft.size();
+    if (position >= size) {
+        return size;
+    }
+    std::size_t boundary = position;
+    while (boundary < size && byte_class(draft, boundary) == WordClass::Space) {
+        ++boundary;
+    }
+    if (boundary >= size) {
+        return size;
+    }
+    const WordClass run = byte_class(draft, boundary);
+    while (boundary < size && byte_class(draft, boundary) == run) {
+        ++boundary;
+    }
+    return boundary;
+}
+
+std::size_t InputModel::cursor_left(std::size_t position) const {
+    if (position == 0) {
+        return 0;
+    }
+    std::size_t index = position;
+    if (index > draft.size()) {
+        index = draft.size();
+    }
+    --index;
+    while (index > 0 && (static_cast<unsigned char>(draft[index]) & 0xC0) == 0x80) {
+        --index;
+    }
+    return index;
+}
+
+std::size_t InputModel::cursor_right(std::size_t position) const {
+    const std::size_t size = draft.size();
+    if (position >= size) {
+        return size;
+    }
+    std::size_t index = position + 1;
+    while (index < size && (static_cast<unsigned char>(draft[index]) & 0xC0) == 0x80) {
+        ++index;
+    }
+    return index;
+}
+
+std::size_t glyph_floor(std::string_view draft, std::size_t cursor) noexcept {
+    if (cursor >= draft.size()) {
+        return draft.size();
+    }
+    std::size_t index = cursor;
+    while (index < draft.size() &&
+           (static_cast<unsigned char>(draft[index]) & 0xC0) == 0x80) {
+        ++index;
+    }
+    return index;
+}
+
+std::size_t glyph_len(std::string_view text, std::size_t cursor) noexcept {
+    if (cursor >= text.size()) {
+        return 0;
+    }
+    const unsigned char lead = static_cast<unsigned char>(text[cursor]);
+    std::size_t length = 1;
+    if ((lead & 0xE0) == 0xC0) {
+        length = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+        length = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+        length = 4;
+    }
+    if (cursor + length > text.size()) {
+        length = 1;
+    }
+    return length;
+}
+
+std::string_view glyph_at(std::string_view text, std::size_t cursor) noexcept {
+    if (cursor >= text.size()) {
+        return {};
+    }
+    return text.substr(cursor, glyph_len(text, cursor));
 }
 
 void ConversationScroll::pageUp() {
@@ -331,6 +462,38 @@ bool is_waiting_state(AgentState state) noexcept {
     return state == AgentState::WaitingForInput ||
            state == AgentState::WaitingForPermission ||
            state == AgentState::Error;
+}
+
+Presentation entry_presentation(const std::vector<ConversationEntry>& entries,
+                                std::size_t index, bool turn_active) noexcept {
+    if (index >= entries.size()) {
+        return Presentation::FinalAnswer;
+    }
+    switch (entries[index].role) {
+        case ConversationRole::User:
+            return Presentation::UserAuthored;
+        case ConversationRole::Reasoning:
+        case ConversationRole::Tool:
+            return Presentation::Intermediate;
+        case ConversationRole::System:
+        case ConversationRole::Context:
+            return Presentation::Chrome;
+        case ConversationRole::Assistant:
+            break;
+    }
+    if (turn_active && index + 1 == entries.size()) {
+        return Presentation::Intermediate;
+    }
+    for (std::size_t next = index + 1; next < entries.size(); ++next) {
+        const ConversationRole role = entries[next].role;
+        if (role == ConversationRole::User) {
+            break;
+        }
+        if (role == ConversationRole::Tool || role == ConversationRole::Reasoning) {
+            return Presentation::Intermediate;
+        }
+    }
+    return Presentation::FinalAnswer;
 }
 
 OwnershipMark ownership_mark(DaemonStatus status) noexcept {
@@ -991,6 +1154,16 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
     const auto workspace_it = workspaces.find(workspace);
     if (workspace_it == workspaces.end()) {
         return;
+    }
+    // 48-D2.4: a session switch clears the outgoing session's Esc arm.
+    const auto previous_workspace = workspaces.find(activeWorkspaceId);
+    if (previous_workspace != workspaces.end()) {
+        const auto previous =
+            sessions.find(previous_workspace->second.activeSessionId());
+        if (previous != sessions.end()) {
+            previous->second.esc_arm = EscArm::Disarmed;
+            previous->second.esc_armed_at.reset();
+        }
     }
     ensureSessionIn(workspace, id);
     activeWorkspaceId = workspace;

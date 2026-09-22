@@ -14,6 +14,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/string.hpp>
+
 #include "ymh/core/event.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
@@ -177,7 +181,7 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 ├┬─────────────────────────────────────────────────────────────────────┤
 ││ hello there                                                         │
 │Hello world                                                           │
-│tool: read_file                                                       │
+│▸ read_file  hello.txt                                                │
 │                                                                      │
 │                                                                      │
 │                                                                      │
@@ -189,7 +193,7 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 │                                                                      │
 │                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│> _                                                                   │
+│>                                                                     │
 │build · test-model · ↑12 ↓3 ⚡0 · [░░░░░░░░░░] —  0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
@@ -536,7 +540,7 @@ TEST(UiRenderGolden, CollapsedToolShowsOnlyHeaderNoBody) {
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("tool: read_file"), std::string::npos);
+    EXPECT_NE(rendered.find("▸ read_file"), std::string::npos);
     EXPECT_EQ(rendered.find("(expanded)"), std::string::npos);
     EXPECT_EQ(rendered.find("file-body"), std::string::npos);
 }
@@ -550,7 +554,7 @@ TEST(UiRenderGolden, ExpandAllFoldsShowsBodies) {
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("tool: read_file (expanded)"), std::string::npos);
+    EXPECT_NE(rendered.find("▸ read_file  hello.txt (expanded)"), std::string::npos);
     EXPECT_NE(rendered.find("file-body"), std::string::npos);
 }
 
@@ -666,9 +670,10 @@ TEST(UiRenderGolden, ReasoningExpandHintIsDimmed) {
     const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
     const std::size_t hint = raw.find("ctrl+o to expand");
     ASSERT_NE(hint, std::string::npos);
-    const std::size_t start = hint > 24 ? hint - 24 : 0;
-    const std::string window = raw.substr(start, hint - start);
-    EXPECT_NE(window.find("\x1b[2m"), std::string::npos) << window;
+    // 48-D6: the whole Reasoning entry is Intermediate (dim), so the dim
+    // attribute is applied before the hint text rather than immediately at it.
+    const std::size_t dim = raw.rfind("\x1b[2m", hint);
+    EXPECT_NE(dim, std::string::npos) << raw;
 }
 
 TEST(UiRenderGolden, SlashCommandCompletionSelectionHighlighted) {
@@ -1488,7 +1493,7 @@ TEST(UiRenderGolden, ToolNoticeSuffixRendered) {
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
-    EXPECT_NE(rendered.find("tool: read_file"), std::string::npos);
+    EXPECT_NE(rendered.find("▸ read_file"), std::string::npos);
     EXPECT_NE(rendered.find("notice: retention notice"), std::string::npos);
 }
 
@@ -1796,6 +1801,250 @@ TEST(UiRenderGolden, UI46_G6_StatusSpinner) {
     const std::string line = line_with(rendered, "0 active");
     SCOPED_TRACE(rendered);
     EXPECT_EQ(line.find("│⠋  · build"), 0u);
+}
+
+UiModel tool_line_model(const std::string& name, const std::string& arguments) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel workspace;
+    workspace.id = model.activeWorkspaceId;
+    model.workspaces.emplace(workspace.id, workspace);
+    model.focusSessionIn(workspace.id, kSession);
+    SessionUiState* state = model.session(kSession);
+    ToolCallView call;
+    call.id        = "t1";
+    call.name      = name;
+    call.arguments = arguments;
+    state->tools.by_id["t1"] = state->tools.calls.size();
+    state->tools.calls.push_back(std::move(call));
+    ConversationEntry entry;
+    entry.role         = ConversationRole::Tool;
+    entry.tool_name    = name;
+    entry.tool_call_id = "t1";
+    state->conversation.entries.push_back(std::move(entry));
+    return model;
+}
+
+ftxui::Screen render_screen(const UiModel& model, TerminalSize size, const Theme& theme) {
+    ftxui::Element element = build_ui(model, size, theme);
+    ftxui::Screen screen =
+        ftxui::Screen::Create(ftxui::Dimensions{size.width, size.height});
+    ftxui::Render(screen, element);
+    return screen;
+}
+
+std::string element_ansi(ftxui::Element element, int width = 40) {
+    ftxui::Screen screen = ftxui::Screen::Create(ftxui::Dimensions{width, 1});
+    ftxui::Render(screen, element);
+    return screen.ToString();
+}
+
+TEST(UiRenderGolden, TruncateSpansIsWidthAwareAndSpanPreserving) {
+    const StyledLine line{{"hello", ftxui::Color::Red, false}};
+    EXPECT_EQ(truncate_spans(line, 10), line);
+    EXPECT_EQ(truncate_spans(line, 5), line);
+
+    const StyledLine cut = truncate_spans(line, 4);
+    ASSERT_EQ(cut.size(), 1u);
+    EXPECT_EQ(cut[0].text, "hel…");
+    EXPECT_EQ(cut[0].color, ftxui::Color::Red);
+
+    const StyledLine zero = truncate_spans(line, 0);
+    ASSERT_EQ(zero.size(), 1u);
+    EXPECT_EQ(zero[0].text, "…");
+
+    const StyledLine spans{{"ab", ftxui::Color::Yellow, false},
+                           {"cdef", ftxui::Color::CyanLight, true}};
+    const StyledLine out = truncate_spans(spans, 4);
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_EQ(out[0].text, "ab");
+    EXPECT_EQ(out[0].color, ftxui::Color::Yellow);
+    EXPECT_EQ(out[1].text, "c…");
+    EXPECT_EQ(out[1].color, ftxui::Color::CyanLight);
+    EXPECT_TRUE(out[1].bold);
+}
+
+TEST(UiRenderGolden, TruncateSpansMeasuresCjkGlyphWidth) {
+    const StyledLine cjk{{"日本語", ftxui::Color::GrayLight, false}};
+    const StyledLine out = truncate_spans(cjk, 5);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].text, "日本…");
+    EXPECT_EQ(ftxui::string_width(out[0].text), 5);
+}
+
+TEST(UiRenderGolden, SummarizeToolArgumentsPrefersKeys) {
+    EXPECT_EQ(summarize_tool_arguments("shell", R"({"command":"git   diff  --stat"})"),
+              "git diff --stat");
+    EXPECT_EQ(summarize_tool_arguments("bash", "{\"command\":\"ls\\n  -la\"}"), "ls -la");
+    EXPECT_EQ(summarize_tool_arguments("read_file", R"({"path":"cfg/debug.py","limit":10})"),
+              "cfg/debug.py");
+    EXPECT_EQ(summarize_tool_arguments("grep", R"({"pattern":"TODO"})"), "TODO");
+    EXPECT_EQ(summarize_tool_arguments("glob", R"({"pattern":"*.cpp"})"), "*.cpp");
+    EXPECT_EQ(summarize_tool_arguments("web_fetch", R"({"url":"https://x/y"})"),
+              "https://x/y");
+    EXPECT_EQ(summarize_tool_arguments("mcp_tool", R"({"name":"srv"})"), "srv");
+    EXPECT_EQ(summarize_tool_arguments("mcp_tool", R"({"alpha":1,"beta":2})"),
+              R"({"alpha":1,"beta":2})");
+    EXPECT_EQ(summarize_tool_arguments("read_file", "not json"), "not json");
+    EXPECT_EQ(summarize_tool_arguments("read_file", R"({"path":42})"), "42");
+    EXPECT_EQ(summarize_tool_arguments("read_file", R"({"path":null})"),
+              R"({"path":null})");
+}
+
+TEST(UiRenderGolden, ToolLineRichFormat) {
+    const UiModel model = tool_line_model("read_file", R"({"path":"cfg/debug.py"})");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{40, 12}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("▸ read_file  cfg/debug.py"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ToolLineTruncatesAtContentBoxColumn) {
+    const int width = 40;
+    const UiModel model =
+        tool_line_model("bash", R"({"command":"for f in a b c d e f g h i j k l m n"})");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{width, 12}, Theme{false}));
+    const std::string line = line_with(rendered, "▸ bash");
+    SCOPED_TRACE(rendered);
+    const std::size_t ellipsis = line.find("…");
+    ASSERT_NE(ellipsis, std::string::npos);
+    // 48-D7.3: content_width = width - 2 (border) - 1 (vscroll_indicator). The
+    // line includes the leading border glyph, so the truncated content plus the
+    // ellipsis spans exactly `content_width` columns after that border.
+    const std::string prefix = line.substr(0, ellipsis);
+    const std::string through_ellipsis = line.substr(0, ellipsis + std::string("…").size());
+    EXPECT_EQ(ftxui::string_width(through_ellipsis), width - 2);
+    EXPECT_EQ(ftxui::string_width(prefix), width - 3);
+}
+
+TEST(UiRenderGolden, CollapsedToolRendersExactlyOneRow) {
+    const UiModel model =
+        tool_line_model("read_file", R"({"path":"cfg/debug.py"})");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{40, 12}, Theme{false}));
+    int rows = 0;
+    std::size_t start = 0;
+    while (start <= rendered.size()) {
+        const std::size_t end = rendered.find('\n', start);
+        const std::string line = rendered.substr(
+            start, end == std::string::npos ? std::string::npos : end - start);
+        if (line.find("▸ read_file") != std::string::npos) {
+            ++rows;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    EXPECT_EQ(rows, 1);
+}
+
+TEST(UiRenderGolden, CaretCursorLandsAtInputPosition) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->input.draft = "hello";
+    for (const std::size_t cursor : {0u, 2u, 5u}) {
+        state->input.cursor = cursor;
+        const ftxui::Screen screen =
+            render_screen(model, TerminalSize{40, 12}, Theme{false});
+        const std::string before = state->input.draft.substr(0, cursor);
+        EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar) << cursor;
+        EXPECT_EQ(screen.cursor().x, 3 + ftxui::string_width(before)) << cursor;
+    }
+}
+
+TEST(UiRenderGolden, CaretCursorHandlesCjkLeadingCell) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->input.draft = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E";   // 日本語
+    for (const std::size_t cursor : {0u, 3u, 6u, 9u}) {
+        state->input.cursor = cursor;
+        const ftxui::Screen screen =
+            render_screen(model, TerminalSize{40, 12}, Theme{false});
+        const std::string before = state->input.draft.substr(0, cursor);
+        EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar) << cursor;
+        EXPECT_EQ(screen.cursor().x, 3 + ftxui::string_width(before)) << cursor;
+    }
+}
+
+TEST(UiRenderGolden, ArmedEscHintRendered) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->esc_arm = EscArm::Armed;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("- one more <Esc> to interrupt"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ApplyPresentationBoldDimAndMonochrome) {
+    const Theme color{true};
+    const std::string user =
+        element_ansi(apply_presentation(ftxui::text("x"), Presentation::UserAuthored, color));
+    EXPECT_NE(user.find("\x1b[1m"), std::string::npos);
+    const std::string intermediate =
+        element_ansi(apply_presentation(ftxui::text("x"), Presentation::Intermediate, color));
+    EXPECT_NE(intermediate.find("\x1b[2m"), std::string::npos);
+    const std::string final_answer =
+        element_ansi(apply_presentation(ftxui::text("x"), Presentation::FinalAnswer, color));
+    EXPECT_EQ(final_answer.find("\x1b[2m"), std::string::npos);
+    EXPECT_EQ(final_answer.find("\x1b[1m"), std::string::npos);
+
+    const Theme mono{false};
+    const std::string mono_dim =
+        element_ansi(apply_presentation(ftxui::text("x"), Presentation::Intermediate, mono));
+    EXPECT_NE(mono_dim.find("\x1b[2m"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UserBrightAndIntermediateDimmedInTranscript) {
+    UiModel model = build_model();
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    const std::size_t user_text = raw.find("hello there");
+    ASSERT_NE(user_text, std::string::npos);
+    // 48-I14: user text is bold, never dimmed.
+    EXPECT_NE(raw.rfind("\x1b[1m", user_text), std::string::npos);
+    // The user bar is painted green (48-D6.5).
+    EXPECT_NE(raw.rfind("\x1b[32m", user_text), std::string::npos);
+
+    // 48-D6: the assistant is intermediate (a tool follows it) and dimmed.
+    const std::size_t assistant = raw.find("Hello world");
+    ASSERT_NE(assistant, std::string::npos);
+    EXPECT_NE(raw.rfind("\x1b[2m", assistant), std::string::npos);
+}
+
+TEST(UiRenderGolden, ReasoningBlankLineSeparator) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->conversation.entries.clear();
+    ConversationEntry reasoning;
+    reasoning.role = ConversationRole::Reasoning;
+    reasoning.text = "thinking hard";
+    ConversationEntry assistant;
+    assistant.role = ConversationRole::Assistant;
+    assistant.text = "final answer";
+    state->conversation.entries.push_back(std::move(reasoning));
+    state->conversation.entries.push_back(std::move(assistant));
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    const std::size_t answer = rendered.find("final answer");
+    ASSERT_NE(answer, std::string::npos);
+    const std::size_t previous_end = rendered.rfind('\n', answer);
+    ASSERT_NE(previous_end, std::string::npos);
+    const std::size_t previous_start = rendered.rfind('\n', previous_end - 1);
+    const std::string previous =
+        previous_start == std::string::npos
+            ? rendered.substr(0, previous_end)
+            : rendered.substr(previous_start + 1, previous_end - previous_start - 1);
+    // The border glyphs and padding remain on a blank transcript row.
+    EXPECT_EQ(previous.find_first_not_of(" \xE2\x94\x82"), std::string::npos) << rendered;
 }
 
 } // namespace

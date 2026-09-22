@@ -93,7 +93,4 @@ private:
     std::deque<std::string>              applied_event_order_;
 };
 
-[[nodiscard]] std::string summarize_tool_arguments(const std::string& name,
-                                                   const nlohmann::json& arguments);
-
 } // namespace ymh::ui
