@@ -405,15 +405,16 @@ public:
         for (const SupervisorWorkspace& workspace : options_.workspaces) {
             attach_workspace(workspace);
         }
-        if (model_.workspaces.empty()) {
-            return 1;
-        }
-        model_.activeWorkspaceId = options_.workspaces.front().id;
-        if (!options_.initial_workspace.empty()) {
-            for (const auto& [id, spec] : specs_) {
-                if (spec.cwd == options_.initial_workspace.string()) {
-                    model_.activeWorkspaceId = id;
-                    break;
+        // 49-D1/49-A3: zero workspaces is a valid start state (the empty
+        // screen). A bare `ymh` models no workspace until the first prompt.
+        if (!model_.workspaces.empty()) {
+            model_.activeWorkspaceId = options_.workspaces.front().id;
+            if (!options_.initial_workspace.empty()) {
+                for (const auto& [id, spec] : specs_) {
+                    if (spec.cwd == options_.initial_workspace.string()) {
+                        model_.activeWorkspaceId = id;
+                        break;
+                    }
                 }
             }
         }
@@ -438,6 +439,29 @@ public:
         }
         WorkspaceModel* workspace = model_.activeWorkspace();
         if (workspace == nullptr) {
+            if (!model_.workspaces.empty()) {
+                return;
+            }
+            // 49-D1: the first prompt with no workspace registers the cwd row,
+            // queues the draft, and spawns the daemon. The workspace is modeled
+            // and attached by `ensure_worker_loop` ONLY after the daemon
+            // registers; this path must NOT call `attach_workspace` here (a
+            // pre-spawn attach would poison `connections_`).
+            SessionUiState* composer = &model_.pendingComposer;
+            composer->input.push_history(text);
+            composer->input.draft.clear();
+            composer->input.cursor = 0;
+            composer->input.saved_draft.clear();
+            composer->command_hints.clear();
+            composer->command_hint_selected = 0;
+            const std::optional<WorkspaceId> id =
+                resolve_or_register_workspace(options_.initial_workspace);
+            if (!id.has_value()) {
+                push_notice("cannot create workspace: registry unavailable");
+                return;
+            }
+            pending_creates_[*id] = text;
+            ensure_workspace_running(*id, SessionId{});
             return;
         }
         SessionUiState* state = model_.session(workspace->activeSessionId());
@@ -944,12 +968,53 @@ private:
 
     void push_notice(std::string text) { model_.pushNotice(std::move(text)); }
 
-    // 46-D3: true when the Live switcher has at least one actionable target:
-    // another live-renderable workspace, or a visible session leaf in the active
-    // workspace after the focused-session exclusion.
-    [[nodiscard]] bool switcher_has_targets() const {
+    // 49-D5.1: a workspace's session membership is "unknown" while the catalog
+    // is not loaded, when the workspace is absent from the snapshot, or when its
+    // read failed (`note`). The fallback is conservative: an unknown membership
+    // counts as a target so the notice is never falsely shown (45-D3).
+    [[nodiscard]] bool catalog_membership_unknown(const WorkspaceId& workspace) const {
+        if (!model_.catalog.loaded || model_.catalog.generation == 0) {
+            return true;
+        }
+        for (const WorkspaceHistory& history : model_.catalog.workspaces) {
+            if (history.id == workspace) {
+                return history.note.has_value();
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool has_visible_leaf(const WorkspaceId& workspace) const {
+        const auto it = model_.workspaces.find(workspace);
+        if (it == model_.workspaces.end()) {
+            return false;
+        }
+        for (const SessionCell& cell : it->second.sessions) {
+            if (model_.catalog_has_session(workspace, cell.id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool other_live_workspace_exists() const {
         for (const auto& [id, workspace] : model_.workspaces) {
             if (id != model_.activeWorkspaceId && live_switcher_renderable(workspace)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 49-D5/46-D3: true when the Live switcher has at least one actionable target:
+    // another live-renderable workspace with a known-visible or unknown session,
+    // or a non-focused visible leaf in the active workspace.
+    [[nodiscard]] bool switcher_has_targets() const {
+        for (const auto& [id, workspace] : model_.workspaces) {
+            if (id == model_.activeWorkspaceId || !live_switcher_renderable(workspace)) {
+                continue;
+            }
+            if (catalog_membership_unknown(id) || has_visible_leaf(id)) {
                 return true;
             }
         }
@@ -958,22 +1023,27 @@ private:
             return false;
         }
         const SessionId focused = active->second.activeSessionId();
+        const bool unknown = catalog_membership_unknown(active->first);
         for (const SessionCell& cell : active->second.sessions) {
             if (!focused.value.empty() && cell.id == focused) {
                 continue;
             }
-            if (model_.catalog_has_session(active->first, cell.id)) {
+            if (unknown || model_.catalog_has_session(active->first, cell.id)) {
                 return true;
             }
         }
         return false;
     }
 
-    // 46-D3: opens the notice instead of the switcher when there is no target.
+    // 49-D6/46-D3: opens the notice instead of the switcher when there is no
+    // target. The text distinguishes "another live workspace exists but has no
+    // switchable session" from "nothing else to switch to".
     void openSwitcher() {
         disarm_esc();
         if (!switcher_has_targets()) {
-            model_.message.text = "No other workspaces available";
+            model_.message.text = other_live_workspace_exists()
+                                      ? "No other sessions available"
+                                      : "No other workspaces available";
             model_.message.open = true;
             model_.mode = UiMode::Notice;
             model_.dirty.markAggregate();
@@ -1021,6 +1091,7 @@ private:
     // the workspace and queues a coalesced spawn request for the owned worker;
     // `ensureRunning` blocks and must never run here.
     void ensure_workspace_running(const WorkspaceId& workspace, const SessionId& resume) {
+        ++ensure_call_counts_[workspace];
         if (options_.lifecycle == nullptr) {
             surface_notice(workspace, resume, "cannot start workspace");
             return;
@@ -1085,6 +1156,20 @@ private:
                 ensure_in_flight_.erase(request.workspace);
                 if (!spec.has_value()) {
                     pending_resume_.erase(request.workspace);
+                    // 49-F1: a failed first-prompt spawn never modeled the
+                    // workspace, so restore the draft to the empty-screen
+                    // composer for a retry.
+                    if (model_.workspaces.empty()) {
+                        if (const auto pending = pending_creates_.find(request.workspace);
+                            pending != pending_creates_.end()) {
+                            if (model_.pendingComposer.input.draft.empty()) {
+                                model_.pendingComposer.input.draft = std::move(pending->second);
+                                model_.pendingComposer.input.cursor =
+                                    model_.pendingComposer.input.draft.size();
+                            }
+                            pending_creates_.erase(pending);
+                        }
+                    }
                     surface_notice(request.workspace, request.resume, notice);
                     return;
                 }
@@ -1228,6 +1313,28 @@ private:
         }
     }
 
+    // 49-D1: mirrors `find_or_register_workspace` (src/cli/cli.cpp), which is in
+    // that TU's anonymous namespace and unreachable here. Resolves the cwd row
+    // through the supervisor's own registry handle, registering it if absent.
+    // Never spawns.
+    std::optional<WorkspaceId> resolve_or_register_workspace(
+        const std::filesystem::path& canonical) {
+        if (options_.registry == nullptr || canonical.empty()) {
+            return std::nullopt;
+        }
+        try {
+            if (const std::optional<WorkspaceRecord> row =
+                    options_.registry->findByCanonicalPath(canonical)) {
+                return WorkspaceId{row->id.value};
+            }
+            const WorkspaceRecord row =
+                options_.registry->registerWorkspace(canonical, canonical.filename().string());
+            return WorkspaceId{row.id.value};
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
     std::optional<SupervisorWorkspace> workspace_spec_from_registry(
         const WorkspaceId& workspace) const {
         if (options_.registry == nullptr) {
@@ -1356,6 +1463,19 @@ private:
             apply_daemon_status_liveness(it->second, it->second.daemonStatus);
             model_.dirty.markAggregate();
             if (state == SupervisorLinkState::Attached) {
+                // 49-D1 step 6: a lazily-created workspace's first prompt rides
+                // `pending_creates_`. Consume it BEFORE `refresh_sessions`, whose
+                // auto-create branch would otherwise claim the empty
+                // `activeSessionId` first and drop the draft.
+                if (const auto pending_create = pending_creates_.find(workspace);
+                    pending_create != pending_creates_.end() && !pending_create->second.empty()) {
+                    std::string draft = std::move(pending_create->second);
+                    pending_creates_.erase(pending_create);
+                    if (model_.activeWorkspaceId.value.empty()) {
+                        model_.activeWorkspaceId = workspace;
+                    }
+                    create_session(workspace, std::move(draft));
+                }
                 refresh_sessions(workspace);
                 // 25 review M3: a plain re-attach does not re-activate, so
                 // refresh the status context for the already-active session.
@@ -1485,9 +1605,8 @@ private:
         if (!preferred_agent_.empty()) {
             create_params["agent_preset"] = preferred_agent_;
         }
-        connection->second->submit(
-            std::string(protocol::method::kSessionCreate), std::move(create_params),
-            [this, workspace](SupervisorReply reply) {
+        submit_to(workspace, std::string(protocol::method::kSessionCreate),
+                  std::move(create_params), [this, workspace](SupervisorReply reply) {
                 std::string session;
                 if (reply.ok) {
                     session = reply.result.value("session", std::string{});
@@ -1563,6 +1682,7 @@ private:
 
     void submit_to(const WorkspaceId& workspace, std::string method, nlohmann::json params,
                    SupervisorConnection::ReplyFn reply) {
+        ++submitted_method_counts_[method];
         // Test seam (46-D7): a canned reply installed for this method short-
         // circuits the connection, so the resume/prompt reply terminals are
         // drivable without a live daemon. Production installs none.
@@ -2506,7 +2626,13 @@ private:
     bool handle_input(const ftxui::Event& event) {
         SessionUiState* state = active();
         if (state == nullptr) {
-            state = model_.ensureActiveSession();
+            if (model_.workspaces.empty()) {
+                // 49-D1: the empty screen is typeable; the draft lives in the
+                // zero-workspace composer until the first prompt creates one.
+                state = &model_.pendingComposer;
+            } else {
+                state = model_.ensureActiveSession();
+            }
         }
         if (state == nullptr) {
             WorkspaceModel* workspace = model_.activeWorkspace();
@@ -2987,6 +3113,11 @@ private:
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
     std::map<WorkspaceId, std::string> pending_creates_;
+    // 49 test seams: per-workspace `ensure_workspace_running` invocations and
+    // per-method `submit_to` invocations, so the lazy path can be asserted
+    // without a live daemon. Inert in production.
+    std::map<WorkspaceId, std::size_t> ensure_call_counts_;
+    std::map<std::string, std::size_t> submitted_method_counts_;
     std::optional<SupervisorPresence> presence_;
     std::unique_ptr<DaemonSetScanner> scanner_;
     std::chrono::steady_clock::time_point last_presence_tick_{};
@@ -3102,6 +3233,26 @@ public:
     void drain_actions() override { app_.drain(); }
 
     void open_switcher() override { app_.openSwitcher(); }
+
+    void submit(std::string text) override { app_.submit(text); }
+
+    void register_presence() override { app_.register_presence(); }
+
+    void begin_exit(bool allow_prompt) override { app_.begin_exit(allow_prompt); }
+
+    [[nodiscard]] std::size_t ensure_call_count(const WorkspaceId& workspace) const override {
+        const auto it = app_.ensure_call_counts_.find(workspace);
+        return it == app_.ensure_call_counts_.end() ? 0 : it->second;
+    }
+
+    [[nodiscard]] std::size_t submitted_count(const std::string& method) const override {
+        const auto it = app_.submitted_method_counts_.find(method);
+        return it == app_.submitted_method_counts_.end() ? 0 : it->second;
+    }
+
+    [[nodiscard]] const std::map<WorkspaceId, std::string>& pending_creates() const override {
+        return app_.pending_creates_;
+    }
 
     void install_prompt_editor_io() override {
         app_.with_restored_io_ = [](const std::function<void()>& run) { run(); };

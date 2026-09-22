@@ -189,6 +189,10 @@ struct McpSettings {
     std::int64_t                 shutdown_grace_ms = 2'000;
     std::size_t                  max_frame_bytes = 8u * 1024u * 1024u;
     bool                         allow_network_servers = false;
+    // 50-D3.5: opt-in per-server raw child-stderr capture to
+    // <workspace>/.ymh/mcp/<server>.stderr.log (0600). Global-layer only
+    // (the whole `mcp` section is; 50-I22).
+    bool                         log_child_stderr = false;
 };
 
 // [session] — durable session-DB options (26-D23, 28 §5.4). Global layer only.

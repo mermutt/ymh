@@ -21,6 +21,9 @@ struct InstructionFileConfig {
     std::vector<std::string> project_root_markers{".git"};
     std::vector<std::string> candidates{"AGENTS.md", "CLAUDE.md"};
     std::vector<std::string> local_candidates{"AGENTS.local.md", "CLAUDE.local.md"};
+    // 50-D1.5: ordered global candidates; the loader reads at most one file per
+    // parent directory (the first that exists). Empty => the default list.
+    std::vector<std::filesystem::path> global_candidates;
     bool                     load_local = false;
     std::size_t              max_bytes = 0;  // REQUIRED when enabled; 0 means unset
     std::size_t              max_source_bytes = 1048576;

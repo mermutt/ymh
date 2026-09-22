@@ -384,8 +384,11 @@ target_link_libraries(ymh_mcp
 
 add_library(ymh_skills STATIC
     src/skills/skill_types.cpp
+    src/skills/skill_roots.cpp
+    src/skills/workspace_trust.cpp
     src/skills/frontmatter.cpp
     src/skills/skill_catalog.cpp
+    src/skills/file_commands.cpp
     src/skills/skill_tool.cpp
 )
 add_library(ymh::skills ALIAS ymh_skills)

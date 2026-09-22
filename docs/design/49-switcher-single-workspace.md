@@ -1,7 +1,7 @@
 # 49 — Lazy Workspace Creation on First Prompt and the Session-Aware Ctrl-S Notice
 
 ```
-Status: **draft (Rev 3)** — awaiting independent review.
+Status: **draft (Rev 4)** — awaiting independent review.
 Component: 49 (errata) — reinstates 16-D2's lazy-spawn policy; supersedes 22
             §11.4/22-A7's eager-initial-spawn half; amends 16-D2's bare-cwd
             `NotRunning` listing clause and 46-D3; does not supersede any 22 §3
@@ -279,10 +279,13 @@ With zero workspaces the screen renders:
 
 - **Header**: `ymh` with no cwd suffix (`render_header`, `src/ui/ui_render.cpp:868-873`;
   it already omits the workspace suffix when the id is absent).
-- **Transcript**: empty (`render_conversation(nullptr, …)`,
-  `src/ui/ui_render.cpp:1202-1204`).
+- **Transcript**: empty. `build_ui` renders an empty pane for the zero-workspace
+  state; it does **not** reuse `render_conversation(nullptr, …)`, which renders
+  `(no active session)` for the workspace-without-session case (49-A14).
 - **Prompt box**: `> _` (green `> `, empty draft, `_` caret; `render_input`,
-  `src/ui/ui_render.cpp:385-400`).
+  `src/ui/ui_render.cpp:385-400`). The draft is held in the zero-workspace
+  composer `UiModel::pendingComposer` (49-A13), so typing works before any
+  workspace exists.
 - **Status bar**: left segment `no workspace attached — type a prompt to start`
   (dim), right segment the existing aggregate `0 active · 0 waiting`
   (`render_status`, `src/ui/ui_render.cpp:487-505`; the new left string replaces the
@@ -402,7 +405,7 @@ swallowed** (matching the shipped notice and the switcher's own behaviour,
 The active workspace node is still rendered and focusable; the focused session is
 still hidden; leaves and ordering are unchanged (22 SW1/SW5/SW17; 45-D4).
 
-### 49-D10 — No new mode, model, or wire surface
+### 49-D10 — No new mode, wire surface, or switcher model
 
 `UiMode::Notice`, `MessageDialogModel` (`include/ymh/ui/ui_model.hpp:417-421`), and
 `render_notice` are reused. The lazy path adds no protocol method; the daemon is
@@ -410,6 +413,11 @@ spawned exactly as today (`ymh --host …`) once the row exists. `kProtocolVersi
 stays 1. The change is confined to `src/cli/cli.cpp` (`run_supervisor_entry`),
 `src/ui/supervisor.cpp` (`run`, `submit`, `switcher_has_targets`, `openSwitcher`),
 and the empty-state status string in `src/ui/ui_render.cpp`.
+
+One model field is added: `UiModel::pendingComposer` (49-A13), the zero-workspace
+composer. It exists only because the shipped composer is session-scoped
+(`handle_input` operates on `SessionUiState`); without it the empty screen would
+not be typeable. It is not a switcher/notice model and adds no wire surface.
 
 ---
 
@@ -536,6 +544,7 @@ through.
 | 49-I12 | `/sessions` is unchanged: it enumerates every registered workspace and focuses an attached sessionless workspace node on `<Enter>` (`src/ui/supervisor.cpp:2420-2433`). |
 | 49-I13 | `switcher_has_targets()` never returns `false` while (a) a live-renderable non-active workspace's session membership is unknown (catalog pending, absent from snapshot, or `note` set), or (b) the active workspace's membership is unknown and it has a non-focused visible session leaf (49-D5.1). |
 | 49-I14 | The notice text is exactly `No other workspaces available` when `other_live_workspace_exists()` is false (including the zero-workspace state), and exactly `No other sessions available` otherwise. |
+| 49-I15 | The zero-workspace empty screen is typeable: printable/editing keys operate on `UiModel::pendingComposer`, the draft renders in the prompt box, and `<Enter>` on a non-empty draft runs the 49-D1 lazy path. |
 
 ---
 
@@ -576,6 +585,9 @@ Continue the repo's `F1–F12` convention with the spec-local `49-F` prefix
 | 49-A10 | 22 §3.1/§3.4/§3.7; 45-D3/45-D4 | (no code change) | **Not amended.** The Live-only display predicate, ownership marks, ordering, the focused-session exclusion, and the placeholder leaves are unchanged. |
 | 49-A11 | 16-D2 lazy-spawn policy / 16 O1–O22 | `16:529-551`; (no code change) | **Policy reinstated; listing clause amended.** The shipped drift is 22-A7; 16-D2's lazy-spawn policy and O1–O22 are restored. But 16-D2 also requires the cwd workspace to be "listed as **`NotRunning`** and … browsable read-only" (`16:537-538`), which presumes the registry row exists; 49-A2 removes the row until the first prompt, so for a **bare `ymh`** there is nothing to list and the `NotRunning` listing clause is **amended**: before the first prompt the workspace is absent, not `NotRunning`. Once the first prompt creates the row+daemon, 16-D2's listing semantics resume. A zero-daemon supervisor needs no schema change (`16:250-252`; `src/registry/registry.cpp:91-103`). |
 | 49-A12 | 46-D7 / 46-I13 / 23-D58 / 50-D2 | `46:1521-1535`, `46:3474`; `23:375`, `23:1253-1293`; `50 §4.2 (50-D2)` | **Reconciled, not a conflict.** Rev 2 cited a "48-D3.3 cwd always-win" clause; **that reference was fabricated** — spec 48 has no `D3` decision and no "cwd always wins" text (48 §15 records that the old 48-D3, the Ctrl+C re-entry item, moved to spec 50 as 50-D2; 48's kept decisions are D2/D4–D8). The real overlap is with the fresh-launch create branch: **46-D7.1** retains `focus live.front()` (`46:1530`) and **46-I13** auto-creates an empty session on `Attached` (`46:3474`), while **23-D58** owns the refresh auto-create. Spec **50-D2.1** replaces the live-focus with `create_session` ("always create"), and 49-D1's lazy first prompt routes through `create_session` on that same attach branch (49-D1 step 6). 49-D1 and 50-D2 agree: on a bare launch there is no workspace until the first prompt, and the fresh-launch guarantee applies once it exists (50-OQ-6). No conflict; see spec 50 §14 (cross-spec reconciliation). |
+| 49-A13 | `UiModel` (model surface) | `struct UiModel` (`include/ymh/ui/ui_model.hpp:523`) | **One field added:** `SessionUiState pendingComposer`, the zero-workspace composer. The shipped composer is session-scoped (`handle_input` takes a `SessionUiState*`), so without it the empty screen could not be typed into. `handle_input`/`render_input` fall back to it only while `workspaces` is empty. Never a session cell, never persisted, no wire surface (49-D10 amended). |
+| 49-A14 | 49-D2 transcript rendering | `render_conversation` (`src/ui/ui_render.cpp:397-420`) | `build_ui` renders an **empty** pane for the zero-workspace state instead of `render_conversation(nullptr, …)`, which renders `(no active session)`. The workspace-without-session case is unchanged. |
+| 49-A15 | `create_session` reply seam | `connection->second->submit` (`src/ui/supervisor.cpp:1487`) | Routed through `submit_to` so the `session.create` reply terminal is drivable by the 46-D7 canned-reply test seam; production behaviour is identical (no canned reply installed). |
 
 ---
 
@@ -726,3 +738,4 @@ registry schema, the daemon, the wire protocol, or `/sessions`. The diff is
 | 1 | 2026-09-21 | Initial draft. Diagnosis of the user's report: **UX CHANGE, not a BUG** — the two live entries, both placeholder leaves, the `o [owned]` marks, the two live daemons (eager cwd spawn + S3 resume spawn), and the switcher opening are all correct to 22 §3.1/§11.4 and 46-D3.2. Decision 49-D (Rev 1): make `switcher_has_targets()` session-aware, add the `No other sessions available` text, retain the 46-D3 dismissal, reuse `MessageDialogModel`/`render_notice`. Amendment register 49-A1–A7 (46-D3.2/46-D3.3/46-D3.5/46-I8/46 §5.3 amended; 22 and 45 not amended). Invariants 49-I1–I8; failure modes 49-F1–49-F7; tests 49-U/G/P; fixtures; open questions. |
 | 2 | 2026-09-21 | **New user decision (primary): no workspace/daemon at bare `ymh` startup; created lazily on the first prompt.** Diagnosis extended: the eager cwd spawn (`src/cli/cli.cpp:514`, authorized by 22 §11.4/22-A7) is the root cause; spec 16 §3.2.1 (16-D2) **already pins lazy spawn**, so the shipped code is the drift. Verified a zero-daemon supervisor is representable (no FK in the `supervisors` DDL, `src/registry/registry.cpp:91-103`; `16:250-252`; O1/O10/O15 vacuous; `compute_orphaning_set`/`confirm_exit`/`teardown_daemons` handle an empty set). Found and recorded the shipped blockers: `run()` returns 1 on empty `workspaces` (`src/ui/supervisor.cpp:406-408`) and `submit()` never spawns (`:437-440`). Decisions renumbered: **49-D1** lazy creation, 49-D2 empty state, 49-D3 spawn-path enumeration, 49-D4 lifetime, 49-D5 session-aware predicate, 49-D6 texts (incl. zero-workspace), 49-D7 open path, 49-D8 keys, 49-D9 switcher unchanged, 49-D10 no new surface. Amendment register 49-A1–A12: **22 §11.4/22-A7 bare-cwd eager spawn superseded; 16-D2 reinstated**; 46-D3.2/3.3/3.5/I8 amended; 22 §3.1/§3.4/§3.7 and 45-D3/D4 not amended; **48-D3 conflict recorded (49-A12)**. Invariants 49-I1–I14; failure modes 49-F1–F11; tests 49-U1–U15, 49-G1–G5, 49-P1–P4. Eight open questions (incl. the 48-D3 reconciliation). Verification status: DRAFT — not yet reviewed. |
 | 3 | 2026-09-21 | **Gate repair (adversarial gate FAIL: 1 HIGH + 7 MEDIUM).** (H) The lazy sequence could never connect: 49-D1 step 3 modeled the workspace via `workspace_spec_from_registry` before the daemon registered (`:1222-1224` returns `nullopt` while `row->host` is absent) and called `attach_workspace` pre-spawn, whose `connections_.count != 0` guard (`:770`) then made `ensure_worker_loop`'s post-spawn attach (`:1076`) a no-op. **Fixed:** the workspace is modeled/attached **only after** `lifecycle->ensureRunning` succeeds (`ensure_worker_loop`, `:1052`→`:1057`→`:1076`); `submit()` never attaches early; the draft rides the existing `pending_creates_` map and is consumed on `on_link_state(Attached)` (`:1334`) which sets `activeWorkspaceId` and calls `create_session` (`:1453`). (M) `find_or_register_workspace` is in cli.cpp's anonymous namespace (`:101-906`) and is unreachable from `supervisor.cpp`; replaced with a private `resolve_or_register_workspace` over `options_.registry` (`findByCanonicalPath` `registry.hpp:218-219`, `registerWorkspace` `:252-254`). (M) Removed the contradictory `pending_prompts_` (no consume site); the draft is pinned through `pending_creates_`/`create_session` (cites 46-D7/46-I13). (M) **49-A12's "48-D3.3 cwd always-win" reference was fabricated** — spec 48 has no `D3`; the real overlap is 46-D7.1/46-I13/23-D58 and spec 50-D2 (reconciled by scoping). (M) 16-D2's `NotRunning`/browsable **listing clause is amended** for the bare-cwd case (no row before the first prompt); its lazy-spawn policy is reinstated. (M) 49-D5.1 extends the unknown-membership fallback to the **active** workspace's non-focused visible leaves, fixing the false "nothing available" notice (49-I13). (M) Corrected the Ctrl+N/`/new` claim: `new_session()` no-ops with no active workspace (`:1676-1681`), so it is not a zero-workspace spawn trigger (49-D3, OQ-49-1). Cross-spec reconciliation recorded in spec 50 §14. Verification status: DRAFT — not yet reviewed. |
+| 4 | 2026-09-21 | **Implementation-phase corrections (found while coding; build+suite not yet green at this revision).** (1) **49-A13/49-I15:** the shipped composer is session-scoped, so the empty screen was **not typeable** as 49-D2 claimed; added `UiModel::pendingComposer` and routed `handle_input`/`render_input` to it while `workspaces` is empty. 49-D10 amended accordingly. (2) **49-A14:** `render_conversation(nullptr, …)` renders `(no active session)`, not an empty pane; `build_ui` now renders an empty conversation for the zero-workspace state. 49-D2 corrected. (3) `run_supervisor_entry` gained the `new_session` parameter already sketched in §4, so `--new` stays an explicit eager activation (49-D3/49-I4); `--resume`/`--new` alone register+attach eagerly. (4) **49-A15:** `create_session` routed through `submit_to` so the 46-D7 canned-reply seam can drive the `session.create` terminal; production unchanged. (5) Test seams added to `SupervisorHarness`: `submit`, `register_presence`, `begin_exit`, `ensure_call_count`, `submitted_count`, `pending_creates`; new tests `tests/unit/errata49_ui_test.cpp` plus golden `UI49_G1/G2/G4/G5`, and an extra composer-typeable unit test. (6) The spawn-failure path restores the draft to `pendingComposer` (49-F1). Verification status: **DRAFT (Rev 4)** — awaiting independent review. |

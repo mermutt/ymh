@@ -22,7 +22,9 @@ struct SkillName {
 [[nodiscard]] bool is_valid_skill_name(std::string_view name) noexcept;
 
 enum class SkillSource : std::uint8_t {
+    Home,       // $HOME/.ymh/skills/<name>/SKILL.md          (50-D1.2, Trusted)
     User,       // <config-root>/ymh/skills/<name>/SKILL.md
+    Claude,     // $HOME/.claude/skills/<name>/SKILL.md       (50-D1.2, Trusted)
     Workspace,  // <workspace>/.ymh/skills/<name>/SKILL.md
     Builtin,    // reserved; never produced in v1 (20-D2, OQ-3)
 };

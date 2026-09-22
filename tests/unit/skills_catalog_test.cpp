@@ -61,6 +61,16 @@ struct Fixture {
 
     SkillCatalogConfig config() const {
         SkillCatalogConfig value;
+        value.workspace_trusted = true;
+        return value;
+    }
+
+    std::vector<SkillRoot> roots(const std::filesystem::path& user = {}) const {
+        std::vector<SkillRoot> value;
+        value.push_back(SkillRoot{user.empty() ? user_root : user, SkillSource::User,
+                                  SkillTrust::Trusted});
+        value.push_back(SkillRoot{workspace.path() / ".ymh" / "skills", SkillSource::Workspace,
+                                  SkillTrust::Untrusted});
         return value;
     }
 
@@ -77,7 +87,7 @@ TEST(SkillCatalog, DiscoversBothTiersUserFirst) {
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "repo-conventions",
                 "Repo conventions.");
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 2u);
@@ -95,7 +105,7 @@ TEST(SkillCatalog, WorkspaceCannotShadowUser) {
     write_skill(fixture.user_root, "git-commit", "Trusted.");
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "git-commit", "Hostile.");
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 1u);
@@ -110,7 +120,7 @@ TEST(SkillCatalog, UntrustedNotModelVisibleUnlessExposed) {
     Fixture fixture("skills_expose");
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "repo", "Repo skill.");
 
-    SkillCatalog hidden(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog hidden(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     hidden.discover();
     EXPECT_NE(hidden.find("repo"), nullptr);
     EXPECT_EQ(hidden.find_model_visible("repo"), nullptr);
@@ -119,7 +129,7 @@ TEST(SkillCatalog, UntrustedNotModelVisibleUnlessExposed) {
 
     SkillCatalogConfig exposed = fixture.config();
     exposed.expose_workspace = true;
-    SkillCatalog open(exposed, fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog open(exposed, fixture.env, fixture.roots(), fixture.logger);
     open.discover();
     EXPECT_NE(open.find_model_visible("repo"), nullptr);
     EXPECT_FALSE(open.index_section().empty());
@@ -132,7 +142,7 @@ TEST(SkillCatalog, MalformedSkillSkippedWithWarning) {
     std::filesystem::create_directories(root / "broken");
     std::ofstream(root / "broken" / "SKILL.md") << "name: broken\ndescription: no fence\n";
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 1u);
@@ -147,7 +157,7 @@ TEST(SkillCatalog, NonFatalWarningKeepsSkill) {
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "wordy",
                 "This description is far too long to fit.");
 
-    SkillCatalog catalog(config, fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(config, fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 1u);
@@ -160,7 +170,7 @@ TEST(SkillCatalog, OversizedBodySkipped) {
     config.max_skill_bytes = 64;
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "big", "Big.", std::string(200, 'x'));
 
-    SkillCatalog catalog(config, fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(config, fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     EXPECT_TRUE(catalog.all().empty());
@@ -176,7 +186,7 @@ TEST(SkillCatalog, MaxSkillsCapsAfterSort) {
     SkillCatalogConfig config = fixture.config();
     config.max_skills = 2;
 
-    SkillCatalog catalog(config, fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(config, fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     const std::vector<std::string> names = names_of(catalog);
@@ -197,7 +207,7 @@ TEST(SkillCatalog, SymlinkEscapeSkipped) {
     std::filesystem::create_directory_symlink(outside.path() / "escape", root / "escape", ec);
     ASSERT_FALSE(ec);
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     EXPECT_TRUE(catalog.all().empty());
@@ -212,7 +222,7 @@ TEST(SkillCatalog, SymlinkInsideRootAccepted) {
     std::filesystem::create_directory_symlink(root / "real", root / "linked", ec);
     ASSERT_FALSE(ec);
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 1u);
@@ -226,7 +236,7 @@ TEST(SkillCatalog, NonRegularSkillFileSkipped) {
     ASSERT_EQ(::mkfifo((root / "fifo" / "SKILL.md").c_str(), 0600), 0);
     std::filesystem::create_directories(root / "dironly" / "SKILL.md");
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     EXPECT_TRUE(catalog.all().empty());
@@ -236,7 +246,7 @@ TEST(SkillCatalog, NonRegularSkillFileSkipped) {
 TEST(SkillCatalog, AbsentRootYieldsWarning) {
     Fixture fixture("skills_absent");
     const std::filesystem::path missing = fixture.user_base.path() / "does-not-exist";
-    SkillCatalog catalog(fixture.config(), fixture.env, missing, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(missing), fixture.logger);
     catalog.discover();
 
     EXPECT_TRUE(catalog.all().empty());
@@ -248,7 +258,7 @@ TEST(SkillCatalog, RelativeUserRootDisablesTier) {
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "repo", "Repo skill.");
 
     SkillCatalog catalog(fixture.config(), fixture.env,
-                         std::filesystem::path{"relative/skills"}, fixture.logger);
+                         fixture.roots(std::filesystem::path{"relative/skills"}), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 1u);
@@ -263,7 +273,7 @@ TEST(SkillCatalog, DeterministicDiscovery) {
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "alpha", "A.");
     write_skill(fixture.workspace.path() / ".ymh" / "skills", "mike", "M.");
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
     const std::vector<std::string> first_names = names_of(catalog);
     const std::string              first_index = catalog.index_section();
@@ -281,7 +291,7 @@ TEST(SkillCatalog, IndexTruncationAddsNote) {
     SkillCatalogConfig config = fixture.config();
     config.max_index_bytes = 200;
 
-    SkillCatalog catalog(config, fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(config, fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     ASSERT_EQ(catalog.all().size(), 10u);
@@ -296,7 +306,7 @@ TEST(SkillCatalog, DisabledCatalogIsEmpty) {
     SkillCatalogConfig config = fixture.config();
     config.enabled = false;
 
-    SkillCatalog catalog(config, fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(config, fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     EXPECT_TRUE(catalog.all().empty());
@@ -314,7 +324,7 @@ TEST(SkillCatalog, IndexListsNameAndDescription) {
     Fixture fixture("skills_index_text");
     write_skill(fixture.user_root, "git-commit", "Write a conventional commit.");
 
-    SkillCatalog catalog(fixture.config(), fixture.env, fixture.user_root, fixture.logger);
+    SkillCatalog catalog(fixture.config(), fixture.env, fixture.roots(), fixture.logger);
     catalog.discover();
 
     const std::string& index = catalog.index_section();

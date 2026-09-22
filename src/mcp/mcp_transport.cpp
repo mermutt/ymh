@@ -1,5 +1,6 @@
 #include "ymh/mcp/mcp_transport.hpp"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -9,14 +10,30 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
 #include "ymh/execution/errors.hpp"
 
 namespace ymh {
+namespace {
+
+std::string sanitize_server_id(std::string_view id) {
+    std::string out;
+    out.reserve(id.size());
+    for (const char c : id) {
+        const bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+        out.push_back(safe ? c : '_');
+    }
+    return out.empty() ? std::string{"server"} : out;
+}
+
+} // namespace
 
 std::vector<std::pair<std::string, std::string>> resolve_mcp_env(
     const std::vector<std::string>& entries) {
@@ -65,6 +82,7 @@ StdioMcpTransport::StdioMcpTransport(const McpServerConfig& config,
                                      Logger& logger)
     : config_(config),
       max_frame_bytes_(mcp_config.max_frame_bytes),
+      log_child_stderr_(mcp_config.log_child_stderr),
       environment_(environment),
       logger_(logger) {}
 
@@ -95,11 +113,35 @@ Task<void> StdioMcpTransport::start(CancellationToken cancel) {
     for (const std::string& argument : config_.args) {
         request.argv.push_back(argument);
     }
-    request.cwd = config_.cwd.empty() ? environment_.root()
-                                      : environment_.resolve(config_.cwd.string());
     request.environment = resolve_mcp_env(config_.env);
+    request.env_mode = ProcessEnvMode::Inherit;
     request.capture_stdout = true;
     request.capture_stderr = false;
+
+    try {
+        request.cwd = config_.cwd.empty() ? environment_.root()
+                                          : environment_.resolve(config_.cwd.string());
+    } catch (const ToolError&) {
+        throw McpError{McpErrorCode::ConfigInvalid,
+                       "mcp server '" + config_.id.value +
+                           "': cwd escapes the workspace root"};
+    }
+
+    if (log_child_stderr_) {
+        const std::filesystem::path directory = environment_.root() / ".ymh" / "mcp";
+        const std::filesystem::path path =
+            directory / (sanitize_server_id(config_.id.value) + ".stderr.log");
+        std::error_code ec;
+        std::filesystem::create_directories(directory, ec);
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (fd >= 0) {
+            ::close(fd);
+            request.stderr_path = path;
+        } else {
+            logger_.warn("mcp: cannot open child stderr log '" + path.string() +
+                         "': " + std::strerror(errno));
+        }
+    }
 
     try {
         child_ = environment_.process().spawn(request).get();

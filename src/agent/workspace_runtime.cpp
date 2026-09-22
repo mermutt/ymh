@@ -31,6 +31,7 @@
 #include "ymh/session/session_manager.hpp"
 #include "ymh/skills/skill_catalog.hpp"
 #include "ymh/skills/skill_tool.hpp"
+#include "ymh/skills/workspace_trust.hpp"
 #include "ymh/tools/builtin_tools.hpp"
 #include "ymh/tools/plan_tools.hpp"
 #include "ymh/tools/terminal_tool.hpp"
@@ -42,8 +43,14 @@ namespace {
 std::shared_ptr<SkillCatalog> make_skill_catalog(const Config& config,
                                                  const ExecutionEnvironment& environment,
                                                  Logger& logger) {
-    auto catalog = std::make_shared<SkillCatalog>(
-        to_skill_catalog_config(config), environment, default_skills_root(), logger);
+    std::vector<SkillRoot> roots = default_skill_roots();
+    roots.push_back(SkillRoot{environment.root() / ".ymh" / "skills", SkillSource::Workspace,
+                              SkillTrust::Untrusted});
+    SkillCatalogConfig catalog_config = to_skill_catalog_config(config);
+    catalog_config.workspace_trusted =
+        WorkspaceTrustStore{}.is_trusted(environment.root());
+    auto catalog =
+        std::make_shared<SkillCatalog>(catalog_config, environment, std::move(roots), logger);
     if (catalog->config().enabled) {
         catalog->discover();
     }

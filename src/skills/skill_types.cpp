@@ -46,8 +46,12 @@ bool is_valid_skill_name(std::string_view name) noexcept {
 
 std::string_view skill_source_name(SkillSource source) noexcept {
     switch (source) {
+        case SkillSource::Home:
+            return "home";
         case SkillSource::User:
             return "user";
+        case SkillSource::Claude:
+            return "claude";
         case SkillSource::Workspace:
             return "workspace";
         case SkillSource::Builtin:

@@ -88,6 +88,7 @@ private:
 
     McpServerConfig                     config_;
     std::size_t                         max_frame_bytes_;
+    bool                                log_child_stderr_;
     ExecutionEnvironment&               environment_;
     Logger&                             logger_;
     std::unique_ptr<ChildProcessHandle> child_;

@@ -59,6 +59,19 @@ public:
     // 46-D3: drives the real Ctrl+S open path (the target predicate and the
     // notice-vs-switcher decision).
     virtual void open_switcher() = 0;
+    // 49-D1: drives the real `submit` (the lazy first-prompt path).
+    virtual void submit(std::string text) = 0;
+    // 49-D1: drives the real `register_presence` so the `supervisors` row exists
+    // in the harness (production does this in `run()`).
+    virtual void register_presence() = 0;
+    // 49-U15: drives the real exit entry point (`allow_prompt == true` is the
+    // Ctrl+D / `/exit` path), so the zero-daemon case is exercised.
+    virtual void begin_exit(bool allow_prompt) = 0;
+    // 49 test observers: per-workspace `ensure_workspace_running` invocations and
+    // per-method `submit_to` invocations.
+    [[nodiscard]] virtual std::size_t ensure_call_count(const WorkspaceId& workspace) const = 0;
+    [[nodiscard]] virtual std::size_t submitted_count(const std::string& method) const = 0;
+    [[nodiscard]] virtual const std::map<WorkspaceId, std::string>& pending_creates() const = 0;
     // 46-D13: installs a pass-through terminal hand-off so the editor runs
     // without an FTXUI loop.
     virtual void install_prompt_editor_io() = 0;

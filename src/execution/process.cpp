@@ -540,9 +540,25 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         }
         ::dup2(in.read_fd, STDIN_FILENO);
         ::dup2(out.write_fd, STDOUT_FILENO);
-        redirect_to_devnull(STDERR_FILENO);
-        ::clearenv();
-        ::setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+        bool stderr_redirected = false;
+        if (request.stderr_path.has_value()) {
+            const int fd =
+                ::open(request.stderr_path->c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+            if (fd >= 0) {
+                ::dup2(fd, STDERR_FILENO);
+                if (fd != STDERR_FILENO) {
+                    ::close(fd);
+                }
+                stderr_redirected = true;
+            }
+        }
+        if (!stderr_redirected) {
+            redirect_to_devnull(STDERR_FILENO);
+        }
+        if (request.env_mode == ProcessEnvMode::Minimal) {
+            ::clearenv();
+            ::setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+        }
         for (const auto& [key, value] : request.environment) {
             ::setenv(key.c_str(), value.c_str(), 1);
         }

@@ -22,6 +22,7 @@
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
 #include "ymh/registry/registry.hpp"
+#include "ymh/skills/workspace_trust.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace {
@@ -84,6 +85,7 @@ TEST_F(SkillsRpcTest, ListAndShowReflectDaemonCatalog) {
     std::filesystem::create_directories(broken);
     std::ofstream(broken / "SKILL.md") << "name: broken\ndescription: no fence\n";
     ::setenv("XDG_CONFIG_HOME", config_root.path().c_str(), 1);
+    (void)WorkspaceTrustStore{}.trust(workspace.path());
 
     TempWorkspace registry_dir("skills_rpc_reg");
     RegistryConfig registry_config;

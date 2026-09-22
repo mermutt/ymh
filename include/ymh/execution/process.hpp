@@ -23,11 +23,18 @@
 
 namespace ymh {
 
+enum class ProcessEnvMode : std::uint8_t {
+    Inherit,
+    Minimal,
+};
+
 struct ProcessRequest {
     std::string               executable;      // absolute or PATH-resolved
     std::vector<std::string>  argv;            // never a concatenated shell string
     std::filesystem::path     cwd;             // MUST be resolve()d under root()
     std::vector<std::pair<std::string, std::string>> environment;
+    ProcessEnvMode            env_mode = ProcessEnvMode::Inherit;
+    std::optional<std::filesystem::path> stderr_path;  // spawn()-only
     std::chrono::milliseconds timeout{0};      // 0 => no deadline
     // 46-D8: the clamped per-tool-run budget. `nullopt` => the deadline layer is
     // disabled (`timeout` applies); `0ms` => already expired, the child is NOT
