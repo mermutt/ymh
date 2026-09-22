@@ -1,10 +1,12 @@
 # 50 — Skills/MCP & Session Lifecycle Errata: Claude-Code Skill/Command Discovery (`~/.ymh`, `$HOME/.claude`), the Fresh-Launch Session Guarantee, the MCP Child Environment, and the MCP Global-Layer-Only Guard
 
 ```
-Status: **draft (Rev 2)** — awaiting the independent design gate. This spec
-        amends the owning specs (20, 15, 10, 46, 21, 07); it introduces no new
-        component and no new subsystem. Like 45 and 46, every "current state"
-        claim is reproducible from the shipped tree (HEAD `bbf96aeaa`).
+Status: **draft (Rev 3) — implemented; errata recorded.** This spec amends the
+        owning specs (20, 15, 10, 46, 21, 07); it introduces no new component and
+        no new subsystem. Like 45 and 46, every "current state" claim is
+        reproducible from the shipped tree. Rev 3 amends the spec to the shipped
+        behaviour (the 50-D5 workspace trust gate, no `~/.ymh` scaffolding, the
+        narrowed file-command contract); see §14.
 
         **Origin.** This spec carries the higher-risk half of the original spec
         48, split out by user decision because 48's nine-item surface made each
@@ -18,9 +20,10 @@ Status: **draft (Rev 2)** — awaiting the independent design gate. This spec
         (the underlying problem was an expired credential, not a harness defect);
         the durable diagnostic procedure is preserved in §5.5.
 
-        **Verification status: DRAFT — not yet reviewed.** No code may be written
-        from this spec until an independent gate marks it `verified`
-        (AGENTS.md, the rule).
+        **Verification status: implemented (Milestone).** The Rev 2 design was
+        implemented and the suite is green; Rev 3 records the implementation
+        errata. An independent gate re-review of Rev 3 is still required before
+        the spec is marked `verified`.
 ```
 
 ## 1. Purpose, scope, and supersession map
@@ -57,6 +60,7 @@ a workspace-config supply-chain vector.
 | 50-S4 | `07-tools-execution.md` §6.4 / `include/ymh/execution/process.hpp:26-39`: `ProcessRequest::environment` is an *additive* overlay on an inherited environment. | **Amended by 50-D3** for the `spawn()` path only: `spawn()` currently `clearenv()`s the child (`src/execution/process.cpp:544`), which contradicts the `run()` overlay semantics (`:386-388`) and the PTY overlay semantics (`src/execution/pty.cpp:446-457`). 50-D3 makes `spawn()` inherit-and-overlay; the PTY path is unaffected and already correct. |
 | 50-S5 | `21-config-jsonc-errata.md` §7 and the loader: `mcp`/`mcp_servers` are accepted from **both** the global and workspace layers (`src/config/config.cpp:990-991`, `:1017-1018`). | **Superseded by 50-D4 (breaking).** MCP server definitions become **global-layer only**; a workspace layer that defines `mcp`/`mcp_servers` is a `ConfigError`. See §6 for the migration note. |
 | 50-S6 | `46-permissions-ui-errata.md` 46-D7.1 (`:1528-1535`): "`if (!live.empty()) -> focus live.front() (retained)`". | **Superseded by 50-D2.** On a fresh launch (no `--resume`/`--new`) the active workspace **always** creates a new session; an existing live session is never auto-focused. `/sessions`, the Ctrl-S switcher, and `--resume` remain the only ways to open an existing session. |
+| 50-S7 | `20-skills.md` §2.4/§3.2 and 50-D1's own trust table: the workspace tier is Untrusted but **searched**, with the user entry winning a collision. | **Superseded by 50-D5 (breaking).** The workspace tier is loaded **only** when the workspace has an outside trust record; otherwise the tier is skipped entirely and the skill/command is absent from the catalog (not merely flagged untrusted). See §6A. |
 
 #### 1.3.2 Not superseded (explicitly retained)
 
@@ -87,6 +91,9 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
   (`src/mcp/mcp_transport.cpp:77-113`).
 - **User tier / workspace tier** = the trusted vs untrusted skill/command roots
   (20 §2.4).
+- **Workspace trust record** = the operator's opt-in grant (50-D5) that lets the
+  workspace tier load at all; it lives in ymh's own state directory, never inside
+  the workspace, so a cloned repository cannot ship its own grant.
 - **The env-asymmetry defect** = `spawn()`'s `::clearenv()` versus `run()`/PTY
   inherit-and-overlay; fixed by 50-D3. It had **no bearing on the jira 401**.
 
@@ -104,6 +111,10 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
 | `21-config-jsonc-errata.md` | §7 (`mcp`) | 50-D3: MCP children always inherit (no `mcp.inherit_env`); `mcp.log_child_stderr` (default false), global-layer only. **50-D4 (breaking): `mcp`/`mcp_servers` are global-layer only; a workspace layer is a `ConfigError`.** |
 | `src/config/config.cpp` | `apply_document` pre-scan (`:957-971`) and the `apply_mcp` call site (`:990-991`) | 50-D4: guard once at the existing `global_layer` sites; fail with `'mcp'`/`'mcp_servers' is global-layer only`. No new function parameter. |
 | `15-mcp-adapter.md` | §4.1 (MCP child `cwd`) | 50-I21 (pinned): an MCP server's `cwd` is root-confined; an out-of-root `cwd` must surface as `McpError{ConfigInvalid}`, not an unhandled `PathEscape`. Empty `cwd` defaults to the workspace root (`src/mcp/mcp_transport.cpp:98-99`). |
+| `20-skills.md` | §2.4, §3.2, §5.2 | 50-D5 (breaking): the workspace tier is gated by an outside trust record; a workspace skill/command is **absent** until the operator trusts the workspace. `SkillCatalogConfig` gains `workspace_trusted`; a new `WorkspaceTrustStore` owns the record. |
+| `src/skills/file_commands.cpp` / `include/ymh/skills/file_commands.hpp` | `discover_file_commands` | 50-D5: the signature gains `bool workspace_trusted`; an untrusted workspace root is skipped with a warning. |
+| 50 §3.2.6 | first-run `~/.ymh` scaffolding | **Not shipped.** No `~/.ymh/skills` or `~/.ymh/commands` directory is created; absent roots are simply skipped. `scaffold_user_ymh` was removed from the pinned surface. |
+| 50 §3.2.4 | `Command::reserved` + file-command registry wiring | **Not shipped.** File-command discovery is a tested library; it is not yet registered into `CommandRegistry`, and `Command` has no `reserved` member. The reserved-name rejection is exercised at the discovery layer with the caller-supplied set. |
 
 ---
 ## 3. D1 — Claude-Code-compatible skills and commands (`~/.ymh`, `$HOME/.claude`)
@@ -161,7 +172,9 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
    All three user roots MUST be absolute; a relative or empty root disables that
    root only and records one `SkillLoadWarning` (retains 20 §3.1 M2/SK-F13).
    `$HOME` unset disables roots 1 and 3. The layout is unchanged:
-   `<root>/<skill-name>/SKILL.md` (20 §2.1).
+   `<root>/<skill-name>/SKILL.md` (20 §2.1). Root 4 is **gated by 50-D5**: it is
+   scanned only when `SkillCatalogConfig::workspace_trusted` is true; otherwise
+   the tier is skipped and the skill is absent from the catalog.
 
 3. **Command roots (new).** A **file command** is a single markdown file
    `<root>/<command-name>.md` whose body is a prompt template; its
@@ -180,26 +193,27 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
    subset; a missing/invalid fence degrades to "no description" rather than a
    fatal error (a command file is a convenience, not a safety artifact). The
    body supports one substitution: `$ARGUMENTS` → the raw text after the command
-   token (empty when absent).
+   token (empty when absent). Root 4 is **gated by 50-D5** exactly like skills.
+   **Shipped scope (Rev 3):** `discover_file_commands` is a tested library; it is
+   **not** yet wired into `CommandRegistry`, so file commands do not appear in the
+   `/` list today. See §6A.3.
 
 4. **Precedence (pinned).** Collisions resolve as:
    - **Across trust tiers:** a user (Trusted) skill/command always wins over a
      workspace (Untrusted) one; the workspace entry is rejected and a warning is
-     recorded. (Retains 20 §3.2.)
+     recorded. (Retains 20 §3.2.) With 50-D5 the workspace tier is skipped before
+     the collision is even considered unless the workspace is trusted; when it is
+     trusted, this rule still decides a user/workspace name clash.
    - **Within the user tier:** first root in the table above wins
      (`~/.ymh` > `$XDG_CONFIG_HOME/ymh` > `$HOME/.claude`).
    - **A file command shadows a compiled-in command of the same name** only if
-     the compiled-in command is **not** `reserved`. This requires a real flag: the
-     `Command` struct (`include/ymh/ui/command_registry.hpp:51-56`) is currently
-     `{name, description, handler, aliases}` with **no** reserved marker, so
-     50-D1.4 adds `bool reserved = false;` and marks `/exit`, `/quit`, `/help`,
-     `/sessions`, `/skills`, `/mcp`, `/status`, `/context` as `reserved = true` at
-     their `CommandRegistry::add` sites (`src/ui/command_registry.cpp:67`,
-     `:154-300`). A file command whose name collides with a **reserved**
-     compiled-in command is rejected with a warning; a collision with a
-     **non-reserved** compiled-in command shadows it (file command wins) with a
-     warning. The reserved set is passed to discovery as `reserved_names`
-     (`discover_file_commands`, §7).
+     the compiled-in command is **not** `reserved`. **Not shipped (Rev 3):** the
+     `Command` struct (`include/ymh/ui/command_registry.hpp`) still has
+     `{name, description, handler, aliases}` with no `reserved` member, and file
+     commands are not registered into `CommandRegistry`. The reserved-name
+     rejection is implemented and tested at the discovery layer, which accepts a
+     caller-supplied `reserved_names` set (§7); the registry integration is
+     deferred, so today no file command reaches the `/` list or `/help`.
 
 5. **Instruction roots.** `InstructionLoader` gains
    `$HOME/.claude/CLAUDE.md` as a global instruction candidate, read **after**
@@ -209,20 +223,21 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
    already read (`:169-171`). `~/.ymh/AGENTS.md` and `~/.ymh/CLAUDE.md` are also
    added to the global candidate set, ordered after the config-root file.
 
-6. **First-run scaffolding.** On the conventional invocation
-   (`ymh`, `ymh run`, `ymh list`, `ymh show`, `ymh replay`, `ymh fork`), ymh
-   creates `$HOME/.ymh/skills` and `$HOME/.ymh/commands` as **empty**
-   directories, idempotently, `0700`. It never writes a file and never creates
-   these dirs when `HOME` is unset or when `--config <path>` is explicit (spec
-   21's "explicit path is never scaffolded" rule, extended). Failure to create
-   is a warning, never fatal. `$HOME/.claude` is **never** created or written.
+6. **First-run scaffolding — NOT shipped (Rev 3).** The pinned `scaffold_user_ymh`
+   (`$HOME/.ymh/skills`, `$HOME/.ymh/commands`, `0700`, idempotent) is not part of
+   the shipped tree. ymh creates no `~/.ymh` directory and writes nothing under
+   `$HOME` on startup; discovery tolerates an absent root (it is simply skipped,
+   50-F2), so the user roots work when the operator creates them. `$HOME/.claude`
+   is still **never** created or written. The `~/.ymh` scaffolding may return as a
+   follow-up; it is not required for discovery to function.
 
 7. **Discovery timing.** Skill/command discovery is a **daemon-startup** action,
    like skills today (`src/agent/workspace_runtime.cpp:66-79`), because the
    roots are absolute and workspace-relative. `/skills`, `/skill <name>`, and the
-   `skill` tool are unchanged (20 §6/§7). File commands appear in the `/` list
-   and in `/help`; their description is the frontmatter `description` or the
-   first non-empty body line, truncated to 80 columns.
+   `skill` tool are unchanged (20 §6/§7). File-command discovery produces a
+   description (frontmatter `description` or the first non-empty body line,
+   truncated to 80 columns) but is **not yet registered** into the `/` list or
+   `/help` (Rev 3, §6A.3).
 
 ### 3.3 Invariants
 
@@ -861,6 +876,66 @@ supply-chain / arbitrary-execution vector.
 
 ---
 
+## 6A. D5 — The workspace trust gate (implementation errata; breaking)
+
+> **Origin.** This decision was not in Rev 1/Rev 2. It is the security tightening
+> the implementation shipped on top of 50-D1's trust tiers, and the spec is
+> amended to match it. It supersedes 50-S7.
+
+### 6A.1 Current state (verified)
+
+50-D1 keeps `<workspace>/.ymh/skills` and `<workspace>/.ymh/commands` as
+**Untrusted** but still **searched**: a workspace skill that does not collide with
+a user skill is loaded and shown. A `git clone` can therefore inject instruction
+content (and slash-command prompt templates) into a session before the operator
+has reviewed the repository.
+
+### 6A.2 Decision (50-D5)
+
+1. **Fail closed.** The workspace tier is loaded **only** when the workspace has
+   a trust record. `SkillCatalogConfig::workspace_trusted` defaults `false`;
+   `discover()` and `discover_file_commands` skip every `SkillTrust::Untrusted`
+   root when it is false, recording one warning
+   (`workspace is not trusted: workspace tier disabled` /
+   `workspace is not trusted: command tier disabled`). The skill/command is
+   **absent from the catalog** — not merely flagged untrusted.
+2. **The record lives outside the workspace.** `WorkspaceTrustStore`
+   (`include/ymh/skills/workspace_trust.hpp`) stores canonical workspace paths in
+   `${XDG_STATE_HOME}/ymh/trusted_workspaces.json` (else
+   `$HOME/.local/state/ymh/...`), written atomically (`tmp` + `rename`) with mode
+   `0600`. A cloned repository cannot ship its own grant.
+3. **Canonical identity.** A workspace and its trailing-separator spelling
+   (`/ws` and `/ws/`) are one key; the key is `weakly_canonical` normalized
+   (a path with no filename component that is not the root folds to its parent).
+4. **Fail closed on a bad store.** A missing, unreadable, or corrupt store is
+   treated as empty (untrusted); no exception escapes discovery.
+5. **Grant surface (not shipped).** No `/trust` command, CLI flag, or prompt was
+   added. The store is currently populated programmatically (and by tests); a
+   user-facing grant is a follow-up. Until then the safe default holds.
+
+### 6A.3 Shipped vs pinned (file-command contract)
+
+`discover_file_commands` is pinned with the extra `bool workspace_trusted`
+parameter (§7). Reserved-name rejection, `$ARGUMENTS` substitution, frontmatter
+degradation, and user-tier ordering are implemented and unit-tested. **Not
+shipped:** the `Command::reserved` member and the `CommandRegistry` integration,
+so a discovered file command is not yet reachable from the `/` list or `/help`.
+The reserved set is passed by the caller to the discovery layer; the compiled-in
+registry is untouched.
+
+### 6A.4 Test plan
+
+- **Unit.** `WorkspaceTrustStore` round-trip, canonical trailing-slash key, `0600`
+  mode, corrupt store treated as empty.
+- **Outside-in.** A fixture workspace with a skill file and **no** trust record:
+  the catalog does not contain it (`find == nullptr`, `all().empty()`) and records
+  the "not trusted" warning. After `WorkspaceTrustStore::trust(workspace)`, a
+  rebuilt runtime contains the skill (still `SkillTrust::Untrusted`).
+- **PTY.** The workspace-skill listing test grants the workspace trust first;
+  `SkillsEmptyState` continues to pass with the tier disabled.
+
+---
+
 ## 7. C++ interface sketches (pinned)
 
 Only new/changed symbols are shown; unchanged members are elided with `…`.
@@ -904,23 +979,37 @@ struct SkillRoot {
 struct SkillCatalogConfig {
     bool                     enabled = true;
     bool                     expose_workspace = false;
+    // 50-D5: the workspace tier loads only when the operator has trusted this
+    // workspace (a record outside the workspace). Default false = fail closed.
+    bool                     workspace_trusted = false;          // NEW (Rev 3)
     std::size_t              max_skills = 256;
     std::size_t              max_skill_bytes = 64u * 1024u;
     std::size_t              max_description_bytes = 512;
     std::size_t              max_index_bytes = 8u * 1024u;
     std::size_t              max_frontmatter_bytes = 4u * 1024u;
-    // 50-D1.2: ordered roots. `discover()` uses this list verbatim; the
-    // workspace root is appended by the caller (it is environment-relative).
-    std::vector<SkillRoot>   roots;                              // NEW
 };
 
 class SkillCatalog {
 public:
+    // 50-D1.2: ordered roots are a constructor argument (the workspace root is
+    // appended by the caller because it is environment-relative), NOT a config
+    // member. `discover()` uses the list verbatim.
     SkillCatalog(SkillCatalogConfig       config,
                  const ExecutionEnvironment& environment,
                  std::vector<SkillRoot>  roots,                  // CHANGED (was user_root)
                  Logger&                 logger);
     // … discover()/all()/find()/warnings()/index_section() unchanged.
+};
+
+// 50-D5. The operator's workspace trust record, stored OUTSIDE the workspace so a
+// cloned repository cannot ship its own grant. Missing/corrupt => untrusted.
+class WorkspaceTrustStore {
+public:
+    explicit WorkspaceTrustStore(std::filesystem::path store_path = default_path());
+    [[nodiscard]] static std::filesystem::path default_path();
+    [[nodiscard]] bool is_trusted(const std::filesystem::path& workspace) const;
+    [[nodiscard]] bool trust(const std::filesystem::path& workspace) const;
+    [[nodiscard]] bool untrust(const std::filesystem::path& workspace) const;
 };
 
 } // namespace ymh
@@ -941,16 +1030,14 @@ namespace ymh {
 skill_roots(const std::filesystem::path& home,
             const std::filesystem::path& xdg_config_home);
 
-// 50-D1.6. Create $HOME/.ymh/skills and $HOME/.ymh/commands, 0700, idempotent.
-// Returns false and records a warning on failure; never throws.
-[[nodiscard]] bool scaffold_user_ymh(const std::filesystem::path& home,
-                                     std::string& error);
+// 50-D1.6 scaffolding is NOT shipped (Rev 3, §3.2.6): there is no
+// `scaffold_user_ymh`. An absent root is skipped by discovery.
 
 } // namespace ymh
 ```
 
 ```cpp
-// ── include/ymh/commands/file_command.hpp (NEW) ────────────────────────────
+// ── include/ymh/skills/file_commands.hpp (NEW; Rev 3 path) ─────────────────
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -977,14 +1064,22 @@ struct FileCommandLoadWarning {
     std::string           reason;
 };
 
-// 50-D1.3/D1.4. Pure-of-IO discovery; malformed frontmatter degrades to "no
+struct FileCommandCatalog {
+    std::vector<FileCommand>            commands;
+    std::vector<FileCommandLoadWarning> warnings;
+};
+
+// 50-D1.3/D1.4/D5. Pure-of-IO discovery; malformed frontmatter degrades to "no
 // description" (50-F3), never fatal. Deterministic order: root order, then
 // byte-wise ascending name. A workspace entry that collides with a trusted one
 // is rejected with a warning; a name that collides with a reserved compiled-in
-// command is rejected (50-I4).
-[[nodiscard]] std::vector<FileCommand>
+// command is rejected (50-I4); an Untrusted root is skipped unless
+// `workspace_trusted` (50-D5). The caller supplies `reserved_names`; the
+// CommandRegistry wiring is not shipped (Rev 3, §6A.3).
+[[nodiscard]] FileCommandCatalog
 discover_file_commands(const std::vector<SkillRoot>& roots,
-                       const std::vector<std::string>& reserved_names);
+                       const std::vector<std::string>& reserved_names,
+                       bool                            workspace_trusted);
 
 // 50-D1.3. Exactly one substitution of `$ARGUMENTS`; absent -> empty.
 [[nodiscard]] std::string substitute_arguments(std::string_view body,
@@ -994,16 +1089,19 @@ discover_file_commands(const std::vector<SkillRoot>& roots,
 ```
 
 ```cpp
-// ── include/ymh/ui/command_registry.hpp (50-D1.4) ──────────────────────────
+// ── include/ymh/ui/command_registry.hpp (50-D1.4 — NOT SHIPPED, Rev 3) ─────
+// The shipped `Command` is still `{name, description, handler, aliases}`; the
+// `reserved` member and the file-command registration below are deferred. Kept
+// here as the pinned intent.
 namespace ymh::ui {
 struct Command {
     std::string              name;        // without the leading '/'
     std::string              description;
     std::function<void(CommandContext&, const std::string& args)> handler;
     std::vector<std::string> aliases{};
-    // 50-D1.4: NEW. A file command may shadow a compiled-in command only when
-    // this is false; reserved commands (/exit, /quit, /help, /sessions, /skills,
-    // /mcp, /status, /context) are never shadowed.
+    // 50-D1.4: NEW (deferred). A file command may shadow a compiled-in command
+    // only when this is false; reserved commands (/exit, /quit, /help,
+    // /sessions, /skills, /mcp, /status, /context) are never shadowed.
     bool                     reserved = false;
 };
 } // namespace ymh::ui
@@ -1136,6 +1234,8 @@ pin**. The "Gate" column is `Y` (gates this change) or `pin` (retained).
 | 50-I20 | Y | ymh does not filter the MCP child's inherited env; `httpx`-relevant vars (proxy, `SSL_CERT_*`, `NETRC`, `HOME`) reach it. |
 | 50-I21 | Y | An MCP server's `cwd` is root-confined; an out-of-root `cwd` is `McpError{ConfigInvalid}` (never an unhandled `PathEscape`); absent defaults to the workspace root. |
 | 50-I22 | Y | MCP server definitions are global-layer only; a workspace-layer `mcp`/`mcp_servers` is a `ConfigError` with the exact text `'mcp'`/`'mcp_servers' is global-layer only`. |
+| 50-I23 | Y | The workspace tier is fail-closed: with no trust record, a workspace skill/command is **absent** from the catalog (not flagged), and exactly one "not trusted" warning is recorded per skipped root (50-D5). |
+| 50-I24 | Y | The trust record lives outside the workspace (`$XDG_STATE_HOME/ymh/trusted_workspaces.json`, `0600`), is keyed by canonical path (`/ws` == `/ws/`), and a missing/corrupt store reads as untrusted. |
 
 ---
 
@@ -1162,6 +1262,8 @@ applicable (`00-architecture.md:4836-4856`).
 | 50-F14 | — | Helper's `load_dotenv()` is cwd-relative | Investigated for item 9 and cleared; cwd is the workspace root (50-I19); no cwd-default change pinned. |
 | 50-F15 | F4 | MCP server `cwd` is an absolute path outside the workspace root | Resolve inside the `try`, rethrow `McpError{ConfigInvalid}` (50-I21); never an unhandled `PathEscape`. |
 | 50-F16 | F1 | Workspace-local `.ymh/config.jsonc` defines MCP servers | `ConfigError` (global-layer only, 50-I22); no servers from that layer load. |
+| 50-F17 | F1 | Workspace ships a skill/command file with no trust record | Tier skipped; the entry is absent from the catalog and one "not trusted" warning is recorded (50-I23). Fail closed. |
+| 50-F18 | — | Trust store missing, unreadable, or corrupt | Treated as empty (untrusted); no exception escapes discovery (50-I24). |
 
 ---
 
@@ -1181,9 +1283,13 @@ applicable (`00-architecture.md:4836-4856`).
 ### 11.1 Unit (hermetic, no LLM, no daemon)
 
 - **50-D1:** `skill_roots` table over injected `HOME`/`XDG_CONFIG_HOME`; relative
-  root disable; `scaffold_user_ymh` idempotence + failure warning;
-  `discover_file_commands` precedence/reserved/`$ARGUMENTS`; malformed
-  frontmatter; instruction global-candidate order.
+  root disable; `discover_file_commands` precedence/reserved/`$ARGUMENTS`;
+  malformed frontmatter; instruction global-candidate order.
+- **50-D5:** `WorkspaceTrustStore` round-trip, canonical trailing-slash key,
+  `0600` mode, corrupt store treated as empty; `SkillCatalog` and
+  `discover_file_commands` skip the workspace tier with one "not trusted" warning
+  when `workspace_trusted` is false; the outside-in test drives the real store
+  through `make_workspace_runtime` (absent before the grant, present after).
 - **50-D2:** harness fresh-launch creates; `--resume` resumes; reconnect neither;
   missing cwd spec appended.
 - **50-D3:** `ProcessEnvMode` overlay/minimal (assert the **ymh-seeded** key set
@@ -1202,8 +1308,8 @@ applicable (`00-architecture.md:4836-4856`).
 
 - Fake daemon emits `session.list` with a live session; a fresh launch creates a
   new session and emits no `session.resume`.
-- File-command discovery + `/` completion + `$ARGUMENTS` dispatch through the
-  command registry.
+- File-command discovery library (frontmatter, reserved rejection, `$ARGUMENTS`);
+  the `/` completion + registry dispatch is **not shipped** (Rev 3, §6A.3).
 - Fake MCP stdio server asserts the inherited vs minimal environment and, with
   `log_child_stderr = true`, that the child's stderr lands in
   `<workspace>/.ymh/mcp/<server>.stderr.log`; it reports its cwd to assert the cwd
@@ -1388,5 +1494,34 @@ needs an amendment it is recorded here, not in 48.
     boundary pinned, and the real 46-D7.1/46-I13/23-D58 overlap recorded. Spec 48
     is not edited.
 
-  **Verification status: DRAFT — not yet reviewed.** No implementation may begin
-  until an independent gate marks this spec `verified` (AGENTS.md, the rule).
+- **Rev 3 (implementation errata; spec 50 landed).** The implementation shipped
+  three behaviours that differ from Rev 2; this revision amends the spec to them
+  and records the shipped-vs-pinned gaps.
+  - **New 50-D5 — the workspace trust gate (breaking; supersedes 50-S7).** The
+    workspace tier is no longer "Untrusted but searched": it is skipped entirely
+    unless `WorkspaceTrustStore` holds a record for the workspace, so an
+    untrusted workspace skill/command is **absent** from the catalog. The record
+    lives outside the workspace (`$XDG_STATE_HOME/ymh/trusted_workspaces.json`,
+    `0600`, atomic write, canonical key), defaults to untrusted on a
+    missing/corrupt store, and the grant surface (a `/trust` command or CLI flag)
+    is **not shipped** yet. New invariants `50-I23`/`50-I24`, failure modes
+    `50-F17`/`50-F18`, §6A, and the outside-in test.
+  - **Scaffolding dropped.** `scaffold_user_ymh` / `$HOME/.ymh` first-run
+    scaffolding is **not shipped**; absent roots are skipped. `~/.claude` is still
+    never created. §3.2.6 and the §7 sketch corrected.
+  - **File-command contract narrowed.** `discover_file_commands` gains
+    `bool workspace_trusted` and its header is
+    `include/ymh/skills/file_commands.hpp`; the `Command::reserved` member and the
+    `CommandRegistry` integration are **not shipped**, so file commands are a
+    tested discovery library and do not yet reach the `/` list or `/help`.
+    §3.2.3/§3.2.4, §7, and §11.2 corrected.
+  - **`SkillCatalogConfig` shape corrected.** The ordered roots are a constructor
+    argument (not a `SkillCatalogConfig::roots` member); the config gains
+    `workspace_trusted`. §7 corrected.
+  - **Trust-store key fix.** `weakly_canonical` preserves a trailing separator for
+    a nonexistent path, so `/ws` and `/ws/` were two keys; the canonical key now
+    folds a filename-less path to its parent (50-I24).
+
+  **Verification status: implemented (Rev 3); pending gate re-review.** The code
+  and tests are in the tree and the suite is green; an independent gate must
+  re-review Rev 3 before the spec is marked `verified` (AGENTS.md, the rule).

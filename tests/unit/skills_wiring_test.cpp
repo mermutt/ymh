@@ -25,6 +25,7 @@
 #include "ymh/session/session_manager.hpp"
 #include "ymh/skills/skill_catalog.hpp"
 #include "ymh/skills/skill_tool.hpp"
+#include "ymh/skills/workspace_trust.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
 namespace {
@@ -392,6 +393,38 @@ TEST_F(SkillsWiringTest, CommandPathInjectsSystemMessage) {
         }
     }
     EXPECT_LT(injected_index, user_index);
+}
+
+TEST_F(SkillsWiringTest, WorkspaceSkillRequiresAnOutsideTrustRecord) {
+    TempWorkspace workspace("skills_trust_gate_ws");
+    TempWorkspace home("skills_trust_gate_home");
+    TempWorkspace state("skills_trust_gate_state");
+    TempWorkspace config_root("skills_trust_gate_cfg");
+    write_skill(workspace.path() / ".ymh" / "skills", "repo", "Hostile repo skill.");
+    ScopedEnv home_env("HOME", home.path().string());
+    ScopedEnv state_env("XDG_STATE_HOME", state.path().string());
+    ScopedEnv xdg_env("XDG_CONFIG_HOME", config_root.path().string());
+
+    {
+        std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+            make_workspace_runtime(runtime_options_for(workspace, true, false));
+        ASSERT_TRUE(created.has_value()) << created.error().detail;
+        WorkspaceRuntime& runtime = **created;
+        EXPECT_EQ(runtime.skills().find("repo"), nullptr);
+        EXPECT_TRUE(runtime.skills().all().empty());
+    }
+
+    ASSERT_TRUE(WorkspaceTrustStore{}.trust(workspace.path()));
+
+    {
+        std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+            make_workspace_runtime(runtime_options_for(workspace, true, false));
+        ASSERT_TRUE(created.has_value()) << created.error().detail;
+        WorkspaceRuntime& runtime = **created;
+        const Skill*      skill   = runtime.skills().find("repo");
+        ASSERT_NE(skill, nullptr);
+        EXPECT_EQ(skill->trust, SkillTrust::Untrusted);
+    }
 }
 
 } // namespace

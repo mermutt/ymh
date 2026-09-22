@@ -185,9 +185,8 @@ TEST(Config, WorkspaceLayerMcpServersIsAConfigError) {
         (void)load_config(paths);
         FAIL() << "expected ConfigError";
     } catch (const ConfigError& error) {
-        EXPECT_NE(std::string{error.what()}.find("'mcp_servers' is global-layer only"),
-                  std::string::npos);
-        EXPECT_NE(std::string{error.what()}.find(paths.workspace.string()), std::string::npos);
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + paths.workspace.string() + ": 'mcp_servers' is global-layer only");
     }
 }
 
@@ -202,8 +201,25 @@ TEST(Config, WorkspaceLayerMcpSectionIsAConfigError) {
         (void)load_config(paths);
         FAIL() << "expected ConfigError";
     } catch (const ConfigError& error) {
-        EXPECT_NE(std::string{error.what()}.find("'mcp' is global-layer only"),
-                  std::string::npos);
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + paths.workspace.string() + ": 'mcp' is global-layer only");
+    }
+}
+
+TEST(Config, WorkspaceLayerMcpServerArrayIsAConfigError) {
+    test::TempWorkspace workspace("config_ws_mcp_server_array");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"mcp\": { \"server\": [ { \"id\": \"w\", \"command\": \"w\" } ] } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + paths.workspace.string() + ": 'mcp' is global-layer only");
     }
 }
 
@@ -503,12 +519,13 @@ TEST(Config, JsoncLlmNestedAndFlatParity) {
 
 TEST(Config, JsoncMcpServerArrayParses) {
     test::TempWorkspace workspace("config_jsonc_mcp");
-    workspace.write(".ymh/config.jsonc",
+    // 50-D4: `mcp` is global-layer only, so the array form is exercised there.
+    workspace.write("global.jsonc",
                     "{\n  \"mcp\": { \"server\": [\n"
                     "    { \"id\": \"a\", \"command\": \"ca\" },\n"
                     "    { \"id\": \"b\", \"command\": \"cb\" }\n  ] }\n}\n");
     ConfigPaths paths;
-    paths.global    = write_global(workspace);
+    paths.global    = workspace.path() / "global.jsonc";
     paths.workspace = workspace_config_path(workspace.path());
     const Config config = load_config(paths);
     ASSERT_EQ(config.mcp.servers.size(), 2u);
@@ -528,29 +545,36 @@ TEST(Config, EmptyWorkspaceRootsDoesNotOverride) {
 
 TEST(Config, EmptyMcpServerArrayClears) {
     test::TempWorkspace workspace("config_mcp_clear");
+    // 50-D4: MCP definitions are global-layer only, so the cross-layer clear is
+    // superseded. The clearing semantics is exercised on the global layer.
     workspace.write("global.jsonc",
                     "{ \"mcp\": { \"server\": [ { \"id\": \"a\" }, { \"id\": \"b\" } ] } }\n");
-    workspace.write(".ymh/config.jsonc", "{ \"mcp\": { \"server\": [] } }\n");
-    ConfigPaths paths;
-    paths.global    = workspace.path() / "global.jsonc";
-    paths.workspace = workspace_config_path(workspace.path());
-    EXPECT_TRUE(load_config(paths).mcp.servers.empty());
+    workspace.write("clear.jsonc", "{ \"mcp\": { \"server\": [] } }\n");
+    Config config;
+    apply_jsonc_file(config, workspace.path() / "global.jsonc", true);
+    ASSERT_EQ(config.mcp.servers.size(), 2u);
+    apply_jsonc_file(config, workspace.path() / "clear.jsonc", true);
+    EXPECT_TRUE(config.mcp.servers.empty());
 }
 
 TEST(Config, PerServerEmptyArrayEqualsAbsent) {
     test::TempWorkspace workspace("config_mcp_empty_arrays");
-    workspace.write(
-        "global.jsonc",
-        "{ \"mcp\": { \"server\": [ { \"id\": \"s\", \"args\": [\"--x\"], \"env\": [\"A=1\"] } ] } }\n");
-    workspace.write(".ymh/config.jsonc",
-                    "{ \"mcp\": { \"server\": [ { \"id\": \"s\", \"args\": [], \"env\": [] } ] } }\n");
+    // 50-D4: `mcp` is global-layer only. Both branches are compared inside one
+    // global document: an omitted per-server array and an explicit empty one.
+    workspace.write("global.jsonc",
+                    "{ \"mcp\": { \"server\": [\n"
+                    "    { \"id\": \"absent\", \"command\": \"a\" },\n"
+                    "    { \"id\": \"explicit\", \"command\": \"e\", \"args\": [], \"env\": [] }\n"
+                    "  ] }\n}\n");
     ConfigPaths paths;
     paths.global    = workspace.path() / "global.jsonc";
     paths.workspace = workspace_config_path(workspace.path());
     const Config config = load_config(paths);
-    ASSERT_EQ(config.mcp.servers.size(), 1u);
+    ASSERT_EQ(config.mcp.servers.size(), 2u);
     EXPECT_TRUE(config.mcp.servers[0].args.empty());
     EXPECT_TRUE(config.mcp.servers[0].env.empty());
+    EXPECT_TRUE(config.mcp.servers[1].args.empty());
+    EXPECT_TRUE(config.mcp.servers[1].env.empty());
 }
 
 TEST(Config, ReadStringArrayRejectsNonString) {
@@ -914,19 +938,25 @@ TEST(Config, McpMigrationEmptyOldArrayWithNewObjectLoads) {
     EXPECT_EQ(config.mcp.servers[0].id, "b");
 }
 
-TEST(Config, McpMigrationWorkspaceReplacesGlobalWholesale) {
+TEST(Config, McpMigrationWorkspaceOverrideIsRejected) {
     test::TempWorkspace         workspace("config_mcp_layers");
     const std::filesystem::path global = workspace.path() / "global.jsonc";
     workspace.write("global.jsonc",
                     R"JSONC({"mcp": {"server": [{"id": "g", "command": "g"}]}})JSONC");
+    // 50-D4: the old workspace-layer wholesale replacement is now a hard error,
+    // so a cloned repo cannot swap the operator's MCP servers.
     workspace.write(".ymh/config.jsonc",
                     R"JSONC({"mcp_servers": {"w": {"command": "w"}}})JSONC");
     ConfigPaths paths;
     paths.global    = global;
     paths.workspace = workspace_config_path(workspace.path());
-    const Config config = load_config(paths);
-    ASSERT_EQ(config.mcp.servers.size(), 1u);
-    EXPECT_EQ(config.mcp.servers[0].id, "w");
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_EQ(std::string{error.what()},
+                  "config " + paths.workspace.string() + ": 'mcp_servers' is global-layer only");
+    }
 }
 
 TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {

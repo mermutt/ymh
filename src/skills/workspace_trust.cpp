@@ -29,9 +29,18 @@ std::filesystem::path state_dir() {
 }
 
 std::string canonical_key(const std::filesystem::path& workspace) {
-    std::error_code ec;
-    const std::filesystem::path canonical = std::filesystem::weakly_canonical(workspace, ec);
-    return (ec ? workspace.lexically_normal() : canonical).string();
+    std::error_code       ec;
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(workspace, ec);
+    if (ec) {
+        canonical = workspace.lexically_normal();
+    }
+    // `weakly_canonical` keeps a trailing separator for a path that does not
+    // exist, so `/ws` and `/ws/` would otherwise be two different trust keys.
+    // A path with no filename component that is not the root is its parent.
+    if (!canonical.has_filename() && canonical != canonical.root_path()) {
+        canonical = canonical.parent_path();
+    }
+    return canonical.string();
 }
 
 std::vector<std::string> read_trusted(const std::filesystem::path& store_path) {
