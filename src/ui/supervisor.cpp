@@ -50,6 +50,8 @@ namespace {
 
 constexpr std::chrono::milliseconds kFrameInterval{50};
 constexpr std::chrono::milliseconds kMaxFrameDelta{250};
+// 48-D2.4: a lone Esc arms the interrupt for this long before disarming.
+constexpr std::chrono::milliseconds kEscArmTimeout{3000};
 // RB-18: idle presence heartbeats are serviced by a non-repainting closure at
 // this cadence (well under the 5s owner heartbeat interval), so an idle TUI
 // never wakes the renderer.
@@ -461,9 +463,20 @@ public:
         if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
             return;
         }
+        ++agent_cancel_count_;
         nlohmann::json params{{"session", workspace->activeSessionId().value}};
         submit_to(workspace->id, std::string(protocol::method::kAgentCancel), std::move(params),
                   nullptr);
+    }
+
+    // 48-D2.4: opening any modal disarms a pending interrupt.
+    void disarm_esc() {
+        SessionUiState* state = active();
+        if (state != nullptr && state->esc_arm == EscArm::Armed) {
+            state->esc_arm = EscArm::Disarmed;
+            state->esc_armed_at.reset();
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
+        }
     }
 
     void resolvePermission(const SessionId& session, const PermissionRequestId& request,
@@ -503,6 +516,7 @@ private:
         if (quit_.load() || model_.exitConfirm.open) {
             return;
         }
+        disarm_esc();
         const std::vector<WorkspaceId> orphaning = compute_orphaning_set();
         if (orphaning.empty() || !allow_prompt || options_.no_prompt) {
             confirm_exit(orphaning);
@@ -957,6 +971,7 @@ private:
 
     // 46-D3: opens the notice instead of the switcher when there is no target.
     void openSwitcher() {
+        disarm_esc();
         if (!switcher_has_targets()) {
             model_.message.text = "No other workspaces available";
             model_.message.open = true;
@@ -1596,6 +1611,19 @@ private:
         last_tick_ = now;
         adapter_.onTick(delta);
         tick_presence();
+        for (auto& [id, session] : model_.sessions) {
+            if (session.esc_arm != EscArm::Armed) {
+                continue;
+            }
+            const bool expired =
+                session.esc_armed_at.has_value() &&
+                now - *session.esc_armed_at >= kEscArmTimeout;
+            if (expired || !is_active_state(session.agent_state)) {
+                session.esc_arm = EscArm::Disarmed;
+                session.esc_armed_at.reset();
+                model_.dirty.mark(id, UiDirtyFlag::Input);
+            }
+        }
         animation_active_.store(model_.aggregate.flash.isFlashing() ||
                                 model_.has_streaming_reasoning() ||
                                 model_.has_active_turn());
@@ -2491,7 +2519,15 @@ private:
         if (event.is_character() && modal_tail_suppression_active()) {
             return true;
         }
-        // 45-D5.1: Esc hides a visible command list without touching the draft.
+        // 48-D2.4: any other handled key disarms a pending interrupt.
+        if (event != ftxui::Event::Escape && state->esc_arm == EscArm::Armed) {
+            state->esc_arm = EscArm::Disarmed;
+            state->esc_armed_at.reset();
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
+        }
+        // 45-D5.1 / 48-D2.6: Esc hides a visible command list without touching
+        // the draft (45-D5 keeps priority); with no list, Esc arms the interrupt
+        // and a second Esc cancels the active turn.
         if (event == ftxui::Event::Escape) {
             if (!state->command_hints.empty()) {
                 state->hints_dismissed = true;
@@ -2500,7 +2536,21 @@ private:
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
-            return false;
+            if (state->esc_arm == EscArm::Armed) {
+                state->esc_arm = EscArm::Disarmed;
+                state->esc_armed_at.reset();
+                if (model_.has_active_turn()) {
+                    cancelActive();
+                }
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
+            if (model_.has_active_turn()) {
+                state->esc_arm = EscArm::Armed;
+                state->esc_armed_at = std::chrono::steady_clock::now();
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            }
+            return true;
         }
         if (event == ftxui::Event::Return) {
             const std::string text = input.draft;
@@ -2574,16 +2624,26 @@ private:
             }
             return true;
         }
+        // 48-D4: Ctrl+Arrow moves by character-class words; the plain arrows
+        // (48-D5) move glyph-wise so the cursor never lands inside a UTF-8 glyph.
+        if (event == ftxui::Event::ArrowLeftCtrl) {
+            input.cursor = input.word_left_boundary(input.cursor);
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            return true;
+        }
+        if (event == ftxui::Event::ArrowRightCtrl) {
+            input.cursor = input.word_right_boundary(input.cursor);
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
+            return true;
+        }
         if (event == ftxui::Event::ArrowLeft) {
-            if (input.cursor > 0) {
-                --input.cursor;
-            }
+            input.cursor = input.cursor_left(input.cursor);
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
             return true;
         }
         if (event == ftxui::Event::ArrowRight) {
-            if (input.cursor < input.draft.size()) {
-                ++input.cursor;
-            }
+            input.cursor = input.cursor_right(input.cursor);
+            model_.dirty.mark(state->id, UiDirtyFlag::Input);
             return true;
         }
         if (event == ftxui::Event::ArrowUp) {
@@ -2680,6 +2740,7 @@ private:
         if (workspace == nullptr || state == nullptr) {
             return;
         }
+        disarm_esc();
         const SessionId     session = state->id;
         const std::uint64_t generation = bump_context_generation(context_generation_);
         submit_to(workspace->id, std::string(protocol::method::kContextShow),
@@ -2783,6 +2844,7 @@ private:
             return handle_exit_confirm(event);
         }
         if (model_.dialog.open) {
+            disarm_esc();
             return handle_dialog(event);
         }
         if (model_.mode == UiMode::Context && model_.context.open) {
@@ -2897,6 +2959,10 @@ private:
     SupervisorRunOptions options_;
     UiModel model_;
     UiEventAdapter adapter_;
+    // 48-D2 test seam: counts `cancelActive()` invocations so the Esc-Esc
+    // integration test can assert exactly one cancel is submitted. Inert in
+    // production (never read outside the harness).
+    std::size_t agent_cancel_count_ = 0;
     CommandRegistry registry_;
     std::string preferred_model_;
     // 45-D6.11: set once when the daemon reports `mcp.status` unavailable, so
@@ -3148,6 +3214,18 @@ public:
         if (key == "down") {
             return app_.handle_event(ftxui::Event::ArrowDown);
         }
+        if (key == "left") {
+            return app_.handle_event(ftxui::Event::ArrowLeft);
+        }
+        if (key == "right") {
+            return app_.handle_event(ftxui::Event::ArrowRight);
+        }
+        if (key == "ctrl-left") {
+            return app_.handle_event(ftxui::Event::ArrowLeftCtrl);
+        }
+        if (key == "ctrl-right") {
+            return app_.handle_event(ftxui::Event::ArrowRightCtrl);
+        }
         if (key == "enter") {
             return app_.handle_event(ftxui::Event::Return);
         }
@@ -3193,6 +3271,10 @@ public:
     [[nodiscard]] bool quit_requested() const override { return app_.quit_.load(); }
 
     [[nodiscard]] const UiModel& model() const override { return app_.model_; }
+    [[nodiscard]] UiModel& mutable_model() override { return app_.model_; }
+    [[nodiscard]] std::size_t cancel_count() const override {
+        return app_.agent_cancel_count_;
+    }
     [[nodiscard]] const std::set<WorkspaceId>& ensure_in_flight() const override {
         return app_.ensure_in_flight_;
     }

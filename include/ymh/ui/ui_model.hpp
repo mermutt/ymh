@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -166,8 +167,39 @@ struct InputModel {
     bool history_down();
     bool delete_forward();
     void clear_line();
+    // 48-D4.5: class-model delete (skip trailing Space, then one Word/Punct run).
     bool delete_word();
+
+    // 48-D4.1: pure word motion. Never edits the draft. Byte-aligned to a
+    // character-class boundary (Word/Space/Punct; continuation bytes inherit
+    // their lead byte's class). Both are total and clamp to [0, draft.size()].
+    [[nodiscard]] std::size_t word_left_boundary(std::size_t cursor) const;
+    [[nodiscard]] std::size_t word_right_boundary(std::size_t cursor) const;
+
+    // 48-D5.1 (Rev 2): glyph-wise motion for the plain arrows. Both are pure,
+    // total, and clamp to [0, draft.size()]; `cursor_left` never lands on a
+    // UTF-8 continuation byte.
+    [[nodiscard]] std::size_t cursor_left(std::size_t cursor) const;
+    [[nodiscard]] std::size_t cursor_right(std::size_t cursor) const;
 };
+
+// 48-D5.1 (Rev 2): render-time glyph snap. Advances `cursor` off any UTF-8
+// continuation byte to the next lead byte, clamped to `draft.size()`.
+[[nodiscard]] std::size_t glyph_floor(std::string_view draft,
+                                      std::size_t cursor) noexcept;
+
+// 48-D5.1 (Rev 2, gate MEDIUM): the byte length of the UTF-8 glyph beginning at
+// `cursor` (1..4), clamped to the end of `text`; 0 when `cursor >= text.size()`.
+[[nodiscard]] std::size_t glyph_len(std::string_view text,
+                                    std::size_t cursor) noexcept;
+
+// 48-D5.1 (Rev 2, gate MEDIUM): the glyph beginning at `cursor`; empty when
+// `cursor >= text.size()`. `glyph_at` is `text.substr(cursor, glyph_len(...))`.
+[[nodiscard]] std::string_view glyph_at(std::string_view text,
+                                        std::size_t cursor) noexcept;
+
+// 48-D2.1: the Esc-Esc arm. Per-session, never persisted.
+enum class EscArm : std::uint8_t { Disarmed, Armed };
 
 // One entry of the slash-command completion list, snapshotted into the model so
 // the renderer stays pure (10 §8.2 refinement). 45-D8: `display` is the rendered
@@ -250,6 +282,11 @@ struct SessionUiState {
     bool expand_all_folds = false;
     // 25-D6: non-durable TPS clock start for the streaming assistant message.
     std::optional<std::chrono::steady_clock::time_point> stream_started_at;
+
+    // 48-D2.1: the per-session Esc-Esc arm and its arming instant. UI-only;
+    // never persisted and never written to the event log.
+    EscArm esc_arm = EscArm::Disarmed;
+    std::optional<std::chrono::steady_clock::time_point> esc_armed_at;
 
     AgentState agent_state = AgentState::Idle;
 };
@@ -575,6 +612,21 @@ struct UiModel {
 
 [[nodiscard]] bool is_active_state(AgentState state) noexcept;
 [[nodiscard]] bool is_waiting_state(AgentState state) noexcept;
+
+// 48-D6.2: the derived styling level. Never stored on ConversationEntry.
+enum class Presentation : std::uint8_t {
+    UserAuthored,   // bright: White + bold
+    Intermediate,   // dim
+    FinalAnswer,    // normal
+    Chrome,         // dim (System/Context)
+};
+
+// 48-D6.2 (Rev 2): `turn_active` is folded into the classifier so a streaming
+// tail assistant is Intermediate. `turn_active` = `is_active_state(state)` for
+// the rendered session. Pure; O(n) in the worst case.
+[[nodiscard]] Presentation entry_presentation(
+    const std::vector<ConversationEntry>& entries, std::size_t index,
+    bool turn_active) noexcept;
 
 // 16 §3.6: the switcher's display-only ownership mark for one daemon status.
 [[nodiscard]] OwnershipMark ownership_mark(DaemonStatus status) noexcept;

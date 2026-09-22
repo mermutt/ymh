@@ -133,6 +133,11 @@ public:
 
     // Observers (valid only while the harness lives).
     [[nodiscard]] virtual const UiModel& model() const = 0;
+    // 48-D2 test seam: a mutable model so a test can seed a session's agent
+    // state (arming requires an active turn) and inspect the Esc arm.
+    [[nodiscard]] virtual UiModel& mutable_model() = 0;
+    // 48-D2 test seam: the number of `cancelActive()` submissions so far.
+    [[nodiscard]] virtual std::size_t cancel_count() const = 0;
     [[nodiscard]] virtual const std::set<WorkspaceId>& ensure_in_flight() const = 0;
     [[nodiscard]] virtual const std::map<WorkspaceId, SessionId>& pending_resume() const = 0;
     [[nodiscard]] virtual bool has_connection(const WorkspaceId& workspace) const = 0;

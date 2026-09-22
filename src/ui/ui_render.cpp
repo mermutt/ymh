@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +17,7 @@
 #include <ftxui/screen/pixel.hpp>
 #include <ftxui/screen/screen.hpp>
 #include <ftxui/screen/string.hpp>
+#include <nlohmann/json.hpp>
 
 #include "ymh/session/session.hpp"
 #include "ymh/ui/render/diff_renderer.hpp"
@@ -47,7 +49,8 @@ Element paint_bg(Element element, ftxui::Color color, const Theme& theme) {
 // column of every row (U-RB01-2).
 class LeftBar final : public ftxui::Node {
 public:
-    explicit LeftBar(Element child) : ftxui::Node(Elements{std::move(child)}) {}
+    LeftBar(Element child, ftxui::Color color, bool color_enabled)
+        : ftxui::Node(Elements{std::move(child)}), color_(color), color_enabled_(color_enabled) {}
 
     void ComputeRequirement() override {
         ftxui::Node::ComputeRequirement();
@@ -67,13 +70,69 @@ public:
         for (int y = box_.y_min; y <= box_.y_max; ++y) {
             ftxui::Pixel& pixel = screen.PixelAt(box_.x_min, y);
             pixel.character = "│";
+            if (color_enabled_) {
+                pixel.foreground_color = color_;
+            }
             pixel.automerge = true;
         }
     }
+
+private:
+    ftxui::Color color_;
+    bool         color_enabled_;
 };
 
-Element with_left_bar(Element element) {
-    return std::make_shared<LeftBar>(std::move(element));
+Element with_left_bar(Element element, const Theme& theme) {
+    return std::make_shared<LeftBar>(std::move(element), theme.user_bar, theme.color);
+}
+
+// 48-D5.1 (Rev 2, gate HIGH-1): the composer caret is the SINGLE focus owner.
+// The conversation's `focusPositionRelative` also sets `focused.enabled`, and
+// FTXUI's `Focused::Prefer` resolves a tie by `component_active`; the caret sets
+// it, so the terminal cursor lands on the caret instead of being overridden (and
+// left Hidden). FTXUI positions the cursor from `box_.x_max/y_max`, so `SetBox`
+// pins `box_` to the glyph's LEADING cell: a wide (CJK) glyph must not push the
+// caret onto its trailing cell.
+class CaretAnchor final : public ftxui::Node {
+public:
+    explicit CaretAnchor(Element child) : ftxui::Node(Elements{std::move(child)}) {}
+
+    void ComputeRequirement() override {
+        ftxui::Node::ComputeRequirement();
+        requirement_ = children_[0]->requirement();
+        requirement_.focused.enabled = true;
+        requirement_.focused.node = this;
+        requirement_.focused.component_active = true;
+        requirement_.focused.cursor_shape = ftxui::Screen::Cursor::Shape::Bar;
+        requirement_.focused.box.x_min = 0;
+        requirement_.focused.box.y_min = 0;
+        requirement_.focused.box.x_max = requirement_.min_x - 1;
+        requirement_.focused.box.y_max = requirement_.min_y - 1;
+    }
+
+    void SetBox(ftxui::Box box) override {
+        ftxui::Box anchor = box;
+        anchor.x_max = anchor.x_min;
+        ftxui::Node::SetBox(anchor);
+        children_[0]->SetBox(box);
+    }
+};
+
+Element caret_anchor(Element element) {
+    return std::make_shared<CaretAnchor>(std::move(element));
+}
+
+Element spans_to_element(const StyledLine& line, const Theme& theme) {
+    Elements cells;
+    cells.reserve(line.size());
+    for (const StyledSpan& span : line) {
+        Element cell = paint(ftxui::text(span.text), span.color, theme);
+        if (span.bold) {
+            cell = cell | ftxui::bold;
+        }
+        cells.push_back(std::move(cell));
+    }
+    return ftxui::hbox(std::move(cells));
 }
 
 const char* state_glyph(AgentState state) {
@@ -185,11 +244,32 @@ Element render_tool_entry(const ConversationEntry& entry, const ToolModel* tools
     }
     const bool expanded = expand_all_folds || (call != nullptr && call->expanded);
     Elements rows;
-    std::string header = "tool: " + entry.tool_name;
-    if (expanded) {
-        header += " (expanded)";
+
+    const std::string& name =
+        call != nullptr && !call->name.empty() ? call->name : entry.tool_name;
+    const std::string summary =
+        call != nullptr && !call->arguments.empty()
+            ? summarize_tool_arguments(name, call->arguments)
+            : std::string{};
+    StyledLine header;
+    if (call != nullptr && call->outcome != payload::ToolOutcome::Ok) {
+        header.push_back({"✗ ", ftxui::Color::Red, false});
     }
-    rows.push_back(paint(ftxui::text(header), ftxui::Color::Yellow, theme));
+    header.push_back({"▸ ", ftxui::Color::Yellow, false});
+    header.push_back({name, theme.tool_name, true});
+    if (!summary.empty()) {
+        header.push_back({"  ", ftxui::Color{}, false});
+        header.push_back({summary, theme.tool_args, false});
+    }
+    if (call != nullptr && call->truncated) {
+        header.push_back({" [truncated]", ftxui::Color::GrayLight, false});
+    }
+    if (expanded) {
+        rows.push_back(ftxui::hbox({spans_to_element(header, theme),
+                                    ftxui::text(" (expanded)") | ftxui::dim}));
+    } else {
+        rows.push_back(spans_to_element(truncate_spans(header, context.content_width), theme));
+    }
     if (call != nullptr && call->notice.has_value() && !call->notice->summary.empty()) {
         rows.push_back(ftxui::text("notice: " + call->notice->summary) | ftxui::dim);
     }
@@ -261,14 +341,15 @@ const char* context_form_label(ContextForm form) {
 }
 
 Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
-                     bool expand_all_folds, const RenderContext& context) {
+                     bool expand_all_folds, Presentation presentation,
+                     const RenderContext& context) {
     const Theme& theme = context.theme;
     const MarkdownRenderer markdown;
     Elements rows;
     switch (entry.role) {
         case ConversationRole::User: {
             Element body =
-                with_left_bar(markdown.render(MarkdownBlock{entry.text}, context));
+                with_left_bar(markdown.render(MarkdownBlock{entry.text}, context), theme);
             rows.push_back(
                 paint_bg(std::move(body), ftxui::Color::RGB(40, 42, 54), theme));
             break;
@@ -277,9 +358,13 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
             rows.push_back(markdown.render(MarkdownBlock{entry.text}, context));
             break;
         case ConversationRole::Reasoning:
-            return render_reasoning_entry(entry, expand_all_folds, context);
+            return apply_presentation(
+                render_reasoning_entry(entry, expand_all_folds, context), presentation,
+                theme);
         case ConversationRole::Tool:
-            return render_tool_entry(entry, tools, expand_all_folds, context);
+            return apply_presentation(
+                render_tool_entry(entry, tools, expand_all_folds, context), presentation,
+                theme);
         case ConversationRole::System:
             rows.push_back(ftxui::paragraph(entry.text) | ftxui::dim);
             break;
@@ -306,7 +391,7 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
             break;
         }
     }
-    return ftxui::vbox(std::move(rows));
+    return apply_presentation(ftxui::vbox(std::move(rows)), presentation, theme);
 }
 
 Element render_conversation(const SessionUiState* active, const RenderContext& context) {
@@ -315,9 +400,16 @@ Element render_conversation(const SessionUiState* active, const RenderContext& c
         rows.push_back(ftxui::text("(no active session)") | ftxui::dim);
         return ftxui::vbox(std::move(rows));
     }
-    for (const ConversationEntry& entry : active->conversation.entries) {
-        rows.push_back(
-            render_entry(entry, &active->tools, active->expand_all_folds, context));
+    const std::vector<ConversationEntry>& entries = active->conversation.entries;
+    const bool turn_active = is_active_state(active->agent_state);
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        rows.push_back(render_entry(entries[index], &active->tools,
+                                    active->expand_all_folds,
+                                    entry_presentation(entries, index, turn_active),
+                                    context));
+        if (entries[index].role == ConversationRole::Reasoning) {
+            rows.push_back(ftxui::text(""));
+        }
     }
     if (rows.empty()) {
         rows.push_back(ftxui::text("Type a message and press Enter. Ctrl+D or /exit quits.") |
@@ -392,11 +484,23 @@ Element render_input(const UiModel& model, const Theme& theme) {
         }
     }
     std::string draft = active == nullptr ? std::string{} : active->input.draft;
-    return ftxui::hbox({
-        paint(ftxui::text("> "), ftxui::Color::Green, theme) | ftxui::bold,
-        ftxui::text(draft),
-        ftxui::text("_"),
-    });
+    const std::size_t raw_cursor = active == nullptr ? 0 : active->input.cursor;
+    const std::size_t cursor = glyph_floor(draft, raw_cursor);
+    const std::string before = draft.substr(0, cursor);
+    const std::string at =
+        cursor < draft.size() ? std::string(glyph_at(draft, cursor)) : std::string(" ");
+    const std::string after =
+        cursor < draft.size() ? draft.substr(cursor + glyph_len(draft, cursor))
+                              : std::string{};
+    Elements cells;
+    cells.push_back(paint(ftxui::text("> "), ftxui::Color::Green, theme) | ftxui::bold);
+    cells.push_back(ftxui::text(before));
+    cells.push_back(caret_anchor(ftxui::text(at)));
+    cells.push_back(ftxui::text(after));
+    if (active != nullptr && active->esc_arm == EscArm::Armed) {
+        cells.push_back(ftxui::text("  - one more <Esc> to interrupt") | ftxui::dim);
+    }
+    return ftxui::hbox(std::move(cells));
 }
 
 std::string format_percent(std::uint64_t tokens, std::uint64_t window);
@@ -1199,9 +1303,16 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     Elements rows;
     rows.push_back(render_header(model, theme));
     rows.push_back(ftxui::separator());
-    rows.push_back(render_conversation(
-                       active, RenderContext{size.width, theme, false, model.spinner.frame}) |
-                   ftxui::flex);
+    // 48-D7.3: the conversation pane sits inside the border and carries a
+    // vscroll_indicator, so the tool line truncates to the content box, not the
+    // terminal width.
+    const int content_width = size.width > 3 ? size.width - 3 : 1;
+    const RenderContext context{.width = size.width,
+                                .content_width = content_width,
+                                .theme = theme,
+                                .compact = false,
+                                .spinner_frame = model.spinner.frame};
+    rows.push_back(render_conversation(active, context) | ftxui::flex);
     if (active != nullptr && !active->scroll.following) {
         rows.push_back(render_scroll_hint(active, theme));
     }
@@ -1244,6 +1355,124 @@ std::string render_to_ansi(const UiModel& model, TerminalSize size, const Theme&
         ftxui::Screen::Create(ftxui::Dimensions{size.width, size.height});
     ftxui::Render(screen, element);
     return screen.ToString();
+}
+
+ftxui::Element apply_presentation(ftxui::Element element, Presentation presentation,
+                                  const Theme& theme) {
+    switch (presentation) {
+        case Presentation::UserAuthored:
+            if (theme.color) {
+                element = element | ftxui::color(theme.user_foreground);
+            }
+            return element | ftxui::bold;
+        case Presentation::Intermediate:
+        case Presentation::Chrome:
+            return element | ftxui::dim;
+        case Presentation::FinalAnswer:
+            return element;
+    }
+    return element;
+}
+
+StyledLine truncate_spans(const StyledLine& line, int max_width) {
+    int total = 0;
+    for (const StyledSpan& span : line) {
+        total += ftxui::string_width(span.text);
+    }
+    if (total <= max_width) {
+        return line;
+    }
+    if (max_width <= 0) {
+        StyledSpan ellipsis;
+        ellipsis.text  = "…";
+        ellipsis.color = ftxui::Color::GrayLight;
+        return StyledLine{std::move(ellipsis)};
+    }
+    const int target = max_width - 1;
+    StyledLine kept;
+    int        width = 0;
+    bool       truncated = false;
+    for (const StyledSpan& span : line) {
+        StyledSpan current = span;
+        current.text.clear();
+        std::size_t index = 0;
+        while (index < span.text.size()) {
+            const std::string_view glyph = glyph_at(span.text, index);
+            if (glyph.empty()) {
+                break;
+            }
+            const int glyph_width = ftxui::string_width(std::string(glyph));
+            if (width + glyph_width > target) {
+                truncated = true;
+                break;
+            }
+            current.text.append(glyph);
+            width += glyph_width;
+            index += glyph.size();
+        }
+        if (!current.text.empty()) {
+            kept.push_back(std::move(current));
+        }
+        if (truncated) {
+            break;
+        }
+    }
+    if (!kept.empty()) {
+        kept.back().text += "…";
+    } else {
+        StyledSpan ellipsis;
+        ellipsis.text  = "…";
+        ellipsis.color = ftxui::Color::GrayLight;
+        kept.push_back(std::move(ellipsis));
+    }
+    return kept;
+}
+
+std::string summarize_tool_arguments(std::string_view tool_name,
+                                     std::string_view arguments_json) {
+    const auto collapse_whitespace = [](std::string_view text) {
+        std::string collapsed;
+        bool        pending_space = false;
+        for (const char character : text) {
+            if (character == ' ' || character == '\t' || character == '\n' ||
+                character == '\r') {
+                pending_space = !collapsed.empty();
+                continue;
+            }
+            if (pending_space) {
+                collapsed += ' ';
+                pending_space = false;
+            }
+            collapsed += character;
+        }
+        return collapsed;
+    };
+
+    nlohmann::json parsed = nlohmann::json::parse(arguments_json, nullptr, false);
+    if (parsed.is_discarded()) {
+        return std::string(arguments_json);
+    }
+    if (!parsed.is_object()) {
+        return parsed.dump();
+    }
+    const bool shell = tool_name == "shell" || tool_name == "bash";
+    static constexpr std::array<std::string_view, 6> kPreferredKeys = {
+        "command", "path", "pattern", "query", "url", "name"};
+    for (const std::string_view key : kPreferredKeys) {
+        const auto value = parsed.find(key);
+        if (value == parsed.end() || value->is_null()) {
+            continue;
+        }
+        if (value->is_string()) {
+            std::string text = value->get<std::string>();
+            if (shell) {
+                text = collapse_whitespace(text);
+            }
+            return text;
+        }
+        return value->dump();
+    }
+    return parsed.dump();
 }
 
 } // namespace ymh::ui

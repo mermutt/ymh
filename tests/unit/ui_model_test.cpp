@@ -509,6 +509,105 @@ TEST(UiModel, InputEditingHelpers) {
     EXPECT_EQ(input.cursor, 0u);
 }
 
+TEST(UiModel, InputWordBoundaries) {
+    const auto left = [](const std::string& text, std::size_t cursor) {
+        InputModel input;
+        input.draft  = text;
+        input.cursor = cursor;
+        return input.word_left_boundary(cursor);
+    };
+    const auto right = [](const std::string& text, std::size_t cursor) {
+        InputModel input;
+        input.draft  = text;
+        input.cursor = cursor;
+        return input.word_right_boundary(cursor);
+    };
+
+    EXPECT_EQ(left("", 0), 0u);
+    EXPECT_EQ(right("", 0), 0u);
+    EXPECT_EQ(left("a", 1), 0u);
+    EXPECT_EQ(right("a", 0), 1u);
+    EXPECT_EQ(left("ab cd", 5), 3u);
+    EXPECT_EQ(right("ab cd", 0), 2u);
+    EXPECT_EQ(left("a.b", 3), 2u);
+    EXPECT_EQ(right("a.b", 0), 1u);
+    EXPECT_EQ(left("a  b", 4), 3u);
+    EXPECT_EQ(right("a  b", 0), 1u);
+    EXPECT_EQ(left("  ab", 4), 2u);
+    EXPECT_EQ(right("  ab", 0), 4u);
+    EXPECT_EQ(left("ab  ", 4), 0u);
+    EXPECT_EQ(right("ab  ", 0), 2u);
+    EXPECT_EQ(left("a_b-c", 5), 4u);
+    EXPECT_EQ(right("a_b-c", 0), 3u);
+    EXPECT_EQ(right("a_b-c", 3), 4u);
+    EXPECT_EQ(left("foo.bar", 7), 4u);
+    // Multi-byte glyphs are atomic Punct runs (48-F4).
+    EXPECT_EQ(left("\xC3\xA9", 2), 0u);
+    EXPECT_EQ(right("\xC3\xA9", 0), 2u);
+    // Invariant 48-I6 for every cursor position.
+    const std::string sample = "alpha.beta  gamma";
+    for (std::size_t cursor = 0; cursor <= sample.size(); ++cursor) {
+        EXPECT_LE(left(sample, cursor), cursor);
+        EXPECT_LE(cursor, right(sample, cursor));
+    }
+}
+
+TEST(UiModel, InputGlyphMotionAndSnap) {
+    InputModel input;
+    input.draft = "a\xC3\xA9";   // 'a' + U+00E9 (2 bytes)
+    EXPECT_EQ(input.cursor_right(0), 1u);
+    EXPECT_EQ(input.cursor_right(1), 3u);
+    EXPECT_EQ(input.cursor_right(3), 3u);
+    EXPECT_EQ(input.cursor_left(3), 1u);
+    EXPECT_EQ(input.cursor_left(1), 0u);
+    EXPECT_EQ(input.cursor_left(0), 0u);
+
+    input.draft = "\xF0\x9F\x98\x80";   // U+1F600 (4 bytes)
+    EXPECT_EQ(input.cursor_right(0), 4u);
+    EXPECT_EQ(input.cursor_left(4), 0u);
+
+    EXPECT_EQ(glyph_floor("a\xC3\xA9", 2), 3u);
+    EXPECT_EQ(glyph_floor("a\xC3\xA9", 1), 1u);
+    EXPECT_EQ(glyph_floor("a\xC3\xA9", 3), 3u);
+    EXPECT_EQ(glyph_len("a\xC3\xA9", 0), 1u);
+    EXPECT_EQ(glyph_len("a\xC3\xA9", 1), 2u);
+    EXPECT_EQ(glyph_len("a\xC3\xA9", 3), 0u);
+    EXPECT_EQ(glyph_at("a\xC3\xA9", 1), std::string_view("\xC3\xA9"));
+    EXPECT_TRUE(glyph_at("a", 1).empty());
+}
+
+TEST(UiModel, EntryPresentationTable) {
+    const auto entry = [](ConversationRole role) {
+        ConversationEntry value;
+        value.role = role;
+        return value;
+    };
+    std::vector<ConversationEntry> entries = {
+        entry(ConversationRole::User),
+        entry(ConversationRole::Assistant),
+        entry(ConversationRole::Tool),
+        entry(ConversationRole::Assistant),
+        entry(ConversationRole::Reasoning),
+        entry(ConversationRole::System),
+        entry(ConversationRole::Context),
+        entry(ConversationRole::Assistant),
+    };
+    EXPECT_EQ(entry_presentation(entries, 0, false), Presentation::UserAuthored);
+    EXPECT_EQ(entry_presentation(entries, 1, false), Presentation::Intermediate);
+    EXPECT_EQ(entry_presentation(entries, 2, false), Presentation::Intermediate);
+    EXPECT_EQ(entry_presentation(entries, 3, false), Presentation::Intermediate);
+    EXPECT_EQ(entry_presentation(entries, 4, false), Presentation::Intermediate);
+    EXPECT_EQ(entry_presentation(entries, 5, false), Presentation::Chrome);
+    EXPECT_EQ(entry_presentation(entries, 6, false), Presentation::Chrome);
+    EXPECT_EQ(entry_presentation(entries, 7, false), Presentation::FinalAnswer);
+
+    std::vector<ConversationEntry> streaming = {
+        entry(ConversationRole::User), entry(ConversationRole::Assistant)};
+    EXPECT_EQ(entry_presentation(streaming, 1, true), Presentation::Intermediate);
+    EXPECT_EQ(entry_presentation(streaming, 1, false), Presentation::FinalAnswer);
+    EXPECT_EQ(entry_presentation(streaming, 9, false), Presentation::FinalAnswer);
+}
+
 TEST(UiModel, ConversationScrollFollowAndUnseen) {
     ConversationScroll scroll;
     EXPECT_TRUE(scroll.following);

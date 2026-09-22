@@ -789,6 +789,95 @@ TEST(SupervisorHarnessTest, UI45_D2_BothCommandHintSitesPinned) {
     EXPECT_EQ(fixture.state()->input.draft, "/exit ");
 }
 
+// 48-D2 (48-I1..I4): Esc arms only with an active turn; the second Esc cancels
+// exactly once through `cancelActive()`; any other handled key disarms.
+TEST(SupervisorHarnessTest, UI48_D2_EscEscArmsThenCancelsOnce) {
+    ComposerFixture fixture("ymh48d2esc");
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_EQ(state->esc_arm, EscArm::Armed);
+    EXPECT_EQ(fixture.harness->cancel_count(), 0u) << "the first Esc must not cancel";
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("x"));
+    EXPECT_EQ(state->esc_arm, EscArm::Disarmed);
+    EXPECT_EQ(state->input.draft, "x");
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
+    ASSERT_EQ(state->esc_arm, EscArm::Armed);
+    EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_EQ(state->esc_arm, EscArm::Disarmed);
+    EXPECT_EQ(fixture.harness->cancel_count(), 1u) << "the second Esc must cancel once";
+}
+
+TEST(SupervisorHarnessTest, UI48_D2_EscDoesNotArmWithoutActiveTurn) {
+    ComposerFixture fixture("ymh48d2no");
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Idle;
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_EQ(state->esc_arm, EscArm::Disarmed);
+    EXPECT_EQ(fixture.harness->cancel_count(), 0u);
+}
+
+TEST(SupervisorHarnessTest, UI48_D2_CommandListDismissalKeepsPriority) {
+    ComposerFixture fixture("ymh48d2list");
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+    fixture.type("/");
+    ASSERT_FALSE(state->command_hints.empty());
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_TRUE(state->command_hints.empty());
+    EXPECT_EQ(state->esc_arm, EscArm::Disarmed);
+    EXPECT_EQ(fixture.harness->cancel_count(), 0u);
+}
+
+TEST(SupervisorHarnessTest, UI48_D2_ArmExpiresOnTick) {
+    ComposerFixture fixture("ymh48d2exp");
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+    ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    ASSERT_EQ(state->esc_arm, EscArm::Armed);
+
+    state->esc_armed_at =
+        std::chrono::steady_clock::now() - std::chrono::milliseconds(4000);
+    fixture.harness->drain_actions();
+    EXPECT_EQ(state->esc_arm, EscArm::Disarmed);
+}
+
+// 48-D4/D5 (48-I5..I8): Ctrl+Arrow moves by words and plain arrows move
+// glyph-wise; the caret index is exposed on the model.
+TEST(SupervisorHarnessTest, UI48_D4_D5_WordAndGlyphMotion) {
+    ComposerFixture fixture("ymh48d4move");
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+
+    fixture.type("alpha beta gamma");
+    ASSERT_TRUE(fixture.harness->dispatch_key("ctrl-left"));
+    EXPECT_EQ(state->input.cursor, 11u) << "Ctrl+Left must land before `gamma`";
+    ASSERT_TRUE(fixture.harness->dispatch_key("ctrl-left"));
+    EXPECT_EQ(state->input.cursor, 6u) << "Ctrl+Left must land before `beta`";
+    ASSERT_TRUE(fixture.harness->dispatch_key("ctrl-right"));
+    EXPECT_EQ(state->input.cursor, 10u) << "Ctrl+Right must land after `beta`";
+    ASSERT_TRUE(fixture.harness->dispatch_key("ctrl-right"));
+    EXPECT_EQ(state->input.cursor, 16u) << "Ctrl+Right must land after `gamma`";
+
+    state->input.draft  = "a\xC3\xA9";
+    state->input.cursor = 0;
+    ASSERT_TRUE(fixture.harness->dispatch_key("right"));
+    EXPECT_EQ(state->input.cursor, 1u);
+    ASSERT_TRUE(fixture.harness->dispatch_key("right"));
+    EXPECT_EQ(state->input.cursor, 3u) << "plain Right must step over the whole glyph";
+    ASSERT_TRUE(fixture.harness->dispatch_key("left"));
+    EXPECT_EQ(state->input.cursor, 1u);
+}
+
 // 46-D5 (46-I12): typing `/quit` yields the same hint row as `/exit`.
 TEST(SupervisorHarnessTest, UI46_D5_QuitShowsExitRow) {
     ComposerFixture exit_fixture("ymh46d5exit");
