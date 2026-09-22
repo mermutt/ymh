@@ -20,24 +20,41 @@ Architecture and component specs live in `docs/design/`.
 
 ## Build prerequisites
 
-- CMake ≥ 3.25, Ninja, and a C++23 compiler (GCC 13+ / Clang 16+; built and
-  tested here with GCC 16).
-- System libraries: **SQLite3, nlohmann_json, spdlog, fmt, libcurl, libgit2,
-  cmark-gfm**.
-- First configure downloads these via CMake `FetchContent` (network required):
-  FTXUI v6.1.9, Asio 1.38.2, CLI11 v2.5.0, GoogleTest v1.17.0
-  (GoogleTest only when tests are enabled, which is the default).
+- **CMake ≥ 3.25**, **Ninja**, and a C++23 compiler (**GCC 13+ / Clang 16+**;
+  the project is developed against GCC 16, and Ubuntu 24.04's default `g++` is
+  GCC 13.2, which clears the floor).
+- **System libraries**, resolved by CMake `find_package` / `pkg-config` and so
+  installed from apt as `-dev` packages: SQLite3, nlohmann_json, spdlog, fmt,
+  libcurl, libgit2, and cmark-gfm. `pkg-config` itself is also required; the
+  threading runtime is part of libc/libstdc++ and needs no package.
+- **Fetched automatically by CMake `FetchContent`** on the first configure
+  (network required), so they need **no apt package**: FTXUI v6.1.9, Asio
+  1.38.2, CLI11 v2.5.0, GoogleTest v1.17.0 (GoogleTest only when tests are
+  enabled, which is the default via `YMH_BUILD_TESTS=ON`).
 
-Arch Linux:
+### Ubuntu 24.04 LTS (noble)
 
 ```sh
-sudo pacman -S --needed cmake ninja base-devel sqlite nlohmann-json spdlog fmt \
-    curl libgit2 cmark-gfm
+sudo apt update && sudo apt install -y \
+    cmake ninja-build g++ pkg-config \
+    libsqlite3-dev nlohmann-json3-dev libspdlog-dev libfmt-dev \
+    libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev
 ```
 
-Debian/Ubuntu equivalents: `cmake ninja-build g++ libsqlite3-dev
-nlohmann-json3-dev libspdlog-dev libfmt-dev libcurl4-openssl-dev libgit2-dev
-libcmark-gfm-dev`.
+Every `lib*-dev` entry is a development package; the matching runtime `.so`
+libraries arrive as dependencies. `pkg-config` is a transitional package that
+installs `pkgconf`, which CMake's `FindPkgConfig` uses to locate libgit2 and
+cmark-gfm.
+
+The build pins no minimum version for any of these (`find_package` and
+`pkg_check_modules` are called unversioned), and noble's shipped versions
+satisfy them all: SQLite3 3.45.1, nlohmann_json 3.11.3, spdlog 1.12.0, fmt
+9.1.0, libcurl 8.5.0, libgit2 1.7.2, cmark-gfm 0.29.0.gfm.6. Every package
+above is in the default Ubuntu 24.04 repositories, so no PPA, version pin, or
+source build is needed. The one caveat is `libcmark-gfm-dev`, which lives in
+the **`universe`** component: desktop installs enable it by default, while a
+minimal image needs `sudo add-apt-repository universe` first. `libgit2-dev` and
+`libcurl4-openssl-dev` ship from `main`/`security` and need no extra component.
 
 ## Build and test
 
