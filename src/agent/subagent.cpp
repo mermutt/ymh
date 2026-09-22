@@ -17,6 +17,7 @@ payload::SubagentOutcome SubagentRunner::run(const std::string& task, std::strin
 
     options_.kind          = SessionKind::Subagent;
     options_.parentSession = parent_.id();
+    options_.permission_preset = parent_.header().permission_preset;
 
     const std::expected<AgentId, AgentError> created = registry_.create(options_);
     if (!created.has_value()) {

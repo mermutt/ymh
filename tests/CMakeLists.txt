@@ -60,6 +60,7 @@ add_executable(ymh_tests
     unit/transport_socket_test.cpp
     unit/config_test.cpp
     unit/spec52_endpoints_test.cpp
+    unit/spec52_presets_test.cpp
     unit/muse_profile_test.cpp
     unit/muse_sampling_test.cpp
     unit/muse_d2_test.cpp

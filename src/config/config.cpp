@@ -375,10 +375,23 @@ void apply_plan(Config& config, const Json& table, const std::filesystem::path& 
         read_string(table, "section", "agent.plan", config.agent.plan_section, source);
 }
 
+void validate_sandbox_value(const std::string& value, const std::filesystem::path& source) {
+    if (value != "workspace" && value != "read-only" && value != "unrestricted") {
+        fail(source, "invalid sandbox '" + value +
+                         "' (expected workspace, read-only, or unrestricted)");
+    }
+}
+
+void validate_approval_value(const std::string& value, const std::filesystem::path& source) {
+    if (value != "ask" && value != "never") {
+        fail(source, "invalid approval '" + value + "' (expected ask or never)");
+    }
+}
+
 void apply_agent(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "agent",
                    {"model", "max_steps", "reasoning_effort", "system_prompt", "compaction",
-                    "compaction_threshold_tokens", "plan"},
+                    "compaction_threshold_tokens", "plan", "sandbox"},
                    source);
     config.agent.model = read_string(table, "model", "agent", config.agent.model, source);
     config.agent.max_steps = static_cast<std::size_t>(read_int64(
@@ -386,6 +399,8 @@ void apply_agent(Config& config, const Json& table, const std::filesystem::path&
     config.agent.reasoning_effort = read_optional_string(table, "reasoning_effort", "agent", source);
     config.agent.system_prompt =
         read_string(table, "system_prompt", "agent", config.agent.system_prompt, source);
+    config.agent.sandbox = read_string(table, "sandbox", "agent", config.agent.sandbox, source);
+    validate_sandbox_value(config.agent.sandbox, source);
     config.agent.compaction.threshold_tokens = static_cast<std::size_t>(read_int64(
         table, "compaction_threshold_tokens", "agent",
         static_cast<std::int64_t>(config.agent.compaction.threshold_tokens), source));
@@ -413,7 +428,9 @@ void apply_workspace(Config& config, const Json& table, const std::filesystem::p
 }
 
 void apply_permissions(Config& config, const Json& table, const std::filesystem::path& source) {
-    reject_unknown(table, "permissions", {"shell", "write", "read", "default", "rules"}, source);
+    reject_unknown(table, "permissions",
+                   {"shell", "write", "read", "default", "rules", "presets", "default_preset"},
+                   source);
     config.permissions.shell =
         read_string(table, "shell", "permissions", config.permissions.shell, source);
     config.permissions.write =
@@ -422,6 +439,39 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
         read_string(table, "read", "permissions", config.permissions.read, source);
     config.permissions.default_verdict = read_string(
         table, "default", "permissions", config.permissions.default_verdict, source);
+
+    if (const Json* presets = member(table, "presets"); presets != nullptr) {
+        if (!presets->is_object()) {
+            fail(source, "invalid type for 'permissions.presets'");
+        }
+        for (auto it = presets->begin(); it != presets->end(); ++it) {
+            const std::string label = "permissions.presets." + it.key();
+            if (!it->is_object()) {
+                fail(source, "invalid type for '" + label + "'");
+            }
+            reject_unknown(*it, "permissions.presets", {"sandbox", "approval"}, source);
+            PermissionPresetSettings entry;
+            if (member(*it, "sandbox") != nullptr) {
+                entry.sandbox =
+                    read_string(*it, "sandbox", "permissions.presets", entry.sandbox, source);
+            }
+            if (member(*it, "approval") != nullptr) {
+                entry.approval =
+                    read_string(*it, "approval", "permissions.presets", entry.approval, source);
+            }
+            validate_sandbox_value(entry.sandbox, source);
+            validate_approval_value(entry.approval, source);
+            config.permissions.presets[it.key()] = std::move(entry);
+        }
+    }
+
+    config.permissions.default_preset = read_string(
+        table, "default_preset", "permissions", config.permissions.default_preset, source);
+    if (!config.permissions.default_preset.empty() &&
+        config.permissions.presets.count(config.permissions.default_preset) == 0) {
+        fail(source, "unknown permission preset '" + config.permissions.default_preset +
+                         "' in 'permissions.default_preset'");
+    }
 
     const Json* rules = member(table, "rules");
     if (rules == nullptr) {
@@ -1530,6 +1580,75 @@ std::optional<std::string> env_value(std::string_view name) {
         return std::nullopt;
     }
     return std::string{raw};
+}
+
+int sandbox_rank(std::string_view sandbox) {
+    if (sandbox == "read-only") {
+        return 0;
+    }
+    if (sandbox == "workspace") {
+        return 1;
+    }
+    if (sandbox == "unrestricted") {
+        return 2;
+    }
+    throw ConfigError("invalid sandbox '" + std::string{sandbox} + "'");
+}
+
+int approval_rank(std::string_view approval) {
+    if (approval == "ask") {
+        return 0;
+    }
+    if (approval == "never") {
+        return 1;
+    }
+    throw ConfigError("invalid approval '" + std::string{approval} + "'");
+}
+
+bool permission_preset_narrows(const PermissionPresetSettings& baseline,
+                               const PermissionPresetSettings& candidate) {
+    return sandbox_rank(candidate.sandbox) <= sandbox_rank(baseline.sandbox) &&
+           approval_rank(candidate.approval) <= approval_rank(baseline.approval);
+}
+
+PermissionPresetSettings narrow_permission_preset(const PermissionPresetSettings& baseline,
+                                                  const PermissionPresetSettings& candidate) {
+    PermissionPresetSettings result;
+    result.sandbox = sandbox_rank(candidate.sandbox) <= sandbox_rank(baseline.sandbox)
+                         ? candidate.sandbox
+                         : baseline.sandbox;
+    result.approval = approval_rank(candidate.approval) <= approval_rank(baseline.approval)
+                          ? candidate.approval
+                          : baseline.approval;
+    return result;
+}
+
+PermissionPresetSettings resolve_permission_preset(const PermissionDefaults& permissions,
+                                                   std::optional<std::string> preset_name) {
+    const std::string name = preset_name.has_value() && !preset_name->empty()
+                                 ? *preset_name
+                                 : std::string{kWorkspaceWritePreset};
+    const auto        it   = permissions.presets.find(name);
+    if (it == permissions.presets.end()) {
+        throw ConfigError("unknown permission preset '" + name + "'");
+    }
+    return it->second;
+}
+
+PermissionPresetSettings deployment_permission_baseline(const Config& config) {
+    if (!config.permissions.default_preset.empty()) {
+        return resolve_permission_preset(config.permissions,
+                                         config.permissions.default_preset);
+    }
+    PermissionPresetSettings baseline;
+    baseline.sandbox  = config.agent.sandbox;
+    baseline.approval = "ask";
+    return baseline;
+}
+
+std::string default_permission_preset_name(const Config& config) {
+    return config.permissions.default_preset.empty() ? std::string{kWorkspaceWritePreset}
+                                                     : config.permissions.default_preset;
 }
 
 std::filesystem::path default_global_config_path() {

@@ -58,6 +58,9 @@ struct SessionHeader {
     // depth (root 0, spawn parent+1, fork inherits).
     std::optional<std::string> agent_preset;
     std::uint32_t              depth = 0;
+    // 52-D15/52-I12: the permission preset resolved at creation and pinned for
+    // the session's life; a later config change never recomputes it.
+    std::optional<std::string> permission_preset;
 
     bool operator==(const SessionHeader&) const = default;
 };
