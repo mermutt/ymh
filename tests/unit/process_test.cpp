@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -242,6 +246,65 @@ TEST(ProcessService, UI46_D8_ModelTimeoutNeverExceedsDeadline) {
 
     EXPECT_TRUE(result.timed_out);
     EXPECT_LT(elapsed, std::chrono::milliseconds{3000});
+}
+
+std::string spawn_and_read(LocalProcessService& service, const ProcessRequest& request) {
+    std::unique_ptr<ChildProcessHandle> handle = service.spawn(request).get();
+    EXPECT_NE(handle, nullptr);
+    handle->closeStdin();
+    std::string output;
+    std::array<char, 4096> buffer{};
+    for (;;) {
+        const std::size_t count =
+            handle->readStdout(std::span<char>{buffer.data(), buffer.size()}, {}).get();
+        if (count == 0) {
+            break;
+        }
+        output.append(buffer.data(), count);
+    }
+    (void)handle->wait({}).get();
+    return output;
+}
+
+ProcessRequest env_request(const std::filesystem::path& cwd) {
+    ProcessRequest request;
+    request.executable = "/usr/bin/env";
+    request.argv = {"/usr/bin/env"};
+    request.cwd = cwd;
+    request.capture_stdout = true;
+    request.capture_stderr = false;
+    return request;
+}
+
+TEST(ProcessService, SpawnInheritModeInheritsTheAmbientEnvironment) {
+    ymh::test::TempWorkspace workspace("proc_spawn_inherit");
+    LocalProcessService service;
+    ::setenv("YMH_TEST_AMBIENT", "ambient-123", 1);
+
+    ProcessRequest request = env_request(workspace.path());
+    request.env_mode = ProcessEnvMode::Inherit;
+    request.environment = {{"YMH_TEST_OVERLAY", "overlay-456"}};
+    const std::string output = spawn_and_read(service, request);
+    ::unsetenv("YMH_TEST_AMBIENT");
+
+    EXPECT_NE(output.find("YMH_TEST_AMBIENT=ambient-123"), std::string::npos);
+    EXPECT_NE(output.find("YMH_TEST_OVERLAY=overlay-456"), std::string::npos);
+}
+
+TEST(ProcessService, SpawnMinimalModeSeedsOnlyPathAndOverlay) {
+    ymh::test::TempWorkspace workspace("proc_spawn_minimal");
+    LocalProcessService service;
+    ::setenv("YMH_TEST_AMBIENT", "ambient-123", 1);
+
+    ProcessRequest request = env_request(workspace.path());
+    request.env_mode = ProcessEnvMode::Minimal;
+    request.environment = {{"YMH_TEST_OVERLAY", "overlay-456"}};
+    const std::string output = spawn_and_read(service, request);
+    ::unsetenv("YMH_TEST_AMBIENT");
+
+    EXPECT_NE(output.find("PATH=/usr/local/bin:/usr/bin:/bin"), std::string::npos);
+    EXPECT_NE(output.find("YMH_TEST_OVERLAY=overlay-456"), std::string::npos);
+    EXPECT_EQ(output.find("YMH_TEST_AMBIENT="), std::string::npos);
 }
 
 } // namespace

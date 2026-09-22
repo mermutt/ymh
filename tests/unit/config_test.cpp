@@ -173,6 +173,53 @@ TEST(Config, UnknownKeyRejected) {
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
 
+TEST(Config, WorkspaceLayerMcpServersIsAConfigError) {
+    test::TempWorkspace workspace("config_ws_mcp_servers");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"mcp_servers\": { \"fake\": { \"command\": \"true\" } } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("'mcp_servers' is global-layer only"),
+                  std::string::npos);
+        EXPECT_NE(std::string{error.what()}.find(paths.workspace.string()), std::string::npos);
+    }
+}
+
+TEST(Config, WorkspaceLayerMcpSectionIsAConfigError) {
+    test::TempWorkspace workspace("config_ws_mcp_section");
+    workspace.write(".ymh/config.jsonc", "{ \"mcp\": { \"enabled\": false } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("'mcp' is global-layer only"),
+                  std::string::npos);
+    }
+}
+
+TEST(Config, GlobalLayerMcpIsAccepted) {
+    test::TempWorkspace workspace("config_global_mcp");
+    workspace.write("global.jsonc",
+                    "{ \"mcp\": { \"enabled\": true, \"log_child_stderr\": true } }\n");
+
+    ConfigPaths paths;
+    paths.global    = workspace.path() / "global.jsonc";
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    EXPECT_TRUE(config.mcp.enabled);
+    EXPECT_TRUE(config.mcp.log_child_stderr);
+}
+
 TEST(Config, RetryAndTimeoutsParse) {
     test::TempWorkspace workspace("config_retry");
     workspace.write(".ymh/config.jsonc",

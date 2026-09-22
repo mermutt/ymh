@@ -100,6 +100,9 @@ add_executable(ymh_tests
     unit/skills_tool_test.cpp
     unit/skills_wiring_test.cpp
     unit/skills_rpc_test.cpp
+    unit/skill_roots_test.cpp
+    unit/workspace_trust_test.cpp
+    unit/file_commands_test.cpp
     unit/mcp_rpc_test.cpp
     unit/agent_rpc_test.cpp
     unit/no_raw_map_handle_test.cpp
