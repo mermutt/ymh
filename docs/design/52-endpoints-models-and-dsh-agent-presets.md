@@ -1,7 +1,8 @@
 # 52 — Named Endpoints & Models, and dsh-Aligned Agent Presets
 
 ```
-Status: draft (Rev 2) — NOT reviewed. Design only; no code may be written for
+Status: verified (Rev 2) — the five-reviewer adversarial gate PASSED (0 open
+        HIGH / 0 MEDIUM). Design only; no code may be written for
         either part until this spec is `verified` (AGENTS.md, the rule).
         Rev 2 applies the first independent adversarial review (five reviewers:
         scope, schema, import, Part B, completeness); every finding is recorded
@@ -183,9 +184,9 @@ Both shapes are amended by 46-D12 to carry `api_key` and `max_tokens`
 `effective_model` (`src/config/config.cpp:1734-1739`) is the whole selection
 algorithm: `agent.model` if non-empty, else `llm.model`. `agent.model` is set by
 the `agent.model` config key (`src/config/config.cpp:297`), `YMH_AGENT_MODEL`
-(`src/config/config.cpp:1364-1366`), or `--model` (`src/cli/cli.cpp:135-137`).
+(`src/config/config.cpp:1364-1366`), or `--model` (`src/cli/cli.cpp:128-130`).
 The CLI also overrides `llm.provider`/`llm.base_url`/`llm.api_key_env` on the
-single endpoint (`src/cli/cli.cpp:138-146`).
+single endpoint (`src/cli/cli.cpp:131-139`).
 
 The provider is built by `to_provider_config` (`src/cli/wiring.cpp:61-81`) and
 `to_agent_config` (`src/cli/wiring.cpp:198-209`); the sandbox is **hardcoded**
@@ -205,7 +206,7 @@ level: top level (`apply_document`, `:941-946`), `llm` (`:408-413`), `llm.defaul
 
 Layer order (`load_config`, `src/config/config.cpp:1404-1413`): defaults →
 global (required) → workspace (optional) → `YMH_*` env (`apply_env_overrides`,
-`src/config/config.cpp:1332-1398`) → CLI (`src/cli/cli.cpp:135-150`). Scalars are
+`src/config/config.cpp:1332-1398`) → CLI (`src/cli/cli.cpp:128-146`). Scalars are
 last-writer-wins; arrays replace wholesale (`21 §3.4`, `:492-501`).
 
 ### 2.3 The literal `api_key` rule
@@ -1598,7 +1599,7 @@ exists, the re-sync is a manual review.
   - **L-SC3** — §1.3 adds spec-10 and spec-44 coordination rows.
   - **L-SC4** — §1.3/header reworded to "confirms §55 stands".
   - **L-SC5** — §2.1/§2.2 citations fixed (`config.cpp:297`; env in
-    `load_config`; CLI `cli.cpp:135-150`); 46-D12 range ends `:2776`.
+    `load_config`; CLI `cli.cpp:128-146`); 46-D12 range ends `:2776`.
 
   **Honesty.** §1.4/§5.1/§5.2/§5.7 state plainly that prompts are the weakest
   leg (persona only) and record it as 52-OQ-13. Failure modes renumbered to
