@@ -107,6 +107,7 @@ void add_common(CLI::App& app, CliInvocation& invocation) {
     app.add_option("--workspace", invocation.workspace, "Workspace root (default: cwd)");
     app.add_option("--config", invocation.config_path, "Global config file override");
     app.add_option("--model", invocation.model, "Override the model");
+    app.add_option("--endpoint", invocation.endpoint, "Select a named endpoint (literal-id path)");
     app.add_option("--provider", invocation.provider, "Override the provider");
     app.add_option("--base-url", invocation.base_url, "Override the LLM base URL");
     app.add_option("--api-key-env", invocation.api_key_env, "Override the API-key env var name");
@@ -127,6 +128,9 @@ Config load_invocation_config(const CliInvocation& invocation,
 
     if (!invocation.model.empty()) {
         config.agent.model = invocation.model;
+    }
+    if (!invocation.endpoint.empty()) {
+        config.llm.active_endpoint = invocation.endpoint;
     }
     if (!invocation.provider.empty()) {
         config.llm.provider = invocation.provider;
@@ -709,66 +713,10 @@ std::optional<nlohmann::json> read_localcode_document(const std::filesystem::pat
     }
 }
 
-bool is_http_url(std::string_view url) {
-    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
-}
-
-const nlohmann::json* localcode_provider(const nlohmann::json& localcode) {
-    const auto default_profile = localcode.find("default_profile");
-    if (default_profile == localcode.end() || !default_profile->is_string()) {
-        return nullptr;
-    }
-    const auto profiles = localcode.find("profiles");
-    if (profiles == localcode.end() || !profiles->is_object()) {
-        return nullptr;
-    }
-    const auto profile = profiles->find(default_profile->get<std::string>());
-    if (profile == profiles->end() || !profile->is_object()) {
-        return nullptr;
-    }
-    const auto provider_name = profile->find("provider");
-    const auto providers     = localcode.find("providers");
-    if (provider_name == profile->end() || !provider_name->is_string() ||
-        providers == localcode.end() || !providers->is_object()) {
-        return nullptr;
-    }
-    const auto provider = providers->find(provider_name->get<std::string>());
-    if (provider == providers->end() || !provider->is_object()) {
-        return nullptr;
-    }
-    return &(*provider);
-}
-
-void print_localcode_notes(const nlohmann::json& localcode, std::ostream& err) {
-    const auto note = [&err](const std::string& text) {
-        err << "ymh: note: " << redact_secrets(text) << "\n";
-    };
-    if (const auto permission = localcode.find("permission");
-        permission != localcode.end() && permission->is_array() && !permission->empty()) {
-        note("localcode 'permission' is a flat array, not the supported object shape; "
-             "permission rules are not imported");
-    }
-    if (const nlohmann::json* provider = localcode_provider(localcode); provider != nullptr) {
-        const auto type     = provider->find("type");
-        const auto base_url = provider->find("base_url");
-        if (type != provider->end() && type->is_string()) {
-            const std::string name = type->get<std::string>();
-            if (name != "openai-compatible" && name != "openai-compat") {
-                note("localcode provider type '" + name +
-                     "' is not supported; model settings not imported");
-            } else if (base_url != provider->end() && base_url->is_string() &&
-                       !is_http_url(base_url->get<std::string>())) {
-                note("localcode provider base_url is not an http(s) URL; model settings not "
-                     "imported");
-            }
-        }
-    }
-}
-
 bool validate_imported_mcp(nlohmann::json& document, const nlohmann::json& localcode,
                            const std::filesystem::path& source, std::ostream& err) {
     const auto fail_import = [&](const std::string& reason) {
-        err << "ymh: imported config failed validation: " << reason
+        err << "ymh: imported config failed validation: " << redact_secrets(reason)
             << "; writing the default config instead\n";
         return false;
     };
@@ -851,7 +799,7 @@ bool validate_imported_mcp(nlohmann::json& document, const nlohmann::json& local
 bool write_imported_config(const nlohmann::json& document,
                            const std::filesystem::path& global_config, std::ostream& err) {
     const auto fail_import = [&](const std::string& reason) {
-        err << "ymh: imported config failed validation: " << reason
+        err << "ymh: imported config failed validation: " << redact_secrets(reason)
             << "; writing the default config instead\n";
         return false;
     };
@@ -982,20 +930,22 @@ bool maybe_import_localcode_config(const CliInvocation& invocation,
         return false;
     }
 
-    std::string                   import_error;
-    std::optional<nlohmann::json> document =
-        build_localcode_import(*localcode_doc, default_import_profile_id(), import_error);
-    if (!document.has_value()) {
+    std::string                            import_error;
+    std::optional<LocalcodeImportResult>   result =
+        build_localcode_import(*localcode_doc, import_error);
+    if (!result.has_value()) {
         err << "ymh: import failed: " << redact_secrets(import_error)
             << "; writing the default config instead\n";
         return false;
     }
 
-    print_localcode_notes(*localcode_doc, err);
-    if (!validate_imported_mcp(*document, *localcode_doc, global_config, err)) {
+    for (const std::string& note : result->notes) {
+        err << "ymh: note: " << redact_secrets(note) << "\n";
+    }
+    if (!validate_imported_mcp(result->document, *localcode_doc, global_config, err)) {
         return false;
     }
-    return write_imported_config(*document, global_config, err);
+    return write_imported_config(result->document, global_config, err);
 }
 
 CliInvocation parse_cli(const std::vector<std::string>& args) {

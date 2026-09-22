@@ -980,10 +980,10 @@ TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {
       "orchestrate": true
     })JSON");
 
-    std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
-    ASSERT_TRUE(document.has_value()) << error;
-    const nlohmann::json& doc = *document;
+    std::string                          error;
+    const std::optional<LocalcodeImportResult> result = build_localcode_import(localcode, error);
+    ASSERT_TRUE(result.has_value()) << error;
+    const nlohmann::json& doc = result->document;
 
     ASSERT_TRUE(doc.contains("mcp_servers"));
     const nlohmann::json& server = doc["mcp_servers"]["brave-search"];
@@ -994,11 +994,11 @@ TEST(Config, BuildLocalcodeImportMapsSupportedKeys) {
     EXPECT_FALSE(doc.contains("orchestrate"));
     EXPECT_TRUE(doc["agent"]["compaction"]["enabled"].get<bool>());
     EXPECT_DOUBLE_EQ(doc["agent"]["compaction"]["threshold_ratio"].get<double>(), 0.8);
-    EXPECT_EQ(doc["agent"]["compaction"]["context_window_tokens"].get<std::int64_t>(), 128000);
-    EXPECT_EQ(doc["llm"]["default"]["base_url"].get<std::string>(), "https://x.test/v1");
-    EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
-    EXPECT_EQ(doc["llm"]["default"]["api_key"].get<std::string>(), "SECRET");
-    EXPECT_EQ(doc["llm"]["default"]["max_tokens"].get<std::int64_t>(), 5);
+    EXPECT_EQ(doc["llm"]["endpoints"]["prov"]["base_url"].get<std::string>(), "https://x.test/v1");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["model"].get<std::string>(), "m");
+    EXPECT_EQ(doc["llm"]["endpoints"]["prov"]["api_key"].get<std::string>(), "SECRET");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["max_tokens"].get<std::int64_t>(), 5);
+    EXPECT_EQ(doc["llm"]["models"]["p"]["context_window"].get<std::int64_t>(), 128000);
     EXPECT_EQ(doc["llm"]["default"]["max_concurrency"].get<std::int64_t>(), 3);
     EXPECT_EQ(doc["permissions"]["default"].get<std::string>(), "allow");
     ASSERT_EQ(doc["permissions"]["rules"].size(), 1u);
@@ -1014,11 +1014,12 @@ TEST(Config, BuildLocalcodeImportEscapesLiteralDollarBrace) {
         "s": { "command": "echo ${not_a_ref", "env": { "K": "a${1}" } }
       }
     })JSON");
-    std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
-    ASSERT_TRUE(document.has_value()) << error;
-    EXPECT_EQ((*document)["mcp_servers"]["s"]["command"].get<std::string>(), "echo $${not_a_ref");
-    EXPECT_EQ((*document)["mcp_servers"]["s"]["env"]["K"].get<std::string>(), "a$${1}");
+    std::string                          error;
+    const std::optional<LocalcodeImportResult> result = build_localcode_import(localcode, error);
+    ASSERT_TRUE(result.has_value()) << error;
+    EXPECT_EQ(result->document["mcp_servers"]["s"]["command"].get<std::string>(),
+              "echo $${not_a_ref");
+    EXPECT_EQ(result->document["mcp_servers"]["s"]["env"]["K"].get<std::string>(), "a$${1}");
 }
 
 TEST(Config, BuildLocalcodeImportSkipsNonOpenAiProvider) {
@@ -1027,10 +1028,11 @@ TEST(Config, BuildLocalcodeImportSkipsNonOpenAiProvider) {
       "profiles": { "p": { "provider": "prov", "model": "m" } },
       "providers": { "prov": { "type": "anthropic", "base_url": "https://x.test/v1" } }
     })JSON");
-    std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
-    ASSERT_TRUE(document.has_value()) << error;
-    EXPECT_FALSE(document->contains("llm"));
+    std::string                          error;
+    const std::optional<LocalcodeImportResult> result = build_localcode_import(localcode, error);
+    ASSERT_TRUE(result.has_value()) << error;
+    EXPECT_FALSE(result->document.contains("llm"));
+    EXPECT_EQ(result->notes.size(), 2u);
 }
 
 TEST(Config, LocalcodeConfigPathUsesHome) {
@@ -1051,27 +1053,34 @@ TEST(Config, McpServersStdioRequiresNonEmptyCommand) {
     }
 }
 
-// 25 review M5 / UX-F14: a non-string env/header value aborts the import with
-// an error naming the server and key, and no document is produced.
+// 25 review M5 / UX-F14 / 52-F20: a non-string env/header value skips that
+// server with a note; the import still lands.
 TEST(Config, BuildLocalcodeImportRejectsNonStringEnvAndHeaders) {
     const nlohmann::json localcode = nlohmann::json::parse(R"JSON({
       "mcp_servers": {
-        "brave-search": { "command": "c", "env": { "PORT": 8080, "TOKEN": "x" } }
+        "brave-search": { "command": "c", "env": { "PORT": 8080, "TOKEN": "x" } },
+        "ok": { "command": "c" }
       }
     })JSON");
-    std::string                         error;
-    const std::optional<nlohmann::json> document = build_localcode_import(localcode, default_import_profile_id(), error);
-    EXPECT_FALSE(document.has_value());
-    EXPECT_NE(error.find("mcp_servers.brave-search"), std::string::npos) << error;
-    EXPECT_NE(error.find("PORT"), std::string::npos) << error;
+    std::string                          error;
+    const std::optional<LocalcodeImportResult> result = build_localcode_import(localcode, error);
+    ASSERT_TRUE(result.has_value()) << error;
+    EXPECT_FALSE(result->document["mcp_servers"].contains("brave-search"));
+    EXPECT_TRUE(result->document["mcp_servers"].contains("ok"));
+    ASSERT_EQ(result->notes.size(), 1u);
+    EXPECT_NE(result->notes[0].find("brave-search"), std::string::npos) << result->notes[0];
+    EXPECT_NE(result->notes[0].find("PORT"), std::string::npos) << result->notes[0];
 
     const nlohmann::json bad_headers = nlohmann::json::parse(R"JSON({
       "mcp_servers": { "s": { "url": "https://x", "headers": { "Authorization": 5 } } }
     })JSON");
     error.clear();
-    EXPECT_FALSE(build_localcode_import(bad_headers, default_import_profile_id(), error).has_value());
-    EXPECT_NE(error.find("mcp_servers.s"), std::string::npos) << error;
-    EXPECT_NE(error.find("Authorization"), std::string::npos) << error;
+    const std::optional<LocalcodeImportResult> skipped =
+        build_localcode_import(bad_headers, error);
+    ASSERT_TRUE(skipped.has_value()) << error;
+    ASSERT_EQ(skipped->notes.size(), 1u);
+    EXPECT_NE(skipped->notes[0].find("s"), std::string::npos) << skipped->notes[0];
+    EXPECT_NE(skipped->notes[0].find("Authorization"), std::string::npos) << skipped->notes[0];
 }
 
 TEST(Config, PresetsKeysParseWithDefaults) {

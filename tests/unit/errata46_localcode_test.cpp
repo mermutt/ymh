@@ -55,11 +55,10 @@ void write_file(const std::filesystem::path& path, const std::string& body, mode
 }
 
 nlohmann::json import(const nlohmann::json& localcode) {
-    std::string                   error;
-    std::optional<nlohmann::json> document =
-        build_localcode_import(localcode, default_import_profile_id(), error);
-    EXPECT_TRUE(document.has_value()) << error;
-    return document.value_or(nlohmann::json::object());
+    std::string                          error;
+    std::optional<LocalcodeImportResult> result = build_localcode_import(localcode, error);
+    EXPECT_TRUE(result.has_value()) << error;
+    return result.has_value() ? result->document : nlohmann::json::object();
 }
 
 constexpr const char* kProviderProfile = R"JSON({
@@ -72,7 +71,7 @@ constexpr const char* kProviderProfile = R"JSON({
 
 TEST(Errata46D12, UI46_D12_ImportApiKey) {
     const nlohmann::json doc = import(nlohmann::json::parse(kProviderProfile));
-    EXPECT_EQ(doc["llm"]["default"]["api_key"].get<std::string>(), "SECRET");
+    EXPECT_EQ(doc["llm"]["endpoints"]["prov"]["api_key"].get<std::string>(), "SECRET");
 }
 
 TEST(Errata46D12, UI46_D12_ApiKeyReachesProvider) {
@@ -162,8 +161,9 @@ TEST(Errata46D12, UI46_D12_OpenAiCompatTypeAccepted) {
       "profiles": { "p": { "provider": "prov", "model": "m" } },
       "providers": { "prov": { "type": "openai-compat", "base_url": "https://x.test/v1" } }
     })JSON"));
-    EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
-    EXPECT_EQ(doc["llm"]["default"]["profile"].get<std::string>(), "muse-glimmer");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["model"].get<std::string>(), "m");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["endpoint"].get<std::string>(), "prov");
+    EXPECT_FALSE(doc["llm"]["models"]["p"].contains("profile"));
 }
 
 TEST(Errata46D12, UI46_D12_BedrockTypeSkipped) {
@@ -177,7 +177,7 @@ TEST(Errata46D12, UI46_D12_BedrockTypeSkipped) {
 
 TEST(Errata46D12, UI46_D12_ImportMaxTokens) {
     const nlohmann::json doc = import(nlohmann::json::parse(kProviderProfile));
-    EXPECT_EQ(doc["llm"]["default"]["max_tokens"].get<std::int64_t>(), 42);
+    EXPECT_EQ(doc["llm"]["models"]["p"]["max_tokens"].get<std::int64_t>(), 42);
 }
 
 TEST(Errata46D12, UI46_D12_MaxTokensTargetsCallConfig) {
@@ -190,9 +190,9 @@ TEST(Errata46D12, UI46_D12_MaxTokensTargetsCallConfig) {
 
 TEST(Errata46D12, UI46_D12_ModelFieldsRetained) {
     const nlohmann::json doc = import(nlohmann::json::parse(kProviderProfile));
-    EXPECT_EQ(doc["llm"]["default"]["base_url"].get<std::string>(), "https://x.test/v1");
-    EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
-    EXPECT_EQ(doc["agent"]["compaction"]["context_window_tokens"].get<std::int64_t>(), 128000);
+    EXPECT_EQ(doc["llm"]["endpoints"]["prov"]["base_url"].get<std::string>(), "https://x.test/v1");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["model"].get<std::string>(), "m");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["context_window"].get<std::int64_t>(), 128000);
 }
 
 TEST(Errata46D12, UI46_D12_NoProfileNoImport) {
@@ -250,9 +250,9 @@ TEST(Errata46D12, UI46_D12_LocalcodeFixture) {
     })JSON"));
     EXPECT_EQ(doc["permissions"]["default"].get<std::string>(), "allow");
     ASSERT_EQ(doc["permissions"]["rules"].size(), 2u);
-    EXPECT_EQ(doc["llm"]["default"]["api_key"].get<std::string>(), "SECRET");
-    EXPECT_EQ(doc["llm"]["default"]["model"].get<std::string>(), "m");
-    EXPECT_EQ(doc["llm"]["default"]["max_tokens"].get<std::int64_t>(), 42);
+    EXPECT_EQ(doc["llm"]["endpoints"]["prov"]["api_key"].get<std::string>(), "SECRET");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["model"].get<std::string>(), "m");
+    EXPECT_EQ(doc["llm"]["models"]["p"]["max_tokens"].get<std::int64_t>(), 42);
     EXPECT_TRUE(doc.contains("mcp_servers"));
 }
 

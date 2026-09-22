@@ -40,6 +40,7 @@ struct CliInvocation {
     std::string workspace;     // empty => cwd
     std::string config_path;   // empty => default global config
     std::string model;
+    std::string endpoint;
     std::string provider;
     std::string base_url;
     std::string api_key_env;
