@@ -1,6 +1,7 @@
 #include "ymh/config/config.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -103,6 +104,91 @@ void reject_unknown(const Json& table,
 const Json* member(const Json& obj, std::string_view key) {
     const auto it = obj.find(std::string{key});
     return it == obj.end() ? nullptr : &(*it);
+}
+
+bool name_in(std::initializer_list<std::string_view> names, std::string_view key) {
+    for (const std::string_view candidate : names) {
+        if (candidate == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 52-I1: an endpoint/model name is non-empty, <=64 bytes, and matches
+// [A-Za-z0-9][A-Za-z0-9._-]*. Entry names are a free namespace; only the
+// grammar is checked (52-F5).
+bool valid_config_entry_name(std::string_view name) {
+    if (name.empty() || name.size() > 64) {
+        return false;
+    }
+    const auto first = static_cast<unsigned char>(name.front());
+    if (std::isalnum(first) == 0) {
+        return false;
+    }
+    for (const char c : name) {
+        const auto uc = static_cast<unsigned char>(c);
+        if (std::isalnum(uc) != 0 || c == '.' || c == '_' || c == '-') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+// 52-D5/52-I6: validates a user-named map. Each value must be an object with a
+// well-formed name, every key INSIDE an entry is checked against `allowed`, and
+// `retry`/`headers` recurse. Only the entry NAME is not schema-checked.
+void reject_unknown_named_map(const Json& table,
+                              std::string_view table_name,
+                              std::initializer_list<std::string_view> allowed,
+                              const std::filesystem::path& source) {
+    if (!table.is_object()) {
+        fail(source, "invalid type for '" + std::string{table_name} + "'");
+    }
+    const bool allow_retry   = name_in(allowed, "retry");
+    const bool allow_headers = name_in(allowed, "headers");
+    for (auto it = table.begin(); it != table.end(); ++it) {
+        const std::string name = it.key();
+        if (!valid_config_entry_name(name)) {
+            fail(source, "invalid name '" + name + "' for '" + std::string{table_name} + "'");
+        }
+        const std::string label = std::string{table_name} + "." + name;
+        if (!it.value().is_object()) {
+            fail(source, "invalid type for '" + label + "'");
+        }
+        for (auto entry = it.value().begin(); entry != it.value().end(); ++entry) {
+            if (!name_in(allowed, entry.key())) {
+                fail(source, "unknown key '" + label + "." + entry.key() + "'");
+            }
+        }
+        if (allow_retry) {
+            if (const Json* retry = member(it.value(), "retry"); retry != nullptr) {
+                if (!retry->is_object()) {
+                    fail(source, "invalid type for '" + label + ".retry'");
+                }
+                for (auto field = retry->begin(); field != retry->end(); ++field) {
+                    if (!name_in({"max_attempts", "base_delay_ms", "max_delay_ms", "jitter",
+                                  "honor_retry_after"},
+                                 field.key())) {
+                        fail(source, "unknown key '" + label + ".retry." + field.key() + "'");
+                    }
+                }
+            }
+        }
+        if (allow_headers) {
+            if (const Json* headers = member(it.value(), "headers"); headers != nullptr) {
+                if (!headers->is_object()) {
+                    fail(source, "invalid type for '" + label + ".headers'");
+                }
+                for (auto header = headers->begin(); header != headers->end(); ++header) {
+                    if (!header.value().is_string()) {
+                        fail(source, "invalid type for '" + label + ".headers." + header.key() + "'");
+                    }
+                }
+            }
+        }
+    }
 }
 
 std::string read_string(const Json& obj,
@@ -386,21 +472,206 @@ void apply_session(Config& config, const Json& table, const std::filesystem::pat
         table, "persist_prompt_text", "session", config.session.persist_prompt_text, source);
 }
 
+void read_retry(RetrySettings& retry, const Json& table, std::string_view label,
+                const std::filesystem::path& source) {
+    retry.max_attempts = static_cast<std::uint32_t>(read_int64(
+        table, "max_attempts", label, static_cast<std::int64_t>(retry.max_attempts), source));
+    retry.base_delay = std::chrono::milliseconds{
+        read_int64(table, "base_delay_ms", label, retry.base_delay.count(), source)};
+    retry.max_delay = std::chrono::milliseconds{
+        read_int64(table, "max_delay_ms", label, retry.max_delay.count(), source)};
+    retry.jitter = read_double(table, "jitter", label, retry.jitter, source);
+    retry.honor_retry_after =
+        read_bool(table, "honor_retry_after", label, retry.honor_retry_after, source);
+}
+
 void apply_retry(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "llm.default.retry",
                    {"max_attempts", "base_delay_ms", "max_delay_ms", "jitter", "honor_retry_after"},
                    source);
-    config.llm.retry.max_attempts = static_cast<std::uint32_t>(read_int64(
-        table, "max_attempts", "llm.default.retry",
-        static_cast<std::int64_t>(config.llm.retry.max_attempts), source));
-    config.llm.retry.base_delay = std::chrono::milliseconds{read_int64(
-        table, "base_delay_ms", "llm.default.retry", config.llm.retry.base_delay.count(), source)};
-    config.llm.retry.max_delay = std::chrono::milliseconds{read_int64(
-        table, "max_delay_ms", "llm.default.retry", config.llm.retry.max_delay.count(), source)};
-    config.llm.retry.jitter =
-        read_double(table, "jitter", "llm.default.retry", config.llm.retry.jitter, source);
-    config.llm.retry.honor_retry_after = read_bool(
-        table, "honor_retry_after", "llm.default.retry", config.llm.retry.honor_retry_after, source);
+    read_retry(config.llm.retry, table, "llm.default.retry", source);
+}
+
+std::vector<std::pair<std::string, std::string>> read_string_object(
+    const Json& table, std::string_view key, std::string_view label,
+    const std::filesystem::path& source) {
+    std::vector<std::pair<std::string, std::string>> result;
+    const Json* node = member(table, key);
+    if (node == nullptr) {
+        return result;
+    }
+    if (!node->is_object()) {
+        fail(source, "invalid type for '" + std::string{label} + "'");
+    }
+    for (auto it = node->begin(); it != node->end(); ++it) {
+        if (!it.value().is_string()) {
+            fail(source,
+                 "invalid type for '" + std::string{label} + "." + it.key() + "'");
+        }
+        result.emplace_back(it.key(), it.value().get<std::string>());
+    }
+    return result;
+}
+
+void apply_endpoint_entry(EndpointSettings& entry, const Json& table, const std::string& label,
+                          const std::filesystem::path& source, bool global_layer) {
+    entry.provider =
+        read_string(table, "provider", label, entry.provider, source);
+    entry.base_url = read_string(table, "base_url", label, entry.base_url, source);
+    entry.api_key_env = read_string(table, "api_key_env", label, entry.api_key_env, source);
+
+    if (member(table, "api_key") != nullptr) {
+        if (!global_layer) {
+            fail(source, "'" + label + ".api_key' is global-layer only");
+        }
+        const std::string value = read_string(table, "api_key", label, "", source);
+        if (!value.empty()) {
+            require_private_config_file(source);
+            entry.api_key = value;
+        }
+    }
+    if (member(table, "headers") != nullptr) {
+        if (!global_layer) {
+            fail(source, "'" + label + ".headers' is global-layer only");
+        }
+        require_private_config_file(source);
+        entry.headers = read_string_object(table, "headers", label + ".headers", source);
+    }
+
+    entry.max_concurrency = static_cast<std::size_t>(read_int64(
+        table, "max_concurrency", label, static_cast<std::int64_t>(entry.max_concurrency), source));
+    entry.connect_timeout = std::chrono::milliseconds{read_int64(
+        table, "connect_timeout_ms", label, entry.connect_timeout.count(), source)};
+    entry.idle_timeout = std::chrono::milliseconds{
+        read_int64(table, "idle_timeout_ms", label, entry.idle_timeout.count(), source)};
+    entry.request_timeout = std::chrono::milliseconds{
+        read_int64(table, "request_timeout_ms", label, entry.request_timeout.count(), source)};
+
+    if (const Json* retry = member(table, "retry"); retry != nullptr) {
+        read_retry(entry.retry, *retry, label + ".retry", source);
+    }
+}
+
+void apply_model_entry(ModelSettings& entry, const Json& table, const std::string& label,
+                       const std::filesystem::path& source) {
+    entry.endpoint = read_string(table, "endpoint", label, entry.endpoint, source);
+    entry.model    = read_string(table, "model", label, entry.model, source);
+    entry.profile  = read_string(table, "profile", label, entry.profile, source);
+
+    if (member(table, "max_tokens") != nullptr) {
+        const std::int64_t value = read_int64(table, "max_tokens", label, 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for '" + label + ".max_tokens'");
+        }
+        entry.max_tokens = static_cast<std::uint32_t>(value);
+    }
+    if (member(table, "context_window") != nullptr) {
+        const std::int64_t value = read_int64(table, "context_window", label, 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for '" + label + ".context_window'");
+        }
+        entry.context_window = static_cast<std::uint32_t>(value);
+    }
+    entry.reasoning_effort = read_optional_string(table, "reasoning_effort", label, source);
+    if (member(table, "temperature") != nullptr) {
+        const std::optional<double> value = read_optional_double(table, "temperature", label, source);
+        if (!value.has_value() || *value < 0.0 || *value > 2.0) {
+            fail(source, "'" + label + ".temperature' must be in [0.0, 2.0]");
+        }
+        entry.temperature = value;
+    }
+    if (member(table, "top_p") != nullptr) {
+        const std::optional<double> value = read_optional_double(table, "top_p", label, source);
+        if (!value.has_value() || *value <= 0.0 || *value > 1.0) {
+            fail(source, "'" + label + ".top_p' must be in (0.0, 1.0]");
+        }
+        entry.top_p = value;
+    }
+    if (member(table, "top_k") != nullptr) {
+        const std::int64_t value = read_int64(table, "top_k", label, 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for '" + label + ".top_k'");
+        }
+        entry.top_k = value == 0 ? std::nullopt
+                                 : std::optional<std::uint32_t>{static_cast<std::uint32_t>(value)};
+    }
+    if (member(table, "tool_choice") != nullptr) {
+        const std::string value = read_string(table, "tool_choice", label, "", source);
+        if (value.empty()) {
+            fail(source, "'" + label + ".tool_choice' must not be empty");
+        }
+        entry.tool_choice = value;
+    }
+    if (member(table, "stop") != nullptr) {
+        entry.stop = read_string_array(table, "stop", label, source);
+    }
+    if (const ModelProfile* profile = find_model_profile(entry.profile); profile != nullptr) {
+        for (const std::string& stop : entry.stop) {
+            if (std::find(profile->forbidden_stop_tokens.begin(),
+                          profile->forbidden_stop_tokens.end(),
+                          stop) != profile->forbidden_stop_tokens.end()) {
+                fail(source, label + ".stop must not contain '" + stop +
+                                 "': it ends a message, not the turn");
+            }
+        }
+    }
+    if (member(table, "seed") != nullptr) {
+        const std::int64_t value = read_int64(table, "seed", label, 0, source);
+        if (value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            fail(source, "value out of range for '" + label + ".seed'");
+        }
+        entry.seed = static_cast<std::uint32_t>(value);
+    }
+}
+
+void apply_endpoints(Config& config, const Json& table, const std::filesystem::path& source,
+                     bool global_layer) {
+    reject_unknown_named_map(table, "llm.endpoints",
+                             {"provider", "base_url", "api_key", "api_key_env", "headers",
+                              "max_concurrency", "connect_timeout_ms", "idle_timeout_ms",
+                              "request_timeout_ms", "retry"},
+                             source);
+    for (auto it = table.begin(); it != table.end(); ++it) {
+        const std::string name  = it.key();
+        const std::string label = "llm.endpoints." + name;
+        EndpointSettings  entry;
+        apply_endpoint_entry(entry, it.value(), label, source, global_layer);
+        if (!global_layer) {
+            const auto existing = config.llm.endpoints.find(name);
+            if (existing != config.llm.endpoints.end()) {
+                if (existing->second.api_key.has_value()) {
+                    fail(source, "workspace endpoint '" + name +
+                                     "' shadows a global endpoint with a literal api_key");
+                }
+                if (!existing->second.headers.empty()) {
+                    fail(source, "workspace endpoint '" + name +
+                                     "' shadows a global endpoint with credential headers");
+                }
+            }
+        }
+        config.llm.endpoints[name] = std::move(entry);
+    }
+}
+
+void apply_models(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown_named_map(table, "llm.models",
+                             {"endpoint", "model", "profile", "max_tokens", "context_window",
+                              "reasoning_effort", "temperature", "top_p", "top_k", "tool_choice",
+                              "stop", "seed"},
+                             source);
+    for (auto it = table.begin(); it != table.end(); ++it) {
+        const std::string name  = it.key();
+        const std::string label = "llm.models." + name;
+        ModelSettings     entry;
+        apply_model_entry(entry, it.value(), label, source);
+        if (entry.endpoint.empty()) {
+            fail(source, "missing 'endpoint' for '" + label + "'");
+        }
+        if (entry.model.empty()) {
+            fail(source, "missing 'model' for '" + label + "'");
+        }
+        config.llm.models[name] = std::move(entry);
+    }
 }
 
 void apply_llm(Config& config, const Json& table, const std::filesystem::path& source,
@@ -409,8 +680,22 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
                    {"default", "provider", "base_url", "model", "api_key_env", "api_key",
                     "max_tokens", "reasoning_effort", "profile", "temperature", "top_p", "top_k",
                     "tool_choice", "stop", "seed", "max_concurrency", "connect_timeout_ms",
-                    "idle_timeout_ms", "request_timeout_ms", "retry"},
+                    "idle_timeout_ms", "request_timeout_ms", "retry", "endpoints", "models",
+                    "active_model"},
                    source);
+
+    if (const Json* endpoints = member(table, "endpoints"); endpoints != nullptr) {
+        apply_endpoints(config, *endpoints, source, global_layer);
+    }
+    if (const Json* models = member(table, "models"); models != nullptr) {
+        apply_models(config, *models, source);
+    }
+    if (const Json* active = member(table, "active_model"); active != nullptr) {
+        if (!active->is_string()) {
+            fail(source, "invalid type for 'llm.active_model'");
+        }
+        config.llm.active_model = active->get<std::string>();
+    }
 
     const Json* section = &table;
     if (const Json* nested = member(table, "default"); nested != nullptr) {
@@ -1339,6 +1624,12 @@ void apply_env_overrides(Config& config) {
     if (const auto value = env_value("YMH_LLM_MODEL")) {
         config.llm.model = *value;
     }
+    if (const auto value = env_value("YMH_LLM_ACTIVE_MODEL")) {
+        config.llm.active_model = *value;
+    }
+    if (const auto value = env_value("YMH_LLM_ENDPOINT")) {
+        config.llm.active_endpoint = *value;
+    }
     if (const auto value = env_value("YMH_API_KEY_ENV")) {
         config.llm.api_key_env = *value;
     }
@@ -1408,6 +1699,22 @@ Config load_config(const ConfigPaths& paths) {
     apply_env_overrides(config);
     if (!config.llm.profile.empty() && !is_known_model_profile(config.llm.profile)) {
         throw ConfigError("unknown llm.default.profile: " + config.llm.profile);
+    }
+    for (const auto& [name, model] : config.llm.models) {
+        if (config.llm.endpoints.find(model.endpoint) == config.llm.endpoints.end()) {
+            throw ConfigError("unknown endpoint '" + model.endpoint + "' for model '" + name + "'");
+        }
+        if (!model.profile.empty() && !is_known_model_profile(model.profile)) {
+            throw ConfigError("unknown llm.models." + name + ".profile: " + model.profile);
+        }
+    }
+    if (config.llm.active_model.has_value() && !config.llm.active_model->empty() &&
+        config.llm.models.find(*config.llm.active_model) == config.llm.models.end()) {
+        throw ConfigError("unknown llm.active_model: " + *config.llm.active_model);
+    }
+    if (config.llm.active_endpoint.has_value() && !config.llm.active_endpoint->empty() &&
+        config.llm.endpoints.find(*config.llm.active_endpoint) == config.llm.endpoints.end()) {
+        throw ConfigError("unknown endpoint '" + *config.llm.active_endpoint + "'");
     }
     return config;
 }
@@ -1569,28 +1876,33 @@ Json map_localcode_mcp_server(const Json& entry) {
 
 } // namespace
 
-std::optional<Json> build_localcode_import(const Json& localcode,
-                                           std::string_view default_profile_id,
-                                           std::string& error) {
+std::optional<LocalcodeImportResult> build_localcode_import(const Json& localcode,
+                                                            std::string& error) {
     error.clear();
     if (!localcode.is_object()) {
         error = "localcode config must be a JSON object";
         return std::nullopt;
     }
 
-    Json document = Json::object();
+    LocalcodeImportResult result;
+    Json&                document = result.document;
+    std::vector<std::string>& notes = result.notes;
+    document = Json::object();
 
     if (const Json* servers = member(localcode, "mcp_servers"); servers != nullptr) {
         if (servers->is_object()) {
             Json mapped = Json::object();
             for (auto it = servers->begin(); it != servers->end(); ++it) {
-                if (it.value().is_object()) {
-                    try {
-                        mapped[it.key()] = map_localcode_mcp_server(it.value());
-                    } catch (const LocalcodeImportError& failure) {
-                        error = "mcp_servers." + it.key() + ": " + failure.what();
-                        return std::nullopt;
-                    }
+                if (!it.value().is_object()) {
+                    notes.push_back("localcode mcp server '" + it.key() +
+                                    "' is not an object; skipped");
+                    continue;
+                }
+                try {
+                    mapped[it.key()] = map_localcode_mcp_server(it.value());
+                } catch (const LocalcodeImportError& failure) {
+                    notes.push_back("localcode mcp server '" + it.key() + "' skipped: " +
+                                    failure.what());
                 }
             }
             if (!mapped.empty()) {
@@ -1625,6 +1937,12 @@ std::optional<Json> build_localcode_import(const Json& localcode,
     }
 
     if (const Json* permission = member(localcode, "permission");
+        permission != nullptr && permission->is_array() && !permission->empty()) {
+        notes.push_back("localcode 'permission' is a flat array, not the supported object shape; "
+                        "permission rules are not imported");
+    }
+
+    if (const Json* permission = member(localcode, "permission");
         permission != nullptr && permission->is_object()) {
         Json rules = Json::array();
         for (auto it = permission->begin(); it != permission->end(); ++it) {
@@ -1654,88 +1972,240 @@ std::optional<Json> build_localcode_import(const Json& localcode,
         }
     }
 
-    const Json* default_profile = member(localcode, "default_profile");
-    if (default_profile != nullptr && default_profile->is_string()) {
-        const std::string profile_name = default_profile->get<std::string>();
-        const Json*       profiles     = member(localcode, "profiles");
-        const Json*       profile      = nullptr;
-        if (profiles != nullptr && profiles->is_object()) {
-            if (auto it = profiles->find(profile_name);
-                it != profiles->end() && it->is_object()) {
-                profile = &(*it);
+    const Json*           providers = member(localcode, "providers");
+    std::set<std::string> imported_endpoints;
+    if (providers != nullptr && providers->is_object()) {
+        Json endpoints = Json::object();
+        for (auto it = providers->begin(); it != providers->end(); ++it) {
+            const std::string name = it.key();
+            if (!it.value().is_object()) {
+                notes.push_back("localcode provider '" + name + "' is not an object; skipped");
+                continue;
             }
+            const Json& provider = it.value();
+            const Json* type     = member(provider, "type");
+            const std::string type_name =
+                (type != nullptr && type->is_string()) ? type->get<std::string>() : std::string{};
+            if (type_name != "openai-compatible" && type_name != "openai-compat") {
+                notes.push_back("localcode provider '" + name + "' type '" + type_name +
+                                "' is not supported; endpoint skipped");
+                continue;
+            }
+            const Json*       base_url = member(provider, "base_url");
+            const std::string url =
+                (base_url != nullptr && base_url->is_string()) ? base_url->get<std::string>()
+                                                               : std::string{};
+            if (!is_http_url(url)) {
+                notes.push_back("localcode provider '" + name +
+                                "' base_url is not an http(s) URL; endpoint skipped");
+                continue;
+            }
+            Json entry        = Json::object();
+            entry["provider"] = "openai-compatible";
+            entry["base_url"] = url;
+            const Json*       key     = member(provider, "api_key");
+            const std::string api_key =
+                (key != nullptr && key->is_string()) ? key->get<std::string>() : std::string{};
+            if (!api_key.empty()) {
+                entry["api_key"] = api_key;
+            } else {
+                const Json*       env         = member(provider, "api_key_env");
+                const std::string api_key_env =
+                    (env != nullptr && env->is_string()) ? env->get<std::string>() : std::string{};
+                if (!api_key_env.empty()) {
+                    entry["api_key_env"] = api_key_env;
+                } else {
+                    notes.push_back("localcode provider '" + name +
+                                    "' has no api_key or api_key_env; imported as a keyless "
+                                    "endpoint");
+                }
+            }
+            endpoints[name] = std::move(entry);
+            imported_endpoints.insert(name);
         }
-
-        const Json* provider = nullptr;
-        if (profile != nullptr) {
-            const Json* provider_name = member(*profile, "provider");
-            const Json* providers     = member(localcode, "providers");
-            if (provider_name != nullptr && provider_name->is_string() && providers != nullptr &&
-                providers->is_object()) {
-                if (auto it = providers->find(provider_name->get<std::string>());
-                    it != providers->end() && it->is_object()) {
-                    provider = &(*it);
-                }
-            }
-        }
-
-        bool openai_compatible = false;
-        if (provider != nullptr) {
-            const Json* type = member(*provider, "type");
-            if (type != nullptr && type->is_string()) {
-                const std::string name = type->get<std::string>();
-                openai_compatible = name == "openai-compatible" || name == "openai-compat";
-            }
-        }
-        if (openai_compatible) {
-            // Pre-set for any openai-compatible provider, regardless of the
-            // imported model; the caller supplies the id so no profile
-            // identity lives in this file (47-I6). `profile: ""` disables it.
-            if (!default_profile_id.empty()) {
-                document["llm"]["default"]["profile"] = std::string{default_profile_id};
-            }
-            if (const Json* key = member(*provider, "api_key");
-                key != nullptr && key->is_string() && !key->get<std::string>().empty()) {
-                document["llm"]["default"]["api_key"] = key->get<std::string>();
-            }
-            if (const Json* tokens = member(*profile, "max_tokens"); tokens != nullptr) {
-                if (const auto value = read_non_negative_integer(*tokens);
-                    value.has_value() && *value > 0) {
-                    document["llm"]["default"]["max_tokens"] = *value;
-                }
-            }
-            if (const Json* window = member(*profile, "context_window"); window != nullptr) {
-                if (const auto value = read_non_negative_integer(*window); value.has_value()) {
-                    document["agent"]["compaction"]["context_window_tokens"] = *value;
-                }
-            }
-            const Json* base_url = member(*provider, "base_url");
-            if (base_url != nullptr && base_url->is_string()) {
-                const std::string url = base_url->get<std::string>();
-                if (is_http_url(url)) {
-                    document["llm"]["default"]["base_url"] = url;
-                    if (const Json* model = member(*profile, "model");
-                        model != nullptr && model->is_string()) {
-                        document["llm"]["default"]["model"] = model->get<std::string>();
-                    }
-                }
-            } else if (base_url == nullptr) {
-                if (const Json* model = member(*profile, "model");
-                    model != nullptr && model->is_string()) {
-                    document["llm"]["default"]["model"] = model->get<std::string>();
-                }
-            }
+        if (!endpoints.empty()) {
+            document["llm"]["endpoints"] = std::move(endpoints);
         }
     }
 
-    return document;
+    const Json*           profiles = member(localcode, "profiles");
+    std::set<std::string> imported_models;
+    if (profiles != nullptr && profiles->is_object()) {
+        Json models = Json::object();
+        for (auto it = profiles->begin(); it != profiles->end(); ++it) {
+            const std::string name = it.key();
+            if (!it.value().is_object()) {
+                notes.push_back("localcode profile '" + name + "' is not an object; skipped");
+                continue;
+            }
+            const Json&       profile  = it.value();
+            const Json*       model    = member(profile, "model");
+            const std::string model_id =
+                (model != nullptr && model->is_string()) ? model->get<std::string>() : std::string{};
+            if (model_id.empty()) {
+                notes.push_back("localcode profile '" + name + "' has no model; entry skipped");
+                continue;
+            }
+            const Json*       provider_name = member(profile, "provider");
+            const std::string endpoint =
+                (provider_name != nullptr && provider_name->is_string())
+                    ? provider_name->get<std::string>()
+                    : std::string{};
+            if (endpoint.empty() || imported_endpoints.find(endpoint) == imported_endpoints.end()) {
+                notes.push_back("localcode profile '" + name + "' references provider '" + endpoint +
+                                "' which was not imported; entry skipped");
+                continue;
+            }
+            Json entry          = Json::object();
+            entry["endpoint"]   = endpoint;
+            entry["model"]      = model_id;
+            if (const Json* tokens = member(profile, "max_tokens"); tokens != nullptr) {
+                if (const auto value = read_non_negative_integer(*tokens);
+                    value.has_value() && *value > 0) {
+                    entry["max_tokens"] = *value;
+                }
+            }
+            if (const Json* window = member(profile, "context_window"); window != nullptr) {
+                if (const auto value = read_non_negative_integer(*window); value.has_value()) {
+                    entry["context_window"] = *value;
+                }
+            }
+            const std::string_view profile_id = import_profile_id_for_model(model_id);
+            if (!profile_id.empty()) {
+                entry["profile"] = std::string{profile_id};
+            }
+            models[name] = std::move(entry);
+            imported_models.insert(name);
+        }
+        if (!models.empty()) {
+            document["llm"]["models"] = std::move(models);
+        }
+    }
+
+    if (const Json* default_profile = member(localcode, "default_profile");
+        default_profile != nullptr && default_profile->is_string()) {
+        const std::string profile_name = default_profile->get<std::string>();
+        if (!profile_name.empty() && imported_models.find(profile_name) != imported_models.end()) {
+            document["llm"]["active_model"] = profile_name;
+        }
+    }
+
+    return result;
 }
 
 std::string effective_model(const Config& config) {
-    if (!config.agent.model.empty()) {
-        return config.agent.model;
+    return resolve_model(config).model_id;
+}
+
+namespace {
+
+ResolvedEndpoint resolve_named_endpoint(const Config& config, const std::string& name) {
+    const auto it = config.llm.endpoints.find(name);
+    if (it == config.llm.endpoints.end()) {
+        throw ConfigError("unknown endpoint '" + name + "'");
     }
-    return config.llm.model;
+    const EndpointSettings& settings = it->second;
+    ResolvedEndpoint        resolved;
+    resolved.name            = name;
+    resolved.provider        = settings.provider;
+    resolved.base_url        = settings.base_url;
+    resolved.api_key_env     = settings.api_key_env;
+    resolved.api_key         = settings.api_key;
+    resolved.headers         = settings.headers;
+    resolved.connect_timeout = settings.connect_timeout;
+    resolved.idle_timeout    = settings.idle_timeout;
+    resolved.request_timeout = settings.request_timeout;
+    resolved.retry           = settings.retry;
+    resolved.max_concurrency = settings.max_concurrency;
+    return resolved;
+}
+
+ResolvedEndpoint default_endpoint(const Config& config) {
+    ResolvedEndpoint resolved;
+    resolved.name            = "";
+    resolved.provider        = config.llm.provider;
+    resolved.base_url        = config.llm.base_url;
+    resolved.api_key_env     = config.llm.api_key_env;
+    resolved.api_key         = config.llm.api_key;
+    resolved.connect_timeout = config.llm.connect_timeout;
+    resolved.idle_timeout    = config.llm.idle_timeout;
+    resolved.request_timeout = config.llm.request_timeout;
+    resolved.retry           = config.llm.retry;
+    resolved.max_concurrency = config.llm.max_concurrency;
+    return resolved;
+}
+
+ModelProfile resolved_profile(const std::string& id) {
+    if (const ModelProfile* profile = find_model_profile(id); profile != nullptr) {
+        return *profile;
+    }
+    return ModelProfile{};
+}
+
+void fill_default_model(ResolvedModel& out, const Config& config, const std::string& model_id,
+                        const std::string& source) {
+    out.endpoint         = default_endpoint(config);
+    out.model_name       = "";
+    out.model_id         = model_id;
+    out.max_tokens       = config.llm.max_tokens;
+    out.context_window   = std::nullopt;
+    out.reasoning_effort = config.llm.reasoning_effort;
+    out.profile          = resolved_profile(config.llm.profile);
+    out.temperature      = config.llm.temperature;
+    out.top_p            = config.llm.top_p;
+    out.top_k            = config.llm.top_k;
+    out.tool_choice      = config.llm.tool_choice;
+    out.stop             = config.llm.stop;
+    out.seed             = config.llm.seed;
+    out.source           = source;
+}
+
+void fill_named_model(ResolvedModel& out, const Config& config, const std::string& name,
+                      const std::string& source) {
+    const auto it = config.llm.models.find(name);
+    if (it == config.llm.models.end()) {
+        throw ConfigError("unknown model '" + name + "'");
+    }
+    const ModelSettings& model = it->second;
+    out.endpoint         = resolve_named_endpoint(config, model.endpoint);
+    out.model_name       = name;
+    out.model_id         = model.model;
+    out.max_tokens       = model.max_tokens;
+    out.context_window   = model.context_window;
+    out.reasoning_effort = model.reasoning_effort;
+    out.profile          = resolved_profile(model.profile);
+    out.temperature      = model.temperature;
+    out.top_p            = model.top_p;
+    out.top_k            = model.top_k;
+    out.tool_choice      = model.tool_choice;
+    out.stop             = model.stop;
+    out.seed             = model.seed;
+    out.source           = source;
+}
+
+} // namespace
+
+ResolvedModel resolve_model(const Config& config) {
+    ResolvedModel resolved;
+    if (!config.agent.model.empty()) {
+        if (config.llm.models.find(config.agent.model) != config.llm.models.end()) {
+            fill_named_model(resolved, config, config.agent.model, "agent.model");
+        } else {
+            fill_default_model(resolved, config, config.agent.model, "agent.model");
+        }
+    } else if (config.llm.active_model.has_value() && !config.llm.active_model->empty()) {
+        fill_named_model(resolved, config, *config.llm.active_model, "llm.active_model");
+    } else if (!config.llm.model.empty()) {
+        fill_default_model(resolved, config, config.llm.model, "llm.default.model");
+    } else {
+        fill_default_model(resolved, config, "deepseek-flash", "builtin");
+    }
+
+    if (resolved.model_name.empty() && config.llm.active_endpoint.has_value() &&
+        !config.llm.active_endpoint->empty()) {
+        resolved.endpoint = resolve_named_endpoint(config, *config.llm.active_endpoint);
+    }
+    return resolved;
 }
 
 } // namespace ymh

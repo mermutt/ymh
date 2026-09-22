@@ -23,15 +23,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "ymh/jobs/job_types.hpp"
+#include "ymh/llm/llm_call_config.hpp"
+#include "ymh/llm/model_profile.hpp"
 #include "ymh/prompt/instructions.hpp"
 #include "ymh/tools/presentation.hpp"
 
@@ -118,6 +123,44 @@ struct RetrySettings {
     bool                      honor_retry_after = true;
 };
 
+// [llm.endpoints.<name>] (52-D1). One named connection. The absent fields of an
+// entry use the built-in endpoint defaults: `provider = "openai-compatible"` and
+// `base_url = "https://api.deepseek.com/v1"` (52 §3.1). `api_key_env` has no
+// built-in default: a named endpoint is keyless unless it sets one, so a
+// DeepSeek credential is never sent to an unrelated endpoint (52-I4).
+struct EndpointSettings {
+    std::string  provider = "openai-compatible";
+    std::string  base_url = "https://api.deepseek.com/v1";
+    std::string  api_key_env;
+    // 52-D6: global layer only; 0600 file; never logged or rendered.
+    std::optional<std::string> api_key;
+    // 52-D6/52-I4: a secret side-channel (global layer only, values redacted).
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::size_t                max_concurrency = 4;
+    std::chrono::milliseconds  connect_timeout{10'000};
+    std::chrono::milliseconds  idle_timeout{60'000};
+    std::chrono::milliseconds  request_timeout{120'000};
+    RetrySettings              retry;
+};
+
+// [llm.models.<name>] (52-D1). One named generation target bound to an
+// endpoint by name. `endpoint` and `model` are required and non-empty (52-I2,
+// 52-F19).
+struct ModelSettings {
+    std::string                  endpoint;   // required; names an endpoint
+    std::string                  model;      // required; wire id
+    std::string                  profile;    // model-profile id; "" = inert
+    std::optional<std::uint32_t> max_tokens;
+    std::optional<std::uint32_t> context_window;
+    std::optional<std::string>   reasoning_effort;
+    std::optional<double>        temperature;
+    std::optional<double>        top_p;
+    std::optional<std::uint32_t> top_k;
+    std::optional<std::string>   tool_choice;
+    std::vector<std::string>     stop;
+    std::optional<std::uint32_t> seed;
+};
+
 // [llm.default] — mapped onto `LLMProviderConfig` by the CLI wiring.
 struct LlmSettings {
     std::string                provider = "openai-compatible";
@@ -147,6 +190,15 @@ struct LlmSettings {
     std::chrono::milliseconds  idle_timeout{60'000};
     std::chrono::milliseconds  request_timeout{120'000};
     RetrySettings              retry;
+    // 52-D1: the named maps. Entry names are a free namespace; every key inside
+    // an entry is schema-checked (52-I6).
+    std::map<std::string, EndpointSettings, std::less<>> endpoints;
+    std::map<std::string, ModelSettings, std::less<>>    models;
+    // 52-D1: names an `llm.models` entry; an unknown name is a ConfigError.
+    std::optional<std::string> active_model;
+    // 52 §3.3: the endpoint selector (`YMH_LLM_ENDPOINT`/`--endpoint`) used only
+    // on the literal-id path. Not a config-file key; set by env/CLI.
+    std::optional<std::string> active_endpoint;
 };
 
 // [[mcp.server]] — one configured MCP server (15 §4.1/§5.6). Mapped onto
@@ -336,18 +388,24 @@ void apply_jsonc_file(Config& config, const std::filesystem::path& path,
 void apply_mcp_servers_object(McpSettings& mcp, const nlohmann::json& table,
                               const std::filesystem::path& source);
 
-// 25-D15 / 46-D12: builds a ymh config document (JSON object) from a parsed
-// localcode document, including all mapped servers, the provider `api_key`,
-// `skip_permissions`/`permission` rules, and profile `max_tokens`. Pure mapping:
-// no logging, no filesystem; escapes a literal `${` as `$${` in every copied MCP
-// value and forces `required=false` on every copied server. When the provider is
-// openai-compatible and `default_profile_id` is non-empty, that id is written to
-// `llm.default.profile` regardless of the imported model; the caller supplies it
-// so no built-in profile identity lives in this layer (47-I6). Returns
-// `std::nullopt` and fills `error` on an unrecoverable shape problem. Semantic MCP
+// 25-D15 / 46-D12 / 52-D7: builds a ymh config document (JSON object) from a
+// parsed localcode document, including every `providers.<n>` as an
+// `llm.endpoints.<n>` entry, every `profiles.<p>` as an `llm.models.<p>` entry
+// (with `default_profile` -> `llm.active_model`), the mapped servers, the
+// `skip_permissions`/`permission` rules, and per-model `max_tokens`/
+// `context_window`. Pure mapping: no logging, no filesystem; escapes a literal
+// `${` as `$${` in every copied MCP value and forces `required=false` on every
+// copied server. Every skip pushes exactly one note in the same iteration
+// (52-F7/52-F20), so note count == skip count. Returns `std::nullopt` and fills
+// `error` only on an unrecoverable top-level shape problem. Semantic MCP
 // validation lives in the CLI layer (25-D16).
-[[nodiscard]] std::optional<nlohmann::json> build_localcode_import(
-    const nlohmann::json& localcode, std::string_view default_profile_id, std::string& error);
+struct LocalcodeImportResult {
+    nlohmann::json           document;
+    std::vector<std::string> notes;
+};
+
+[[nodiscard]] std::optional<LocalcodeImportResult> build_localcode_import(
+    const nlohmann::json& localcode, std::string& error);
 
 // `$HOME/.localcode/config.json`.
 [[nodiscard]] std::filesystem::path localcode_config_path();
@@ -358,6 +416,46 @@ void apply_env_overrides(Config& config);
 
 // The effective model: `agent.model` if set, else `llm.model`.
 [[nodiscard]] std::string effective_model(const Config& config);
+
+// 52-D3: the fully resolved endpoint (connection) for one selection.
+struct ResolvedEndpoint {
+    std::string  name;   // "" for the anonymous default endpoint
+    ProviderId   provider;
+    std::string  base_url;
+    std::string  api_key_env;
+    std::optional<std::string> api_key;
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::chrono::milliseconds connect_timeout{10'000};
+    std::chrono::milliseconds idle_timeout{60'000};
+    std::chrono::milliseconds request_timeout{120'000};
+    RetrySettings             retry;
+    std::size_t               max_concurrency = 4;
+};
+
+// 52-D3: the fully resolved model (generation + its endpoint). `model_name` is
+// the selected `llm.models` entry name ("" for the literal-id/default paths);
+// `source` is the selector ORIGIN, never the resolved name (52-F3).
+struct ResolvedModel {
+    ResolvedEndpoint             endpoint;
+    std::string                  model_name;
+    std::string                  model_id;
+    std::optional<std::uint32_t> max_tokens;
+    std::optional<std::uint32_t> context_window;
+    std::optional<std::string>   reasoning_effort;
+    ModelProfile                 profile;
+    std::optional<double>        temperature;
+    std::optional<double>        top_p;
+    std::optional<std::uint32_t> top_k;
+    std::optional<std::string>   tool_choice;
+    std::vector<std::string>     stop;
+    std::optional<std::uint32_t> seed;
+    std::string                  source;
+};
+
+// 52-D3: total, deterministic resolution. Order: `agent.model` (name wins over
+// a literal id) -> `llm.active_model` -> `llm.model` verbatim -> built-in
+// `deepseek-flash`. Throws `ConfigError` for an unknown active model/endpoint.
+[[nodiscard]] ResolvedModel resolve_model(const Config& config);
 
 [[nodiscard]] std::optional<std::string> env_value(std::string_view name);
 

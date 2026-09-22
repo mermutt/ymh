@@ -1,5 +1,7 @@
 #include "ymh/llm/model_profile.hpp"
 
+#include <cctype>
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -50,6 +52,20 @@ bool is_known_model_profile(std::string_view id) noexcept {
 }
 
 std::string_view default_import_profile_id() noexcept {
+    return kMuseGlimmerProfileId;
+}
+
+std::string_view import_profile_id_for_model(std::string_view model_id) noexcept {
+    if (model_id.size() < kMuseGlimmerProfileId.size()) {
+        return {};
+    }
+    for (std::size_t i = 0; i < kMuseGlimmerProfileId.size(); ++i) {
+        const unsigned char lhs = static_cast<unsigned char>(model_id[i]);
+        const unsigned char rhs = static_cast<unsigned char>(kMuseGlimmerProfileId[i]);
+        if (std::tolower(lhs) != std::tolower(rhs)) {
+            return {};
+        }
+    }
     return kMuseGlimmerProfileId;
 }
 

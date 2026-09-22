@@ -47,6 +47,23 @@ std::size_t skip_spaces(std::string_view text, std::size_t pos) noexcept {
     return pos;
 }
 
+// 52-D6: index just past the closing quote of the JSON string starting at
+// `start` (text[start] == '"'); `text.size()` when unterminated.
+std::size_t skip_json_string(std::string_view text, std::size_t start) noexcept {
+    std::size_t pos = start + 1;
+    while (pos < text.size()) {
+        if (text[pos] == '\\') {
+            pos += 2;
+            continue;
+        }
+        if (text[pos] == '"') {
+            return pos + 1;
+        }
+        ++pos;
+    }
+    return text.size();
+}
+
 } // namespace
 
 std::string redact_secrets(std::string_view text) {
@@ -84,8 +101,43 @@ std::string redact_secrets(std::string_view text) {
             }
         }
 
-        if (starts_with_ci(text, i, "bearer") && is_boundary_before(text, i)) {
-            std::size_t after = skip_spaces(text, i + 6);
+        // 52-D6/52-F22: every string value inside a `"headers"` object is a
+        // possible credential, so it is masked like `api_key` (keys are kept).
+        if (is_boundary_before(text, i) && text[i] == '"' &&
+            starts_with_ci(text, i + 1, "headers") && i + 8 < text.size() &&
+            text[i + 8] == '"') {
+            std::size_t cursor = skip_spaces(text, i + 9);
+            if (cursor < text.size() && text[cursor] == ':') {
+                cursor = skip_spaces(text, cursor + 1);
+                if (cursor < text.size() && text[cursor] == '{') {
+                    out.append(text.substr(i, cursor + 1 - i));
+                    ++cursor;
+                    while (cursor < text.size() && text[cursor] != '}') {
+                        if (text[cursor] == '"') {
+                            const std::size_t string_end = skip_json_string(text, cursor);
+                            const std::size_t after      = skip_spaces(text, string_end);
+                            if (after < text.size() && text[after] == ':') {
+                                out.append(text.substr(cursor, string_end - cursor));
+                            } else {
+                                out.append("\"[REDACTED]\"");
+                            }
+                            cursor = string_end;
+                            continue;
+                        }
+                        out.push_back(text[cursor]);
+                        ++cursor;
+                    }
+                    if (cursor < text.size()) {
+                        out.push_back('}');
+                        ++cursor;
+                    }
+                    i = cursor;
+                    continue;
+                }
+            }
+        }
+
+        if (starts_with_ci(text, i, "bearer") && is_boundary_before(text, i)) {            std::size_t after = skip_spaces(text, i + 6);
             if (after < text.size() && is_token_char(text[after])) {
                 out.append("Bearer ");
                 out.append(kRedacted);

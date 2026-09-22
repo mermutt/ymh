@@ -48,4 +48,9 @@ struct ModelProfile {
 // the profile layer never name a built-in profile. Empty means "pre-set none".
 [[nodiscard]] std::string_view default_import_profile_id() noexcept;
 
+// 52 §4.2: the profile id to pre-set for a wire model id, or "" when the model
+// needs no profile. The only place that knows which model ids map to which
+// built-in profile (47-I6); callers never name a built-in profile.
+[[nodiscard]] std::string_view import_profile_id_for_model(std::string_view model_id) noexcept;
+
 } // namespace ymh

@@ -59,24 +59,24 @@ std::string default_plan_section() {
 }
 
 LLMProviderConfig to_provider_config(const Config& config) {
-    LLMProviderConfig provider;
-    provider.provider     = config.llm.provider;
-    provider.base_url     = config.llm.base_url;
-    provider.model        = effective_model(config);
-    provider.api_key_env  = config.llm.api_key_env;
-    provider.api_key      = config.llm.api_key;
-    provider.connect_timeout = config.llm.connect_timeout;
-    provider.idle_timeout    = config.llm.idle_timeout;
-    provider.request_timeout = config.llm.request_timeout;
-    provider.retry.max_attempts      = config.llm.retry.max_attempts;
-    provider.retry.base_delay        = config.llm.retry.base_delay;
-    provider.retry.max_delay         = config.llm.retry.max_delay;
-    provider.retry.jitter            = config.llm.retry.jitter;
-    provider.retry.honor_retry_after = config.llm.retry.honor_retry_after;
-    if (const ModelProfile* profile = find_model_profile(config.llm.profile);
-        profile != nullptr) {
-        provider.profile = *profile;
-    }
+    const ResolvedModel  resolved = resolve_model(config);
+    const ResolvedEndpoint& endpoint = resolved.endpoint;
+    LLMProviderConfig    provider;
+    provider.provider     = endpoint.provider;
+    provider.base_url     = endpoint.base_url;
+    provider.model        = resolved.model_id;
+    provider.api_key_env  = endpoint.api_key_env;
+    provider.api_key      = endpoint.api_key;
+    provider.headers      = endpoint.headers;
+    provider.connect_timeout = endpoint.connect_timeout;
+    provider.idle_timeout    = endpoint.idle_timeout;
+    provider.request_timeout = endpoint.request_timeout;
+    provider.retry.max_attempts      = endpoint.retry.max_attempts;
+    provider.retry.base_delay        = endpoint.retry.base_delay;
+    provider.retry.max_delay         = endpoint.retry.max_delay;
+    provider.retry.jitter            = endpoint.retry.jitter;
+    provider.retry.honor_retry_after = endpoint.retry.honor_retry_after;
+    provider.profile = resolved.profile;
     return provider;
 }
 
@@ -196,9 +196,10 @@ SkillCatalogConfig to_skill_catalog_config(const Config& config) {
 }
 
 AgentConfig to_agent_config(const Config& config) {
+    const ResolvedModel resolved = resolve_model(config);
     AgentConfig agent;
-    agent.provider    = config.llm.provider;
-    agent.model       = effective_model(config);
+    agent.provider    = resolved.endpoint.provider;
+    agent.model       = resolved.model_id;
     agent.max_steps   = config.agent.max_steps;
     agent.sandbox     = SandboxMode::Workspace;
     agent.persist_prompt_text = config.session.persist_prompt_text;
@@ -207,53 +208,52 @@ AgentConfig to_agent_config(const Config& config) {
     agent.plan_section =
         config.agent.plan_section.empty() ? default_plan_section() : config.agent.plan_section;
 
-    const ModelProfile* profile = find_model_profile(config.llm.profile);
-    if (profile != nullptr) {
-        agent.profile = *profile;
-    }
+    agent.profile             = resolved.profile;
+    const bool has_profile    = !resolved.profile.id.empty();
 
     if (config.agent.reasoning_effort.has_value()) {
         agent.parameters.reasoning_effort = config.agent.reasoning_effort;
-    } else if (config.llm.reasoning_effort.has_value()) {
-        agent.parameters.reasoning_effort = config.llm.reasoning_effort;
+    } else if (resolved.reasoning_effort.has_value()) {
+        agent.parameters.reasoning_effort = resolved.reasoning_effort;
     }
-    if (config.llm.max_tokens.has_value()) {
-        agent.parameters.max_output_tokens = config.llm.max_tokens;
+    if (resolved.max_tokens.has_value()) {
+        agent.parameters.max_output_tokens = resolved.max_tokens;
     }
-    if (config.llm.temperature.has_value()) {
-        agent.parameters.temperature = config.llm.temperature;
-    } else if (profile != nullptr) {
-        agent.parameters.temperature = profile->temperature;
+    if (resolved.temperature.has_value()) {
+        agent.parameters.temperature = resolved.temperature;
+    } else if (has_profile) {
+        agent.parameters.temperature = resolved.profile.temperature;
     }
-    if (config.llm.top_p.has_value()) {
-        agent.parameters.top_p = config.llm.top_p;
-    } else if (profile != nullptr) {
-        agent.parameters.top_p = profile->top_p;
+    if (resolved.top_p.has_value()) {
+        agent.parameters.top_p = resolved.top_p;
+    } else if (has_profile) {
+        agent.parameters.top_p = resolved.profile.top_p;
     }
-    if (config.llm.top_k.has_value()) {
-        agent.parameters.top_k = config.llm.top_k;
-    } else if (profile != nullptr) {
-        agent.parameters.top_k = profile->top_k;
+    if (resolved.top_k.has_value()) {
+        agent.parameters.top_k = resolved.top_k;
+    } else if (has_profile) {
+        agent.parameters.top_k = resolved.profile.top_k;
     }
-    if (config.llm.tool_choice.has_value()) {
-        agent.parameters.tool_choice = config.llm.tool_choice;
+    if (resolved.tool_choice.has_value()) {
+        agent.parameters.tool_choice = resolved.tool_choice;
     }
-    if (!config.llm.stop.empty()) {
-        agent.parameters.stop = config.llm.stop;
+    if (!resolved.stop.empty()) {
+        agent.parameters.stop = resolved.stop;
     }
-    if (config.llm.seed.has_value()) {
-        agent.parameters.seed = config.llm.seed;
+    if (resolved.seed.has_value()) {
+        agent.parameters.seed = resolved.seed;
     }
     return agent;
 }
 
 CompactionPolicy to_compaction_policy(const Config& config) {
+    const ResolvedModel       resolved = resolve_model(config);
     const CompactionSettings& settings = config.agent.compaction;
     CompactionPolicy          policy;
-    policy.provider                = config.llm.provider;
+    policy.provider                = resolved.endpoint.provider;
     policy.threshold_tokens        = settings.threshold_tokens;
     policy.threshold_ratio         = settings.threshold_ratio;
-    policy.context_window_tokens   = settings.context_window_tokens;
+    policy.context_window_tokens   = resolved.context_window.value_or(settings.context_window_tokens);
     policy.reserve_output_tokens   = settings.reserve_output_tokens;
     policy.keep_recent_turns       = settings.keep_recent_turns;
     policy.min_prefix_messages     = settings.min_prefix_messages;

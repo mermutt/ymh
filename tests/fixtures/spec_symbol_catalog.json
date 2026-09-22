@@ -1017,6 +1017,24 @@
       "section": "7.7"
     },
     {
+      "symbol": "config::llm.active_model",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "3.1"
+    },
+    {
+      "symbol": "config::llm.endpoints",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "3.1"
+    },
+    {
+      "symbol": "config::llm.models",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "3.1"
+    },
+    {
       "symbol": "config::llm.default",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
