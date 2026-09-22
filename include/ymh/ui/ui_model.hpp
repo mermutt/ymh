@@ -408,6 +408,18 @@ public:
     std::set<WorkspaceId>      collapsed;
     SwitcherSource             source = SwitcherSource::Live;
 
+    // 51-D4.3: the switcher's double-Ctrl+D delete arm. Reuses 48-D2's `EscArm`
+    // and the `kEscArmTimeout` window; UI-only, never persisted.
+    EscArm                                     delete_arm = EscArm::Disarmed;
+    std::optional<std::chrono::steady_clock::time_point> delete_armed_at;
+    // 51-D4.3 (51-M1/M2): the exact target the arm is bound to. The confirm
+    // requires the live cursor == *delete_target; a mismatch disarms, so a cursor
+    // move can never redirect a confirmed delete.
+    std::optional<SwitcherCursor>              delete_target;
+    // 51-D4.5: a workspace target's `workspace_sessions` junction count, captured
+    // at arm time so the confirmation can state it (the renderer stays pure).
+    std::size_t                                delete_target_session_count = 0;
+
     void open(const UiModel& model);
     // 22 §3.6/§4.3 (S2): History source — builds nodes from `model.catalog`
     // (every registered workspace, live or not). Sets `source = History`.
@@ -416,6 +428,12 @@ public:
     void moveDown();
     void moveUp();
     void toggleExpand();
+
+    // 51-D4.3 (51-M1/M2): reset delete_arm/delete_armed_at/delete_target/
+    // delete_target_session_count. Called by open(), openHistory() and close().
+    void disarm_delete();
+    // 51-D4.10 (51-M4): re-clamp `cursor` to a still-valid node after a delete.
+    void clamp_cursor();
 };
 
 struct AggregateStatus {

@@ -2312,4 +2312,43 @@ TEST(UiRenderGolden, UI51_D3_TableInUserBlockUsesNestedWidth) {
     EXPECT_NE(fallback.find("| a | b | c | d | e | f |"), std::string::npos);
 }
 
+// 51-I21: the switcher shows the double-Ctrl+D confirmation while armed, and a
+// workspace target states the junction count (51-D4.5).
+TEST(UiRenderGolden, UI51_D4_SwitcherDeleteHintGolden) {
+    UiModel model = build_model();
+    WorkspaceModel beta;
+    beta.id           = WorkspaceId{"workspace-beta"};
+    beta.title        = "beta";
+    beta.cwd          = "/work/beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live         = true;
+    SessionCell beta_cell;
+    beta_cell.id = SessionId{"beta-session"};
+    beta.sessions.push_back(beta_cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    model.openSwitcher();
+
+    SwitcherCursor session_cursor;
+    session_cursor.workspace = WorkspaceId{"workspace-beta"};
+    session_cursor.session   = SessionId{"beta-session"};
+    model.switcher.delete_arm = EscArm::Armed;
+    model.switcher.delete_target = session_cursor;
+    const std::string session_hint =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(session_hint);
+    EXPECT_NE(session_hint.find("- one more Ctrl+D to delete"), std::string::npos);
+
+    SwitcherCursor workspace_cursor;
+    workspace_cursor.workspace = WorkspaceId{"workspace-beta"};
+    model.switcher.delete_target = workspace_cursor;
+    model.switcher.delete_target_session_count = 3;
+    const std::string workspace_hint =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(workspace_hint);
+    EXPECT_NE(workspace_hint.find("- one more Ctrl+D to delete"), std::string::npos);
+    EXPECT_NE(workspace_hint.find("3 sessions"), std::string::npos);
+}
+
 } // namespace

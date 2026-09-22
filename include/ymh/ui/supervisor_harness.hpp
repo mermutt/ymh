@@ -65,12 +65,16 @@ public:
     // in the harness (production does this in `run()`).
     virtual void register_presence() = 0;
     // 49-U15: drives the real exit entry point (`allow_prompt == true` is the
-    // Ctrl+D / `/exit` path), so the zero-daemon case is exercised.
+    // Ctrl+Q / `/exit` path), so the zero-daemon case is exercised.
     virtual void begin_exit(bool allow_prompt) = 0;
     // 49 test observers: per-workspace `ensure_workspace_running` invocations and
     // per-method `submit_to` invocations.
     [[nodiscard]] virtual std::size_t ensure_call_count(const WorkspaceId& workspace) const = 0;
     [[nodiscard]] virtual std::size_t submitted_count(const std::string& method) const = 0;
+    // 51-D4 test seam: the last params submitted for `method`, so the delete
+    // RPC's `only_if_empty`/`force` flags are assertable.
+    [[nodiscard]] virtual std::optional<nlohmann::json> last_submitted_params(
+        const std::string& method) const = 0;
     [[nodiscard]] virtual const std::map<WorkspaceId, std::string>& pending_creates() const = 0;
     // 46-D13: installs a pass-through terminal hand-off so the editor runs
     // without an FTXUI loop.
@@ -116,6 +120,11 @@ public:
     // 46-D7 (N6): installs a canned reply for one method (`session.resume`,
     // `agent.prompt`), so its reply terminal is drivable without a live daemon.
     virtual void install_method_reply(std::string method, nlohmann::json result, int error) = 0;
+    // 51-D4 test seam: like `install_method_reply` but with an explicit error
+    // string, so the InvalidParams refusals ("active session" / "turn in
+    // progress") are distinguishable.
+    virtual void install_method_error_reply(std::string method, int error_code,
+                                            std::string error) = 0;
     // 46-D7 (N6): seeds the per-workspace resume refcount directly, so the
     // `session.list` gate can be exercised while a resume is in flight.
     virtual void seed_resume_in_flight(const WorkspaceId& workspace) = 0;

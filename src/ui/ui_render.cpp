@@ -414,7 +414,7 @@ Element render_conversation(const SessionUiState* active, const RenderContext& c
         }
     }
     if (rows.empty()) {
-        rows.push_back(ftxui::text("Type a message and press Enter. Ctrl+D or /exit quits.") |
+        rows.push_back(ftxui::text("Type a message and press Enter. Ctrl+Q or /exit quits.") |
                        ftxui::dim);
     }
     return ftxui::vbox(std::move(rows)) |
@@ -969,6 +969,16 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         rows.push_back(ftxui::text(footer) | ftxui::dim);
     } else {
         rows.push_back(ftxui::text("j/k move · Tab expand · Enter focus · Esc close") | ftxui::dim);
+    }
+    // 51-D4.3: the double-press delete confirmation; a workspace target states
+    // the number of sessions the cascade will destroy (51-D4.5).
+    if (switcher.delete_arm == EscArm::Armed) {
+        std::string hint = "  - one more Ctrl+D to delete";
+        if (switcher.delete_target.has_value() && !switcher.delete_target->session.has_value()) {
+            hint += " workspace and its " +
+                    std::to_string(switcher.delete_target_session_count) + " sessions";
+        }
+        rows.push_back(ftxui::text(hint) | ftxui::dim);
     }
     return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"),
                          ftxui::vbox(std::move(rows))) |
