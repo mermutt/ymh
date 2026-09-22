@@ -15,6 +15,10 @@ struct RenderContext {
     Theme       theme{};
     bool        compact = false;
     std::size_t spinner_frame = 0;
+    // 51-D3.4/51-H5: display columns consumed by enclosing prefixes (block quote
+    // `"> "` = 2, list markers, the user-block LeftBar gutter = 2). Default 0.
+    // Only the table layout reads it; other renderers' wrapping is unchanged.
+    int         indent = 0;
 };
 
 } // namespace ymh::ui

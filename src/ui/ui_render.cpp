@@ -348,8 +348,10 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
     Elements rows;
     switch (entry.role) {
         case ConversationRole::User: {
-            Element body =
-                with_left_bar(markdown.render(MarkdownBlock{entry.text}, context), theme);
+            RenderContext user_context = context;
+            user_context.indent = context.indent + 2;
+            Element body = with_left_bar(
+                markdown.render(MarkdownBlock{entry.text}, user_context), theme);
             rows.push_back(
                 paint_bg(std::move(body), ftxui::Color::RGB(40, 42, 54), theme));
             break;

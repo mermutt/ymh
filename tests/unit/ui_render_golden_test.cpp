@@ -158,6 +158,46 @@ UiModel build_model() {
     return model;
 }
 
+UiModel build_message_model(ConversationRole role, const std::string& text) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel workspace;
+    workspace.id = model.activeWorkspaceId;
+    workspace.cwd = "/work";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(workspace.id, workspace);
+    model.focusSessionIn(workspace.id, kSession);
+    model.session(kSession)->status.model = "test-model";
+    UiEventAdapter adapter(model);
+    if (role == ConversationRole::User) {
+        adapter.onEvent(typed_event(EventType::UserMessage, [&text] {
+            payload::UserMessage message;
+            message.id = "m1";
+            ContentBlock block;
+            block.kind = ContentBlockKind::Text;
+            block.text = text;
+            message.content.push_back(block);
+            return message;
+        }()));
+    } else {
+        payload::AssistantChunk chunk;
+        chunk.message = "a1";
+        chunk.text = text;
+        adapter.onEvent(typed_event(EventType::AssistantChunk, chunk));
+        adapter.onEvent(typed_event(EventType::AssistantMessage, [&text] {
+            payload::AssistantMessage message;
+            message.id = "a1";
+            ContentBlock block;
+            block.kind = ContentBlockKind::Text;
+            block.text = text;
+            message.content.push_back(block);
+            return message;
+        }()));
+    }
+    return model;
+}
+
 void seed_catalog_session(UiModel& model, const WorkspaceId& workspace,
                           const SessionId& session) {
     WorkspaceHistory history;
@@ -2131,6 +2171,60 @@ TEST(UiRenderGolden, ReasoningBlankLineSeparator) {
             : rendered.substr(previous_start + 1, previous_end - previous_start - 1);
     // The border glyphs and padding remain on a blank transcript row.
     EXPECT_EQ(previous.find_first_not_of(" \xE2\x94\x82"), std::string::npos) << rendered;
+}
+
+TEST(UiRenderGolden, UI51_D3_TableGolden) {
+    const UiModel model = build_message_model(
+        ConversationRole::Assistant, "| A | B |\n|---|---|\n| 1 | 2 |\n");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("\u256d"), std::string::npos);
+    EXPECT_NE(rendered.find("\u253c"), std::string::npos);
+    EXPECT_NE(rendered.find("\u251c"), std::string::npos);
+    EXPECT_NE(rendered.find("\u253c"), std::string::npos);
+    EXPECT_NE(rendered.find("\u2534"), std::string::npos);
+    EXPECT_NE(rendered.find("A"), std::string::npos);
+    EXPECT_NE(rendered.find("1"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D3_TableAlignmentGolden) {
+    const UiModel model = build_message_model(
+        ConversationRole::Assistant, "| L | C | R |\n|:---|:---:|---:|\n| a | b | c |\n");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("\u2502 a"), std::string::npos);
+    EXPECT_NE(rendered.find("c \u2502"), std::string::npos);
+    EXPECT_NE(rendered.find(" b "), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D3_TableFallbackGolden) {
+    const UiModel model = build_message_model(
+        ConversationRole::Assistant,
+        "| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |\n");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered.find("\u253c"), std::string::npos);
+    EXPECT_NE(rendered.find("| a | b | c | d | e | f |"), std::string::npos);
+}
+
+TEST(UiRenderGolden, UI51_D3_TableInUserBlockUsesNestedWidth) {
+    const std::string table =
+        "| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |\n";
+    const UiModel assistant =
+        build_message_model(ConversationRole::Assistant, table);
+    const std::string grid =
+        render_to_ansi(assistant, TerminalSize{70, 24}, Theme{false});
+    EXPECT_NE(grid.find("\u253c"), std::string::npos);
+
+    const UiModel user = build_message_model(ConversationRole::User, table);
+    const std::string fallback =
+        render_to_ansi(user, TerminalSize{70, 24}, Theme{false});
+    SCOPED_TRACE(fallback);
+    EXPECT_EQ(fallback.find("\u253c"), std::string::npos);
+    EXPECT_NE(fallback.find("| a | b | c | d | e | f |"), std::string::npos);
 }
 
 } // namespace
