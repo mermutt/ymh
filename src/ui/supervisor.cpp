@@ -3038,7 +3038,8 @@ private:
         terminal.enterRawMode();
         ftxui::ScreenInteractive screen = ftxui::ScreenInteractive::Fullscreen();
         screen_ = &screen;
-        const Theme theme{terminal.capabilities().trueColor};
+        const Theme theme =
+            make_theme(terminal.capabilities().trueColor, ThemeVariant::Dark);
 
         auto renderer = ftxui::Renderer([this, &screen, theme] {
             const TerminalSize size{screen.dimx(), screen.dimy()};
