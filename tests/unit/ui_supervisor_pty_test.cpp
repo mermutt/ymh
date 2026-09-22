@@ -620,7 +620,7 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
         << "supervisor did not spawn its daemon";
 
     const std::size_t prompt_mark = child.raw_size();
-    child.write("\x04");
+    child.write("\x11");
     ASSERT_TRUE(child.wait_for_since(prompt_mark, "Terminate and exit", 15s)) << child.text();
     ASSERT_TRUE(child.wait_for_since(prompt_mark, "1 workspace daemon", 5s)) << child.text();
 
@@ -638,7 +638,7 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
     }
 
     const std::size_t confirm_mark = child.raw_size();
-    child.write("\x04");
+    child.write("\x11");
     ASSERT_TRUE(child.wait_for_since(confirm_mark, "Terminate and exit", 15s)) << child.text();
     child.write("y");
     EXPECT_TRUE(child.wait_exit(25s)) << child.text();
@@ -700,7 +700,7 @@ TEST(UiSupervisorPty, ExitPromptArrowKeysMoveHighlight) {
         << "supervisor did not spawn its daemon";
 
     const std::size_t prompt_mark = child.raw_size();
-    child.write("\x04");
+    child.write("\x11");
     ASSERT_TRUE(child.wait_for_since(prompt_mark, "Terminate and exit", 15s)) << child.text();
     ASSERT_TRUE(child.wait_for_raw_since(prompt_mark, "\x1b[7m[ Terminate and exit ]", 5s))
         << "the popup must open with Terminate highlighted";
@@ -769,7 +769,7 @@ TEST(UiSupervisorPty, ModalKeystrokesDoNotReachComposer) {
     ASSERT_TRUE(child.wait_for("keep", 10s)) << child.text();
 
     const std::size_t modal_mark = child.raw_size();
-    child.write("\x04");
+    child.write("\x11");
     ASSERT_TRUE(child.wait_for_since(modal_mark, "Terminate and exit", 15s)) << child.text();
 
     const std::size_t burst_raw  = child.raw_size();
@@ -858,7 +858,7 @@ TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
     }
 
     const std::size_t prompt_mark = child.raw_size();
-    child.write("\x04");
+    child.write("\x11");
     ASSERT_TRUE(child.wait_for_since(prompt_mark, "Terminate and exit", 15s)) << child.text();
     ASSERT_TRUE(child.wait_for_since(prompt_mark, "1 workspace daemon", 5s)) << child.text();
 
@@ -878,7 +878,7 @@ TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
 
     // Confirm tears the daemon down and exits (§4.3).
     const std::size_t confirm_mark = child.raw_size();
-    child.write("\x04");
+    child.write("\x11");
     ASSERT_TRUE(child.wait_for_since(confirm_mark, "Terminate and exit", 15s)) << child.text();
     child.write("y");
     EXPECT_TRUE(child.wait_exit(25s)) << child.text();

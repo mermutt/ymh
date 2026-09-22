@@ -535,7 +535,7 @@ private:
 
     // 16 §4.2 (16-D9). The supervisor stays registered until the user confirms:
     // query the orphaning set read-only, then either exit (empty set), auto-
-    // confirm (--yes), or open the prompt. Ctrl+D and `/exit` stay thin callers.
+    // confirm (--yes), or open the prompt. Ctrl+Q and `/exit` stay thin callers.
     void begin_exit(bool allow_prompt) {
         if (quit_.load() || model_.exitConfirm.open) {
             return;
@@ -1683,6 +1683,7 @@ private:
     void submit_to(const WorkspaceId& workspace, std::string method, nlohmann::json params,
                    SupervisorConnection::ReplyFn reply) {
         ++submitted_method_counts_[method];
+        last_method_params_[method] = params;
         // Test seam (46-D7): a canned reply installed for this method short-
         // circuits the connection, so the resume/prompt reply terminals are
         // drivable without a live daemon. Production installs none.
@@ -1743,6 +1744,13 @@ private:
                 session.esc_armed_at.reset();
                 model_.dirty.mark(id, UiDirtyFlag::Input);
             }
+        }
+        // 51-D4.3: the switcher's delete arm expires on the same tick.
+        if (model_.switcher.delete_arm == EscArm::Armed &&
+            model_.switcher.delete_armed_at.has_value() &&
+            now - *model_.switcher.delete_armed_at >= kEscArmTimeout) {
+            model_.switcher.disarm_delete();
+            model_.dirty.markAggregate();
         }
         animation_active_.store(model_.aggregate.flash.isFlashing() ||
                                 model_.has_streaming_reasoning() ||
@@ -2581,6 +2589,15 @@ private:
     }
 
     bool handle_switcher(const ftxui::Event& event) {
+        // 51-D4.2: Ctrl+D is the switcher-only delete key.
+        if (event == ftxui::Event::CtrlD) {
+            return handle_switcher_delete(event);
+        }
+        // 51-D4.3: any other key disarms a pending delete (mirrors the Esc arm).
+        if (model_.switcher.delete_arm == EscArm::Armed) {
+            model_.switcher.disarm_delete();
+            model_.dirty.markAggregate();
+        }
         if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
             model_.switcher.close();
             model_.mode = UiMode::Conversation;
@@ -2621,6 +2638,241 @@ private:
             return true;
         }
         return true;
+    }
+
+    // 51-D4.2/D4.3: the switcher's Ctrl+D arm/confirm handler. The first press
+    // arms (capturing the exact target and, for a workspace, its junction-row
+    // count); a second press within `kEscArmTimeout` and with the live cursor
+    // still equal to the armed target confirms. Any other key or the timeout
+    // disarms; a single press never deletes.
+    bool handle_switcher_delete(const ftxui::Event& event) {
+        (void)event;
+        SwitcherOverlayModel& switcher = model_.switcher;
+        const auto now = std::chrono::steady_clock::now();
+        const bool expired = switcher.delete_armed_at.has_value() &&
+                             now - *switcher.delete_armed_at >= kEscArmTimeout;
+        if (switcher.delete_arm == EscArm::Armed && !expired &&
+            switcher.delete_target.has_value() && *switcher.delete_target == switcher.cursor) {
+            const SwitcherCursor target = *switcher.delete_target;
+            switcher.disarm_delete();
+            if (target.session.has_value()) {
+                delete_highlighted_session(target);
+            } else {
+                delete_highlighted_workspace(target);
+            }
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (switcher.cursor.workspace.value.empty()) {
+            return true;
+        }
+        switcher.delete_arm = EscArm::Armed;
+        switcher.delete_armed_at = now;
+        switcher.delete_target = switcher.cursor;
+        switcher.delete_target_session_count = arm_workspace_delete(switcher.cursor);
+        model_.dirty.markAggregate();
+        return true;
+    }
+
+    // 51-D4.5: reads the workspace target's `workspace_sessions` junction set
+    // once, at arm time. Its size is the confirmation count (not the Live model's
+    // session list, 51-L3) and the set is the cascade's removal list; a junction
+    // that reappears before the confirm makes `removeWorkspace` refuse (51-F20).
+    std::size_t arm_workspace_delete(const SwitcherCursor& cursor) {
+        pending_workspace_delete_junctions_.clear();
+        if (cursor.session.has_value() || options_.registry == nullptr) {
+            return 0;
+        }
+        try {
+            pending_workspace_delete_junctions_ = options_.registry->listSessions(cursor.workspace);
+        } catch (const std::exception&) {
+            pending_workspace_delete_junctions_.clear();
+        }
+        return pending_workspace_delete_junctions_.size();
+    }
+
+    [[nodiscard]] bool workspace_has_live_daemon(const WorkspaceId& workspace) const {
+        const auto it = model_.workspaces.find(workspace);
+        return it != model_.workspaces.end() && live_switcher_renderable(it->second);
+    }
+
+    // 51-D4.4/51-I22: a session delete goes through the owning daemon's
+    // `session.delete` RPC (only_if_empty=false, force=false). The daemon performs
+    // both layers and enforces its own refusals; the supervisor never writes the
+    // store. A workspace with no live daemon is refused (51-F22).
+    void delete_highlighted_session(const SwitcherCursor& cursor) {
+        if (!cursor.session.has_value()) {
+            return;
+        }
+        const SessionId   session   = *cursor.session;
+        const WorkspaceId workspace = cursor.workspace;
+        if (!workspace_has_live_daemon(workspace)) {
+            push_notice("workspace not running; use `ymh session prune`");
+            return;
+        }
+        const std::optional<SwitcherCursor> next = next_cursor_after_session_delete(cursor);
+        nlohmann::json params{{"session", session.value},
+                              {"confirm", true},
+                              {"only_if_empty", false},
+                              {"force", false}};
+        submit_to(workspace, std::string(protocol::method::kSessionDelete), std::move(params),
+                  [this, workspace, session, next](SupervisorReply reply) {
+                      if (!reply.ok) {
+                          const std::string text = session_delete_refusal(reply);
+                          enqueue([this, text] { push_notice(text); });
+                          return;
+                      }
+                      enqueue([this, workspace, session, next] {
+                          apply_session_deleted(workspace, session, next);
+                      });
+                  });
+    }
+
+    // 51-D4.10: the cursor after deleting `cursor`'s session — the previous
+    // session in the same workspace, or the workspace node when none remain.
+    std::optional<SwitcherCursor> next_cursor_after_session_delete(
+        const SwitcherCursor& cursor) const {
+        for (const WorkspaceNode& node : model_.switcher.workspaces) {
+            if (node.id != cursor.workspace) {
+                continue;
+            }
+            for (std::size_t index = 0; index < node.sessions.size(); ++index) {
+                if (!cursor.session.has_value() || node.sessions[index].id != *cursor.session) {
+                    continue;
+                }
+                SwitcherCursor next;
+                next.workspace = cursor.workspace;
+                if (index > 0) {
+                    next.session = node.sessions[index - 1].id;
+                }
+                return next;
+            }
+            break;
+        }
+        return std::nullopt;
+    }
+
+    void apply_session_deleted(const WorkspaceId& workspace, const SessionId& session,
+                               const std::optional<SwitcherCursor>& next) {
+        model_.eraseSession(workspace, session);
+        if (next.has_value()) {
+            model_.switcher.cursor = *next;
+        }
+        for (WorkspaceNode& node : model_.switcher.workspaces) {
+            if (node.id != workspace) {
+                continue;
+            }
+            std::erase_if(node.sessions,
+                          [&session](const SessionNode& entry) { return entry.id == session; });
+            break;
+        }
+        refresh_after_delete();
+    }
+
+    // 51-D4.5/D4.6/51-I23: a workspace delete is a registry-only cascade,
+    // reachable only for a non-running workspace from the History source. It
+    // states the junction count, removes each junction, then the workspace row.
+    // A Live-source delete and a workspace with a live daemon are always refused.
+    void delete_highlighted_workspace(const SwitcherCursor& cursor) {
+        const WorkspaceId workspace = cursor.workspace;
+        if (model_.switcher.source == SwitcherSource::Live || workspace_has_live_daemon(workspace)) {
+            push_notice("stop the workspace first");
+            return;
+        }
+        if (options_.registry == nullptr) {
+            push_notice("cannot delete workspace: registry unavailable");
+            return;
+        }
+        // 51-D4.5: re-check the live claim before each mutation so a daemon that
+        // starts mid-cascade stops the delete (already-removed junctions are
+        // durable and not rolled back, OQ-51-9).
+        for (const WorkspaceSessionRecord& row : pending_workspace_delete_junctions_) {
+            if (workspace_has_live_daemon(workspace)) {
+                push_notice("stop the workspace first");
+                return;
+            }
+            try {
+                options_.registry->removeSession(workspace, row.sessionId);
+            } catch (const RegistryError& error) {
+                push_notice(registry_refusal_text(error.code()));
+                return;
+            } catch (const std::exception& error) {
+                push_notice(std::string("workspace delete failed: ") + error.what());
+                return;
+            }
+        }
+        try {
+            options_.registry->removeWorkspace(workspace);
+        } catch (const RegistryError& error) {
+            push_notice(registry_refusal_text(error.code()));
+            return;
+        } catch (const std::exception& error) {
+            push_notice(std::string("workspace delete failed: ") + error.what());
+            return;
+        }
+        apply_workspace_deleted(workspace);
+    }
+
+    void apply_workspace_deleted(const WorkspaceId& workspace) {
+        model_.eraseWorkspace(workspace);
+        std::erase_if(model_.switcher.workspaces,
+                      [&workspace](const WorkspaceNode& node) { return node.id == workspace; });
+        if (model_.switcher.workspaces.empty()) {
+            model_.switcher.close();
+            model_.mode = UiMode::Conversation;
+            catalog_visible_.store(false);
+            model_.dirty.markAggregate();
+            return;
+        }
+        if (model_.switcher.cursor.workspace == workspace) {
+            model_.switcher.clamp_cursor();
+        }
+        refresh_after_delete();
+    }
+
+    // 51-D4.10 (51-M4/51-I27): after a successful delete, re-clamp the cursor to
+    // a valid node and re-read the list from its source.
+    void refresh_after_delete() {
+        model_.switcher.clamp_cursor();
+        if (model_.switcher.source == SwitcherSource::History) {
+            if (catalog_ != nullptr) {
+                catalog_->refreshNow();
+            }
+        } else {
+            resnapshot_switcher();
+            refresh_sessions(model_.switcher.cursor.workspace);
+        }
+        model_.dirty.markAggregate();
+    }
+
+    static std::string session_delete_refusal(const SupervisorReply& reply) {
+        switch (reply.error_code) {
+            case static_cast<int>(protocol::AppCode::DependentSession):
+                return "session has dependent sessions";
+            case static_cast<int>(protocol::AppCode::UnknownSession):
+                return "session is already gone";
+            case static_cast<int>(protocol::RpcCode::InvalidParams):
+                return reply.error.empty() ? std::string("session delete refused")
+                                           : "session delete refused: " + reply.error;
+            default:
+                return reply.error.empty() ? std::string("session delete failed")
+                                           : "session delete failed: " + reply.error;
+        }
+    }
+
+    static std::string registry_refusal_text(RegistryErrorCode code) {
+        switch (code) {
+            case RegistryErrorCode::WorkspaceNotEmpty:
+                return "workspace is not empty";
+            case RegistryErrorCode::HostClaimed:
+                return "stop the workspace first";
+            case RegistryErrorCode::MutationInProgress:
+                return "another registry mutation is in progress";
+            case RegistryErrorCode::UnknownWorkspace:
+                return "workspace is already gone";
+            default:
+                return "workspace delete failed";
+        }
     }
 
     bool handle_input(const ftxui::Event& event) {
@@ -2990,7 +3242,7 @@ private:
             }
             return true;
         }
-        if (event == ftxui::Event::CtrlD) {
+        if (event == ftxui::Event::CtrlQ) {
             begin_exit(/*allow_prompt=*/true);
             return true;
         }
@@ -3119,6 +3371,12 @@ private:
     // without a live daemon. Inert in production.
     std::map<WorkspaceId, std::size_t> ensure_call_counts_;
     std::map<std::string, std::size_t> submitted_method_counts_;
+    // 51-D4.5: the junction set read at Ctrl+D arm time for a workspace target,
+    // used by the registry-only cascade at confirm.
+    std::vector<WorkspaceSessionRecord> pending_workspace_delete_junctions_;
+    // 51-D4 test seam: the last params submitted per method, so the delete RPC's
+    // `only_if_empty`/`force` flags are assertable. Inert in production.
+    std::map<std::string, nlohmann::json> last_method_params_;
     std::optional<SupervisorPresence> presence_;
     std::unique_ptr<DaemonSetScanner> scanner_;
     std::chrono::steady_clock::time_point last_presence_tick_{};
@@ -3251,6 +3509,15 @@ public:
         return it == app_.submitted_method_counts_.end() ? 0 : it->second;
     }
 
+    [[nodiscard]] std::optional<nlohmann::json> last_submitted_params(
+        const std::string& method) const override {
+        const auto it = app_.last_method_params_.find(method);
+        if (it == app_.last_method_params_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
     [[nodiscard]] const std::map<WorkspaceId, std::string>& pending_creates() const override {
         return app_.pending_creates_;
     }
@@ -3331,6 +3598,12 @@ public:
         app_.method_replies_[std::move(method)] = std::move(canned);
     }
 
+    void install_method_error_reply(std::string method, int error_code,
+                                    std::string error) override {
+        app_.method_replies_[std::move(method)] =
+            SupervisorReply{false, nlohmann::json{}, error_code, std::move(error)};
+    }
+
     void seed_resume_in_flight(const WorkspaceId& workspace) override {
         ++app_.resume_in_flight_[workspace];
     }
@@ -3398,6 +3671,12 @@ public:
         }
         if (key == "ctrl-c") {
             return app_.handle_event(ftxui::Event::CtrlC);
+        }
+        if (key == "ctrl-d") {
+            return app_.handle_event(ftxui::Event::CtrlD);
+        }
+        if (key == "ctrl-q") {
+            return app_.handle_event(ftxui::Event::CtrlQ);
         }
         if (key == "ctrl-s") {
             return app_.handle_event(ftxui::Event::CtrlS);

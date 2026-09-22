@@ -1175,6 +1175,7 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
 
 void SwitcherOverlayModel::open(const UiModel& model) {
     workspaces.clear();
+    disarm_delete();
     source = SwitcherSource::Live;
     const bool filtering = filter.has_value() && !filter->empty();
     const bool catalog_pending = !model.catalog.loaded || model.catalog.generation == 0;
@@ -1262,6 +1263,7 @@ void SwitcherOverlayModel::open(const UiModel& model) {
 
 void SwitcherOverlayModel::openHistory(const UiModel& model) {
     workspaces.clear();
+    disarm_delete();
     source = SwitcherSource::History;
     const bool filtering = filter.has_value() && !filter->empty();
     SessionId focused;
@@ -1352,6 +1354,42 @@ void SwitcherOverlayModel::close() {
     workspaces.clear();
     cursor = SwitcherCursor{};
     filter.reset();
+    disarm_delete();
+}
+
+void SwitcherOverlayModel::disarm_delete() {
+    delete_arm = EscArm::Disarmed;
+    delete_armed_at.reset();
+    delete_target.reset();
+    delete_target_session_count = 0;
+}
+
+void SwitcherOverlayModel::clamp_cursor() {
+    if (workspaces.empty()) {
+        cursor = SwitcherCursor{};
+        return;
+    }
+    const WorkspaceNode* node = nullptr;
+    for (const WorkspaceNode& candidate : workspaces) {
+        if (candidate.id == cursor.workspace) {
+            node = &candidate;
+            break;
+        }
+    }
+    if (node == nullptr) {
+        cursor.workspace = workspaces.front().id;
+        cursor.session.reset();
+        return;
+    }
+    if (!cursor.session.has_value()) {
+        return;
+    }
+    for (const SessionNode& session : node->sessions) {
+        if (session.id == *cursor.session) {
+            return;
+        }
+    }
+    cursor.session.reset();
 }
 
 void SwitcherOverlayModel::moveDown() {

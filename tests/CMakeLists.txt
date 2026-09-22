@@ -34,6 +34,7 @@ add_executable(ymh_tests
     unit/errata46_deadline_test.cpp
     unit/errata46_ui_test.cpp
     unit/errata49_ui_test.cpp
+    unit/errata51_ui_test.cpp
     unit/agent_loop_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp
