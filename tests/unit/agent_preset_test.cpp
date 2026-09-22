@@ -348,8 +348,9 @@ TEST(AgentPresetLoader, RowVocabularyIsParsed) {
     EXPECT_EQ(row.id, "persona");
     EXPECT_EQ(row.group, "core");
     EXPECT_TRUE(row.disabled);
-    ASSERT_TRUE(row.persona_prefix.has_value());
-    EXPECT_EQ(*row.persona_prefix, "You are");
+    ASSERT_TRUE(row.persona.has_value());
+    EXPECT_EQ(row.persona->prefix, "You are");
+    EXPECT_EQ(row.persona->suffix, "cwd");
     ASSERT_TRUE(row.tool_filter.has_value());
     EXPECT_EQ(row.tool_filter->allow, (std::vector<std::string>{"read"}));
     EXPECT_EQ(row.tool_filter->deny, (std::vector<std::string>{"shell"}));

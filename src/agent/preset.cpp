@@ -1,6 +1,7 @@
 #include "ymh/agent/preset.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -12,7 +13,9 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/config/config.hpp"
+#include "ymh/core/logger.hpp"
 #include "ymh/prompt/order.hpp"
+#include "ymh/prompt/runtime_context.hpp"
 #include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
@@ -129,6 +132,8 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
 
     std::set<std::string> row_ids;
     std::set<std::string> section_names;
+    bool                  persona_prefix_seen = false;
+    bool                  persona_suffix_seen = false;
     for (std::size_t index = 0; index < rows->size(); ++index) {
         const Json&       row   = (*rows)[index];
         const std::string label = "rows[" + std::to_string(index) + "]";
@@ -136,8 +141,9 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
             load_fail(file, "invalid type for '" + label + "'");
         }
         reject_unknown(row, file, label,
-                       {"id", "group", "disabled", "persona", "tools", "skills", "sections",
-                        "config"});
+                       {"id", "group", "disabled", "persona", "persona_prefix", "persona_suffix",
+                        "tools", "skills", "sections", "permission_preset", "model",
+                        "capabilities", "config"});
 
         const Json* id = member(row, "id");
         if (id == nullptr || !id->is_string() || id->get<std::string>().empty()) {
@@ -166,18 +172,72 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
             if (!persona->is_object()) {
                 load_fail(file, "invalid type for '" + label + ".persona'");
             }
-            reject_unknown(*persona, file, label + ".persona", {"prefix", "suffix"});
+            reject_unknown(*persona, file, label + ".persona",
+                           {"prefix", "suffix", "complete", "include_runtime_context"});
+            PersonaConfig config;
             if (const Json* prefix = member(*persona, "prefix")) {
                 if (!prefix->is_string()) {
                     load_fail(file, "invalid type for '" + label + ".persona.prefix'");
                 }
-                parsed.persona_prefix = prefix->get<std::string>();
+                config.prefix = prefix->get<std::string>();
             }
             if (const Json* suffix = member(*persona, "suffix")) {
                 if (!suffix->is_string()) {
                     load_fail(file, "invalid type for '" + label + ".persona.suffix'");
                 }
-                parsed.persona_suffix = suffix->get<std::string>();
+                config.suffix = suffix->get<std::string>();
+            }
+            if (const Json* complete = member(*persona, "complete")) {
+                if (!complete->is_boolean()) {
+                    load_fail(file, "invalid type for '" + label + ".persona.complete'");
+                }
+                config.complete = complete->get<bool>();
+            }
+            if (const Json* include = member(*persona, "include_runtime_context")) {
+                if (!include->is_boolean()) {
+                    load_fail(file, "invalid type for '" +
+                                        label + ".persona.include_runtime_context'");
+                }
+                config.include_runtime_context = include->get<bool>();
+            }
+            parsed.persona = std::move(config);
+        }
+        if (const Json* prefix = member(row, "persona_prefix")) {
+            if (!prefix->is_string()) {
+                load_fail(file, "invalid type for '" + label + ".persona_prefix'");
+            }
+            parsed.persona_prefix = prefix->get<std::string>();
+        }
+        if (const Json* suffix = member(row, "persona_suffix")) {
+            if (!suffix->is_string()) {
+                load_fail(file, "invalid type for '" + label + ".persona_suffix'");
+            }
+            parsed.persona_suffix = suffix->get<std::string>();
+        }
+        if (parsed.persona.has_value() &&
+            (parsed.persona_prefix.has_value() || parsed.persona_suffix.has_value())) {
+            load_fail(file, "row '" + row_id +
+                                "' sets 'persona' together with 'persona_prefix'/'persona_suffix' "
+                                "(52-F15)");
+        }
+        if (!parsed.disabled) {
+            const bool defines_prefix =
+                (parsed.persona.has_value() && !parsed.persona->prefix.empty()) ||
+                (parsed.persona_prefix.has_value() && !parsed.persona_prefix->empty());
+            const bool defines_suffix =
+                (parsed.persona.has_value() && !parsed.persona->suffix.empty()) ||
+                (parsed.persona_suffix.has_value() && !parsed.persona_suffix->empty());
+            if (defines_prefix) {
+                if (persona_prefix_seen) {
+                    load_fail(file, "duplicate 'deployment:persona-prefix' across rows (52-F15)");
+                }
+                persona_prefix_seen = true;
+            }
+            if (defines_suffix) {
+                if (persona_suffix_seen) {
+                    load_fail(file, "duplicate 'deployment:persona-suffix' across rows (52-F15)");
+                }
+                persona_suffix_seen = true;
             }
         }
         if (const Json* tools = member(row, "tools")) {
@@ -244,6 +304,32 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
                 parsed.sections.push_back(std::move(parsed_section));
             }
         }
+        if (const Json* permission = member(row, "permission_preset")) {
+            if (!permission->is_string() || permission->get<std::string>().empty()) {
+                load_fail(file, "invalid type for '" + label + ".permission_preset'");
+            }
+            parsed.permission_preset = permission->get<std::string>();
+        }
+        if (const Json* model = member(row, "model")) {
+            if (!model->is_string()) {
+                load_fail(file, "invalid type for '" + label + ".model'");
+            }
+            parsed.model = model->get<std::string>();
+        }
+        if (const Json* capabilities = member(row, "capabilities")) {
+            parsed.capabilities = read_string_array(*capabilities, file, label + ".capabilities");
+            for (const std::string& capability : parsed.capabilities) {
+                const CapabilitySpec* spec = find_capability(capability);
+                if (spec == nullptr) {
+                    load_fail(file, "row '" + row_id + "' names unknown capability '" + capability +
+                                        "' (52-F13)");
+                }
+                if (spec->disposition == CapabilityDisposition::Out) {
+                    load_fail(file, "row '" + row_id + "' names out-of-scope capability '" +
+                                        capability + "' (52-F13)");
+                }
+            }
+        }
         if (const Json* config = member(row, "config")) {
             parsed.config = config->dump();
         }
@@ -305,23 +391,92 @@ std::filesystem::path default_presets_user_root() {
 }
 
 std::filesystem::path default_presets_shipped_root() {
+    if (const char* env = std::getenv("YMH_PRESETS_DIR"); env != nullptr) {
+        std::filesystem::path candidate{env};
+        std::error_code       error;
+        if (candidate.empty() || !std::filesystem::is_directory(candidate, error)) {
+            return {};
+        }
+        return candidate;
+    }
+    std::error_code error;
+#ifdef YMH_PRESETS_DIR
+    {
+        std::filesystem::path candidate{YMH_PRESETS_DIR};
+        if (!candidate.empty() && std::filesystem::is_directory(candidate, error)) {
+            return candidate;
+        }
+    }
+#endif
+#ifdef YMH_SOURCE_DIR
+    {
+        std::filesystem::path candidate = std::filesystem::path{YMH_SOURCE_DIR} / "presets";
+        if (std::filesystem::is_directory(candidate, error)) {
+            return candidate;
+        }
+    }
+#endif
     return {};
+}
+
+std::vector<std::string> reserved_ids() {
+    return {"ptc", "cordis"};
+}
+
+const std::vector<CapabilitySpec>& shipped_capabilities() {
+    static const std::vector<CapabilitySpec> capabilities = {
+        {"subagents", CapabilityDisposition::In},
+        {"skills", CapabilityDisposition::In},
+        {"plan-mode", CapabilityDisposition::InNotPresetControlled},
+        {"compaction", CapabilityDisposition::InNotPresetControlled},
+        {"goals", CapabilityDisposition::InNotPresetControlled},
+        {"jobs", CapabilityDisposition::InNotPresetControlled},
+        {"commands", CapabilityDisposition::InNotPresetControlled},
+        {"workflow", CapabilityDisposition::Out},
+        {"ralph", CapabilityDisposition::Out},
+        {"ptc", CapabilityDisposition::Out},
+        {"run-code", CapabilityDisposition::Out},
+        {"plugin", CapabilityDisposition::Out},
+        {"cordis", CapabilityDisposition::Out},
+        {"remote", CapabilityDisposition::Out},
+        {"acp", CapabilityDisposition::Out},
+        {"image", CapabilityDisposition::Out},
+        {"model-selection", CapabilityDisposition::Out},
+    };
+    return capabilities;
+}
+
+const CapabilitySpec* find_capability(std::string_view name) {
+    for (const CapabilitySpec& spec : shipped_capabilities()) {
+        if (spec.name == name) {
+            return &spec;
+        }
+    }
+    return nullptr;
 }
 
 AgentPresetRoster::AgentPresetRoster(SystemPrompt& prompt, ToolRegistry& tools,
                                      SkillCatalog& skills, SessionManager& sessions,
-                                     PresetConfig config)
+                                     PresetConfig config, Logger* logger,
+                                     std::vector<std::string> known_permission_presets)
     : prompt_(prompt),
       tools_(tools),
       skills_(skills),
       sessions_(sessions),
-      config_(std::move(config)) {}
+      config_(std::move(config)),
+      logger_(logger),
+      known_permission_presets_(std::move(known_permission_presets)) {}
 
 std::vector<std::filesystem::path> AgentPresetRoster::roots() const {
     std::vector<std::filesystem::path> result;
     if (config_.include_shipped_root) {
         std::filesystem::path shipped = default_presets_shipped_root();
-        if (!shipped.empty()) {
+        if (shipped.empty()) {
+            if (logger_ != nullptr) {
+                logger_->warn("presets: shipped root is empty; the shipped "
+                              "minimal/standard presets are unavailable (52-F16)");
+            }
+        } else {
             result.push_back(std::move(shipped));
         }
     }
@@ -366,6 +521,12 @@ void AgentPresetRoster::ensure_loaded() const {
                 for (const std::string& skill_root : row.skill_roots) {
                     reject_escaping_skill_root(preset, skill_root, file);
                 }
+                if (row.permission_preset.has_value() &&
+                    std::find(known_permission_presets_.begin(), known_permission_presets_.end(),
+                              *row.permission_preset) == known_permission_presets_.end()) {
+                    throw ConfigError("preset " + file.string() + ": unknown permission preset '" +
+                                      *row.permission_preset + "' (52-F17)");
+                }
             }
             if (!seen.insert(preset.id).second) {
                 throw PresetLoadError("duplicate preset id '" + preset.id + "' across roots");
@@ -396,6 +557,11 @@ const AgentPreset& AgentPresetRoster::resolve(std::optional<std::string> id) con
             return preset;
         }
     }
+    const std::vector<std::string> reserved = reserved_ids();
+    if (std::find(reserved.begin(), reserved.end(), *target) != reserved.end()) {
+        throw PresetUnavailable("preset '" + *target +
+                                "' is reserved and not shipped by this build");
+    }
     throw PresetNotFound("unknown preset '" + *target + "'");
 }
 
@@ -420,6 +586,7 @@ void AgentPresetRoster::register_preset_rows(const AgentPreset& preset, ScopeHan
     std::optional<ToolRestriction> filter;
     bool                           persona_prefix = false;
     bool                           persona_suffix = false;
+    bool                           suppress_runtime_context = false;
     for (const PresetRow& row : preset.rows) {
         if (row.disabled) {
             continue;
@@ -431,6 +598,30 @@ void AgentPresetRoster::register_preset_rows(const AgentPreset& preset, ScopeHan
             section.complete = spec.complete;
             section.text     = [text = spec.text](const AssembleContext&) { return text; };
             scope.add_section(std::move(section));
+        }
+        if (row.persona.has_value()) {
+            if (!row.persona->include_runtime_context) {
+                suppress_runtime_context = true;
+            }
+            if (!row.persona->prefix.empty() && !persona_prefix) {
+                PromptSection section;
+                section.name     = "deployment:persona-prefix";
+                section.order    = section_order("deployment:persona-prefix");
+                section.complete = row.persona->complete;
+                section.text =
+                    [text = row.persona->prefix](const AssembleContext&) { return text; };
+                scope.add_section(std::move(section));
+                persona_prefix = true;
+            }
+            if (!row.persona->suffix.empty() && !persona_suffix) {
+                PromptSection section;
+                section.name  = "deployment:persona-suffix";
+                section.order = section_order("deployment:persona-suffix");
+                section.text =
+                    [text = row.persona->suffix](const AssembleContext&) { return text; };
+                scope.add_section(std::move(section));
+                persona_suffix = true;
+            }
         }
         if (row.persona_prefix.has_value() && !persona_prefix) {
             PromptSection section;
@@ -457,6 +648,13 @@ void AgentPresetRoster::register_preset_rows(const AgentPreset& preset, ScopeHan
     }
     if (filter.has_value()) {
         scope.set_tool_filter(make_tool_filter(*filter));
+    }
+    if (suppress_runtime_context) {
+        PromptContext context;
+        context.name  = std::string{kRuntimeContextName};
+        context.order = 0;
+        context.text  = [](const AssembleContext&) { return std::string{}; };
+        scope.add_context(std::move(context));
     }
 }
 

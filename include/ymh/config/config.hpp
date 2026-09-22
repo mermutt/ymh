@@ -78,6 +78,10 @@ struct AgentDefaults {
     std::string                system_prompt;     // empty => built-in default
     std::string                plan_section;      // empty => built-in default (25-D3)
     CompactionSettings         compaction;
+    // 52-D15/52-I11: the deployment sandbox baseline, replacing the hardcode in
+    // `to_agent_config`. One of "workspace"|"read-only"|"unrestricted"; a
+    // permission preset may only narrow it.
+    std::string                sandbox = "workspace";
 };
 
 // [workspace]
@@ -96,6 +100,41 @@ struct PermissionRuleSettings {
     std::string                id;
 };
 
+// 52-D15: one named permission preset. `sandbox` is one of
+// "workspace"|"read-only"|"unrestricted"; `approval` is "ask"|"never".
+struct PermissionPresetSettings {
+    std::string sandbox  = "workspace";
+    std::string approval = "ask";
+};
+
+// 52-D15: the two shipped permission preset names.
+inline constexpr std::string_view kWorkspaceWritePreset   = "workspace-write";
+inline constexpr std::string_view kDangerFullAccessPreset = "danger-full-access";
+
+// 52-D15: the built-in `permissions.presets` seed, so the two shipped names
+// always resolve even when the deployment config does not restate them.
+[[nodiscard]] inline std::map<std::string, PermissionPresetSettings, std::less<>>
+builtin_permission_presets() {
+    std::map<std::string, PermissionPresetSettings, std::less<>> presets;
+    presets[std::string{kWorkspaceWritePreset}]   = PermissionPresetSettings{};
+    presets[std::string{kDangerFullAccessPreset}] = PermissionPresetSettings{"unrestricted", "never"};
+    return presets;
+}
+
+// 52-I11: sandbox/approval ordering for the narrowing check. `read-only` is the
+// narrowest, `unrestricted` the widest; `ask` is narrower than `never`.
+[[nodiscard]] int sandbox_rank(std::string_view sandbox);
+[[nodiscard]] int approval_rank(std::string_view approval);
+
+// 52-I11: true when `candidate` is no wider than `baseline` in either dimension.
+[[nodiscard]] bool permission_preset_narrows(const PermissionPresetSettings& baseline,
+                                             const PermissionPresetSettings& candidate);
+
+// 52-I11: the per-dimension minimum of the two bindings. A preset can only
+// narrow the deployment; a wider candidate is clamped, never applied.
+[[nodiscard]] PermissionPresetSettings narrow_permission_preset(
+    const PermissionPresetSettings& baseline, const PermissionPresetSettings& candidate);
+
 // [permissions] — mapped onto `PermissionConfig` by the CLI wiring.
 struct PermissionDefaults {
     std::string shell = "ask";
@@ -106,7 +145,19 @@ struct PermissionDefaults {
     std::string default_verdict = "ask";
     // 46-D1: the general rule list; becomes Layer::Project rules.
     std::vector<PermissionRuleSettings> rules;
+    // 52-D15: named permission presets, seeded with the two shipped names.
+    std::map<std::string, PermissionPresetSettings, std::less<>> presets =
+        builtin_permission_presets();
+    // 52-D15: names a `permissions.presets` entry; empty => built-in
+    // `workspace-write`. An unknown name is a `ConfigError` (52-F17).
+    std::string default_preset;
 };
+
+// 52-D15: session preset's `permission_preset` > `permissions.default_preset` >
+// built-in `workspace-write`. An unknown named preset is a `ConfigError`
+// (52-F17).
+[[nodiscard]] PermissionPresetSettings resolve_permission_preset(
+    const PermissionDefaults& permissions, std::optional<std::string> preset_name);
 
 // [logging] — §40. `log_prompts` is off by default and must never be enabled
 // implicitly; prompt bodies are redacted even when it is on.
@@ -456,6 +507,16 @@ struct ResolvedModel {
 // a literal id) -> `llm.active_model` -> `llm.model` verbatim -> built-in
 // `deepseek-flash`. Throws `ConfigError` for an unknown active model/endpoint.
 [[nodiscard]] ResolvedModel resolve_model(const Config& config);
+
+// 52-D15: the deployment permission baseline. When `permissions.default_preset`
+// names a preset its settings govern; otherwise the baseline is
+// `{agent.sandbox, "ask"}`. A preset binding may only narrow this baseline
+// (52-I11).
+[[nodiscard]] PermissionPresetSettings deployment_permission_baseline(const Config& config);
+
+// 52-D15/52-I12: the deployment's default permission preset name, pinned into a
+// session at creation.
+[[nodiscard]] std::string default_permission_preset_name(const Config& config);
 
 [[nodiscard]] std::optional<std::string> env_value(std::string_view name);
 

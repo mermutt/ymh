@@ -25,6 +25,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(FetchContent)
 include(CompilerWarnings)
+include(GNUInstallDirs)
 
 # ---------------------------------------------------------------------------
 # Options
@@ -485,6 +486,13 @@ target_link_libraries(ymh_agent
         ymh::warnings
 )
 
+# 52-D13: the shipped-presets root. A dev build falls back to <source>/presets;
+# an installed build resolves the install location first.
+target_compile_definitions(ymh_agent PRIVATE
+    YMH_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    YMH_PRESETS_DIR="${CMAKE_INSTALL_FULL_DATADIR}/ymh/presets"
+)
+
 # ---------------------------------------------------------------------------
 # Configuration library (component: config, §37)
 # ---------------------------------------------------------------------------
@@ -812,3 +820,9 @@ if(YMH_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# ---------------------------------------------------------------------------
+# Shipped agent presets (52-D13)
+# ---------------------------------------------------------------------------
+
+install(DIRECTORY presets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/ymh/presets)

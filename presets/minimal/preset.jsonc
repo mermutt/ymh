@@ -1,0 +1,15 @@
+{
+  "id": "minimal",
+  "display_name": "Minimal",
+  "rows": [
+    {
+      "id": "persona",
+      "persona": {
+        "prefix": "You are a helpful software engineer assistant.",
+        "complete": true,
+        "include_runtime_context": false
+      }
+    },
+    { "id": "shell", "tools": { "allow": ["shell"] } }
+  ]
+}

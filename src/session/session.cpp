@@ -283,6 +283,8 @@ void to_json(nlohmann::json& json, const SessionHeader& header) {
         {"metadata", header.metadata ? nlohmann::json(*header.metadata) : nlohmann::json(nullptr)},
         {"agent_preset", header.agent_preset ? nlohmann::json(*header.agent_preset)
                                              : nlohmann::json(nullptr)},
+        {"permission_preset", header.permission_preset ? nlohmann::json(*header.permission_preset)
+                                                       : nlohmann::json(nullptr)},
         {"depth", header.depth},
     };
 }
@@ -316,6 +318,11 @@ void from_json(const nlohmann::json& json, SessionHeader& header) {
         header.agent_preset = json.at("agent_preset").get<std::string>();
     } else {
         header.agent_preset = std::nullopt;
+    }
+    if (json.contains("permission_preset") && !json.at("permission_preset").is_null()) {
+        header.permission_preset = json.at("permission_preset").get<std::string>();
+    } else {
+        header.permission_preset = std::nullopt;
     }
     header.depth = json.value("depth", std::uint32_t{0});
 }
@@ -740,6 +747,7 @@ Session Session::fork(const Session& parent, std::size_t seedLength, SessionStor
     child.parentSession = parent.id();
     child.seedLength    = seedLength;
     child.depth         = parent.header().depth;
+    child.permission_preset = parent.header().permission_preset;
     validateHeader(child);
 
     store.create(child);

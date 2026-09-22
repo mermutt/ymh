@@ -1861,6 +1861,36 @@
       "category": "config_key",
       "spec": "47-muse-glimmer-support.md",
       "section": "10.2"
+    },
+    {
+      "symbol": "config::agent.sandbox",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "5.6"
+    },
+    {
+      "symbol": "config::permissions.default_preset",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "5.6"
+    },
+    {
+      "symbol": "config::permissions.presets",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "5.6"
+    },
+    {
+      "symbol": "config::permissions.presets.approval",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "5.6"
+    },
+    {
+      "symbol": "config::permissions.presets.sandbox",
+      "category": "config_key",
+      "spec": "52-endpoints-models-and-dsh-agent-presets.md",
+      "section": "5.6"
     }
   ]
 }

@@ -1,0 +1,14 @@
+{
+  "id": "standard",
+  "display_name": "Standard",
+  "rows": [
+    {
+      "id": "persona",
+      "persona": {
+        "prefix": "You are a coding agent powered by the {{model}} model.",
+        "suffix": "Your working directory is {{cwd}}."
+      }
+    },
+    { "id": "instructions" }
+  ]
+}

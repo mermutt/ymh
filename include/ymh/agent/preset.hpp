@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "ymh/agent/agent.hpp"
+#include "ymh/prompt/persona.hpp"
 
 namespace ymh {
 
@@ -25,6 +26,7 @@ class ScopeHandle;
 class SystemPrompt;
 class ToolRegistry;
 class SkillCatalog;
+class Logger;
 
 // 42 §3.1: 26 §4.3.8 shared value types.
 using GoalId   = std::uint64_t;  // Wave 6; shared type only
@@ -50,17 +52,37 @@ struct PromptSectionSpec {
 };
 
 // 42-D17: one preset composition row (42 §2.1.1 pins the file vocabulary).
+// 52-D10 adds `persona` (reusing PersonaConfig verbatim; PersonaRow was deleted
+// in Rev 2), `permission_preset`, `model`, and `capabilities` (§5.7).
 struct PresetRow {
     std::string                    id;
     std::string                    group;
     bool                           disabled = false;
-    std::optional<std::string>     persona_prefix;
-    std::optional<std::string>     persona_suffix;
+    std::optional<PersonaConfig>   persona;
+    std::optional<std::string>     persona_prefix;  // legacy (42), still honored
+    std::optional<std::string>     persona_suffix;  // legacy (42), still honored
     std::optional<ToolRestriction> tool_filter;
     std::vector<std::string>       skill_roots;
     std::vector<PromptSectionSpec> sections;
+    std::optional<std::string>     permission_preset;
+    std::optional<std::string>     model;  // reserved (52-OQ-6)
+    std::vector<std::string>       capabilities;
     std::optional<std::string>     config;
 };
+
+// 52 §5.7: the in/out agent capability list. `In` capabilities are delivered;
+// `InNotPresetControlled` exist in ymh but are host-global and not selected by a
+// preset in v1; `Out` capabilities are not shipped, so a preset that names one
+// is a load error (52-I13/52-F13).
+enum class CapabilityDisposition : std::uint8_t { In, InNotPresetControlled, Out };
+
+struct CapabilitySpec {
+    std::string          name;
+    CapabilityDisposition disposition = CapabilityDisposition::Out;
+};
+
+[[nodiscard]] const std::vector<CapabilitySpec>& shipped_capabilities();
+[[nodiscard]] const CapabilitySpec* find_capability(std::string_view name);
 
 struct AgentPreset {
     std::string            id;
@@ -91,6 +113,13 @@ public:
 
 // 42-F8: any preset-file schema violation; names the file and key.
 class PresetLoadError : public PresetError {
+public:
+    using PresetError::PresetError;
+};
+
+// 52-D11: a known-but-not-shipped preset id (ptc, cordis). `resolve` throws this
+// rather than silently yielding an empty composition (52-F11).
+class PresetUnavailable : public PresetError {
 public:
     using PresetError::PresetError;
 };
@@ -134,8 +163,13 @@ inline constexpr std::string_view kDelegationContextName = "subagent:delegation"
 
 class AgentPresetRoster {
 public:
+    // 52-D13/52-F16: `logger` (optional) receives the one shipped-root warning.
+    // 52-F17: `known_permission_presets` are the names a row's `permission_preset`
+    // may reference; an unknown name fails the load with a `ConfigError`.
     AgentPresetRoster(SystemPrompt& prompt, ToolRegistry& tools, SkillCatalog& skills,
-                      SessionManager& sessions, PresetConfig config);
+                      SessionManager& sessions, PresetConfig config,
+                      Logger* logger = nullptr,
+                      std::vector<std::string> known_permission_presets = {});
     ~AgentPresetRoster();
 
     AgentPresetRoster(const AgentPresetRoster&) = delete;
@@ -203,6 +237,8 @@ private:
     SkillCatalog&                                 skills_;
     SessionManager&                               sessions_;
     PresetConfig                                  config_;
+    Logger*                                       logger_ = nullptr;
+    std::vector<std::string>                      known_permission_presets_;
 };
 
 // `$XDG_CONFIG_HOME/ymh/presets` (else `$HOME/.config/ymh/presets`).
@@ -210,5 +246,10 @@ private:
 
 // The packaged shipped root; empty in a source build.
 [[nodiscard]] std::filesystem::path default_presets_shipped_root();
+
+// 52-D11/M-P1: the compiled-in reserved ids (`ptc`, `cordis`). They are not
+// discovered, so `list()` never returns them; `resolve` throws
+// `PresetUnavailable` for an undiscovered reserved id (52-I8/52-F11).
+[[nodiscard]] std::vector<std::string> reserved_ids();
 
 } // namespace ymh

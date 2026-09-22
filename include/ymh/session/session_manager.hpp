@@ -37,6 +37,8 @@ struct SessionOptions {
     // the start preset.
     std::uint32_t              depth = 0;
     std::optional<std::string> agent_preset;
+    // 52-D15/52-I12: the permission preset pinned for the session.
+    std::optional<std::string> permission_preset;
 };
 
 class SessionManager {

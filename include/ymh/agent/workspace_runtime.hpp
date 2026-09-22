@@ -162,6 +162,9 @@ public:
     [[nodiscard]] PlanModeController& plan_mode() noexcept;
 
     [[nodiscard]] const AgentConfig&       agent_config() const noexcept;
+    // 52-D15/52-I12: the deployment default permission preset name pinned into
+    // each new session.
+    [[nodiscard]] const std::string&       default_permission_preset() const noexcept;
     [[nodiscard]] const LLMProviderConfig& provider_config() const noexcept;
 
     // 18 §3.4 (CX-08): read-only accessors for the assembled-context inspector.

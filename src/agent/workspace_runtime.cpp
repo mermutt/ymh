@@ -90,6 +90,29 @@ PresetConfig make_preset_config(const Config& config) {
     return preset;
 }
 
+std::vector<std::string> permission_preset_names(const Config& config) {
+    std::vector<std::string> names;
+    names.reserve(config.permissions.presets.size());
+    for (const auto& [name, settings] : config.permissions.presets) {
+        (void)settings;
+        names.push_back(name);
+    }
+    return names;
+}
+
+SandboxMode effective_sandbox_mode(const Config& config) {
+    const PermissionPresetSettings baseline = deployment_permission_baseline(config);
+    const PermissionPresetSettings effective = narrow_permission_preset(
+        PermissionPresetSettings{config.agent.sandbox, "ask"}, baseline);
+    if (effective.sandbox == "read-only") {
+        return SandboxMode::ReadOnly;
+    }
+    if (effective.sandbox == "unrestricted") {
+        return SandboxMode::Unrestricted;
+    }
+    return SandboxMode::Workspace;
+}
+
 } // namespace
 
 bool skill_tool_usable(const PermissionPolicy& policy, bool prompt_path_available) {
@@ -129,10 +152,11 @@ public:
                                                        pty_events_, tool_config_)
                    : nullptr),
           environment_(std::make_unique<LocalEnvironment>(
-              root_, SandboxMode::Workspace, tool_config_, pty_.get())),
+              root_, effective_sandbox_mode(config), tool_config_, pty_.get())),
           skill_catalog_(make_skill_catalog(config, *environment_,
                                             category_logger(LogCategory::Tool))),
           permission_config_(to_permission_config(config)),
+          default_permission_preset_(default_permission_preset_name(config)),
           policy_(permission_config_, grant_store),
           gate_(policy_, permission_config_),
           agent_config_(make_agent_config(config, *skill_catalog_, policy_,
@@ -153,8 +177,9 @@ public:
               } catch (const UnknownSession&) {
               }
           }),
-          roster_(std::make_unique<AgentPresetRoster>(prompt_, tools_, *skill_catalog_,
-                                                     sessions_, make_preset_config(config))) {
+          roster_(std::make_unique<AgentPresetRoster>(
+              prompt_, tools_, *skill_catalog_, sessions_, make_preset_config(config),
+              &category_logger(LogCategory::Tool), permission_preset_names(config))) {
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
             registrations_.push_back(tools_.add(std::move(tool)));
         }
@@ -253,6 +278,7 @@ public:
     std::vector<ToolRegistry::Registration> registrations_;
     std::unique_ptr<McpManager>        mcp_;
     PermissionConfig                   permission_config_;
+    std::string                        default_permission_preset_;
     RulePermissionPolicy               policy_;
     PermissionGate                     gate_;
     AgentConfig                        agent_config_;
@@ -389,6 +415,10 @@ ContextAssembler&     WorkspaceRuntime::context() noexcept { return impl_->assem
 PlanModeController&   WorkspaceRuntime::plan_mode() noexcept { return impl_->plan_mode_; }
 
 const AgentConfig& WorkspaceRuntime::agent_config() const noexcept { return impl_->agent_config_; }
+
+const std::string& WorkspaceRuntime::default_permission_preset() const noexcept {
+    return impl_->default_permission_preset_;
+}
 
 const LLMProviderConfig& WorkspaceRuntime::provider_config() const noexcept {
     return impl_->provider_config_;
