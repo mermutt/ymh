@@ -20,9 +20,10 @@ Architecture and component specs live in `docs/design/`.
 
 ## Build prerequisites
 
-- **CMake ≥ 3.25**, **Ninja**, and a C++23 compiler (**GCC 13+ / Clang 16+**;
+- **CMake ≥ 3.22**, **Ninja**, and a C++23 compiler (**GCC 13+ / Clang 16+**;
   the project is developed against GCC 16, and Ubuntu 24.04's default `g++` is
-  GCC 13.2, which clears the floor).
+  GCC 13.2, which clears the floor). Ubuntu 22.04's stock CMake 3.22.1 is
+  sufficient.
 - **System libraries**, resolved by CMake `find_package` / `pkg-config` and so
   installed from apt as `-dev` packages: SQLite3, nlohmann_json, spdlog, fmt,
   libcurl, libgit2, and cmark-gfm. `pkg-config` itself is also required; the
