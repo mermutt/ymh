@@ -360,7 +360,7 @@ Two new maps under `llm`, plus an active-model selector:
       "base_url": "http://openai.tedai.ibm.com",
       "api_key": "sk-...",                       // literal; GLOBAL layer only; 0600
       "api_key_env": "TEDAI_API_KEY",            // fallback when api_key absent
-      "headers": { "X-Client": "ymh" },          // optional, NON-secret
+      "headers": { "X-Client": "ymh" }, // optional; GLOBAL layer only; redacted
       "max_concurrency": 4,
       "connect_timeout_ms": 10000,
       "idle_timeout_ms": 60000,
@@ -591,7 +591,7 @@ Pinned properties:
   `reasoning_effort`, `temperature`, `top_p`, `top_k`, `tool_choice`, `stop`,
   `seed`).
 - An unknown key **inside** an endpoint/model entry fails with the qualified
-  name `llm.endpoints.<name>.<key>` (52-F-unknown).
+  name `llm.endpoints.<name>.<key>` (52-F24).
 - **Nested maps recurse.** `reject_unknown_named_map` recurses into
   `endpoint.<name>.retry` against the **retry allowlist** (`max_attempts`,
   `base_delay_ms`, `max_delay_ms`, `jitter`, `honor_retry_after`) with the
@@ -601,7 +601,7 @@ Pinned properties:
   mirroring the `read_string_object_as_env` shape used by `apply_llm`
   (`src/config/config.cpp:390-403`, `:660-679`). A non-object `headers` or a
   non-string header value is a `ConfigError` (never silently dropped).
-- **Explicit type checks (52-F-unknown/52-F19).** The loader pins
+- **Explicit type checks (52-F24/52-F19).** The loader pins
   `is_object()` for `llm.endpoints`, `llm.models`, and (when present)
   `llm.default`, and `is_string()` for `llm.active_model` and each
   `endpoint`/`model`/`provider`/`base_url`/`api_key_env`/`profile` value, with a
@@ -761,6 +761,13 @@ set **F1–F23 is contiguous** (§7).
   401. **Guard:** the import emits a note for a keyless endpoint (52-D7); the
   config is **not** rejected (a keyless local endpoint is legitimate), and the
   provider surfaces a typed auth error at request time. Instance of F1.
+- **52-F24: strict-loader violation inside a named-map entry.** An unknown key
+  inside `llm.endpoints.<n>` / `llm.models.<n>` or inside a nested `retry`
+  object; a non-object `endpoints`/`models`/`default`; a non-string
+  `active_model`; or a `headers` value that is not a string. **Guard:** 52-I6 —
+  `reject_unknown_named_map` validates every key INSIDE an entry against the
+  entry allowlist and recurses into `retry`, so only the entry NAME is free; the
+  loader fails with a qualified label. Instance of F1.
 
 ---
 
@@ -1318,7 +1325,7 @@ instantiates using the taxonomy **asserted by `42 §7.1` / `44 §8.1`** — not
 
 ## 7. Failure modes (consolidated)
 
-`52-F1..52-F23`, contiguous (Part A: F1–F10, F18–F23; Part B: F11–F17). The
+`52-F1..52-F24`, contiguous (Part A: F1–F10, F18–F24; Part B: F11–F17). The
 Rev-1 F18 (shipped-root warning) is merged into F16 as a behaviour (M-C2).
 Coverage matrix in §9.5.
 
