@@ -146,6 +146,10 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
 pkg_check_modules(CMARK_GFM REQUIRED IMPORTED_TARGET libcmark-gfm)
+# Ubuntu/Debian ship the cmark-gfm extensions as a separate package with its own
+# pkg-config module; Arch folds them into libcmark-gfm and has no such module.
+# Optional on purpose: requiring it would break Arch.
+pkg_check_modules(CMARK_GFM_EXTENSIONS IMPORTED_TARGET libcmark-gfm-extensions)
 
 # ---------------------------------------------------------------------------
 # Core library
@@ -688,6 +692,12 @@ target_link_libraries(ymh_render
         PkgConfig::CMARK_GFM
         ymh::warnings
 )
+
+# Link the separately-packaged extensions module only where it exists (Ubuntu/
+# Debian); on Arch the core module already pulls the extensions transitively.
+if(CMARK_GFM_EXTENSIONS_FOUND)
+    target_link_libraries(ymh_render PRIVATE PkgConfig::CMARK_GFM_EXTENSIONS)
+endif()
 
 # ---------------------------------------------------------------------------
 # Terminal UI library (component 10)

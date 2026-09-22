@@ -39,7 +39,7 @@ Architecture and component specs live in `docs/design/`.
 sudo apt update && sudo apt install -y \
     cmake ninja-build g++ pkg-config \
     libsqlite3-dev nlohmann-json3-dev libspdlog-dev libfmt-dev \
-    libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev
+    libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev libcmark-gfm-extensions-dev
 ```
 
 Every `lib*-dev` entry is a development package; the matching runtime `.so`
