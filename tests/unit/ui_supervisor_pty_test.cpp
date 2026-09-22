@@ -29,6 +29,7 @@
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session_persistence.hpp"
+#include "ymh/skills/workspace_trust.hpp"
 
 namespace {
 
@@ -920,6 +921,9 @@ TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
     write_skill_file(config / "ymh" / "skills", "git-commit", "Write a conventional commit.");
     const std::filesystem::path workspace = root.path() / "skills-ws";
     std::filesystem::create_directories(workspace);
+    // 50-D5: the workspace tier is loaded only when the operator has trusted the
+    // workspace; grant it so this test keeps covering workspace skill listing.
+    ASSERT_TRUE(WorkspaceTrustStore{}.trust(workspace));
     write_skill_file(workspace / ".ymh" / "skills", "repo-conventions", "Repo conventions.");
     const std::filesystem::path broken = workspace / ".ymh" / "skills" / "broken";
     std::filesystem::create_directories(broken);
