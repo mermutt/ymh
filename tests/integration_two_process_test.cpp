@@ -450,7 +450,8 @@ public:
     ~PtyChild() { terminate(); }
 
     bool spawn(const std::filesystem::path& binary, const std::filesystem::path& cwd,
-               const std::map<std::string, std::string>& env) {
+               const std::map<std::string, std::string>& env,
+               const std::vector<std::string>& args = {}) {
         master_ = ::posix_openpt(O_RDWR | O_NOCTTY);
         if (master_ < 0) {
             return false;
@@ -490,7 +491,16 @@ public:
             if (::chdir(cwd.c_str()) != 0) {
                 ::_exit(126);
             }
-            ::execl(binary.c_str(), binary.c_str(), static_cast<char*>(nullptr));
+            std::vector<std::string> argv_storage;
+            argv_storage.push_back(binary.string());
+            argv_storage.insert(argv_storage.end(), args.begin(), args.end());
+            std::vector<char*> argv;
+            argv.reserve(argv_storage.size() + 1);
+            for (std::string& argument : argv_storage) {
+                argv.push_back(argument.data());
+            }
+            argv.push_back(nullptr);
+            ::execv(binary.c_str(), argv.data());
             ::_exit(127);
         }
         ::close(slave);
@@ -776,12 +786,14 @@ TEST_F(TwoProcess, SupervisorExitWithPeerKeepsDaemon) {
     const std::map<std::string, std::string> env = supervisor_env(root);
 
     PtyChild first;
-    ASSERT_TRUE(first.spawn(binary_, workspace, env));
+    // 49-D3/49-I4: a bare `ymh` no longer spawns eagerly; `--new` is the
+    // retained explicit activation that creates the workspace and daemon.
+    ASSERT_TRUE(first.spawn(binary_, workspace, env, {"--new"}));
     ASSERT_TRUE(first.wait_for("Type a message and press Enter", 30s))
         << "first supervisor did not become ready";
 
     PtyChild second;
-    ASSERT_TRUE(second.spawn(binary_, workspace, env));
+    ASSERT_TRUE(second.spawn(binary_, workspace, env, {"--new"}));
     ASSERT_TRUE(second.wait_for("Type a message and press Enter", 30s))
         << "second supervisor did not attach";
 
@@ -848,7 +860,7 @@ TEST_F(TwoProcess, LastSupervisorExitTearsDaemonDown) {
     DaemonGuard guard(workspace_id.value);
 
     PtyChild child;
-    ASSERT_TRUE(child.spawn(binary_, workspace, supervisor_env(root)));
+    ASSERT_TRUE(child.spawn(binary_, workspace, supervisor_env(root), {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 30s))
         << "supervisor did not auto-create a session";
 

@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -155,6 +156,18 @@ std::vector<pid_t> host_processes_under_root(const std::filesystem::path& root) 
         }
     }
     return pids;
+}
+
+bool wait_for_host_processes_under_root(const std::filesystem::path& root,
+                                        std::chrono::milliseconds      timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!host_processes_under_root(root).empty()) {
+            return true;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    return !host_processes_under_root(root).empty();
 }
 
 class HostDaemonGuard {
@@ -427,6 +440,9 @@ private:
     std::string buffer_;
 };
 
+// 49-D3/49-I4: the eager cwd spawn is removed for a bare `ymh`, so the tests
+// that need a workspace+session before interacting launch with `--new`, the
+// retained explicit activation. The lazy first-prompt path has its own tests.
 TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ShortTempRoot root("ymh_pty");
     const std::filesystem::path state = root.state_dir();
@@ -472,7 +488,7 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace_a, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace_a, env, {"--new"}));
 
     ASSERT_TRUE(child.wait_for("alpha", 25s));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 10s))
@@ -526,7 +542,7 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("/help\r");
@@ -596,7 +612,7 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
     ASSERT_TRUE(child.wait_for("active ·", 10s)) << child.text();
     ASSERT_FALSE(host_processes(&workspace_id.value).empty())
@@ -676,7 +692,7 @@ TEST(UiSupervisorPty, ExitPromptArrowKeysMoveHighlight) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
     ASSERT_TRUE(child.wait_for("active ·", 10s)) << child.text();
     ASSERT_FALSE(host_processes(&workspace_id.value).empty())
@@ -745,7 +761,7 @@ TEST(UiSupervisorPty, ModalKeystrokesDoNotReachComposer) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("keep");
@@ -805,7 +821,7 @@ TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
     ASSERT_TRUE(child.wait_for("active ·", 10s)) << child.text();
     ASSERT_FALSE(host_processes(&workspace_id.value).empty())
@@ -927,7 +943,7 @@ TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
     env["XDG_CONFIG_HOME"] = config.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::size_t completion_mark = child.raw_size();
@@ -979,7 +995,7 @@ TEST(UiSupervisorPty, SkillsEmptyState) {
     env["XDG_CONFIG_HOME"] = config.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::size_t mark = child.raw_size();
@@ -1028,7 +1044,7 @@ TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::size_t open_mark = child.raw_size();
@@ -1075,7 +1091,7 @@ TEST(UiSupervisorPty, ContextOverlayShowsNote) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::size_t mark = child.raw_size();
@@ -1117,7 +1133,7 @@ TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
     env["XDG_STATE_HOME"] = state.string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::size_t open_mark = child.raw_size();
@@ -1169,7 +1185,7 @@ TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
     env["XDG_CONFIG_HOME"] = (root.path() / ".config").string();
     env["TERM"] = "xterm-256color";
     ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env,
-                            {"--config", explicit_config.string()}));
+                            {"--new", "--config", explicit_config.string()}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::vector<pid_t> hosts = host_processes(&workspace_id.value);
@@ -1329,7 +1345,7 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
 
     HostDaemonGuard alpha_guard(alpha_id.value);
     PtyChild        child;
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state), {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
@@ -1374,7 +1390,7 @@ TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
 
     HostDaemonGuard alpha_guard(alpha_id.value);
     PtyChild        child;
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state), {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
@@ -1439,7 +1455,7 @@ TEST(UiSupervisorPty, SwLive_ShowsOtherWorkspaceLiveSession) {
 
     HostDaemonGuard alpha_guard(alpha_id.value);
     PtyChild        child;
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state), {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
@@ -1482,7 +1498,7 @@ TEST(UiSupervisorPty, SwP1_SessionsSelectionSpawnsAndResumes) {
     HostDaemonGuard alpha_guard(alpha_id.value);
     HostDaemonGuard beta_guard(beta_id);
     PtyChild        child;
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state), {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("/sessions\r");
@@ -1648,7 +1664,7 @@ TEST(UiSupervisorPty, UX_I2_TabThenEnterExecutesHighlightedCommand) {
     env["XDG_CONFIG_HOME"] = (root.path() / ".config").string();
     env["HOME"] = root.path().string();
     env["TERM"] = "xterm-256color";
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env, {"--new"}));
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     const std::size_t mark = child.raw_size();
@@ -1739,5 +1755,220 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
+// 49-P3 (49-I1/49-I3): a bare `ymh` under a PTY creates neither a cwd host
+// socket nor a `workspaces` registry row; the first prompt spawns the daemon
+// and registers its host.
+TEST(UiSupervisorPty, UI49_P3_NoDaemonBeforePrompt) {
+    ShortTempRoot root("ymh_pty_49p3");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "lazy-ws";
+    std::filesystem::create_directories(workspace);
+    const std::filesystem::path canonical = std::filesystem::canonical(workspace);
+    const std::filesystem::path socket   = workspace / ".ymh" / "host.sock";
+
+    PtyChild child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("no workspace attached — type a prompt to start", 25s))
+        << child.text();
+    EXPECT_FALSE(std::filesystem::exists(socket)) << "a bare `ymh` opened a cwd host socket";
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(pty_registry_config(state));
+        EXPECT_FALSE(registry->findByCanonicalPath(canonical).has_value())
+            << "a bare `ymh` wrote a cwd workspace row before the first prompt";
+        EXPECT_TRUE(registry->listWorkspaces().empty());
+    }
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty())
+        << "a bare `ymh` spawned a daemon before the first prompt";
+
+    child.write("hello lazy\r");
+    ASSERT_TRUE(wait_for_host_processes_under_root(root.path(), 30s))
+        << "the first prompt did not spawn a daemon: " << child.text();
+
+    std::string workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(pty_registry_config(state));
+        const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
+        ASSERT_TRUE(row.has_value()) << "the first prompt did not register the cwd row";
+        EXPECT_TRUE(row->host.has_value()) << "the daemon never registered its host row";
+        workspace_id = row->id.value;
+    }
+    EXPECT_TRUE(std::filesystem::exists(socket)) << "the spawned daemon never opened its socket";
+
+    HostDaemonGuard guard(workspace_id);
+    child.terminate();
+    guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// 49-P4 (49-I3): the first prompt attaches the workspace ONLY after the daemon
+// registers, creates the session, and sends the prompt. The fake LLM reply
+// proves the whole chain reached `Attached` — a pre-spawn attach could never
+// connect.
+TEST(UiSupervisorPty, UI49_P4_FirstPromptRendersSession) {
+    ShortTempRoot root("ymh_pty_49p4");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "lazy-ws";
+    std::filesystem::create_directories(workspace);
+    const std::filesystem::path canonical = std::filesystem::canonical(workspace);
+    root.write("fake.json", R"([{"text": "lazy reply", "finish": "stop"}])");
+
+    std::map<std::string, std::string> env = pty_env(root.path(), state);
+    env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
+
+    PtyChild child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for("no workspace attached — type a prompt to start", 25s))
+        << child.text();
+    ASSERT_TRUE(host_processes_under_root(root.path()).empty());
+
+    child.write("hello lazy\r");
+    ASSERT_TRUE(child.wait_for("lazy reply", 30s)) << child.text();
+    EXPECT_NE(child.text().find(canonical.string()), std::string::npos)
+        << "the lazily-created workspace never became active";
+
+    std::string workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(pty_registry_config(state));
+        const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
+        ASSERT_TRUE(row.has_value()) << "the first prompt did not register the cwd row";
+        workspace_id = row->id.value;
+    }
+
+    HostDaemonGuard guard(workspace_id);
+    child.terminate();
+    guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// 49-P1 (the reported repro, 49-I7): a bare `ymh` creates no cwd workspace, so
+// after resuming a stored session in a second workspace via `/sessions` there is
+// exactly one live workspace and Ctrl-S shows the notice, not the switcher.
+TEST(UiSupervisorPty, UI49_P1_ResumeThenCtrlSShowsNotice) {
+    ShortTempRoot root("ymh_pty_49p1");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    const std::string marker = "zz49p1markerzz";
+    write_stored_session(beta, "beta-stored", marker);
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    HostDaemonGuard beta_guard(beta_id);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
+    ASSERT_TRUE(child.wait_for("no workspace attached — type a prompt to start", 25s))
+        << child.text();
+
+    child.write("/sessions\r");
+    ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
+    child.write("jjjj\r");
+    ASSERT_TRUE(wait_for_host(beta_id, 25s)) << "selecting the stored session did not spawn beta";
+    ASSERT_TRUE(child.wait_for(marker, 25s)) << child.text();
+
+    child.write("\x13");
+    ASSERT_TRUE(child.wait_for("No other workspaces available", 10s)) << child.text();
+    EXPECT_EQ(child.last_frame().find("(current session hidden)"), std::string::npos)
+        << "the lone live workspace must not render the switcher: " << child.last_frame();
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// 49-P2 (49-I7/49-I11): once two live workspaces each have a session, Ctrl-S
+// opens the switcher instead of the notice.
+TEST(UiSupervisorPty, UI49_P2_TwoWorkspacesWithSessionsShowsSwitcher) {
+    ShortTempRoot root("ymh_pty_49p2");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    const std::string alpha_marker = "zz49p2alphamarker";
+    const std::string beta_marker  = "zz49p2betamarker";
+    const SessionId   alpha_session = write_stored_session(alpha, "alpha-stored", alpha_marker);
+    write_stored_session(beta, "beta-stored", beta_marker);
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    HostDaemonGuard beta_guard(beta_id);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state),
+                            {"--resume", alpha_session.value}));
+    ASSERT_TRUE(child.wait_for(alpha_marker, 25s)) << child.text();
+
+    child.write("/sessions\r");
+    ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
+    child.write("jjjj\r");
+    ASSERT_TRUE(wait_for_host(beta_id, 25s)) << "selecting the stored session did not spawn beta";
+    ASSERT_TRUE(child.wait_for(beta_marker, 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for_frame_contains("/beta", 10s))
+        << "the resumed workspace did not become active:\n"
+        << child.last_frame();
+
+    // 49-F6: the first Ctrl-S after the state change may still see the stale
+    // catalog snapshot; its refreshNow lands before the next Ctrl-S.
+    bool switcher_open = false;
+    for (int attempt = 0; attempt < 6 && !switcher_open; ++attempt) {
+        const std::size_t mark = child.raw_size();
+        child.write("\x13");
+        if (child.wait_for_since(mark, "Switcher", 4s)) {
+            switcher_open = true;
+            break;
+        }
+        if (child.wait_for_since(mark, "No other sessions available", 4s)) {
+            child.write("\x1b");
+            child.wait_for_frame_absent("No other sessions available", 5s);
+        }
+    }
+    ASSERT_TRUE(switcher_open) << child.last_frame();
+    EXPECT_NE(child.last_frame().find("alpha"), std::string::npos)
+        << "the other live workspace is missing from the switcher: " << child.last_frame();
+    EXPECT_NE(child.last_frame().find("beta"), std::string::npos)
+        << "the active workspace is missing from the switcher: " << child.last_frame();
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
 
 } // namespace
