@@ -143,7 +143,10 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
   F#-tagged failure modes (F1–F12, §54), dsh mapping, and a test plan. Match the
   style of `00-architecture.md`.
 - Work targets **one component at a time**.
-- No commit unless explicitly requested.
+- **Commit when a coherent change is done** — build green, full suite green,
+  warnings-as-errors clean. Keep commits atomic and scoped to one logical change,
+  with a concise message in the repo's style. Never commit secrets, and never
+  commit `requirements_draft.txt` (untracked by design).
 
 ## Testing
 
