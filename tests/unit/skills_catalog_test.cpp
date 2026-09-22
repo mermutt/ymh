@@ -332,4 +332,47 @@ TEST(SkillCatalog, IndexListsNameAndDescription) {
     EXPECT_NE(index.find("Write a conventional commit."), std::string::npos);
 }
 
+TEST(SkillCatalog, UntrustedWorkspaceSkillIsAbsentFromTheCatalog) {
+    Fixture fixture("skills_untrusted_absent");
+    write_skill(fixture.workspace.path() / ".ymh" / "skills", "repo", "Hostile.");
+
+    SkillCatalogConfig config = fixture.config();
+    config.workspace_trusted = false;
+    SkillCatalog catalog(config, fixture.env, fixture.roots(), fixture.logger);
+    catalog.discover();
+
+    EXPECT_EQ(catalog.find("repo"), nullptr);
+    EXPECT_TRUE(catalog.all().empty());
+    EXPECT_TRUE(has_warning(catalog, "not trusted"));
+}
+
+TEST(SkillCatalog, NewUserRootsPrecedeTheConfigRoot) {
+    TempWorkspace home("skills_home_root");
+    TempWorkspace config_base("skills_cfg_root");
+    const std::filesystem::path home_skills = home.path() / ".ymh" / "skills";
+    const std::filesystem::path claude_skills = home.path() / ".claude" / "skills";
+    const std::filesystem::path config_skills = config_base.path() / "skills";
+    write_skill(home_skills, "shared", "From ~/.ymh.");
+    write_skill(config_skills, "shared", "From the config root.");
+    write_skill(claude_skills, "claude-only", "From ~/.claude.");
+
+    LocalEnvironment   env(home.path());
+    NullLogger         logger;
+    SkillCatalogConfig config;
+    config.workspace_trusted = false;
+    std::vector<SkillRoot> roots{SkillRoot{home_skills, SkillSource::Home, SkillTrust::Trusted},
+                                 SkillRoot{config_skills, SkillSource::User, SkillTrust::Trusted},
+                                 SkillRoot{claude_skills, SkillSource::Claude, SkillTrust::Trusted}};
+    SkillCatalog catalog(config, env, roots, logger);
+    catalog.discover();
+
+    ASSERT_EQ(catalog.all().size(), 2u);
+    EXPECT_EQ(catalog.all()[0].meta.name.value, "shared");
+    EXPECT_EQ(catalog.all()[0].source, SkillSource::Home);
+    EXPECT_EQ(catalog.all()[0].meta.description, "From ~/.ymh.");
+    EXPECT_EQ(catalog.all()[1].meta.name.value, "claude-only");
+    EXPECT_EQ(catalog.all()[1].source, SkillSource::Claude);
+    EXPECT_TRUE(has_warning(catalog, "shadowed by"));
+}
+
 } // namespace
