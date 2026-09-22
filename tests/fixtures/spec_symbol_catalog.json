@@ -1197,6 +1197,12 @@
       "section": "7.8"
     },
     {
+      "symbol": "config::mcp.log_child_stderr",
+      "category": "config_key",
+      "spec": "50-skills-mcp-and-session-lifecycle-errata.md",
+      "section": "5.2"
+    },
+    {
       "symbol": "config::mcp.max_frame_bytes",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
