@@ -608,12 +608,19 @@ public:
                 insert.step();
                 sequences.push_back(static_cast<Sequence>(sqlite3_last_insert_rowid(db)));
 
-                // 19 §5.2: materialize sessions.title in the same transaction.
+                // 19 §5.2 / 53-D6: materialize sessions.title/model in the same
+                // transaction.
                 if (event.type == EventType::SessionRenamed) {
                     Statement set_title{db, "UPDATE sessions SET title = ? WHERE id = ?"};
                     set_title.bindText(1, event.payload.get<payload::SessionRenamed>().title);
                     set_title.bindText(2, id.value);
                     set_title.step();
+                } else if (event.type == EventType::SessionModelChanged) {
+                    Statement set_model{db, "UPDATE sessions SET model = ? WHERE id = ?"};
+                    set_model.bindText(1,
+                                       event.payload.get<payload::SessionModelChanged>().model);
+                    set_model.bindText(2, id.value);
+                    set_model.step();
                 }
             }
 

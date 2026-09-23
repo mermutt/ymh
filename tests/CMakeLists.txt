@@ -35,6 +35,7 @@ add_executable(ymh_tests
     unit/errata46_ui_test.cpp
     unit/errata49_ui_test.cpp
     unit/errata51_ui_test.cpp
+    unit/errata53_ui_test.cpp
     unit/agent_loop_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp
@@ -48,6 +49,7 @@ add_executable(ymh_tests
     unit/compaction_trigger_test.cpp
     unit/context_snapshot_test.cpp
     unit/plan_mode_test.cpp
+    unit/model_selection_test.cpp
     unit/llm_pool_test.cpp
     unit/workspace_runtime_test.cpp
     unit/host_runtime_test.cpp

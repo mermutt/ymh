@@ -68,6 +68,9 @@ struct SupervisorRunOptions {
     // `Attached`. Seeded into `pending_resume_` by `run()` (shared code path
     // with S3's lazy spawn), or delivered through `resume_from_history`.
     std::optional<std::pair<WorkspaceId, SessionId>> initial_resume;
+
+    // 53-D1/53-D3: the eager-spawn failure notice (53-F1); empty means none.
+    std::optional<std::string> initial_notice;
 };
 
 int run_supervisor(const SupervisorRunOptions& options);

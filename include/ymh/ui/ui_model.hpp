@@ -21,9 +21,21 @@
 #include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/ui_event.hpp"
 
+namespace ymh {
+struct Config;
+struct ResolvedModel;
+} // namespace ymh
+
 namespace ymh::ui {
 
 struct UiModel;
+
+// 53-D3.1: the canonical status-line model value: the `llm.models` entry name
+// when named, else the wire id. Used at create, refresh, apply_create_reply,
+// resume, and catalog hydration so the segment never flips between name and id.
+[[nodiscard]] std::string display_model(const ymh::ResolvedModel& model);
+[[nodiscard]] std::string display_model(const ymh::Config& config,
+                                        const std::string& model_id);
 
 constexpr std::size_t kNoEntry = static_cast<std::size_t>(-1);
 
@@ -475,6 +487,25 @@ struct MessageDialogModel {
     std::string text;
 };
 
+// 53-D4: the `/model` picker overlay. Rows are the `llm.models` entries plus a
+// synthetic row for the current literal id when no named entry is active.
+struct ModelPickerRow {
+    std::string name;      // llm.models key; "" for the synthetic literal row
+    std::string model_id;  // wire id
+    std::string endpoint;  // endpoint name
+};
+
+struct ModelPickerModel {
+    bool                        visible = false;
+    std::vector<ModelPickerRow> rows;
+    std::size_t                 selected = 0;
+
+    void open(const ymh::Config& config, const std::string& current_display);
+    void close();
+    void moveUp();
+    void moveDown();
+};
+
 struct PermissionDialogModel {
     bool                open = false;
     SessionId           session;
@@ -555,7 +586,11 @@ struct UiModel {
     ContextOverlayModel                   context;
     SessionCatalogModel                   catalog;
     ReasoningSpinnerState                 spinner;
+    ModelPickerModel                      model_picker;
     UiMode                                mode = UiMode::Conversation;
+    // 53-D3.1: the resolved model for the no-session fallback segment (entry
+    // name when named, else the wire id). Never persisted.
+    std::string                           resolved_model;
     bool                                  shouldExit = false;
     std::string                           mcp_status;
     DirtySet                              dirty;

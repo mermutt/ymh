@@ -441,9 +441,9 @@ private:
     std::string buffer_;
 };
 
-// 49-D3/49-I4: the eager cwd spawn is removed for a bare `ymh`, so the tests
-// that need a workspace+session before interacting launch with `--new`, the
-// retained explicit activation. The lazy first-prompt path has its own tests.
+// 53-D1: a bare `ymh` eagerly spawns its cwd daemon, so `--new` is no longer
+// required to have a workspace+session before interacting; these tests keep
+// using it as an explicit activation where that is what they exercise.
 TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ShortTempRoot root("ymh_pty");
     const std::filesystem::path state = root.state_dir();
@@ -1759,50 +1759,38 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
-// 49-P3 (49-I1/49-I3): a bare `ymh` under a PTY creates neither a cwd host
-// socket nor a `workspaces` registry row; the first prompt spawns the daemon
-// and registers its host.
-TEST(UiSupervisorPty, UI49_P3_NoDaemonBeforePrompt) {
-    ShortTempRoot root("ymh_pty_49p3");
+// 53-P3 (53-I1/53-I2): a bare `ymh` under a PTY registers the cwd row and
+// spawns its daemon before the loop, and the model renders from the first frame.
+// A no-daemon start is the *failed* eager spawn (53-F1), not the normal path.
+TEST(UiSupervisorPty, UI53_P3_EagerDaemonAtStart) {
+    ShortTempRoot root("ymh_pty_53p3");
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
     ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
-    const std::filesystem::path workspace = root.path() / "lazy-ws";
+    const std::filesystem::path workspace = root.path() / "eager-ws";
     std::filesystem::create_directories(workspace);
     const std::filesystem::path canonical = std::filesystem::canonical(workspace);
     const std::filesystem::path socket   = workspace / ".ymh" / "host.sock";
 
     PtyChild child;
     ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, pty_env(root.path(), state)));
-    ASSERT_TRUE(child.wait_for("no workspace attached — type a prompt to start", 25s))
-        << child.text();
-    EXPECT_FALSE(std::filesystem::exists(socket)) << "a bare `ymh` opened a cwd host socket";
-    {
-        std::unique_ptr<WorkspaceRegistry> registry =
-            WorkspaceRegistry::openReadOnly(pty_registry_config(state));
-        EXPECT_FALSE(registry->findByCanonicalPath(canonical).has_value())
-            << "a bare `ymh` wrote a cwd workspace row before the first prompt";
-        EXPECT_TRUE(registry->listWorkspaces().empty());
-    }
-    EXPECT_TRUE(host_processes_under_root(root.path()).empty())
-        << "a bare `ymh` spawned a daemon before the first prompt";
-
-    child.write("hello lazy\r");
     ASSERT_TRUE(wait_for_host_processes_under_root(root.path(), 30s))
-        << "the first prompt did not spawn a daemon: " << child.text();
+        << "the eager start did not spawn a daemon: " << child.text();
 
     std::string workspace_id;
     {
         std::unique_ptr<WorkspaceRegistry> registry =
             WorkspaceRegistry::openReadOnly(pty_registry_config(state));
         const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
-        ASSERT_TRUE(row.has_value()) << "the first prompt did not register the cwd row";
+        ASSERT_TRUE(row.has_value()) << "the eager start did not register the cwd row";
         EXPECT_TRUE(row->host.has_value()) << "the daemon never registered its host row";
         workspace_id = row->id.value;
     }
-    EXPECT_TRUE(std::filesystem::exists(socket)) << "the spawned daemon never opened its socket";
+    EXPECT_TRUE(std::filesystem::exists(socket)) << "the eager daemon never opened its socket";
+    ASSERT_TRUE(child.wait_for("deepseek-flash", 25s))
+        << "the status line did not show the model from the first frame: " << child.text();
 
     HostDaemonGuard guard(workspace_id);
     child.terminate();
@@ -1810,18 +1798,17 @@ TEST(UiSupervisorPty, UI49_P3_NoDaemonBeforePrompt) {
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
-// 49-P4 (49-I3): the first prompt attaches the workspace ONLY after the daemon
-// registers, creates the session, and sends the prompt. The fake LLM reply
-// proves the whole chain reached `Attached` — a pre-spawn attach could never
-// connect.
-TEST(UiSupervisorPty, UI49_P4_FirstPromptRendersSession) {
-    ShortTempRoot root("ymh_pty_49p4");
+// 53-P4 (53-D2/53-I2): the eager attach creates the session before any prompt,
+// so the first prompt renders in the already-attached session. The fake LLM
+// reply proves the whole chain reached `Attached`.
+TEST(UiSupervisorPty, UI53_P4_EagerSessionThenPrompt) {
+    ShortTempRoot root("ymh_pty_53p4");
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
     ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
 
-    const std::filesystem::path workspace = root.path() / "lazy-ws";
+    const std::filesystem::path workspace = root.path() / "eager-ws";
     std::filesystem::create_directories(workspace);
     const std::filesystem::path canonical = std::filesystem::canonical(workspace);
     root.write("fake.json", R"([{"text": "lazy reply", "finish": "stop"}])");
@@ -1831,21 +1818,21 @@ TEST(UiSupervisorPty, UI49_P4_FirstPromptRendersSession) {
 
     PtyChild child;
     ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
-    ASSERT_TRUE(child.wait_for("no workspace attached — type a prompt to start", 25s))
-        << child.text();
-    ASSERT_TRUE(host_processes_under_root(root.path()).empty());
+    // The eager attach models the workspace and its first session with no prompt.
+    ASSERT_TRUE(child.wait_for(canonical.string(), 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for("↑0 ↓0", 25s)) << child.text();
 
     child.write("hello lazy\r");
     ASSERT_TRUE(child.wait_for("lazy reply", 30s)) << child.text();
     EXPECT_NE(child.text().find(canonical.string()), std::string::npos)
-        << "the lazily-created workspace never became active";
+        << "the eagerly-created workspace never became active";
 
     std::string workspace_id;
     {
         std::unique_ptr<WorkspaceRegistry> registry =
             WorkspaceRegistry::openReadOnly(pty_registry_config(state));
         const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
-        ASSERT_TRUE(row.has_value()) << "the first prompt did not register the cwd row";
+        ASSERT_TRUE(row.has_value()) << "the eager start did not register the cwd row";
         workspace_id = row->id.value;
     }
 
@@ -1855,11 +1842,11 @@ TEST(UiSupervisorPty, UI49_P4_FirstPromptRendersSession) {
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
-// 49-P1 (the reported repro, 49-I7): a bare `ymh` creates no cwd workspace, so
-// after resuming a stored session in a second workspace via `/sessions` there is
-// exactly one live workspace and Ctrl-S shows the notice, not the switcher.
-TEST(UiSupervisorPty, UI49_P1_ResumeThenCtrlSShowsNotice) {
-    ShortTempRoot root("ymh_pty_49p1");
+// 53-P1 (53-I3/49-I7 re-pointed): the eager cwd workspace is live from the
+// start, so after resuming a stored session in a second live workspace there are
+// two live workspaces and Ctrl-S opens the switcher, not the notice.
+TEST(UiSupervisorPty, UI53_P1_EagerCwdThenCtrlSShowsSwitcher) {
+    ShortTempRoot root("ymh_pty_53p1");
     const std::filesystem::path state = root.state_dir();
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
@@ -1869,6 +1856,7 @@ TEST(UiSupervisorPty, UI49_P1_ResumeThenCtrlSShowsNotice) {
     const std::filesystem::path beta  = root.path() / "beta";
     std::filesystem::create_directories(alpha);
     std::filesystem::create_directories(beta);
+    const std::filesystem::path alpha_canonical = std::filesystem::canonical(alpha);
 
     WorkspaceId alpha_id;
     std::string beta_id;
@@ -1878,15 +1866,26 @@ TEST(UiSupervisorPty, UI49_P1_ResumeThenCtrlSShowsNotice) {
         alpha_id = registry->registerWorkspace(alpha, "alpha").id;
         beta_id  = registry->registerWorkspace(beta, "beta").id.value;
     }
-    const std::string marker = "zz49p1markerzz";
+    const std::string marker = "zz53p1markerzz";
     write_stored_session(beta, "beta-stored", marker);
+    root.write("fake.json", R"([{"text": "alpha reply", "finish": "stop"}])");
+
+    std::map<std::string, std::string> env = pty_env(root.path(), state);
+    env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
 
     HostDaemonGuard alpha_guard(alpha_id.value);
     HostDaemonGuard beta_guard(beta_id);
     PtyChild        child;
-    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state)));
-    ASSERT_TRUE(child.wait_for("no workspace attached — type a prompt to start", 25s))
-        << child.text();
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, env));
+    ASSERT_TRUE(child.wait_for(alpha_canonical.string(), 25s))
+        << "the eager cwd workspace was not modeled: " << child.text();
+    ASSERT_TRUE(child.wait_for("↑0 ↓0", 25s))
+        << "the eager session was not active: " << child.text();
+
+    // Prompt the eager session so it leaves the unprompted-root catalog filter
+    // (53-I12) and becomes a visible switcher leaf.
+    child.write("hello alpha\r");
+    ASSERT_TRUE(child.wait_for("alpha reply", 25s)) << child.text();
 
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
@@ -1895,13 +1894,67 @@ TEST(UiSupervisorPty, UI49_P1_ResumeThenCtrlSShowsNotice) {
     ASSERT_TRUE(child.wait_for(marker, 25s)) << child.text();
 
     child.write("\x13");
-    ASSERT_TRUE(child.wait_for("No other workspaces available", 10s)) << child.text();
-    EXPECT_EQ(child.last_frame().find("(current session hidden)"), std::string::npos)
-        << "the lone live workspace must not render the switcher: " << child.last_frame();
+    ASSERT_TRUE(child.wait_for("Switcher", 10s))
+        << "two live workspaces must render the switcher: " << child.text();
 
     child.terminate();
     alpha_guard.stop();
     beta_guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// 53-P2 (53-D4/D5): `/model` opens the picker; arrows+Enter switch the live
+// session and the bottom line updates.
+TEST(UiSupervisorPty, UI53_P2_ModelPickerSwitch) {
+    ShortTempRoot root("ymh_pty_53p2");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    root.write(".config/ymh/config.jsonc", R"JSON({
+      "llm": {
+        "endpoints": {
+          "ds": { "provider": "openai-compatible", "base_url": "https://api.deepseek.com/v1", "api_key_env": "DEEPSEEK_API_KEY" }
+        },
+        "models": {
+          "alpha": { "endpoint": "ds", "model": "alpha-wire" },
+          "beta":  { "endpoint": "ds", "model": "beta-wire" }
+        },
+        "active_model": "alpha"
+      }
+    })JSON");
+
+    const std::filesystem::path workspace = root.path() / "picker-ws";
+    std::filesystem::create_directories(workspace);
+    const std::filesystem::path canonical = std::filesystem::canonical(workspace);
+
+    PtyChild child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, pty_env(root.path(), state)));
+    ASSERT_TRUE(wait_for_host_processes_under_root(root.path(), 30s)) << child.text();
+    // The eager session shows the active named model once auto-create lands.
+    ASSERT_TRUE(child.wait_for("build · alpha", 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for("↑0 ↓0", 25s)) << child.text();
+
+    child.write("/model\r");
+    ASSERT_TRUE(child.wait_for("j/k move · Enter apply · Esc close", 15s)) << child.text();
+    ASSERT_TRUE(child.wait_for("beta-wire", 15s)) << child.text();
+
+    child.write("j\r");
+    ASSERT_TRUE(child.wait_for("build · beta", 15s)) << child.text();
+
+    std::string workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(pty_registry_config(state));
+        const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
+        ASSERT_TRUE(row.has_value());
+        workspace_id = row->id.value;
+    }
+
+    HostDaemonGuard guard(workspace_id);
+    child.terminate();
+    guard.stop();
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 

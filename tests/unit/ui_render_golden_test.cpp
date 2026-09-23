@@ -1902,16 +1902,17 @@ TEST(UiRenderGolden, UI49_G2_MultiWorkspaceSwitcherUnchanged) {
     EXPECT_EQ(rendered.find("[ OK ]"), std::string::npos);
 }
 
-// 49-G4 (49-D2/49-I2): an empty `UiModel` renders the empty screen: header
-// `ymh`, an empty transcript, the prompt box, and the empty-state status bar.
-TEST(UiRenderGolden, UI49_G4_EmptyScreen) {
+// 53-G4 (53-D3/53-I11): the 53-F1 fallback (no workspace) composes the 49-D2
+// prompt string with the resolved model.
+TEST(UiRenderGolden, UI53_G4_EmptyScreenWithResolvedModel) {
     UiModel model;
+    model.resolved_model = "deepseek-flash";
 
     const std::string rendered =
-        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+        normalize(render_to_ansi(model, TerminalSize{120, 20}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("ymh"), std::string::npos);
-    EXPECT_NE(rendered.find("no workspace attached — type a prompt to start"),
+    EXPECT_NE(rendered.find("no workspace attached — type a prompt to start · deepseek-flash"),
               std::string::npos);
     EXPECT_NE(rendered.find("0 active · 0 waiting"), std::string::npos);
     EXPECT_EQ(rendered.find("(no active session)"), std::string::npos);
@@ -1919,27 +1920,88 @@ TEST(UiRenderGolden, UI49_G4_EmptyScreen) {
     EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
 }
 
-// 49-G5 (49-D1): after the first prompt the modeled workspace and its session
-// render (the header gains the cwd and the transcript shows the user message).
-TEST(UiRenderGolden, UI49_G5_LazyFirstSubmit) {
+// 53-G1 (53-D3/25-D1): the status line renders `build · <model>` in position 3
+// for a modeled session from the first frame.
+TEST(UiRenderGolden, G53_StatusWithModel) {
     UiModel model;
-    const WorkspaceId workspace{"lazy-ws"};
+    const WorkspaceId workspace{"eager-ws"};
     model.activeWorkspaceId = workspace;
     WorkspaceModel ws;
     ws.id           = workspace;
-    ws.cwd          = "/lazy/work";
+    ws.cwd          = "/eager/work";
     ws.daemonStatus = DaemonStatus::Attached;
     ws.live         = true;
     model.workspaces.emplace(workspace, std::move(ws));
     model.focusSessionIn(workspace, kSession);
-    model.apply(UiEvent{UserMessage{kSession, "m1", "first lazy prompt"}});
+    model.session(kSession)->status.model = "balanced";
+    model.apply(UiEvent{UserMessage{kSession, "m1", "first eager prompt"}});
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("ymh · /lazy/work"), std::string::npos);
-    EXPECT_NE(rendered.find("first lazy prompt"), std::string::npos);
+    EXPECT_NE(rendered.find("ymh · /eager/work"), std::string::npos);
+    EXPECT_NE(rendered.find("first eager prompt"), std::string::npos);
+    EXPECT_NE(rendered.find("build · balanced"), std::string::npos);
     EXPECT_EQ(rendered.find("no workspace attached"), std::string::npos);
+}
+
+// 53-G2 (53-D3): a workspace attached without a session renders
+// `build · <model> · no session`.
+TEST(UiRenderGolden, G53_StatusFallbackNoSession) {
+    UiModel model;
+    const WorkspaceId workspace{"eager-ws"};
+    model.activeWorkspaceId = workspace;
+    WorkspaceModel ws;
+    ws.id           = workspace;
+    ws.cwd          = "/eager/work";
+    ws.daemonStatus = DaemonStatus::Attached;
+    ws.live         = true;
+    model.workspaces.emplace(workspace, std::move(ws));
+    model.resolved_model = "balanced";
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("build · balanced · no session"), std::string::npos);
+}
+
+// 53-G3 (53-D4): the picker overlay renders rows (name, wire id, endpoint), the
+// current marker, and a footer hint.
+TEST(UiRenderGolden, G53_ModelPickerOverlay) {
+    UiModel model = build_model();
+    model.model_picker.rows.push_back(ModelPickerRow{"balanced", "Muse-Glimmer-30B", "ds"});
+    model.model_picker.rows.push_back(ModelPickerRow{"fast", "deepseek-flash", "ds"});
+    model.model_picker.selected = 1;
+    model.model_picker.visible  = true;
+    model.mode                  = UiMode::ModelPicker;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("balanced"), std::string::npos);
+    EXPECT_NE(rendered.find("Muse-Glimmer-30B"), std::string::npos);
+    EXPECT_NE(rendered.find("fast"), std::string::npos);
+    EXPECT_NE(rendered.find("j/k move · Enter apply · Esc close"), std::string::npos);
+}
+
+// 53-G4 (53-I11): at a narrow width the model segment is kept while tps is
+// dropped before the note/notice (mirrors
+// `StatusNarrowDegradationDropsTpsBeforeNoteAndNotice`).
+TEST(UiRenderGolden, G53_StatusNarrowKeepsModel) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->status.tps                   = 50.0;
+    state->status.context_used_tokens   = 50;
+    state->status.context_window_tokens = 100;
+    state->status.note                  = "note";
+    model.pushNotice("notice");
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{91, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("build · test-model"), std::string::npos);
+    EXPECT_EQ(rendered.find("50.0 tps"), std::string::npos);
 }
 
 // 46-G2 (46-I27, 46-D4): the permission dialog is composited opaquely; no

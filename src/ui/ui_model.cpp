@@ -5,9 +5,66 @@
 #include <type_traits>
 #include <utility>
 
+#include "ymh/config/config.hpp"
 #include "ymh/llm/redaction.hpp"
 
 namespace ymh::ui {
+
+std::string display_model(const ymh::ResolvedModel& model) {
+    return model.model_name.empty() ? model.model_id : model.model_name;
+}
+
+std::string display_model(const ymh::Config& config, const std::string& model_id) {
+    if (model_id.empty()) {
+        return {};
+    }
+    for (const auto& [name, settings] : config.llm.models) {
+        if (settings.model == model_id) {
+            return name;
+        }
+    }
+    return model_id;
+}
+
+void ModelPickerModel::open(const ymh::Config& config, const std::string& current_display) {
+    rows.clear();
+    selected = 0;
+    const ResolvedModel resolved = resolve_model(config);
+    if (resolved.model_name.empty()) {
+        rows.push_back(ModelPickerRow{"", resolved.model_id, resolved.endpoint.name});
+    }
+    for (const auto& [name, settings] : config.llm.models) {
+        rows.push_back(ModelPickerRow{name, settings.model, settings.endpoint});
+    }
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        const ModelPickerRow& row = rows[index];
+        if ((!row.name.empty() && row.name == current_display) ||
+            (!current_display.empty() && row.model_id == current_display)) {
+            selected = index;
+            break;
+        }
+    }
+    visible = true;
+}
+
+void ModelPickerModel::close() {
+    visible  = false;
+    selected = 0;
+    rows.clear();
+}
+
+void ModelPickerModel::moveDown() {
+    if (!rows.empty()) {
+        selected = (selected + 1) % rows.size();
+    }
+}
+
+void ModelPickerModel::moveUp() {
+    if (!rows.empty()) {
+        selected = (selected + rows.size() - 1) % rows.size();
+    }
+}
+
 namespace {
 
 constexpr std::size_t kMaxToolOutput = 64u * 1024u;
@@ -1071,6 +1128,12 @@ void UiModel::apply(const UiEvent& event) {
             } else if constexpr (std::is_same_v<T, PlanModeChanged>) {
                 state.status.plan_active = e.active;
                 clear_plan_notices(*this);
+                dirty.mark(e.session, UiDirtyFlag::Status);
+            } else if constexpr (std::is_same_v<T, ModelChanged>) {
+                ResolvedModel resolved;
+                resolved.model_name = e.model_name;
+                resolved.model_id   = e.model;
+                state.status.model  = display_model(resolved);
                 dirty.mark(e.session, UiDirtyFlag::Status);
             }
             refreshCell(e.session);

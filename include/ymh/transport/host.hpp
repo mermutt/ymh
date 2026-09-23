@@ -70,6 +70,16 @@ struct SetModeResult {
     bool      pending = false;
 };
 
+// 53-D5: the `session.set_model` result. `model` is the effective wire id;
+// `model_name` is the `llm.models` entry name ("" for a literal id); `pending`
+// is true iff the change was queued behind an open turn.
+struct SetModelResult {
+    SessionId   session;
+    std::string model;
+    std::string model_name;
+    bool        pending = false;
+};
+
 class TransportHost {
 public:
     virtual ~TransportHost() = default;
@@ -126,7 +136,8 @@ public:
     virtual nlohmann::json listAgents(const nlohmann::json& params) = 0;
     virtual nlohmann::json selectAgent(const nlohmann::json& params) = 0;
 
-    virtual SetModeResult setSessionMode(const nlohmann::json& params) = 0;
+    virtual SetModeResult  setSessionMode(const nlohmann::json& params) = 0;
+    virtual SetModelResult setSessionModel(const nlohmann::json& params) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,
                                   PermissionScope scope) = 0;

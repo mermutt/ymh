@@ -612,14 +612,33 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
         // The global notice ring is workspace-independent (22-A8): it must stay
         // visible even with no active session (25 review M2).
         if (notice.empty()) {
-            if (model.workspaces.empty()) {
-                // 49-D2: the empty screen's left segment prompts for the first
-                // prompt; it is not a notice.
-                return ftxui::hbox(
-                    {ftxui::text("no workspace attached — type a prompt to start") | ftxui::dim,
-                     ftxui::filler(), aggregate});
+            int fallback_avail = width - ftxui::string_width(right) - 1;
+            if (fallback_avail < 1) {
+                fallback_avail = 1;
             }
-            return ftxui::hbox({ftxui::text(""), ftxui::filler(), aggregate});
+            const auto fit = [&](std::string text) {
+                return ftxui::string_width(text) > fallback_avail
+                           ? ellipsize_text(text, fallback_avail)
+                           : text;
+            };
+            if (model.workspaces.empty()) {
+                // 49-D2/53-D3: the 53-F1 fallback keeps the empty-screen prompt
+                // and appends the resolved model.
+                std::string left = "no workspace attached — type a prompt to start";
+                if (!model.resolved_model.empty()) {
+                    left += " · " + model.resolved_model;
+                }
+                return ftxui::hbox(
+                    {ftxui::text(fit(std::move(left))) | ftxui::dim, ftxui::filler(), aggregate});
+            }
+            // 53-D3: a workspace attached without a session renders the resolved
+            // model beside the mode.
+            std::string left = "build";
+            if (!model.resolved_model.empty()) {
+                left += " · " + model.resolved_model;
+            }
+            left += " · no session";
+            return ftxui::hbox({ftxui::text(fit(std::move(left))), ftxui::filler(), aggregate});
         }
         return ftxui::hbox({ftxui::text(notice), ftxui::filler(), aggregate});
     }
@@ -982,6 +1001,49 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
     }
     return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"),
                          ftxui::vbox(std::move(rows))) |
+           ftxui::clear_under | ftxui::center;
+}
+
+Element render_model_picker(const UiModel& model, const Theme& theme) {
+    const ModelPickerModel& picker = model.model_picker;
+    std::string             current = model.resolved_model;
+    const auto              workspace_it = model.workspaces.find(model.activeWorkspaceId);
+    if (workspace_it != model.workspaces.end() &&
+        !workspace_it->second.activeSessionId().value.empty()) {
+        const auto session_it = model.sessions.find(workspace_it->second.activeSessionId());
+        if (session_it != model.sessions.end() && !session_it->second.status.model.empty()) {
+            current = session_it->second.status.model;
+        }
+    }
+    Elements rows;
+    rows.push_back(ftxui::text("model") | ftxui::bold);
+    rows.push_back(ftxui::separator());
+    if (picker.rows.empty()) {
+        rows.push_back(ftxui::text("(no models configured)") | ftxui::dim);
+    }
+    for (std::size_t index = 0; index < picker.rows.size(); ++index) {
+        const ModelPickerRow& row   = picker.rows[index];
+        const std::string     label = row.name.empty() ? row.model_id : row.name;
+        const bool            is_current = (!row.name.empty() && row.name == current) ||
+                                            (!row.model_id.empty() && row.model_id == current);
+        std::string line = index == picker.selected ? "> " : "  ";
+        line += is_current ? "● " : "  ";
+        line += label;
+        if (!row.model_id.empty() && row.model_id != label) {
+            line += "  " + row.model_id;
+        }
+        if (!row.endpoint.empty()) {
+            line += "  " + row.endpoint;
+        }
+        Element element = ftxui::text(line);
+        if (index == picker.selected) {
+            element = paint(element, ftxui::Color::Cyan, theme) | ftxui::bold;
+        }
+        rows.push_back(element);
+    }
+    rows.push_back(ftxui::separator());
+    rows.push_back(ftxui::text("j/k move · Enter apply · Esc close") | ftxui::dim);
+    return ftxui::window(ftxui::text("model"), ftxui::vbox(std::move(rows))) |
            ftxui::clear_under | ftxui::center;
 }
 
@@ -1383,6 +1445,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     }
     if (model.mode == UiMode::Switcher) {
         return ftxui::dbox({main, render_switcher(model, theme)});
+    }
+    if (model.mode == UiMode::ModelPicker && model.model_picker.visible) {
+        return ftxui::dbox({main, render_model_picker(model, theme)});
     }
     return main;
 }

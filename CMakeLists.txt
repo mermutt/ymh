@@ -451,6 +451,7 @@ add_library(ymh_agent STATIC
     src/agent/context_assembler.cpp
     src/agent/context_snapshot.cpp
     src/agent/llm_pool.cpp
+    src/agent/model_selection.cpp
     src/agent/plan_mode_controller.cpp
     src/agent/preset.cpp
     src/agent/repeat_tool_reminder.cpp

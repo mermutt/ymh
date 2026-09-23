@@ -20,7 +20,10 @@ struct CommandContext {
     SessionUiState*                         session = nullptr;
     std::function<void()>                   request_exit;
     std::function<void()>                   create_session;
-    std::function<void(const std::string&)> set_model;
+    // 53-D4: `/model` with no args opens the picker; with an arg it validates
+    // and applies (or sets `preferred_model_` when no session is live).
+    std::function<void()>                   open_model_picker;
+    std::function<void(const std::string&)> apply_model;
     std::function<void()>                   compact;
     // 19 §6.1: appends a User rename through the daemon; `args` is the trimmed
     // title. A rejected rename is surfaced by the wired reply lambda.

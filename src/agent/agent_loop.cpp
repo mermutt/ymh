@@ -55,23 +55,28 @@ bool has_valid_plan_argument(const nlohmann::json& arguments) {
     return plan->get_ref<const std::string&>().find_first_not_of(" \t\r\n") != std::string::npos;
 }
 
-// 25-D5/N5: commits any queued plan selection on every turn exit (normal end,
-// error, cancellation, lease/store failure, step limit), including maintenance.
-class PlanFlushGuard {
+// 25-D5/N5 + 53-D7: commits any queued plan/model selection on every turn exit
+// (normal end, error, cancellation, lease/store failure, step limit), including
+// maintenance.
+class TurnFlushGuard {
 public:
-    PlanFlushGuard(PlanModeController* controller, Session& session)
-        : controller_(controller), session_(session) {}
-    PlanFlushGuard(const PlanFlushGuard&) = delete;
-    PlanFlushGuard& operator=(const PlanFlushGuard&) = delete;
-    ~PlanFlushGuard() {
-        if (controller_ != nullptr) {
-            controller_->flush_pending_at_turn_end(session_);
+    TurnFlushGuard(PlanModeController* plan, ModelSelectionController* model, Session& session)
+        : plan_(plan), model_(model), session_(session) {}
+    TurnFlushGuard(const TurnFlushGuard&) = delete;
+    TurnFlushGuard& operator=(const TurnFlushGuard&) = delete;
+    ~TurnFlushGuard() {
+        if (plan_ != nullptr) {
+            plan_->flush_pending_at_turn_end(session_);
+        }
+        if (model_ != nullptr) {
+            model_->flush_pending_at_turn_end(session_);
         }
     }
 
 private:
-    PlanModeController* controller_;
-    Session&            session_;
+    PlanModeController*      plan_;
+    ModelSelectionController* model_;
+    Session&                 session_;
 };
 
 } // namespace
@@ -530,33 +535,55 @@ CompactionOutcome AgentLoop::runCompactionNow(const std::vector<Message>& messag
     return CompactionOutcome::NotNeeded;
 }
 
+ModelSelection AgentLoop::effective_model_selection() const {
+    const ModelSelection configured{config_.model, "", config_.parameters, config_.profile,
+                                    config_.provider};
+    if (services_.model_selection == nullptr) {
+        return configured;
+    }
+    if (const std::optional<ModelSelection> selected =
+            services_.model_selection->effective(session_);
+        selected.has_value()) {
+        return *selected;
+    }
+    // No durable selection: keep the session's OWN model (the folded header wire
+    // id) with the configured parameters/profile. Never `config_.model`, which
+    // can differ from the session's model on resume/fork.
+    ModelSelection own = configured;
+    if (!session_.header().model.empty()) {
+        own.model = session_.header().model;
+    }
+    return own;
+}
+
 FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
                                       TurnId turn, StepId step, std::size_t turn_step) {
     (void)pruner_.prune_session(session_);
+    const ModelSelection selected = effective_model_selection();
     LLMRequest request;
-    request.model    = config_.model;
+    request.model    = selected.model;
     request.messages = messages;
     if (services_.context != nullptr) {
         request.tools = services_.context->tools(active_scope());
     }
-    request.parameters = config_.parameters;
+    request.parameters = selected.parameters;
     request.session_id = session_.id();
 
-    if (config_.profile.force_first_tool_call && turn_step == 1 && !request.tools.empty() &&
-        !config_.parameters.tool_choice.has_value()) {
+    if (selected.profile.force_first_tool_call && turn_step == 1 && !request.tools.empty() &&
+        !request.parameters.tool_choice.has_value()) {
         request.parameters.tool_choice = std::string{"required"};
     }
 
     LlmCallConfig config;
-    config.provider         = config_.provider;
-    config.model            = config_.model;
-    config.reasoning_effort = config_.parameters.reasoning_effort;
-    config.temperature      = config_.parameters.temperature;
-    config.max_tokens       = config_.parameters.max_output_tokens;
-    config.stop             = config_.parameters.stop;
-    config.top_p            = config_.parameters.top_p;
-    config.top_k            = config_.parameters.top_k;
-    config.seed             = config_.parameters.seed;
+    config.provider         = selected.provider;
+    config.model            = selected.model;
+    config.reasoning_effort = selected.parameters.reasoning_effort;
+    config.temperature      = selected.parameters.temperature;
+    config.max_tokens       = selected.parameters.max_output_tokens;
+    config.stop             = selected.parameters.stop;
+    config.top_p            = selected.parameters.top_p;
+    config.top_k            = selected.parameters.top_k;
+    config.seed             = selected.parameters.seed;
     config.tool_choice      = request.parameters.tool_choice;
 
     FrozenRequest     frozen          = FrozenRequest::freeze(std::move(request), config);
@@ -841,7 +868,7 @@ bool AgentLoop::executeToolCall(const ToolCallAssembled& assembled, TurnId turn,
 
 void AgentLoop::runMaintenanceTurn(TurnId turn) {
     session_.append(payload::TurnStarted{turn, payload::TurnOrigin::Maintenance});
-    PlanFlushGuard plan_flush{services_.plan_mode, session_};
+    TurnFlushGuard turn_flush{services_.plan_mode, services_.model_selection, session_};
     {
         std::lock_guard<std::mutex> lock(control_mutex_);
         turn_cancel_   = CancellationSource{};
@@ -853,6 +880,9 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
     session_.append(payload::StepStarted{turn, step});
     if (services_.plan_mode != nullptr) {
         services_.plan_mode->apply_pending_at_step_start(session_);
+    }
+    if (services_.model_selection != nullptr) {
+        services_.model_selection->apply_pending_at_step_start(session_);
     }
     state_ = AgentState::Thinking;
 
@@ -913,7 +943,7 @@ void AgentLoop::runTurn() {
         appendUserMessage(trigger.message);
     }
     session_.append(payload::TurnStarted{turn, trigger.origin});
-    PlanFlushGuard plan_flush{services_.plan_mode, session_};
+    TurnFlushGuard turn_flush{services_.plan_mode, services_.model_selection, session_};
 
     CancellationToken turnToken;
     {
@@ -950,6 +980,9 @@ void AgentLoop::runTurn() {
         session_.append(payload::StepStarted{turn, step});
         if (services_.plan_mode != nullptr) {
             services_.plan_mode->apply_pending_at_step_start(session_);
+        }
+        if (services_.model_selection != nullptr) {
+            services_.model_selection->apply_pending_at_step_start(session_);
         }
 
         drainFoldedItems();
@@ -1086,7 +1119,8 @@ void AgentLoop::runTurn() {
                 assistant.usage        = assembler.usage();
                 assistant.stream       = accumulator.snapshot();
                 assistant.replay_state = assembler.replay_state();
-                assistant.source       = model_message_source(config_.provider, config_.model);
+                const ModelSelection stamped = effective_model_selection();
+                assistant.source = model_message_source(stamped.provider, stamped.model);
                 session_.append(assistant);
                 settledUsage = assembler.usage();
             } else {

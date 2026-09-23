@@ -409,6 +409,13 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
                     nlohmann::json{{"session", mode.session.value},
                                    {"active", mode.active},
                                    {"pending", mode.pending}});
+        } else if (method_name == method::kSessionSetModel) {
+            const SetModelResult model = host_.setSessionModel(request.params);
+            respond(conn, request.id,
+                    nlohmann::json{{"session", model.session.value},
+                                   {"model", model.model},
+                                   {"model_name", model.model_name},
+                                   {"pending", model.pending}});
         } else if (method_name == method::kSessionResume) {
             const SessionResumed resumed = host_.resumeSession(session_param(request.params));
             respond(conn, request.id,

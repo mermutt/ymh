@@ -25,6 +25,7 @@
 #include "ymh/agent/chunk_coalescer.hpp"
 #include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
+#include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/agent/repeat_tool_reminder.hpp"
@@ -79,6 +80,8 @@ struct AgentServices {
     PermissionResolver    permission_resolver;
     // 25-D2: null => plan mode is unavailable; `exit_plan_mode` fails closed.
     PlanModeController*   plan_mode = nullptr;
+    // 53-D7: null => the model never changes mid-session (pre-53 behavior).
+    ModelSelectionController* model_selection = nullptr;
     // 42 §3.2 / 43 §4: the Wave-5 roster. When null, Wave-5 composition is off
     // and the delegation path applies no composition.
     AgentPresetRoster*    presets = nullptr;
@@ -132,6 +135,10 @@ public:
     void       suspend();
 
     [[nodiscard]] const AgentConfig& config() const noexcept { return config_; }
+
+    // 53-D7/H4: the single source of the effective selection, used by
+    // `buildRequest` AND the `AssistantMessage` provenance stamp.
+    [[nodiscard]] ModelSelection effective_model_selection() const;
 
 private:
     enum class InboxKind : std::uint8_t {

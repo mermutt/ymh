@@ -190,6 +190,9 @@ enum class AppCode : int {
     // 45-D9.4: `agent.select` on a session whose composition is already fixed
     // (spec 42-F4). Next free server-range code after `NotLastOwner`.
     CompositionFixed           = -32020,
+    // 53-F6: the target model's `ResolvedEndpoint` identity has no registered
+    // route in the daemon.
+    EndpointNotRouted          = -32021,
 };
 
 [[nodiscard]] constexpr int code_value(RpcCode code) noexcept {
@@ -532,6 +535,8 @@ inline constexpr std::string_view kEventSubscribe   = "event.subscribe";
 inline constexpr std::string_view kEventUnsubscribe = "event.unsubscribe";
 inline constexpr std::string_view kSessionRename    = "session.rename";
 inline constexpr std::string_view kSessionSetMode   = "session.set_mode";
+// 53-D5: the mid-flight model switch (Interactive only, like `agent.select`).
+inline constexpr std::string_view kSessionSetModel  = "session.set_model";
 inline constexpr std::string_view kSkillsList       = "skills.list";
 inline constexpr std::string_view kSkillsShow       = "skills.show";
 inline constexpr std::string_view kContextShow      = "context.show";

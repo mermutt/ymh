@@ -1,6 +1,6 @@
-// 49-D1/D5/D6: lazy workspace creation on the first prompt and the
-// session-aware Ctrl-S notice. The supervisor-level cases drive the real
-// private handlers through the additive `SupervisorHarness` seam.
+// 49-D5/D6: the session-aware Ctrl-S notice, and (53-D1 superseded 49-D1/D2)
+// the retained lazy `submit()` fallback. The supervisor-level cases drive the
+// real private handlers through the additive `SupervisorHarness` seam.
 
 #include <gtest/gtest.h>
 
@@ -312,9 +312,11 @@ TEST(Errata49, UI49_I12_SessionsOpensHistory) {
     EXPECT_EQ(harness->model().switcher.source, SwitcherSource::History);
 }
 
-// ── 49-D1 / 49-D2 ───────────────────────────────────────────────────────────
+// ── 53-D1 fallback (49-D1/49-D2 superseded) ─────────────────────────────────
+// The harness does not run the eager startup; these cover the retained lazy
+// `submit()` fallback (53-F1) and the still-representable zero-daemon supervisor.
 
-TEST(Errata49, UI49_D1_NoWorkspaceAtStartup) {
+TEST(Errata49, UI53_F1_DegradedStartNoWorkspace) {
     SupervisorRunOptions options;
     options.identity = test_identity();
     const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
@@ -324,7 +326,7 @@ TEST(Errata49, UI49_D1_NoWorkspaceAtStartup) {
     EXPECT_EQ(harness->model().mode, UiMode::Conversation);
 }
 
-TEST(Errata49, UI49_D1_EmptyStateNoticeOnCtrlS) {
+TEST(Errata49, UI53_F1_DegradedStartCtrlSNotice) {
     SupervisorRunOptions options;
     options.identity = test_identity();
     const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
@@ -335,7 +337,7 @@ TEST(Errata49, UI49_D1_EmptyStateNoticeOnCtrlS) {
     EXPECT_EQ(harness->model().message.text, "No other workspaces available");
 }
 
-TEST(Errata49, UI49_D1_EmptyStateComposerTypeable) {
+TEST(Errata49, UI53_F1_DegradedStartComposerTypeable) {
     SupervisorRunOptions options;
     options.identity = test_identity();
     const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
@@ -346,7 +348,7 @@ TEST(Errata49, UI49_D1_EmptyStateComposerTypeable) {
     EXPECT_EQ(harness->model().pendingComposer.input.draft, "hi");
 }
 
-TEST(Errata49, UI49_D1_NoRegistryRowBeforePrompt) {
+TEST(Errata49, UI53_F1_LazySubmitRegistersRow) {
     ShortTempRoot root("ymh_49_u13");
     std::filesystem::create_directories(root.path() / "ws");
     const std::filesystem::path cwd = std::filesystem::canonical(root.path() / "ws");
@@ -372,7 +374,7 @@ TEST(Errata49, UI49_D1_NoRegistryRowBeforePrompt) {
     EXPECT_FALSE(registry->listSupervisors().empty());
 }
 
-TEST(Errata49, UI49_D1_FirstPromptSpawnsWorkspace) {
+TEST(Errata49, UI53_F1_LazySubmitSpawnsWorkspace) {
     ShortTempRoot root("ymh_49_u12");
     std::filesystem::create_directories(root.path() / "ws");
     const std::filesystem::path cwd = std::filesystem::canonical(root.path() / "ws");
@@ -416,7 +418,7 @@ TEST(Errata49, UI49_D1_FirstPromptSpawnsWorkspace) {
     EXPECT_EQ(harness->submitted_count(std::string(protocol::method::kAgentPrompt)), 1U);
 }
 
-TEST(Errata49, UI49_D1_SpawnFailureNoPhantom) {
+TEST(Errata49, UI53_F1_LazySpawnFailureNoPhantom) {
     ShortTempRoot root("ymh_49_u14");
     std::filesystem::create_directories(root.path() / "ws");
     const std::filesystem::path cwd = std::filesystem::canonical(root.path() / "ws");
@@ -439,7 +441,7 @@ TEST(Errata49, UI49_D1_SpawnFailureNoPhantom) {
     EXPECT_EQ(harness->model().pendingComposer.input.draft, "hi");
 }
 
-TEST(Errata49, UI49_I5_ZeroDaemonCleanExit) {
+TEST(Errata49, UI53_A3_ZeroDaemonCleanExit) {
     ShortTempRoot root("ymh_49_u15");
     std::unique_ptr<WorkspaceRegistry> registry = WorkspaceRegistry::open(registry_config(root.path()));
 

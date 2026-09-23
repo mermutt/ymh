@@ -50,6 +50,8 @@ enum class UiMode : std::uint8_t {
     Context,
     // 46-D3: the single-OK notice popup (the empty Live switcher's replacement).
     Notice,
+    // 53-D4: the `/model` picker overlay.
+    ModelPicker,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {
@@ -215,6 +217,12 @@ struct PlanModeChanged {
     bool      active = false;
 };
 
+struct ModelChanged {
+    SessionId   session;
+    std::string model;       // effective wire id
+    std::string model_name;  // llm.models entry name; "" for a literal id
+};
+
 struct UiEvent {
     std::variant<
         UserMessage,
@@ -237,6 +245,7 @@ struct UiEvent {
         CompactionOutcomeNotice,
         SessionTitleChanged,
         PlanModeChanged,
+        ModelChanged,
         ContextInjected>
         value;
 };
