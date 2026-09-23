@@ -322,6 +322,8 @@ std::set<std::string> extract_config_keys() {
             table = head_strings.front();
         } else if (head.find("entry, table") != std::string::npos) {
             table = "mcp_servers";
+        } else if (head.find("*it, label") != std::string::npos) {
+            table = "permissions.presets";
         } else {
             continue;
         }

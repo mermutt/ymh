@@ -181,6 +181,12 @@ public:
 
     [[nodiscard]] ScopeKey standing_key_for(std::optional<std::string> id) const;
 
+    // 52-D15: the permission preset a preset binds, folded from its enabled rows
+    // (last row wins). Returns nullopt for an absent/unknown preset or one with
+    // no binding; never throws.
+    [[nodiscard]] std::optional<std::string> permission_preset_for(
+        const std::optional<std::string>& id) const;
+
     // 42 §3.2/§2.2: mount the preset once (idempotent), register its rows into
     // the standing scope, then join the agent's leaf to that standing mount and
     // record it. A second call for the same id registers nothing twice (42-I1).

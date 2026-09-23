@@ -518,6 +518,23 @@ struct ResolvedModel {
 // session at creation.
 [[nodiscard]] std::string default_permission_preset_name(const Config& config);
 
+// 52-I11: the effective permission preset name for a session. `binding` is a
+// preset row's `permission_preset`; it is honored only when it does not widen
+// `baseline`, otherwise `fallback` (the deployment default) is kept.
+[[nodiscard]] std::string effective_permission_preset_name(
+    const PermissionDefaults& permissions, const PermissionPresetSettings& baseline,
+    std::string_view fallback, const std::optional<std::string>& binding);
+
+// ymh/execution/environment.hpp (opaque declaration; keeps config.hpp free of
+// the execution include).
+enum class SandboxMode : std::uint8_t;
+
+// 52-D15: the deployment sandbox after clamping `agent.sandbox` against the
+// permission-preset baseline. Single source of truth for both the CLI wiring
+// and the workspace runtime, so they cannot drift. Throws `ConfigError` for an
+// unknown sandbox value.
+[[nodiscard]] SandboxMode effective_sandbox_mode(const Config& config);
+
 [[nodiscard]] std::optional<std::string> env_value(std::string_view name);
 
 } // namespace ymh

@@ -456,6 +456,61 @@ TEST(Preset52Permission, ConfigKeysParseAndValidate) {
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
 
+TEST(Preset52Permission, UnknownPresetKeyNamesThePreset) {
+    TempWorkspace               workspace("spec52_perm_diag");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    std::ofstream(global, std::ios::binary)
+        << R"({"permissions": {"presets": {"foo": {"bogus": 1}}}})";
+    ConfigPaths paths;
+    paths.global = global;
+    try {
+        (void)load_config(paths);
+        FAIL() << "an unknown key inside a preset must be rejected";
+    } catch (const ConfigError& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("permissions.presets.foo.bogus"), std::string::npos) << message;
+    }
+}
+
+TEST(Preset52Permission, EffectiveSandboxModeClampsAndValidates) {
+    Config config;
+    EXPECT_EQ(effective_sandbox_mode(config), SandboxMode::Workspace);
+
+    config.agent.sandbox = "unrestricted";
+    EXPECT_EQ(effective_sandbox_mode(config), SandboxMode::Unrestricted);
+
+    config.permissions.default_preset = "workspace-write";
+    EXPECT_EQ(effective_sandbox_mode(config), SandboxMode::Workspace);
+
+    config.permissions.default_preset.clear();
+    config.agent.sandbox = "bogus";
+    EXPECT_THROW((void)effective_sandbox_mode(config), ConfigError);
+}
+
+TEST(Preset52Permission, WorkspaceLayerCannotDefineOrSelectPresets) {
+    TempWorkspace               workspace("spec52_perm_layer");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    const std::filesystem::path local  = workspace.path() / ".ymh" / "config.jsonc";
+    std::filesystem::create_directories(local.parent_path());
+    std::ofstream(global, std::ios::binary) << R"({"permissions": {"shell": "deny"}})";
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = local;
+
+    std::ofstream(local, std::ios::binary)
+        << R"({"permissions": {"default_preset": "danger-full-access"}})";
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+
+    std::ofstream(local, std::ios::binary)
+        << R"({"permissions": {"presets": {"evil": {"sandbox": "unrestricted", "approval": "never"}}}})";
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+
+    std::ofstream(local, std::ios::binary) << R"({"permissions": {"shell": "deny"}})";
+    const Config narrowed = load_config(paths);
+    EXPECT_EQ(narrowed.permissions.shell, "deny");
+}
+
 TEST(Preset52Permission, SessionPinningSurvivesConfigChangeAndFork) {
     RosterEnv env("spec52_pin");
     SessionOptions options;

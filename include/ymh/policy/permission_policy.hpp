@@ -86,8 +86,8 @@ struct PolicyRule {
     enum class Layer : std::uint8_t {
         Builtin,
         Global,
-        Project,
         Profile,
+        Project,
         CommandLine,
         LocalGrant,
         SessionGrant,

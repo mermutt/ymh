@@ -569,6 +569,29 @@ ScopeKey AgentPresetRoster::standing_key_for(std::optional<std::string> id) cons
     return "preset:" + resolve(std::move(id)).id;
 }
 
+std::optional<std::string> AgentPresetRoster::permission_preset_for(
+    const std::optional<std::string>& id) const {
+    if (!id.has_value() || id->empty()) {
+        return std::nullopt;
+    }
+    try {
+        std::optional<std::string> binding;
+        for (const PresetRow& row : resolve(*id).rows) {
+            if (row.disabled) {
+                continue;
+            }
+            if (row.permission_preset.has_value()) {
+                binding = row.permission_preset;
+            }
+        }
+        return binding;
+    } catch (const PresetError&) {
+        return std::nullopt;
+    } catch (const ConfigError&) {
+        return std::nullopt;
+    }
+}
+
 AgentPresetRoster::~AgentPresetRoster() = default;
 
 void AgentPresetRoster::ensure_standing(const AgentPreset& preset) {

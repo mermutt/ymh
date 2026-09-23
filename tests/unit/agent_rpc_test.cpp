@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -59,10 +60,16 @@ void write_preset(const std::filesystem::path& root, const std::string& id,
 // Owns a WorkspaceRuntime + HostRuntime wired with a two-preset roster.
 class AgentRpcFixture {
 public:
-    AgentRpcFixture(const std::string& prefix, std::vector<std::string> preset_ids) {
+    AgentRpcFixture(const std::string& prefix, std::vector<std::string> preset_ids,
+                    std::map<std::string, std::string> preset_bodies = {},
+                    std::function<void(Config&)>       configure = {}) {
         root_ = std::filesystem::canonical(workspace_.path());
         for (const std::string& id : preset_ids) {
-            write_preset(presets_.path(), id, R"({"display_name":")" + id + R"("})");
+            const auto body = preset_bodies.find(id);
+            write_preset(presets_.path(), id,
+                         body != preset_bodies.end()
+                             ? body->second
+                             : R"({"display_name":")" + id + R"("})");
         }
         RegistryConfig registry_config;
         registry_config.db_path = registry_dir_.path() / "registry.db";
@@ -73,6 +80,9 @@ public:
 
         WorkspaceRuntimeOptions options;
         options.config = Config{};
+        if (configure) {
+            configure(options.config);
+        }
         options.config.presets.root = presets_.path();
         options.config.presets.include_user_root = false;
         options.config.presets.include_shipped_root = false;
@@ -309,6 +319,38 @@ TEST(AgentRpcTest, UI45_D9_PreferredAgentOnCreate) {
     const nlohmann::json result =
         fixture.host().listAgents(nlohmann::json{{"session", created.session.value}});
     EXPECT_EQ(result.at("active").get<std::string>(), "second");
+}
+
+// 52-D15/52-I11: a preset row's permission binding narrows the session's pinned
+// preset, and a wider binding is clamped back to the deployment default.
+TEST(AgentRpcTest, Preset52PermissionBindingNarrowsSessionPreset) {
+    AgentRpcFixture fixture(
+        "agent-perm-narrow", {"standard"},
+        {{"standard",
+          R"({"display_name":"standard","rows":[{"id":"perm","permission_preset":"read-only-plus"}]})"}},
+        [](Config& config) {
+            config.permissions.presets["read-only-plus"] =
+                PermissionPresetSettings{"read-only", "ask"};
+        });
+    const std::string session = fixture.create_session("standard");
+    const std::shared_ptr<Session> created =
+        fixture.runtime().sessions().sessionPtr(SessionId{session});
+    ASSERT_NE(created, nullptr);
+    ASSERT_TRUE(created->header().permission_preset.has_value());
+    EXPECT_EQ(*created->header().permission_preset, "read-only-plus");
+}
+
+TEST(AgentRpcTest, Preset52PermissionBindingCannotWidenSessionPreset) {
+    AgentRpcFixture fixture(
+        "agent-perm-widen", {"standard"},
+        {{"standard",
+          R"({"display_name":"standard","rows":[{"id":"perm","permission_preset":"danger-full-access"}]})"}});
+    const std::string session = fixture.create_session("standard");
+    const std::shared_ptr<Session> created =
+        fixture.runtime().sessions().sessionPtr(SessionId{session});
+    ASSERT_NE(created, nullptr);
+    ASSERT_TRUE(created->header().permission_preset.has_value());
+    EXPECT_EQ(*created->header().permission_preset, "workspace-write");
 }
 
 // 45-D9.10/45-I27: the protocol version stays 1 and CompositionFixed is the

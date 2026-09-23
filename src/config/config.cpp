@@ -28,6 +28,7 @@
 
 #include "ymh/config/jsonc.hpp"
 #include "ymh/core/logger.hpp"
+#include "ymh/execution/environment.hpp"
 #include "ymh/llm/model_profile.hpp"
 #include "ymh/mcp/mcp_types.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -51,15 +52,18 @@ constexpr std::string_view kConfigFile = "config.jsonc";
     throw ConfigError("config " + source.string() + ": " + std::string{detail});
 }
 
-// 46-D12.2: a literal `llm.api_key` may only be read from a file with no
-// group/other permission bits, so a chmod'd config cannot silently leak it.
-void require_private_config_file(const std::filesystem::path& source) {
+// 46-D12.2: a literal `llm.api_key` (or a credential `headers` map) may only be
+// read from a file with no group/other permission bits, so a chmod'd config
+// cannot silently leak it. `key` names the offending config key so the error
+// points at the field the user actually wrote, not a neighbouring one.
+void require_private_config_file(const std::filesystem::path& source,
+                                 std::string_view key) {
     struct stat info {};
     if (::stat(source.c_str(), &info) != 0) {
         return;
     }
     if ((info.st_mode & 077) != 0) {
-        fail(source, "'llm.api_key' requires a 0600 config file");
+        fail(source, "'" + std::string{key} + "' requires a 0600 config file");
     }
 }
 
@@ -427,10 +431,22 @@ void apply_workspace(Config& config, const Json& table, const std::filesystem::p
     }
 }
 
-void apply_permissions(Config& config, const Json& table, const std::filesystem::path& source) {
+void apply_permissions(Config& config, const Json& table, const std::filesystem::path& source,
+                       bool global_layer) {
     reject_unknown(table, "permissions",
                    {"shell", "write", "read", "default", "rules", "presets", "default_preset"},
                    source);
+    // 52-D15: a permission preset is a deployment-level capability bundle. A
+    // workspace layer (e.g. a cloned repo's `.ymh/config.jsonc`) must not be
+    // able to define or select one, or it could widen itself to allow-all.
+    if (!global_layer) {
+        if (member(table, "presets") != nullptr) {
+            fail(source, "'permissions.presets' is global-layer only");
+        }
+        if (member(table, "default_preset") != nullptr) {
+            fail(source, "'permissions.default_preset' is global-layer only");
+        }
+    }
     config.permissions.shell =
         read_string(table, "shell", "permissions", config.permissions.shell, source);
     config.permissions.write =
@@ -449,15 +465,15 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
             if (!it->is_object()) {
                 fail(source, "invalid type for '" + label + "'");
             }
-            reject_unknown(*it, "permissions.presets", {"sandbox", "approval"}, source);
+            reject_unknown(*it, label, {"sandbox", "approval"}, source);
             PermissionPresetSettings entry;
             if (member(*it, "sandbox") != nullptr) {
                 entry.sandbox =
-                    read_string(*it, "sandbox", "permissions.presets", entry.sandbox, source);
+                    read_string(*it, "sandbox", label, entry.sandbox, source);
             }
             if (member(*it, "approval") != nullptr) {
                 entry.approval =
-                    read_string(*it, "approval", "permissions.presets", entry.approval, source);
+                    read_string(*it, "approval", label, entry.approval, source);
             }
             validate_sandbox_value(entry.sandbox, source);
             validate_approval_value(entry.approval, source);
@@ -576,7 +592,7 @@ void apply_endpoint_entry(EndpointSettings& entry, const Json& table, const std:
         }
         const std::string value = read_string(table, "api_key", label, "", source);
         if (!value.empty()) {
-            require_private_config_file(source);
+            require_private_config_file(source, label + ".api_key");
             entry.api_key = value;
         }
     }
@@ -584,7 +600,7 @@ void apply_endpoint_entry(EndpointSettings& entry, const Json& table, const std:
         if (!global_layer) {
             fail(source, "'" + label + ".headers' is global-layer only");
         }
-        require_private_config_file(source);
+        require_private_config_file(source, label + ".headers");
         entry.headers = read_string_object(table, "headers", label + ".headers", source);
     }
 
@@ -767,7 +783,7 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
         }
         const std::string value = read_string(*section, "api_key", "llm.default", "", source);
         if (!value.empty()) {
-            require_private_config_file(source);
+            require_private_config_file(source, "llm.api_key");
             config.llm.api_key = value;
         }
     }
@@ -1319,7 +1335,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         apply_workspace(config, *workspace, source);
     }
     if (const Json* permissions = section("permissions"); permissions != nullptr) {
-        apply_permissions(config, *permissions, source);
+        apply_permissions(config, *permissions, source, global_layer);
     }
     if (const Json* logging = section("logging"); logging != nullptr) {
         apply_logging(config, *logging, source);
@@ -1512,6 +1528,9 @@ bool write_default_config(const std::filesystem::path& file, Logger* logger, boo
         }
         written += static_cast<std::size_t>(count);
     }
+    if (ok && ::fsync(fd) != 0) {
+        ok = false;
+    }
     if (::close(fd) != 0) {
         ok = false;
     }
@@ -1519,6 +1538,13 @@ bool write_default_config(const std::filesystem::path& file, Logger* logger, boo
         scaffold_warn(logger, "config: cannot write '" + file.string() + "'");
         (void)::unlink(file.c_str());
         return false;
+    }
+    const std::filesystem::path directory =
+        file.parent_path().empty() ? std::filesystem::path{"."} : file.parent_path();
+    const int dir_fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+        (void)::fsync(dir_fd);
+        ::close(dir_fd);
     }
     created = true;
     return true;
@@ -1649,6 +1675,33 @@ PermissionPresetSettings deployment_permission_baseline(const Config& config) {
 std::string default_permission_preset_name(const Config& config) {
     return config.permissions.default_preset.empty() ? std::string{kWorkspaceWritePreset}
                                                      : config.permissions.default_preset;
+}
+
+std::string effective_permission_preset_name(const PermissionDefaults& permissions,
+                                             const PermissionPresetSettings& baseline,
+                                             std::string_view fallback,
+                                             const std::optional<std::string>& binding) {
+    if (!binding.has_value() || binding->empty()) {
+        return std::string{fallback};
+    }
+    const PermissionPresetSettings candidate = resolve_permission_preset(permissions, binding);
+    return permission_preset_narrows(baseline, candidate) ? *binding : std::string{fallback};
+}
+
+SandboxMode effective_sandbox_mode(const Config& config) {
+    const PermissionPresetSettings effective = narrow_permission_preset(
+        PermissionPresetSettings{config.agent.sandbox, "ask"},
+        deployment_permission_baseline(config));
+    if (effective.sandbox == "workspace") {
+        return SandboxMode::Workspace;
+    }
+    if (effective.sandbox == "read-only") {
+        return SandboxMode::ReadOnly;
+    }
+    if (effective.sandbox == "unrestricted") {
+        return SandboxMode::Unrestricted;
+    }
+    throw ConfigError("invalid sandbox '" + effective.sandbox + "'");
 }
 
 std::filesystem::path default_global_config_path() {
