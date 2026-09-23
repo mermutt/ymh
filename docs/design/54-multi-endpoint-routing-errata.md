@@ -1,7 +1,7 @@
 # 54 — Multi-Endpoint Routing (errata)
 
-Status: **draft (Rev 6)** — DESIGN ONLY. No implementation may begin until this
-spec is independently verified (AGENTS.md "The rule").
+Status: **verified (Rev 6)** — the five-reviewer adversarial gate PASSED (0 open
+HIGH / 0 MEDIUM). Implementation may begin (AGENTS.md "The rule").
 
 Revision: Rev 6 — four residuals from the final fix pass applied (2 MEDIUM /
 2 LOW). **(MEDIUM)** The compactor paired the summarizer's `config.profile_id`
@@ -719,10 +719,12 @@ never the startup endpoint. Pinned:
 - If the resolved endpoint is not routable, the compactor takes its existing
   `NoProviderRoute` failure path (`compactor.cpp:296-301`), never a fallback.
 - The summarizer model may legitimately differ from the session model
-  (`policy_.summarizer_model`); the endpoint **and profile id** are still the
-  **session's** current route when the resolved model is the session's model or
-  a literal, because that is the connection the user is paying for and the
-  session's model selection expresses. When the override instead names an
+  (`policy_.summarizer_model`); when the resolved model is the session's model
+  the endpoint **and profile id** are the session's current route, because that
+  is the connection the user is paying for and the session's model selection
+  expresses. For a **literal** override only the **endpoint** is the session's;
+  the profile id is the inert `""` (bullet 3 — a literal has no catalog profile
+  to pair with). When the override instead names an
   `llm.models` entry, that entry's own endpoint **and profile id** win, so the
   adapter-side shaping always matches the requested model (recorded as 54-OQ-7).
 
@@ -970,7 +972,7 @@ Continue the repo's `F#`-tagged convention with the spec-local `54-F` prefix
 | 54-F6 | Two threads select the same not-yet-built `(endpoint, profile_id)` concurrently | serialized under `endpoint_cache_mutex_`: the first constructs and retains the provider, the second observes the cache hit and reuses it; exactly one provider is constructed (54-I2/I11) | none |
 | 54-F7 | Resume/fork of a session whose wire id is shared by two entries on different endpoints | resolved by entry name (54-D8) when the name was folded; a pre-54 session without a name falls back to the sorted-first wire-id match (today's behavior, recorded) | re-issue `/model` to pin the intended entry |
 | 54-F8 | Compaction on a session switched to a named endpoint | the summarizer routes through the requested model's endpoint **and profile id** (54-D7), never the startup endpoint; the omitted-profile pair is never used when the requested model **has** a profile (an empty `profile_id` is its correct pair when it has none) | none |
-| 54-F9 | Two models on one endpoint have different profile ids | each `(endpoint, profile_id)` gets its own provider (cache **and** route key, 54-I2/I9/H6): the second profile's request misses the first's route and builds its own provider; the profiles never bleed, intra-session or cross-session | none (the 53 §10.1 limitation is narrowed to profiles the cache cannot distinguish; see 54-OQ-1) |
+| 54-F9 | Two models on one **named** endpoint have different profile ids | each `(endpoint, profile_id)` gets its own provider (cache **and** route key, 54-I2/I9/H6): the second profile's request misses the first's route and builds its own provider; the profiles never bleed, intra-session or cross-session. The anonymous default endpoint is profile-blind (Provider-kind route, `profile_id == ""`), so this case cannot arise there (54-I9) | none (the 53 §10.1 limitation is narrowed to profiles the cache cannot distinguish; see 54-OQ-1) |
 | 54-F10 | No route resolves (`endpoint` unknown and `provider` unregistered, or the resolver returns null) | `NoProviderRouteError` at `prepare_call` (28 §3.5), loud, before a `PreparedCall` exists; no silent fallback | fix the config/model; the error names the route |
 | 54-F11 | The `/model` picker offers a model the daemon's startup catalog does not know | `InvalidParams` (53-F5); no event, no pending entry | restart the daemon, or pick a row the daemon knows (54-OQ-3) |
 | 54-F12 | `/model` commits a switch to an endpoint that is **routable** (54-D4 passes) but whose provider construction fails (`create` error / keyless, 54-F1) | `set_model` commits the switch (guard checks routability only); the failure surfaces on the **next request** as a typed `ConfigError`/`ProviderFailed`, isolated to that session/endpoint; the daemon and other sessions are unaffected | fix the endpoint config, then re-issue `/model` (or restart the daemon) to retry construction (54-OQ-8) |
@@ -1009,7 +1011,7 @@ a build; run the suite only after the build completes.
 |---|---|---|
 | 54-U1 | `LlmCallConfig.endpoint`/`profile_id` serialization, and the empty-profile resolution | `endpoint == ""` and `profile_id == ""` omit the keys; the default-path canonical JSON and event bytes are byte-identical to pre-54 (52-I5/54-I6). A request with `profile_id == ""` (and with an unknown id) resolves through the resolver without a null deref and builds its provider with the inert `ModelProfile{}` (`id == ""`), i.e. the same **inert-profile treatment** as the pre-54 default path (54-D1). |
 | 54-U2 | `resolve_adapter` route selection | `endpoint` set → the `Endpoint`-kind `RouteKey{Endpoint, name, profile_id}` route; the same endpoint with a **different** `profile_id` is a **miss** (not the first profile's route); empty `endpoint` → the `Provider`-kind route; unknown → `NoProviderRouteError`; a provider id named `@foo` does not collide with endpoint `foo`. |
-| 54-U3 | Lazy construction + cache | the resolver is invoked once per `(endpoint, profile_id)`; a second request reuses it; an unused pair is never built; two profiles on one endpoint get **distinct providers and distinct routes** (54-I2/I9/H6). |
+| 54-U3 | Lazy construction + cache | the resolver is invoked once per `(endpoint, profile_id)`; a second request reuses it; an unused pair is never built; two profiles on one **named** endpoint get **distinct providers and distinct routes** (54-I2/I9/H6); the anonymous default endpoint keeps the profile-blind `Provider`-kind route, so no profile split is expected there (54-I9). |
 | 54-U4 | Construction failure | a resolver returning null (or a `create` error) yields `NoProviderRouteError`; the failure is not cached as a success (54-F1/F10). |
 | 54-U5 | Catalog endpoint identity | a wire id shared by two entries resolves by name to the right endpoint (`model_selection.cpp:301-323`). |
 | 54-U6 | Cross-endpoint `set_model` accepted | the existing `SetModelCrossEndpointRejected` (`tests/unit/host_runtime_test.cpp:738-752`) is **inverted**: `cross` (endpoint `other`) is accepted and appends one event (54-D4). |
