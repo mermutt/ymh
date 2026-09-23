@@ -147,6 +147,7 @@ Config load_invocation_config(const CliInvocation& invocation,
     if (!invocation.reasoning_effort.empty()) {
         config.agent.reasoning_effort = invocation.reasoning_effort;
     }
+    validate_llm_references(config);
     return config;
 }
 
@@ -887,6 +888,29 @@ bool write_imported_config(const nlohmann::json& document,
 
 } // namespace
 
+std::vector<std::string> daemon_override_flags(const CliInvocation& invocation) {
+    std::vector<std::string> flags;
+    if (!invocation.model.empty()) {
+        flags.emplace_back("--model");
+    }
+    if (!invocation.endpoint.empty()) {
+        flags.emplace_back("--endpoint");
+    }
+    if (!invocation.provider.empty()) {
+        flags.emplace_back("--provider");
+    }
+    if (!invocation.base_url.empty()) {
+        flags.emplace_back("--base-url");
+    }
+    if (!invocation.api_key_env.empty()) {
+        flags.emplace_back("--api-key-env");
+    }
+    if (!invocation.reasoning_effort.empty()) {
+        flags.emplace_back("--reasoning-effort");
+    }
+    return flags;
+}
+
 bool workspace_stop_may_proceed(std::size_t live_supervisors, std::size_t live_automation,
                                 bool force, bool interactive, std::istream& in, std::ostream& out,
                                 std::ostream& err, const std::string& workspace_label) {
@@ -1197,6 +1221,20 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                         reader->findByCanonicalPath(*canonical);
                     if (row.has_value() && row->host.has_value() &&
                         reader->probeLiveness(row->id) == HostLiveness::Live) {
+                        const std::vector<std::string> overrides =
+                            daemon_override_flags(invocation);
+                        if (!overrides.empty()) {
+                            err << "ymh: cannot apply ";
+                            for (std::size_t index = 0; index < overrides.size(); ++index) {
+                                if (index != 0) {
+                                    err << ", ";
+                                }
+                                err << overrides[index];
+                            }
+                            err << " to the running daemon for '" << root.string()
+                                << "'; stop it (`ymh workspace stop`) and retry\n";
+                            return 2;
+                        }
                         std::unique_ptr<WorkspaceRegistry> writer =
                             WorkspaceRegistry::open(default_registry_config());
                         return run_via_daemon(*writer, *row, effective_global_config(invocation),

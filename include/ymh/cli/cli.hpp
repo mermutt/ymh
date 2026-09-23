@@ -80,6 +80,12 @@ struct CliInvocation {
                                               std::ostream& out, std::ostream& err,
                                               const std::string& workspace_label);
 
+// 52 review (2B): the CLI provider/model selectors present on `invocation`, in
+// flag order. The live-daemon `run` path owns its provider config and cannot
+// honor these, so the CLI must reject rather than silently drop them. Pure, so
+// the detection is unit-testable.
+[[nodiscard]] std::vector<std::string> daemon_override_flags(const CliInvocation& invocation);
+
 // Parses and executes. Returns a process exit code.
 int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostream& err);
 int run_cli(int argc, char** argv);

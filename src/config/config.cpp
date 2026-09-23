@@ -1864,11 +1864,7 @@ void apply_env_overrides(Config& config) {
     }
 }
 
-Config load_config(const ConfigPaths& paths) {
-    Config config;
-    apply_jsonc_file(config, paths.global, /*required=*/true);
-    apply_jsonc_file(config, paths.workspace, /*required=*/false);
-    apply_env_overrides(config);
+void validate_llm_references(const Config& config) {
     if (!config.llm.profile.empty() && !is_known_model_profile(config.llm.profile)) {
         throw ConfigError("unknown llm.default.profile: " + config.llm.profile);
     }
@@ -1888,6 +1884,14 @@ Config load_config(const ConfigPaths& paths) {
         config.llm.endpoints.find(*config.llm.active_endpoint) == config.llm.endpoints.end()) {
         throw ConfigError("unknown endpoint '" + *config.llm.active_endpoint + "'");
     }
+}
+
+Config load_config(const ConfigPaths& paths) {
+    Config config;
+    apply_jsonc_file(config, paths.global, /*required=*/true);
+    apply_jsonc_file(config, paths.workspace, /*required=*/false);
+    apply_env_overrides(config);
+    validate_llm_references(config);
     return config;
 }
 

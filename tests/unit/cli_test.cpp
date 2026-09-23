@@ -18,6 +18,7 @@
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 
+#include "support/child_process.hpp"
 #include "support/test_env.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/cli.hpp"
@@ -560,6 +561,58 @@ TEST(CliImport, LoaderRejectedDocumentIsNotWritten) {
     EXPECT_FALSE(run.result);
     EXPECT_FALSE(std::filesystem::exists(run.global));
     EXPECT_NE(run.err.find("imported config failed validation"), std::string::npos) << run.err;
+}
+
+TEST(Cli52Review, DaemonOverrideFlagsDetectsSelectors) {
+    CliInvocation invocation;
+    EXPECT_TRUE(daemon_override_flags(invocation).empty());
+
+    invocation.model            = "m";
+    invocation.endpoint         = "e";
+    invocation.provider         = "p";
+    invocation.base_url         = "u";
+    invocation.api_key_env      = "k";
+    invocation.reasoning_effort = "low";
+    const std::vector<std::string> flags = daemon_override_flags(invocation);
+    ASSERT_EQ(flags.size(), 6u);
+    EXPECT_EQ(flags[0], "--model");
+    EXPECT_EQ(flags[1], "--endpoint");
+    EXPECT_EQ(flags[2], "--provider");
+    EXPECT_EQ(flags[3], "--base-url");
+    EXPECT_EQ(flags[4], "--api-key-env");
+    EXPECT_EQ(flags[5], "--reasoning-effort");
+}
+
+TEST(Cli52Review, UnknownEndpointExitsTwoNotAbort) {
+    test::TempWorkspace workspace("cli52_unknown_endpoint");
+    const std::string  config_path = (workspace.path() / "config.jsonc").string();
+    std::ofstream(config_path)
+        << R"JSON({
+             "llm": {
+               "endpoints": { "real": { "base_url": "https://example.invalid/v1",
+                                        "api_key_env": "YMH_TEST_KEY" } },
+               "models": { "m": { "endpoint": "real", "model": "wire" } },
+               "active_model": "m"
+             }
+           })JSON";
+
+    ymh::test::ChildOptions options;
+#ifdef YMH_TEST_BINARY
+    options.executable = std::filesystem::path{YMH_TEST_BINARY};
+#else
+    options.executable = std::filesystem::path{"ymh"};
+#endif
+    options.argv       = {"ymh",        "--config",    config_path, "--workspace",
+                          workspace.path().string(), "--endpoint", "bogus", "run", "hi"};
+    options.env_remove = {"YMH_LLM_ENDPOINT", "YMH_LLM_ACTIVE_MODEL", "YMH_LLM_MODEL"};
+    options.stdout_path = workspace.path() / "stdout.txt";
+    options.stderr_path = workspace.path() / "stderr.txt";
+    const ymh::test::ExitStatus status = ymh::test::run_child(std::move(options));
+    ASSERT_TRUE(status.exited);
+    EXPECT_FALSE(status.signalled) << "killed by signal " << status.signal;
+    EXPECT_EQ(status.code, 2);
+    const std::string err_text = ymh::test::read_text_file(workspace.path() / "stderr.txt");
+    EXPECT_NE(err_text.find("unknown endpoint 'bogus'"), std::string::npos) << err_text;
 }
 
 TEST(CliImport, MoreThanMaxServersStaysNonRequired) {
