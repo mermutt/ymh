@@ -15,6 +15,7 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/context_snapshot.hpp"
+#include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/preset.hpp"
 #include "ymh/agent/turn_executor.hpp"
@@ -634,7 +635,22 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
 
         SessionOptions options;
         options.serverProfile = object.value("server_profile", std::string{"interactive"});
-        options.model = object.value("model", runtime_.agent_config().model);
+        options.model         = runtime_.agent_config().model;
+        // 53-D2/H5: the `model` param is an `llm.models` NAME (or a literal id);
+        // resolve it to the entry's wire id BEFORE it reaches the header/event.
+        if (const auto model_it = object.find("model"); model_it != object.end()) {
+            if (!model_it->is_string()) {
+                throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                       "InvalidParams"});
+            }
+            const std::string                      requested = model_it->get<std::string>();
+            const std::optional<ModelCatalogEntry> entry = runtime_.model_catalog().find(requested);
+            if (!entry.has_value()) {
+                throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                       "InvalidParams"});
+            }
+            options.model = entry->model_id;
+        }
         options.title = object.value("title", std::string{});
         options.cwd = runtime_.root();
         if (object.contains("agent_preset")) {
@@ -751,6 +767,47 @@ protocol::SetModeResult HostRuntime::setSessionMode(const nlohmann::json& params
     });
 }
 
+protocol::SetModelResult HostRuntime::setSessionModel(const nlohmann::json& params) {
+    return translate([&]() -> protocol::SetModelResult {
+        if (!params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const auto session_it = params.find("session");
+        const auto model_it   = params.find("model");
+        if (session_it == params.end() || !session_it->is_string() ||
+            model_it == params.end() || !model_it->is_string() ||
+            model_it->get_ref<const std::string&>().empty()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const SessionId                        id{session_it->get<std::string>()};
+        const std::optional<ModelCatalogEntry> entry =
+            runtime_.model_catalog().find(model_it->get<std::string>());
+        if (!entry.has_value()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        // 53-I9: compare the full ResolvedEndpoint identity (name/base_url), not
+        // the ProviderId, which two distinct endpoints commonly share.
+        const ResolvedEndpoint& registered = runtime_.model_catalog().default_entry().endpoint;
+        if (entry->endpoint.name != registered.name ||
+            entry->endpoint.base_url != registered.base_url) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::EndpointNotRouted),
+                                   "EndpointNotRouted"});
+        }
+        // agentStatus throws UnknownSession for an id the daemon does not know.
+        const bool turn_open = agentStatus(id) != "Idle";
+        std::shared_ptr<Session> session = runtime_.sessions().sessionPtr(id);
+        const ModelSelection     selection{entry->model_id, entry->name, entry->parameters,
+                                           entry->profile, entry->endpoint.provider};
+        const ModelSetResult result =
+            runtime_.model_selection().set(*session, turn_open, selection);
+        return protocol::SetModelResult{id, entry->model_id, entry->name,
+                                        result == ModelSetResult::Queued};
+    });
+}
+
 protocol::SessionResumed HostRuntime::resumeSession(const SessionId& id) {
     return translate([&]() -> protocol::SessionResumed {
         std::expected<AgentId, AgentError> resumed = runtime_.agents().resume(id);
@@ -864,6 +921,7 @@ void HostRuntime::deleteSession(const SessionId& id, bool only_if_empty, bool fo
 
         runtime_.sessions().deleteSession(id, only_if_empty);
         runtime_.plan_mode().erase(id);
+        runtime_.model_selection().erase(id);
 
         if (active_session_.has_value() && active_session_->value == id.value) {
             active_session_.reset();

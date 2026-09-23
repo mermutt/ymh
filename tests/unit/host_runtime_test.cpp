@@ -267,7 +267,8 @@ public:
     explicit Bridge(const std::string& prefix, FakeScript script = FakeScript{},
                     bool with_pty = false,
                     std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)>
-                        provider_factory = {})
+                        provider_factory = {},
+                    Config config = Config{})
         : workspace_(prefix), registry_dir_("host_runtime_registry_" + prefix) {
         root_ = std::filesystem::canonical(workspace_.path());
 
@@ -283,7 +284,7 @@ public:
         boot_id_ = BootId{"host-runtime-test-boot"};
         host_boot_id_ = HostBootId{"host-runtime-test-boot"};
         WorkspaceRuntimeOptions options;
-        options.config = Config{};
+        options.config = std::move(config);
         options.root = root_;
         options.boot_id = boot_id_;
         options.store_factory = [] { return std::make_unique<MemorySessionStore>(); };
@@ -621,6 +622,133 @@ TEST_F(HostRuntimeTest, SetModeSeesLoggedStateWithColdMemo) {
     EXPECT_FALSE(result.active);
     EXPECT_FALSE(result.pending);
     EXPECT_FALSE(plan_mode_active(bridge.runtime().sessions().sessionPtr(created.session)->events()));
+}
+
+Config config_with_named_models() {
+    Config config;
+    config.llm.endpoints["ds"] = EndpointSettings{};
+    EndpointSettings other;
+    other.base_url = "https://other.example/v1";
+    config.llm.endpoints["other"] = other;
+
+    ModelSettings balanced;
+    balanced.endpoint         = "ds";
+    balanced.model            = "Muse-Glimmer-30B";
+    balanced.reasoning_effort = "low";
+    config.llm.models["balanced"] = balanced;
+
+    ModelSettings fast;
+    fast.endpoint = "ds";
+    fast.model    = "deepseek-flash";
+    config.llm.models["fast"] = fast;
+
+    ModelSettings cross;
+    cross.endpoint = "other";
+    cross.model    = "cross-model";
+    config.llm.models["cross"] = cross;
+
+    config.llm.active_model = "balanced";
+    return config;
+}
+
+std::size_t model_change_count(const std::shared_ptr<Session>& session) {
+    std::size_t count = 0;
+    for (const EventRecord& record : session->events()) {
+        if (record.event.type == EventType::SessionModelChanged) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 53-U9 (53-D5/53-I6): an idle switch appends exactly one `session/model` and
+// folds the header; the reply echoes the entry's wire id + name.
+TEST_F(HostRuntimeTest, SetModelCommittedAppendsAndFoldsHeader) {
+    Bridge bridge("hr_set_model", FakeScript{}, false, {}, config_with_named_models());
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+    ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
+
+    const protocol::SetModelResult result = bridge.host().setSessionModel(
+        nlohmann::json{{"session", created.session.value}, {"model", "fast"}});
+    EXPECT_EQ(result.model, "deepseek-flash");
+    EXPECT_EQ(result.model_name, "fast");
+    EXPECT_FALSE(result.pending);
+
+    std::shared_ptr<Session> session = bridge.runtime().sessions().sessionPtr(created.session);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->header().model, "deepseek-flash");
+    EXPECT_EQ(model_change_count(session), 1u);
+}
+
+// 53-U9 (53-D5): selecting the already-effective model is `Unchanged`: no append.
+TEST_F(HostRuntimeTest, SetModelUnchangedNoAppend) {
+    Bridge bridge("hr_set_model_same", FakeScript{}, false, {}, config_with_named_models());
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+    ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
+
+    const protocol::SetModelResult result = bridge.host().setSessionModel(
+        nlohmann::json{{"session", created.session.value}, {"model", "balanced"}});
+    EXPECT_EQ(result.model, "Muse-Glimmer-30B");
+    EXPECT_FALSE(result.pending);
+    EXPECT_EQ(model_change_count(bridge.runtime().sessions().sessionPtr(created.session)), 0u);
+}
+
+// 53-U20 (53-D2/H5): `session.create` resolves an `llm.models` NAME to the wire id
+// before writing the header/event.
+TEST_F(HostRuntimeTest, CreateSessionResolvesNamedModelToWireId) {
+    Bridge bridge("hr_create_model", FakeScript{}, false, {}, config_with_named_models());
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json{{"model", "fast"}});
+    ASSERT_FALSE(created.session.value.empty());
+    const std::shared_ptr<Session> session = bridge.runtime().sessions().sessionPtr(created.session);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->header().model, "deepseek-flash");
+}
+
+// 53-U25 (53-F4/53-F5): an unknown session is `UnknownSession`; an unknown model
+// name is `InvalidParams`; neither appends.
+TEST_F(HostRuntimeTest, SetModelUnknownSessionAndModelRejected) {
+    Bridge bridge("hr_set_model_bad", FakeScript{}, false, {}, config_with_named_models());
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+    ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
+
+    try {
+        (void)bridge.host().setSessionModel(
+            nlohmann::json{{"session", "no-such-session"}, {"model", "fast"}});
+        FAIL() << "unknown session was accepted";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::AppCode::UnknownSession));
+    }
+
+    try {
+        (void)bridge.host().setSessionModel(
+            nlohmann::json{{"session", created.session.value}, {"model", "nope"}});
+        FAIL() << "unknown model was accepted";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::RpcCode::InvalidParams));
+    }
+    EXPECT_EQ(model_change_count(bridge.runtime().sessions().sessionPtr(created.session)), 0u);
+}
+
+// 53-U13 (53-I9/53-F6): a target whose endpoint identity differs is rejected with
+// `EndpointNotRouted` and appends nothing.
+TEST_F(HostRuntimeTest, SetModelCrossEndpointRejected) {
+    Bridge bridge("hr_set_model_cross", FakeScript{}, false, {}, config_with_named_models());
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+    ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
+
+    try {
+        (void)bridge.host().setSessionModel(
+            nlohmann::json{{"session", created.session.value}, {"model", "cross"}});
+        FAIL() << "cross-endpoint switch was accepted";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::AppCode::EndpointNotRouted));
+    }
+    EXPECT_EQ(model_change_count(bridge.runtime().sessions().sessionPtr(created.session)), 0u);
 }
 
 // 23-D55 / SL-I22: all guards precede all side effects. A delete refused by the

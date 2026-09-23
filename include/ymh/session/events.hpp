@@ -250,6 +250,16 @@ struct PlanMode {
     bool active = false;
 };
 
+// ---- session model (53-D6) -------------------------------------------------
+
+// Whole-value-replace session model selection. The last `session/model` in a
+// session log wins; a log with none keeps `SessionStarted.model`. `model` is the
+// wire id; `model_name` is the `llm.models` entry name ("" for a literal id).
+struct SessionModelChanged {
+    std::string model;
+    std::string model_name;
+};
+
 // ---- LLM request header (28 §5.2, 29 §3.2) ---------------------------------
 
 // A changed snapshot, not a per-dispatch record: logged at a request-series
@@ -452,6 +462,10 @@ template <>
 struct SessionEventMap<EventType::JobChanged> {
     using type = payload::JobChanged;
 };
+template <>
+struct SessionEventMap<EventType::SessionModelChanged> {
+    using type = payload::SessionModelChanged;
+};
 
 // Payload type -> EventType (01 §4.4).
 template <>
@@ -570,6 +584,10 @@ template <>
 struct EventTraits<payload::JobChanged> {
     static constexpr EventType type = EventType::JobChanged;
 };
+template <>
+struct EventTraits<payload::SessionModelChanged> {
+    static constexpr EventType type = EventType::SessionModelChanged;
+};
 
 // Total payload-name mapping used by tests and diagnostics.
 [[nodiscard]] std::string_view session_end_reason_name(payload::SessionEndReason reason) noexcept;
@@ -649,5 +667,7 @@ void to_json(nlohmann::json& json, const CommandDone& value);
 void from_json(const nlohmann::json& json, CommandDone& value);
 void to_json(nlohmann::json& json, const JobChanged& value);
 void from_json(const nlohmann::json& json, JobChanged& value);
+void to_json(nlohmann::json& json, const SessionModelChanged& value);
+void from_json(const nlohmann::json& json, SessionModelChanged& value);
 
 } // namespace ymh::payload

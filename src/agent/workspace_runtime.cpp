@@ -10,6 +10,7 @@
 #include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/llm_pool.hpp"
+#include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/preset.hpp"
 #include "ymh/cli/wiring.hpp"
@@ -170,6 +171,7 @@ public:
           ring_(governor_.caps().session_output_ring_bytes),
           sink_(ring_),
           sessions_(*store_, bus_),
+          model_catalog_(ModelCatalog::build(config)),
           plan_mode_([this](const SessionId& id, payload::PlanMode mode) {
               try {
                   if (auto session = sessions_.sessionPtr(id)) {
@@ -178,6 +180,23 @@ public:
               } catch (const UnknownSession&) {
               }
           }),
+          model_selection_(
+              [this](const SessionId& id, payload::SessionModelChanged change) {
+                  try {
+                      if (auto session = sessions_.sessionPtr(id)) {
+                          session->append(change);
+                      }
+                  } catch (const UnknownSession&) {
+                  }
+              },
+              [this](const std::string& wire_id) -> std::optional<ModelSelection> {
+                  const std::optional<ModelCatalogEntry> entry = model_catalog_.find(wire_id);
+                  if (!entry.has_value()) {
+                      return std::nullopt;
+                  }
+                  return ModelSelection{entry->model_id, entry->name, entry->parameters,
+                                        entry->profile, entry->endpoint.provider};
+              }),
           roster_(std::make_unique<AgentPresetRoster>(
               prompt_, tools_, *skill_catalog_, sessions_, make_preset_config(config),
               &category_logger(LogCategory::Tool), permission_preset_names(config))) {
@@ -246,6 +265,7 @@ public:
 
         services_.sessions        = &sessions_;
         services_.plan_mode       = &plan_mode_;
+        services_.model_selection = &model_selection_;
         services_.governor        = &governor_;
         services_.tools           = &tools_;
         services_.policy          = &policy_;
@@ -315,7 +335,9 @@ public:
     OutputRing                         ring_;
     RingOutputSink                     sink_;
     SessionManager                     sessions_;
+    ModelCatalog                       model_catalog_;
     PlanModeController                 plan_mode_;
+    ModelSelectionController           model_selection_;
     std::unique_ptr<AgentPresetRoster> roster_;
     AgentServices                      services_;
     std::unique_ptr<AgentRegistry>     agents_;
@@ -432,6 +454,10 @@ bool                  WorkspaceRuntime::has_provider() const noexcept {
 LLMPool&              WorkspaceRuntime::pool() noexcept { return impl_->pool_; }
 ContextAssembler&     WorkspaceRuntime::context() noexcept { return impl_->assembler_; }
 PlanModeController&   WorkspaceRuntime::plan_mode() noexcept { return impl_->plan_mode_; }
+ModelCatalog&         WorkspaceRuntime::model_catalog() noexcept { return impl_->model_catalog_; }
+ModelSelectionController& WorkspaceRuntime::model_selection() noexcept {
+    return impl_->model_selection_;
+}
 
 const AgentConfig& WorkspaceRuntime::agent_config() const noexcept { return impl_->agent_config_; }
 

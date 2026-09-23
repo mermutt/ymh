@@ -402,11 +402,17 @@ public:
     }
 
     int run() {
+        // 53-D1/53-D3: the eager-spawn failure notice and the resolved model
+        // for the no-session fallback segment.
+        if (options_.initial_notice.has_value()) {
+            model_.pushNotice(*options_.initial_notice);
+        }
+        model_.resolved_model = display_model(resolve_model(options_.config));
         for (const SupervisorWorkspace& workspace : options_.workspaces) {
             attach_workspace(workspace);
         }
-        // 49-D1/49-A3: zero workspaces is a valid start state (the empty
-        // screen). A bare `ymh` models no workspace until the first prompt.
+        // 53-D1: the eager attach models the cwd workspace; the zero-workspace
+        // branch survives only as the 53-F1 degraded fallback.
         if (!model_.workspaces.empty()) {
             model_.activeWorkspaceId = options_.workspaces.front().id;
             if (!options_.initial_workspace.empty()) {
@@ -1063,6 +1069,162 @@ private:
         return true;
     }
 
+    // 53-D4: the current status-line model value (the active session's display
+    // model, else the resolved fallback).
+    std::string current_model_display() const {
+        const auto workspace = model_.workspaces.find(model_.activeWorkspaceId);
+        if (workspace != model_.workspaces.end() &&
+            !workspace->second.activeSessionId().value.empty()) {
+            const auto session = model_.sessions.find(workspace->second.activeSessionId());
+            if (session != model_.sessions.end() && !session->second.status.model.empty()) {
+                return session->second.status.model;
+            }
+        }
+        return model_.resolved_model;
+    }
+
+    // 53-D4: a valid argument is an `llm.models` name, or a literal wire id the
+    // daemon catalog can resolve (any entry's `model`, or the effective default).
+    [[nodiscard]] bool model_argument_known(const std::string& value) const {
+        if (value.empty()) {
+            return false;
+        }
+        if (options_.config.llm.models.find(value) != options_.config.llm.models.end()) {
+            return true;
+        }
+        if (resolve_model(options_.config).model_id == value) {
+            return true;
+        }
+        for (const auto& [name, settings] : options_.config.llm.models) {
+            (void)name;
+            if (settings.model == value) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void open_model_picker() {
+        disarm_esc();
+        model_.model_picker.open(options_.config, current_model_display());
+        model_.mode = UiMode::ModelPicker;
+        model_.dirty.markAggregate();
+    }
+
+    // 53-D4/D5: validates and applies a model argument. No live session sets the
+    // preference for the next create; a live session issues `session.set_model`.
+    void apply_model(const std::string& name_or_id) {
+        if (!model_argument_known(name_or_id)) {
+            if (SessionUiState* state = active(); state != nullptr) {
+                append_system_entry(model_, *state,
+                                    "unknown model: " + name_or_id + " (see /model)");
+            } else {
+                model_.pushNotice("unknown model: " + name_or_id + " (see /model)");
+            }
+            return;
+        }
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        SessionUiState* state     = active();
+        if (workspace == nullptr || state == nullptr) {
+            // 53-D8: no live session => the next `session.create` uses this.
+            preferred_model_      = name_or_id;
+            model_.resolved_model = options_.config.llm.models.count(name_or_id) != 0
+                                        ? name_or_id
+                                        : display_model(options_.config, name_or_id);
+            model_.pushNotice("model preference set to " + model_.resolved_model);
+            return;
+        }
+        if (session_read_only(*workspace, state->id)) {
+            append_system_entry(
+                model_, *state,
+                "model: session is read-only (activate its workspace to switch)");
+            return;
+        }
+        submit_set_model(workspace->id, state->id, name_or_id);
+    }
+
+    [[nodiscard]] static bool session_read_only(const WorkspaceModel& workspace,
+                                                const SessionId& session) {
+        for (const SessionCell& cell : workspace.sessions) {
+            if (cell.id == session) {
+                return cell.readOnly;
+            }
+        }
+        return false;
+    }
+
+    // 53-D5: the `session.set_model` RPC. The supervisor never writes
+    // `sessions.db`; the durable event (or this reply) is the source of truth.
+    void submit_set_model(const WorkspaceId& workspace, const SessionId& session,
+                          const std::string& name_or_id) {
+        submit_to(workspace, std::string(protocol::method::kSessionSetModel),
+                  nlohmann::json{{"session", session.value}, {"model", name_or_id}},
+                  [this, workspace, session](SupervisorReply reply) {
+                      enqueue([this, workspace, session, reply = std::move(reply)]() mutable {
+                          if (model_.workspaces.count(workspace) == 0) {
+                              return;
+                          }
+                          SessionUiState* state = model_.session(session);
+                          if (state == nullptr) {
+                              return;
+                          }
+                          if (!reply.ok) {
+                              append_system_entry(
+                                  model_, *state,
+                                  "model: " + (reply.error.empty() ? std::string{"request failed"}
+                                                                   : reply.error));
+                              return;
+                          }
+                          const std::string model_name =
+                              reply.result.value("model_name", std::string{});
+                          const std::string model = reply.result.value("model", std::string{});
+                          state->status.model = model_name.empty() ? model : model_name;
+                          model_.resolved_model = state->status.model;
+                          model_.dirty.mark(session, UiDirtyFlag::Status);
+                          if (reply.result.value("pending", false)) {
+                              model_.pushNotice("model change queued");
+                              model_.dirty.markAggregate();
+                          }
+                      });
+                  });
+    }
+
+    // 53-D4/I10: arrows/`j`/`k` wrap; Enter applies; Esc/Ctrl+C dismiss; Tab and
+    // every other key are swallowed.
+    bool handle_model_picker(const ftxui::Event& event) {
+        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
+            model_.model_picker.close();
+            model_.mode = UiMode::Conversation;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowDown || (event.is_character() && event.character() == "j")) {
+            model_.model_picker.moveDown();
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowUp || (event.is_character() && event.character() == "k")) {
+            model_.model_picker.moveUp();
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::Return) {
+            std::string target;
+            if (model_.model_picker.selected < model_.model_picker.rows.size()) {
+                const ModelPickerRow row = model_.model_picker.rows[model_.model_picker.selected];
+                target = row.name.empty() ? row.model_id : row.name;
+            }
+            model_.model_picker.close();
+            model_.mode = UiMode::Conversation;
+            model_.dirty.markAggregate();
+            if (!target.empty()) {
+                apply_model(target);
+            }
+            return true;
+        }
+        return true;
+    }
+
     // 22 §3.3: the switcher overlay is a snapshot. Rebuild it in place (not via
     // `openSwitcher()`, so `mode`/`source` survive) whenever the live set
     // changes while a Live-source switcher is open.
@@ -1279,7 +1441,10 @@ private:
         // process is unmodeled, and `refresh_sessions` is not guaranteed to run
         // for it (it only hydrates sessions the daemon reports as `live`).
         if (state.status.model.empty()) {
-            state.status.model = stored_session_model(workspace, session);
+            // 53-D3.1: the catalog stores the wire id; the status line shows the
+            // canonical entry-name-else-id value.
+            state.status.model =
+                display_model(options_.config, stored_session_model(workspace, session));
         }
         model_.ensureCellIn(workspace, session);
         // Subscribe here, not only via the `SessionCreated` notice: that notice
@@ -1542,7 +1707,8 @@ private:
                     for (const auto& [session, title] : live) {
                         SessionUiState& state = model_.ensureSessionIn(workspace, session);
                         if (state.status.model.empty()) {
-                            state.status.model = effective_model(options_.config);
+                            state.status.model = display_model(
+                                options_.config, effective_model(options_.config));
                         }
                         model_.ensureCellIn(workspace, session);
                         model_.setCellTitle(workspace, session, title);
@@ -1651,7 +1817,8 @@ private:
         }
         SessionUiState& state = model_.ensureSessionIn(workspace, session);
         if (state.status.model.empty()) {
-            state.status.model = effective_model(options_.config);
+            state.status.model =
+                display_model(options_.config, effective_model(options_.config));
         }
         model_.ensureCellIn(workspace, session);
         activate_session(workspace, session);
@@ -1772,7 +1939,8 @@ private:
     [[nodiscard]] bool modal_owns_input() const {
         return model_.exitConfirm.open || model_.dialog.open ||
                (model_.mode == UiMode::Context && model_.context.open) ||
-               model_.message.open || model_.mode == UiMode::Switcher;
+               model_.message.open || model_.mode == UiMode::Switcher ||
+               (model_.mode == UiMode::ModelPicker && model_.model_picker.visible);
     }
 
     // RB-12: composer snapshot taken when a modal opens, restored when it
@@ -2257,7 +2425,8 @@ private:
         context.session = model_.ensureActiveSession();
         context.request_exit = [this] { requestExit(); };
         context.create_session = [this] { new_session(); };
-        context.set_model = [this](const std::string& name) { preferred_model_ = name; };
+        context.open_model_picker = [this] { open_model_picker(); };
+        context.apply_model       = [this](const std::string& name) { apply_model(name); };
         context.compact = [this] {
             WorkspaceModel* workspace = model_.activeWorkspace();
             if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
@@ -3233,6 +3402,9 @@ private:
         }
         if (model_.mode == UiMode::Switcher) {
             return handle_switcher(event);
+        }
+        if (model_.mode == UiMode::ModelPicker && model_.model_picker.visible) {
+            return handle_model_picker(event);
         }
         if (event == ftxui::Event::CtrlS || event == ftxui::Event::CtrlP) {
             openSwitcher();

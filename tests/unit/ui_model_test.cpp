@@ -654,10 +654,14 @@ TEST(UiModel, CommandRegistryDispatchesBuiltins) {
     const CommandRegistry registry = CommandRegistry::builtin();
     bool exited = false;
     bool created = false;
+    bool picker_opened = false;
+    std::string applied_model;
     CommandContext context{model};
     context.session = model.session(kSession);
     context.request_exit = [&exited] { exited = true; };
     context.create_session = [&created] { created = true; };
+    context.open_model_picker = [&picker_opened] { picker_opened = true; };
+    context.apply_model = [&applied_model](const std::string& name) { applied_model = name; };
 
     EXPECT_FALSE(registry.dispatch("plain text", context));
     EXPECT_TRUE(registry.dispatch("/help", context));
@@ -669,8 +673,10 @@ TEST(UiModel, CommandRegistryDispatchesBuiltins) {
     EXPECT_TRUE(registry.dispatch("/new", context));
     EXPECT_TRUE(created);
 
+    EXPECT_TRUE(registry.dispatch("/model", context));
+    EXPECT_TRUE(picker_opened);
     EXPECT_TRUE(registry.dispatch("/model tiny", context));
-    EXPECT_EQ(model.session(kSession)->status.model, "tiny");
+    EXPECT_EQ(applied_model, "tiny");
 
     EXPECT_TRUE(registry.dispatch("/bogus", context));
     EXPECT_TRUE(registry.dispatch("/exit", context));

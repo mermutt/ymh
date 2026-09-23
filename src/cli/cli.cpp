@@ -497,17 +497,14 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
         err << "ymh: cannot canonicalize " << resolved_root << '\n';
         return 1;
     }
-    // 49-D1/49-A1/49-A2: a bare `ymh` (no --resume/--new) starts with zero
-    // workspaces and spawns no daemon; the cwd row and daemon are created on the
-    // first prompt. `--resume`/`--new` are explicit activations and keep the
-    // eager register+attach.
+    // 53-D1/53-A1/53-A5: a bare `ymh` eagerly registers the cwd workspace row
+    // and spawns/attaches its daemon before the loop (reverting 49-D1). The
+    // registry/canonicalize failure stays fatal; the spawn failure degrades only
+    // for the bare case (53-F1).
     const bool                     explicit_activation = !resume_session.empty() || new_session;
-    std::optional<WorkspaceRecord> row;
-    if (explicit_activation) {
-        row = find_or_register_workspace(*canonical, err);
-        if (!row.has_value()) {
-            return 1;
-        }
+    std::optional<WorkspaceRecord> row = find_or_register_workspace(*canonical, err);
+    if (!row.has_value()) {
+        return 1;
     }
 
     std::unique_ptr<WorkspaceRegistry> registry;
@@ -523,19 +520,23 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
 
     const AttachIdentity identity{ui::process_client_instance(),
                                   protocol::ClientRole::Supervisor};
-    if (row.has_value()) {
-        try {
-            const AttachResult attach = lifecycle.ensureRunning(row->id, identity);
-            (void)attach;
-        } catch (const std::exception& error) {
+    std::optional<std::string> startup_notice;
+    try {
+        const AttachResult attach = lifecycle.ensureRunning(row->id, identity);
+        (void)attach;
+    } catch (const std::exception& error) {
+        // 53-D1 step 4: an explicit activation (`--resume`/`--new`) stays fatal;
+        // a bare `ymh` records the failure and continues unmodeled (53-F1).
+        if (explicit_activation) {
             err << "ymh: cannot attach to workspace daemon: " << error.what() << '\n';
             return 1;
         }
+        startup_notice = "cannot start workspace daemon: " + std::string{error.what()};
     }
 
     ui::DaemonSetScanner scanner(*registry, std::chrono::milliseconds{2'000}, {});
     std::vector<ui::SupervisorWorkspace> attached = scanner.scanOnce();
-    if (row.has_value() && attached.empty()) {
+    if (attached.empty()) {
         const std::optional<WorkspaceRecord> refreshed = registry->findById(row->id);
         if (refreshed.has_value() && refreshed->host.has_value()) {
             ui::SupervisorWorkspace workspace;
@@ -557,7 +558,8 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     options.lifecycle = &lifecycle;
     options.registry = registry.get();
     options.identity = identity;
-    if (resume_id.has_value() && row.has_value()) {
+    options.initial_notice = std::move(startup_notice);
+    if (resume_id.has_value()) {
         options.initial_resume = std::make_pair(row->id, *resume_id);
     }
     return ui::run_supervisor(options);

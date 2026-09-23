@@ -172,25 +172,17 @@ CommandRegistry CommandRegistry::builtin() {
             context.model.dirty.mark(context.session->id, UiDirtyFlag::Conversation);
         }});
     registry.add(Command{
-        "model", "show or set the model (applies to new sessions)",
+        "model", "pick or set the model",
         [](CommandContext& context, const std::string& args) {
             if (args.empty()) {
-                const std::string current =
-                    context.session == nullptr ? std::string{} : context.session->status.model;
-                append_system(context, "model: " + (current.empty() ? std::string{"(default)"} : current));
+                if (context.open_model_picker) {
+                    context.open_model_picker();
+                }
                 return;
             }
-            if (context.set_model) {
-                context.set_model(args);
+            if (context.apply_model) {
+                context.apply_model(args);
             }
-            if (context.session != nullptr) {
-                context.session->status.model = args;
-                context.model.dirty.mark(context.session->id, UiDirtyFlag::Status);
-            }
-            append_system(context,
-                          "model set to " + args +
-                              " (the daemon applies it at session.create; there is no "
-                              "live model switch)");
         }});
     registry.add(Command{
         "compact", "Summarize history to reclaim context",

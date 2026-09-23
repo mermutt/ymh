@@ -394,6 +394,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::SessionEnded:
             case EventType::SessionRenamed:
             case EventType::PlanMode:
+            case EventType::SessionModelChanged:
             case EventType::LlmRequestHeader:
             case EventType::AgentPresetSelected:
             case EventType::GoalChange:
@@ -568,6 +569,8 @@ void Session::reload() {
     for (const EventRecord& record : ownEvents()) {
         if (record.event.type == EventType::SessionRenamed) {
             header_.title = record.event.payload.get<payload::SessionRenamed>().title;
+        } else if (record.event.type == EventType::SessionModelChanged) {
+            header_.model = record.event.payload.get<payload::SessionModelChanged>().model;
         }
     }
 
@@ -621,9 +624,11 @@ Sequence Session::appendEventLocked(Event event) {
 
     const Sequence seq = store_->append(header_.id, event);
     header_.updatedAt  = epoch_ms(event.timestamp);
-    // 19 §5.2: mirror updatedAt materialization for the title.
+    // 19 §5.2: mirror updatedAt materialization for the title and the model.
     if (event.type == EventType::SessionRenamed) {
         header_.title = event.payload.get<payload::SessionRenamed>().title;
+    } else if (event.type == EventType::SessionModelChanged) {
+        header_.model = event.payload.get<payload::SessionModelChanged>().model;
     }
     log_.push_back(EventRecord{seq, event});
     if (event.type == EventType::TurnStarted) {
@@ -680,9 +685,11 @@ std::vector<Sequence> Session::appendBatch(std::span<const Event> events) {
     for (std::size_t index = 0; index < events.size(); ++index) {
         const Event& event = events[index];
         header_.updatedAt  = epoch_ms(event.timestamp);
-        // 19 §5.2: a batched rename mirrors the last such event's title.
+        // 19 §5.2: a batched rename mirrors the last such event's title/model.
         if (event.type == EventType::SessionRenamed) {
             header_.title = event.payload.get<payload::SessionRenamed>().title;
+        } else if (event.type == EventType::SessionModelChanged) {
+            header_.model = event.payload.get<payload::SessionModelChanged>().model;
         }
         log_.push_back(EventRecord{sequences[index], event});
         if (event.type == EventType::TurnStarted) {

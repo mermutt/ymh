@@ -95,7 +95,8 @@ TEST(EventTypeTest, LlmRequestHeaderWireNameAndVocabularySize) {
     EXPECT_EQ(ymh::wire_name(ymh::EventType::CommandRun), "command/run");
     EXPECT_EQ(ymh::wire_name(ymh::EventType::CommandDone), "command/done");
     EXPECT_EQ(ymh::wire_name(ymh::EventType::JobChanged), "job/changed");
-    EXPECT_EQ(ymh::all_event_types().size(), 30u);
+    EXPECT_EQ(ymh::wire_name(ymh::EventType::SessionModelChanged), "session/model");
+    EXPECT_EQ(ymh::all_event_types().size(), 31u);
 }
 
 TEST(EventTest, TryDecodeSkipsUnknownTypeButDecodesKnown) {

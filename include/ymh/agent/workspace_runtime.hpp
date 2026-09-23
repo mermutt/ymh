@@ -52,6 +52,8 @@ class TokenEstimator;
 class McpManager;
 class AgentPresetRoster;
 class PlanModeController;
+class ModelSelectionController;
+class ModelCatalog;
 struct AgentConfig;
 struct CompactionPolicy;
 struct LLMProviderConfig;
@@ -160,6 +162,12 @@ public:
     // 25-D2: the owned plan-mode controller, for the `session.set_mode` handler
     // and `deleteSession`'s memo cleanup.
     [[nodiscard]] PlanModeController& plan_mode() noexcept;
+
+    // 53-D7: the owned model catalog and mid-flight selection controller, for
+    // the `session.set_model`/`session.create` resolution and `deleteSession`'s
+    // memo cleanup.
+    [[nodiscard]] ModelCatalog&             model_catalog() noexcept;
+    [[nodiscard]] ModelSelectionController& model_selection() noexcept;
 
     [[nodiscard]] const AgentConfig&       agent_config() const noexcept;
     // 52-D15/52-I12: the deployment default permission preset name pinned into

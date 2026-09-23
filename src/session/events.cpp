@@ -826,6 +826,15 @@ void from_json(const nlohmann::json& json, JobChanged& value) {
     value.label  = json.at("label").get<std::string>();
 }
 
+void to_json(nlohmann::json& json, const SessionModelChanged& value) {
+    json = nlohmann::json{{"model", value.model}, {"model_name", value.model_name}};
+}
+
+void from_json(const nlohmann::json& json, SessionModelChanged& value) {
+    value.model      = json.value("model", std::string{});
+    value.model_name = json.value("model_name", std::string{});
+}
+
 } // namespace payload
 
 } // namespace ymh

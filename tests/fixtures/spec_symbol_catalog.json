@@ -177,6 +177,12 @@
       "section": "6.1"
     },
     {
+      "symbol": "EventType::SessionModelChanged",
+      "category": "event_type",
+      "spec": "53-eager-daemon-and-model-switching-errata.md",
+      "section": "3"
+    },
+    {
       "symbol": "EventType::McpServerStatusChanged",
       "category": "event_type",
       "spec": "15-mcp-adapter.md",
@@ -367,6 +373,12 @@
       "category": "wire_method",
       "spec": "25-ui-ux-errata.md",
       "section": "3.3"
+    },
+    {
+      "symbol": "protocol::method::kSessionSetModel",
+      "category": "wire_method",
+      "spec": "53-eager-daemon-and-model-switching-errata.md",
+      "section": "3"
     },
     {
       "symbol": "protocol::method::kSkillsList",
@@ -871,6 +883,12 @@
       "category": "durable_payload",
       "spec": "44-goals-jobs-commands.md",
       "section": "5.7"
+    },
+    {
+      "symbol": "payload::SessionModelChanged",
+      "category": "durable_payload",
+      "spec": "53-eager-daemon-and-model-switching-errata.md",
+      "section": "3"
     },
     {
       "symbol": "cli::AssistantStreamPrinter",

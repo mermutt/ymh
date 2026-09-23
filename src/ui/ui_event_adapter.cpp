@@ -162,6 +162,12 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             events.push_back(UiEvent{PlanModeChanged{session, payload.active}});
             break;
         }
+        case EventType::SessionModelChanged: {
+            const auto payload = event.payload.get<payload::SessionModelChanged>();
+            events.push_back(
+                UiEvent{ModelChanged{session, payload.model, payload.model_name}});
+            break;
+        }
         case EventType::AssistantAttempt:
         case EventType::GoalChange:
         case EventType::CommandRun:
