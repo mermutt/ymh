@@ -274,6 +274,8 @@ void to_json(nlohmann::json& json, const SessionHeader& header) {
         {"updated_at", header.updatedAt},
         {"title", header.title},
         {"model", header.model},
+        {"model_name", header.model_name ? nlohmann::json(*header.model_name)
+                                         : nlohmann::json(nullptr)},
         {"server_profile", header.serverProfile},
         {"kind", std::string{session_kind_name(header.kind)}},
         {"parent_session", header.parentSession ? nlohmann::json(header.parentSession->value)
@@ -296,6 +298,11 @@ void from_json(const nlohmann::json& json, SessionHeader& header) {
     header.updatedAt     = json.at("updated_at").get<std::int64_t>();
     header.title         = json.value("title", std::string{});
     header.model         = json.value("model", std::string{});
+    if (json.contains("model_name") && !json.at("model_name").is_null()) {
+        header.model_name = json.at("model_name").get<std::string>();
+    } else {
+        header.model_name = std::nullopt;
+    }
     header.serverProfile = json.value("server_profile", std::string{});
     header.kind          = parse_session_kind(json.at("kind").get<std::string>())
                                .value_or(SessionKind::Root);
@@ -570,7 +577,11 @@ void Session::reload() {
         if (record.event.type == EventType::SessionRenamed) {
             header_.title = record.event.payload.get<payload::SessionRenamed>().title;
         } else if (record.event.type == EventType::SessionModelChanged) {
-            header_.model = record.event.payload.get<payload::SessionModelChanged>().model;
+            const auto& change = record.event.payload.get<payload::SessionModelChanged>();
+            header_.model      = change.model;
+            header_.model_name = change.model_name.empty()
+                                     ? std::nullopt
+                                     : std::optional<std::string>{change.model_name};
         }
     }
 
@@ -628,7 +639,11 @@ Sequence Session::appendEventLocked(Event event) {
     if (event.type == EventType::SessionRenamed) {
         header_.title = event.payload.get<payload::SessionRenamed>().title;
     } else if (event.type == EventType::SessionModelChanged) {
-        header_.model = event.payload.get<payload::SessionModelChanged>().model;
+        const auto& change = event.payload.get<payload::SessionModelChanged>();
+        header_.model      = change.model;
+        header_.model_name = change.model_name.empty()
+                                 ? std::nullopt
+                                 : std::optional<std::string>{change.model_name};
     }
     log_.push_back(EventRecord{seq, event});
     if (event.type == EventType::TurnStarted) {
@@ -689,7 +704,11 @@ std::vector<Sequence> Session::appendBatch(std::span<const Event> events) {
         if (event.type == EventType::SessionRenamed) {
             header_.title = event.payload.get<payload::SessionRenamed>().title;
         } else if (event.type == EventType::SessionModelChanged) {
-            header_.model = event.payload.get<payload::SessionModelChanged>().model;
+            const auto& change = event.payload.get<payload::SessionModelChanged>();
+            header_.model      = change.model;
+            header_.model_name = change.model_name.empty()
+                                     ? std::nullopt
+                                     : std::optional<std::string>{change.model_name};
         }
         log_.push_back(EventRecord{sequences[index], event});
         if (event.type == EventType::TurnStarted) {
@@ -749,6 +768,7 @@ Session Session::fork(const Session& parent, std::size_t seedLength, SessionStor
     child.updatedAt     = now;
     child.title         = "";
     child.model         = parent.header().model;
+    child.model_name    = parent.header().model_name;
     child.serverProfile = parent.header().serverProfile;
     child.kind          = SessionKind::Fork;
     child.parentSession = parent.id();
@@ -764,6 +784,7 @@ Session Session::fork(const Session& parent, std::size_t seedLength, SessionStor
         .model         = child.model,
         .serverProfile = child.serverProfile,
         .title         = child.title,
+        .model_name    = child.model_name.value_or(""),
     });
     return childSession;
 }

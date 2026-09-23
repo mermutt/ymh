@@ -30,6 +30,7 @@ struct SessionOptions {
     std::filesystem::path    cwd;
     std::string              serverProfile;
     std::string              model;
+    std::string              model_name;
     std::string              title;
     SessionKind              kind          = SessionKind::Root;
     std::optional<SessionId> parentSession = std::nullopt;

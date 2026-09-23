@@ -118,6 +118,8 @@ TEST(CallConfigEquals, IsFieldWiseAndStopOrderSensitive) {
     };
 
     field_is_compared([](LlmCallConfig& config) { config.provider = "other"; });
+    field_is_compared([](LlmCallConfig& config) { config.endpoint = "ds"; });
+    field_is_compared([](LlmCallConfig& config) { config.profile_id = "muse-glimmer"; });
     field_is_compared([](LlmCallConfig& config) { config.model = "other"; });
     field_is_compared([](LlmCallConfig& config) { config.reasoning_effort = "high"; });
     field_is_compared([](LlmCallConfig& config) { config.temperature = 0.25; });
@@ -826,6 +828,183 @@ TEST(AgentLoopHeader, NullRuntimeFailsWithProviderFailed) {
             EXPECT_EQ(record.event.payload.get<payload::TurnFailed>().code, "ProviderFailed");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 54 — multi-endpoint routing (54-D1/D2/D3, 54-I2/I5/I10/I11/I13)
+// ---------------------------------------------------------------------------
+
+LlmCallConfig endpoint_config(std::string endpoint, std::string profile_id) {
+    LlmCallConfig config = config_for("openai-compatible");
+    config.endpoint      = std::move(endpoint);
+    config.profile_id    = std::move(profile_id);
+    return config;
+}
+
+std::string serve_text(LlmRuntime& runtime, const LlmCallConfig& config) {
+    const FrozenRequest frozen = FrozenRequest::freeze(LLMRequest{}, config);
+    PreparedCall        call   = runtime.prepare_call(config, CancellationToken{}).get();
+    std::string         text;
+    (void)call.stream(frozen, [&text](const StreamEvent& event) {
+        if (const auto* delta = std::get_if<TextDelta>(&event)) {
+            text += delta->text;
+        }
+        return SinkFlow::Continue;
+    }, CancellationToken{}).get();
+    return text;
+}
+
+// 54-U1: the new keys are omitted when empty and compared by `call_config_equals`.
+TEST(LlmCallConfig54, EndpointAndProfileAreAdditiveAndCompared) {
+    const LlmCallConfig base  = config_for("openai-compatible");
+    const std::string   plain = FrozenRequest::freeze(LLMRequest{}, base).canonical_template();
+    EXPECT_EQ(plain.find("\"endpoint\""), std::string::npos);
+    EXPECT_EQ(plain.find("\"profile_id\""), std::string::npos);
+
+    LlmCallConfig keyed = base;
+    keyed.endpoint      = "ds";
+    keyed.profile_id    = "muse-glimmer";
+    const std::string rendered =
+        FrozenRequest::freeze(LLMRequest{}, keyed).canonical_template();
+    EXPECT_NE(rendered.find("\"endpoint\":\"ds\""), std::string::npos);
+    EXPECT_NE(rendered.find("\"profile_id\":\"muse-glimmer\""), std::string::npos);
+
+    LlmCallConfig endpoint_only = base;
+    endpoint_only.endpoint      = "ds";
+    EXPECT_FALSE(call_config_equals(base, endpoint_only));
+    LlmCallConfig profile_only = base;
+    profile_only.profile_id    = "muse-glimmer";
+    EXPECT_FALSE(call_config_equals(base, profile_only));
+}
+
+// 54-U2: endpoint-first selection; a different profile is a miss; an unknown
+// endpoint never falls back to the Provider-kind/default route (54-I5/I10).
+TEST(LlmRuntime54, EndpointFirstRouteSelection) {
+    LlmRuntime runtime;
+    auto empty_profile = runtime.register_endpoint_route(
+        "ds", "", std::make_shared<FakeLLM>(script_of({text_step("ds-empty")})));
+    auto profile_route = runtime.register_endpoint_route(
+        "ds", "muse-glimmer",
+        std::make_shared<FakeLLM>(script_of({text_step("ds-muse")})));
+    auto provider_route = runtime.register_adapter(
+        {"openai-compatible"}, std::make_shared<FakeLLM>(script_of({text_step("default")})));
+    (void)empty_profile;
+    (void)profile_route;
+    (void)provider_route;
+
+    EXPECT_EQ(serve_text(runtime, endpoint_config("ds", "muse-glimmer")), "ds-muse");
+    EXPECT_EQ(serve_text(runtime, endpoint_config("ds", "")), "ds-empty");
+    EXPECT_EQ(serve_text(runtime, config_for("openai-compatible")), "default");
+
+    EXPECT_THROW((void)runtime.prepare_call(endpoint_config("ds", "other"), CancellationToken{}),
+                 NoProviderRouteError);
+    LlmCallConfig ghost = endpoint_config("ghost", "");
+    ghost.provider      = "openai-compatible";
+    EXPECT_THROW((void)runtime.prepare_call(ghost, CancellationToken{}),
+                 NoProviderRouteError);
+}
+
+// 54-U2: typed keys keep a provider id literally named `@foo` from colliding
+// with endpoint `foo`.
+TEST(LlmRuntime54, TypedRouteKeysDoNotCollide) {
+    LlmRuntime runtime;
+    auto provider_route = runtime.register_adapter(
+        {"@foo"}, std::make_shared<FakeLLM>(script_of({text_step("provider")})));
+    auto endpoint_route = runtime.register_endpoint_route(
+        "foo", "", std::make_shared<FakeLLM>(script_of({text_step("endpoint")})));
+    (void)provider_route;
+    (void)endpoint_route;
+
+    EXPECT_EQ(serve_text(runtime, endpoint_config("foo", "")), "endpoint");
+    EXPECT_EQ(serve_text(runtime, config_for("@foo")), "provider");
+}
+
+// 54-U3: the resolver is invoked exactly once per `(endpoint, profile_id)` pair;
+// a second request reuses the registered route; an unused pair is never built.
+TEST(LlmRuntime54, ResolverInvokedOncePerEndpointProfilePair) {
+    LlmRuntime                 runtime;
+    std::vector<std::pair<std::string, std::string>> calls;
+    std::vector<AdapterHandle> handles;
+    runtime.set_route_resolver(
+        [&](std::string_view name, std::string_view profile) -> std::shared_ptr<LLMProvider> {
+            calls.emplace_back(std::string{name}, std::string{profile});
+            auto provider =
+                std::make_shared<FakeLLM>(script_of({text_step("lazy"), text_step("lazy")}));
+            handles.push_back(runtime.register_endpoint_route(name, profile, provider));
+            return provider;
+        });
+
+    const LlmCallConfig cfg = endpoint_config("ds", "muse-glimmer");
+    EXPECT_EQ(serve_text(runtime, cfg), "lazy");
+    EXPECT_EQ(serve_text(runtime, cfg), "lazy");
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].first, "ds");
+    EXPECT_EQ(calls[0].second, "muse-glimmer");
+
+    EXPECT_EQ(serve_text(runtime, endpoint_config("ds", "")), "lazy");
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[1].second, "");
+}
+
+// 54-U4: a resolver that cannot build the provider fails loud and typed.
+TEST(LlmRuntime54, ResolverNullFailsLoud) {
+    LlmRuntime runtime;
+    bool       called = false;
+    runtime.set_route_resolver([&called](std::string_view, std::string_view) {
+        called = true;
+        return std::shared_ptr<LLMProvider>{};
+    });
+    EXPECT_THROW((void)runtime.prepare_call(endpoint_config("ds", ""), CancellationToken{}),
+                 NoProviderRouteError);
+    EXPECT_TRUE(called);
+}
+
+// 54-U22 / 54-I13: the resolver is one-shot.
+TEST(LlmRuntime54, SetRouteResolverIsOneShot) {
+    LlmRuntime runtime;
+    runtime.set_route_resolver(
+        [](std::string_view, std::string_view) { return std::shared_ptr<LLMProvider>{}; });
+    EXPECT_THROW(
+        runtime.set_route_resolver(
+            [](std::string_view, std::string_view) { return std::shared_ptr<LLMProvider>{}; }),
+        std::logic_error);
+}
+
+// 54-U9: the check-build-insert under the resolver's own mutex constructs exactly
+// one provider when two threads race the same pair (54-I2/I11).
+TEST(LlmRuntime54, ConcurrentSamePairBuildsOnce) {
+    LlmRuntime                 runtime;
+    std::mutex                 guard;
+    std::size_t                built = 0;
+    std::shared_ptr<LLMProvider> cached;
+    std::vector<AdapterHandle> handles;
+    runtime.set_route_resolver(
+        [&](std::string_view name, std::string_view profile) -> std::shared_ptr<LLMProvider> {
+            std::lock_guard<std::mutex> lock(guard);
+            if (cached != nullptr) {
+                return cached;
+            }
+            ++built;
+            cached = std::make_shared<FakeLLM>(script_of({text_step("once")}));
+            handles.push_back(runtime.register_endpoint_route(name, profile, cached));
+            return cached;
+        });
+
+    std::atomic<int> successes{0};
+    const auto       run = [&] {
+        try {
+            (void)runtime.prepare_call(endpoint_config("ds", "p"), CancellationToken{}).get();
+            ++successes;
+        } catch (...) {
+        }
+    };
+    std::thread first(run);
+    std::thread second(run);
+    first.join();
+    second.join();
+
+    EXPECT_EQ(built, 1u);
+    EXPECT_EQ(successes.load(), 2);
 }
 
 } // namespace

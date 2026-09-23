@@ -1,5 +1,7 @@
 #include "ymh/agent/compactor.hpp"
 
+#include "ymh/agent/model_selection.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <optional>
@@ -140,18 +142,68 @@ std::string resolve_summarizer_model(const CompactionPolicy& policy, const Sessi
     return resolved.value_or(session.header().model);
 }
 
+struct SummarizerRoute {
+    std::string endpoint;
+    std::string profile_id;
+    ProviderId  provider;
+};
+
+SummarizerRoute summarizer_route(const std::string& model, const Session& session,
+                                 const ModelCatalog* catalog,
+                                 const ProviderId&   fallback_provider) {
+    const SessionHeader              header = session.header();
+    std::optional<ModelCatalogEntry> durable;
+    if (catalog != nullptr) {
+        if (header.model_name.has_value() && !header.model_name->empty()) {
+            durable = catalog->find(*header.model_name);
+        }
+        if (!durable.has_value() && !header.model.empty()) {
+            durable = catalog->find(header.model);
+        }
+    }
+
+    SummarizerRoute route;
+    route.provider = fallback_provider;
+
+    const bool session_model = !model.empty() && model == header.model;
+    if (session_model && durable.has_value()) {
+        route.endpoint   = durable->endpoint.name;
+        route.profile_id = durable->profile.id;
+        route.provider   = durable->endpoint.provider;
+        return route;
+    }
+    if (catalog != nullptr && !model.empty()) {
+        if (const auto entry = catalog->find(model); entry.has_value()) {
+            route.endpoint   = entry->endpoint.name;
+            route.profile_id = entry->profile.id;
+            route.provider   = entry->endpoint.provider;
+            return route;
+        }
+    }
+    if (durable.has_value()) {
+        route.endpoint = durable->endpoint.name;
+        route.provider = durable->endpoint.provider;
+    } else if (catalog != nullptr) {
+        route.endpoint = catalog->default_entry().endpoint.name;
+        route.provider = catalog->default_entry().endpoint.provider;
+    }
+    return route;
+}
+
 } // namespace
 
 ContextCompactor::ContextCompactor(LlmRuntime&           runtime,
                                    LLMPool&              pool,
                                    const TokenEstimator& estimator,
                                    CompactionPolicy      policy,
-                                   WallClock             clock)
+                                   WallClock             clock,
+                                   const ModelCatalog*   catalog)
     : runtime_(runtime),
       pool_(pool),
       estimator_(estimator),
       policy_(std::move(policy)),
-      clock_(std::move(clock)) {}
+      clock_(std::move(clock)),
+      catalog_(catalog) {}
 
 ContextCompactor::PlanResult ContextCompactor::select_plan(const Session& session,
                                                            std::size_t keep) const {
@@ -265,8 +317,12 @@ CompactionResult ContextCompactor::compact(const Session& session,
         request.session_id             = session.id();
         request.purpose                = CallPurpose::Compaction;
 
+        const SummarizerRoute route = summarizer_route(model, session, catalog_, policy_.provider);
+
         LlmCallConfig config;
-        config.provider    = policy_.provider;
+        config.endpoint    = route.endpoint;
+        config.profile_id  = route.profile_id;
+        config.provider    = route.provider;
         config.model       = model;
         config.tool_choice = std::string{"none"};
 

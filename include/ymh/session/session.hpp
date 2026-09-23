@@ -48,6 +48,7 @@ struct SessionHeader {
     std::int64_t               updatedAt = 0;  // epoch ms of last appended event
     std::string                title;
     std::string                model;
+    std::optional<std::string> model_name;  // 54-D8: llm.models entry name, when known
     std::string                serverProfile;
     SessionKind                kind = SessionKind::Root;
     std::optional<SessionId>   parentSession;

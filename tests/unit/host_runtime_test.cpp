@@ -34,6 +34,7 @@
 #include "ymh/host/host_runtime.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/llm/fake_llm.hpp"
+#include "ymh/llm/provider_registry.hpp"
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
 #include "ymh/registry/registry.hpp"
@@ -733,22 +734,123 @@ TEST_F(HostRuntimeTest, SetModelUnknownSessionAndModelRejected) {
     EXPECT_EQ(model_change_count(bridge.runtime().sessions().sessionPtr(created.session)), 0u);
 }
 
-// 53-U13 (53-I9/53-F6): a target whose endpoint identity differs is rejected with
-// `EndpointNotRouted` and appends nothing.
-TEST_F(HostRuntimeTest, SetModelCrossEndpointRejected) {
+// 54-U6 (54-D4): a target on a different but ROUTABLE endpoint is accepted and
+// appends one `session/model` event (the pre-54 `EndpointNotRouted` rejection is
+// inverted).
+TEST_F(HostRuntimeTest, SetModelCrossEndpointAccepted) {
     Bridge bridge("hr_set_model_cross", FakeScript{}, false, {}, config_with_named_models());
     const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
     ASSERT_FALSE(created.session.value.empty());
     ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
 
-    try {
-        (void)bridge.host().setSessionModel(
-            nlohmann::json{{"session", created.session.value}, {"model", "cross"}});
-        FAIL() << "cross-endpoint switch was accepted";
-    } catch (const protocol::RpcException& error) {
-        EXPECT_EQ(error.code(), protocol::code_value(protocol::AppCode::EndpointNotRouted));
+    const protocol::SetModelResult result = bridge.host().setSessionModel(
+        nlohmann::json{{"session", created.session.value}, {"model", "cross"}});
+    EXPECT_EQ(result.model, "cross-model");
+    EXPECT_EQ(result.model_name, "cross");
+    EXPECT_FALSE(result.pending);
+
+    std::shared_ptr<Session> session = bridge.runtime().sessions().sessionPtr(created.session);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->header().model, "cross-model");
+    EXPECT_EQ(session->header().model_name, std::optional<std::string>{"cross"});
+    EXPECT_EQ(model_change_count(session), 1u);
+}
+
+// 54-U19 (54-I3/I4): routability is membership of the endpoint NAME in the
+// startup snapshot; the anonymous default is always routable.
+TEST_F(HostRuntimeTest, IsRoutableEndpointIsNameMembership) {
+    Bridge bridge("hr_routable", FakeScript{}, false, {}, config_with_named_models());
+    EXPECT_TRUE(bridge.runtime().is_routable_endpoint(""));
+    EXPECT_TRUE(bridge.runtime().is_routable_endpoint("ds"));
+    EXPECT_TRUE(bridge.runtime().is_routable_endpoint("other"));
+    EXPECT_FALSE(bridge.runtime().is_routable_endpoint("missing"));
+}
+
+// 54-U10 (54-I10): a request switched to a different endpoint routes to that
+// endpoint's provider and carries only that endpoint's credentials/headers.
+TEST_F(HostRuntimeTest, CrossEndpointRequestCarriesOnlyItsOwnCredentials) {
+    std::mutex                     captured_mutex;
+    std::vector<LLMProviderConfig> captured;
+    FakeScript                     script;
+    script.steps.push_back(text_step("ok"));
+
+    Config config = config_with_named_models();
+    config.llm.endpoints["ds"].api_key    = "DS-KEY";
+    config.llm.endpoints["ds"].headers    = {{"X-Ds", "ds"}};
+    config.llm.endpoints["other"].api_key = "OTHER-KEY";
+    config.llm.endpoints["other"].headers = {{"X-Other", "other"}};
+
+    auto factory = [&](const LLMProviderConfig& provider_config) -> std::unique_ptr<LLMProvider> {
+        {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            captured.push_back(provider_config);
+        }
+        return std::make_unique<FakeLLM>(script);
+    };
+
+    Bridge bridge("hr_cross_creds", FakeScript{}, false, factory, config);
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+    ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
+
+    const protocol::SetModelResult switched = bridge.host().setSessionModel(
+        nlohmann::json{{"session", created.session.value}, {"model", "cross"}});
+    EXPECT_EQ(switched.model, "cross-model");
+
+    nlohmann::json message;
+    message["role"]    = "user";
+    message["content"] = nlohmann::json::array(
+        {nlohmann::json{{"kind", "text"}, {"text", "hi"}}});
+    bridge.clear_forwarded();
+    bridge.host().agentPrompt(created.session, message);
+    ASSERT_TRUE(bridge.wait_for_turn_end(10s));
+
+    std::optional<LLMProviderConfig> other_config;
+    {
+        std::lock_guard<std::mutex> lock(captured_mutex);
+        for (const LLMProviderConfig& entry : captured) {
+            if (entry.base_url == "https://other.example/v1") {
+                other_config = entry;
+            }
+        }
     }
-    EXPECT_EQ(model_change_count(bridge.runtime().sessions().sessionPtr(created.session)), 0u);
+    ASSERT_TRUE(other_config.has_value());
+    EXPECT_EQ(other_config->api_key.value_or(""), "OTHER-KEY");
+    bool carries_other_header = false;
+    bool carries_ds_header    = false;
+    for (const auto& [key, value] : other_config->headers) {
+        if (key == "X-Other") {
+            carries_other_header = true;
+        }
+        if (key == "X-Ds") {
+            carries_ds_header = true;
+        }
+    }
+    EXPECT_TRUE(carries_other_header);
+    EXPECT_FALSE(carries_ds_header);
+}
+
+// 54-U8 (54-D8): the entry name folds on a switch and survives a fork; a
+// pre-54 header without a name falls back to the wire id at resolution.
+TEST_F(HostRuntimeTest, ModelNameFoldsAndSurvivesFork) {
+    Bridge bridge("hr_model_name", FakeScript{}, false, {}, config_with_named_models());
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json{{"model", "fast"}});
+    ASSERT_FALSE(created.session.value.empty());
+    std::shared_ptr<Session> session = bridge.runtime().sessions().sessionPtr(created.session);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->header().model, "deepseek-flash");
+    EXPECT_EQ(session->header().model_name, std::optional<std::string>{"fast"});
+
+    ASSERT_EQ(bridge.host().resumeSession(created.session).status, "Idle");
+    (void)bridge.host().setSessionModel(
+        nlohmann::json{{"session", created.session.value}, {"model", "cross"}});
+    EXPECT_EQ(session->header().model_name, std::optional<std::string>{"cross"});
+
+    const SessionId forked = bridge.runtime().sessions().forkSession(created.session, 0);
+    std::shared_ptr<Session> child = bridge.runtime().sessions().sessionPtr(forked);
+    ASSERT_NE(child, nullptr);
+    EXPECT_EQ(child->header().model_name, std::optional<std::string>{"cross"});
 }
 
 // 23-D55 / SL-I22: all guards precede all side effects. A delete refused by the

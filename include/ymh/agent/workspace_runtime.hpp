@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "ymh/config/config.hpp"
 #include "ymh/mcp/mcp_client.hpp"
@@ -168,6 +169,10 @@ public:
     // memo cleanup.
     [[nodiscard]] ModelCatalog&             model_catalog() noexcept;
     [[nodiscard]] ModelSelectionController& model_selection() noexcept;
+
+    // 54-D4: membership of the endpoint NAME in the startup routable set
+    // ("" = the anonymous default). Never consults ProviderId or base_url.
+    [[nodiscard]] bool is_routable_endpoint(std::string_view name) const;
 
     [[nodiscard]] const AgentConfig&       agent_config() const noexcept;
     // 52-D15/52-I12: the deployment default permission preset name pinned into

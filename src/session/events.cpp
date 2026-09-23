@@ -285,10 +285,14 @@ void to_json(nlohmann::json& json, const SessionStarted& value) {
         {"server_profile", value.serverProfile},
         {"title", value.title},
     };
+    if (!value.model_name.empty()) {
+        json["model_name"] = value.model_name;
+    }
 }
 
 void from_json(const nlohmann::json& json, SessionStarted& value) {
     value.model         = json.at("model").get<std::string>();
+    value.model_name    = json.value("model_name", std::string{});
     value.serverProfile = json.at("server_profile").get<std::string>();
     value.title         = json.value("title", std::string{});
 }

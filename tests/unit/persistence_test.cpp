@@ -135,7 +135,7 @@ Event make_event(const SessionId& session, std::chrono::system_clock::time_point
     typed.id         = make_event_id();
     typed.session_id = session;
     typed.timestamp  = timestamp;
-    typed.payload    = payload::SessionStarted{"test-model", "interactive", "t"};
+    typed.payload    = payload::SessionStarted{"test-model", "interactive", "t", ""};
     return encode(typed);
 }
 
@@ -144,7 +144,7 @@ Event make_event_with_id(const SessionId& session, const EventId& id) {
     typed.id         = id;
     typed.session_id = session;
     typed.timestamp  = std::chrono::system_clock::now();
-    typed.payload    = payload::SessionStarted{"test-model", "interactive", "t"};
+    typed.payload    = payload::SessionStarted{"test-model", "interactive", "t", ""};
     return encode(typed);
 }
 
@@ -282,6 +282,34 @@ TEST(Persistence, CreateLoadListRoundTrip) {
     const auto headers = store->list();
     ASSERT_EQ(headers.size(), 1u);
     EXPECT_EQ(headers.front().id.value, header.id.value);
+}
+
+// 54-U8 (54-D8): the durable `sessions` metadata envelope recovers `model_name`
+// without depending on an event.
+TEST(Persistence, ModelNameRoundTripsThroughMetadataColumn) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    SessionHeader header = make_header(workspace.root());
+    header.model_name    = std::string{"fast"};
+    store->create(header);
+
+    const auto loaded = store->load(header.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->model_name, std::optional<std::string>{"fast"});
+    EXPECT_EQ(*loaded, header);
+}
+
+// A pre-54 row without a name loads with nullopt (durable resolution falls back
+// to the wire id).
+TEST(Persistence, MissingModelNameLoadsNullopt) {
+    TempWorkspace workspace;
+    auto          store  = SessionPersistence::open(workspace.config());
+    SessionHeader header = make_header(workspace.root());
+    store->create(header);
+
+    const auto loaded = store->load(header.id);
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_FALSE(loaded->model_name.has_value());
 }
 
 TEST(Persistence, SequenceMonotonicWithGaps) {

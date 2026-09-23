@@ -2,6 +2,11 @@
 
 #include <chrono>
 #include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -113,6 +118,15 @@ std::vector<std::string> permission_preset_names(const Config& config) {
     return names;
 }
 
+std::map<std::string, ResolvedEndpoint> make_endpoint_map(const Config& config) {
+    std::map<std::string, ResolvedEndpoint> endpoints;
+    for (const auto& [name, settings] : config.llm.endpoints) {
+        (void)settings;
+        endpoints.emplace(name, resolve_endpoint(config, name));
+    }
+    return endpoints;
+}
+
 } // namespace
 
 bool skill_tool_usable(const PermissionPolicy& policy, bool prompt_path_available) {
@@ -136,6 +150,8 @@ public:
          SessionPersistence* persistence,
          LLMProviderConfig provider_config,
          std::unique_ptr<LLMProvider> provider,
+         ProviderRegistry providers,
+         std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)> provider_factory,
          bool attach_permission_gate,
          bool attach_permission_resolver,
          Executor* executor,
@@ -194,12 +210,16 @@ public:
                   if (!entry.has_value()) {
                       return std::nullopt;
                   }
-                  return ModelSelection{entry->model_id, entry->name, entry->parameters,
-                                        entry->profile, entry->endpoint.provider};
+                  return ModelSelection{entry->model_id, entry->name, entry->endpoint.name,
+                                        entry->parameters, entry->profile,
+                                        entry->endpoint.provider};
               }),
           roster_(std::make_unique<AgentPresetRoster>(
               prompt_, tools_, *skill_catalog_, sessions_, make_preset_config(config),
-              &category_logger(LogCategory::Tool), permission_preset_names(config))) {
+              &category_logger(LogCategory::Tool), permission_preset_names(config))),
+          providers_(std::move(providers)),
+          provider_factory_(std::move(provider_factory)),
+          endpoints_(make_endpoint_map(config)) {
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
             registrations_.push_back(tools_.add(std::move(tool)));
         }
@@ -289,16 +309,58 @@ public:
             }
             adapter_handle_ = runtime_.register_adapter(std::move(routes), std::move(adapter));
         }
+        runtime_.set_route_resolver(
+            [this](std::string_view endpoint_name, std::string_view profile_id) {
+                return resolve_endpoint_provider(endpoint_name, profile_id);
+            });
         services_.runtime = &runtime_;
         services_.pool    = &pool_;
 
         if (adapter_handle_.has_value()) {
             compactor_ = std::make_unique<ContextCompactor>(
-                runtime_, pool_, estimator_, to_compaction_policy(config));
+                runtime_, pool_, estimator_, to_compaction_policy(config),
+                std::chrono::system_clock::now, &model_catalog_);
             services_.context_compactor = compactor_.get();
         }
 
         agents_ = std::make_unique<AgentRegistry>(services_, agent_config_);
+    }
+
+    std::shared_ptr<LLMProvider> resolve_endpoint_provider(std::string_view endpoint_name,
+                                                           std::string_view profile_id) {
+        std::lock_guard<std::mutex> lock(endpoint_cache_mutex_);
+        const std::pair<std::string, std::string> key{std::string{endpoint_name},
+                                                      std::string{profile_id}};
+        if (const auto cached = endpoint_cache_.find(key); cached != endpoint_cache_.end()) {
+            return cached->second;
+        }
+        const auto endpoint_it = endpoints_.find(key.first);
+        if (endpoint_it == endpoints_.end()) {
+            return nullptr;
+        }
+        const ModelProfile* found = find_model_profile(key.second);
+        static const ModelProfile kInertProfile{};
+        const ModelProfile& profile = (found != nullptr) ? *found : kInertProfile;
+        const LLMProviderConfig config = to_provider_config(endpoint_it->second, profile);
+
+        std::unique_ptr<LLMProvider> created;
+        if (provider_factory_) {
+            created = provider_factory_(config);
+        }
+        if (created == nullptr) {
+            std::expected<std::unique_ptr<LLMProvider>, LLMError> result =
+                providers_.create(config);
+            if (!result.has_value()) {
+                return nullptr;
+            }
+            created = std::move(*result);
+        }
+        std::shared_ptr<LLMProvider> provider{std::move(created)};
+        AdapterHandle handle =
+            runtime_.register_endpoint_route(endpoint_name, profile_id, provider);
+        endpoint_handles_.insert_or_assign(key, std::move(handle));
+        endpoint_cache_.emplace(key, provider);
+        return provider;
     }
 
     std::filesystem::path              root_;
@@ -341,6 +403,12 @@ public:
     std::unique_ptr<AgentPresetRoster> roster_;
     AgentServices                      services_;
     std::unique_ptr<AgentRegistry>     agents_;
+    ProviderRegistry                   providers_;
+    std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)> provider_factory_;
+    std::map<std::string, ResolvedEndpoint> endpoints_;
+    std::map<std::pair<std::string, std::string>, std::shared_ptr<LLMProvider>> endpoint_cache_;
+    std::map<std::pair<std::string, std::string>, AdapterHandle> endpoint_handles_;
+    mutable std::mutex                 endpoint_cache_mutex_;
 };
 
 WorkspaceRuntime::WorkspaceRuntime(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -415,6 +483,8 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
         auto impl = std::make_unique<Impl>(std::move(options.config), std::move(options.root),
                                            std::move(store), persistence,
                                            std::move(provider_config), std::move(provider),
+                                           std::move(providers),
+                                           std::move(options.provider_factory),
                                            options.attach_permission_gate,
                                            options.attach_permission_resolver, options.executor,
                                            std::move(options.mcp_client_factory),
@@ -457,6 +527,13 @@ PlanModeController&   WorkspaceRuntime::plan_mode() noexcept { return impl_->pla
 ModelCatalog&         WorkspaceRuntime::model_catalog() noexcept { return impl_->model_catalog_; }
 ModelSelectionController& WorkspaceRuntime::model_selection() noexcept {
     return impl_->model_selection_;
+}
+
+bool WorkspaceRuntime::is_routable_endpoint(std::string_view name) const {
+    if (name.empty()) {
+        return true;
+    }
+    return impl_->endpoints_.find(std::string{name}) != impl_->endpoints_.end();
 }
 
 const AgentConfig& WorkspaceRuntime::agent_config() const noexcept { return impl_->agent_config_; }

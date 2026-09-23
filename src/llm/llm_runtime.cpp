@@ -125,7 +125,8 @@ LLMResponse run_adapter(const std::shared_ptr<LLMProvider>& adapter,
 } // namespace
 
 bool call_config_equals(const LlmCallConfig& left, const LlmCallConfig& right) noexcept {
-    return left.provider == right.provider && left.model == right.model &&
+    return left.provider == right.provider && left.endpoint == right.endpoint &&
+           left.profile_id == right.profile_id && left.model == right.model &&
            left.reasoning_effort == right.reasoning_effort &&
            left.temperature == right.temperature && left.max_tokens == right.max_tokens &&
            left.stop == right.stop && left.top_p == right.top_p && left.top_k == right.top_k &&
@@ -247,15 +248,49 @@ AdapterHandle LlmRuntime::register_adapter(std::vector<ProviderId>      routes,
     // re-enters the runtime must not self-deadlock on the non-recursive lock.
     const RetryPolicy retry = adapter->retry_policy();
 
+    std::vector<RouteKey> keys;
+    keys.reserve(routes.size());
+    for (ProviderId& id : routes) {
+        keys.push_back(RouteKey{RouteKind::Provider, std::move(id), std::string{}});
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     const std::uint64_t         generation = next_generation_++;
     Registration                registration;
-    registration.routes     = std::move(routes);
+    registration.routes     = std::move(keys);
     registration.adapter    = std::move(adapter);
     registration.retry      = retry;
     registration.generation = generation;
     registrations_.push_back(std::move(registration));
     return AdapterHandle{this, generation};
+}
+
+AdapterHandle LlmRuntime::register_endpoint_route(std::string_view             endpoint_name,
+                                                  std::string_view             profile_id,
+                                                  std::shared_ptr<LLMProvider> adapter) {
+    if (adapter == nullptr) {
+        throw std::invalid_argument("register_endpoint_route requires a non-null adapter");
+    }
+    const RetryPolicy retry = adapter->retry_policy();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::uint64_t         generation = next_generation_++;
+    Registration                registration;
+    registration.routes.push_back(
+        RouteKey{RouteKind::Endpoint, std::string{endpoint_name}, std::string{profile_id}});
+    registration.adapter    = std::move(adapter);
+    registration.retry      = retry;
+    registration.generation = generation;
+    registrations_.push_back(std::move(registration));
+    return AdapterHandle{this, generation};
+}
+
+void LlmRuntime::set_route_resolver(RouteResolver resolver) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (resolver_.has_value()) {
+        throw std::logic_error("set_route_resolver may be called at most once");
+    }
+    resolver_ = std::move(resolver);
 }
 
 std::vector<ProviderInfo> LlmRuntime::list_providers() const {
@@ -293,7 +328,7 @@ InterceptorHandle LlmRuntime::add_stream_interceptor(StreamInterceptor intercept
 
 Task<PreparedCall> LlmRuntime::prepare_call(LlmCallConfig config, CancellationToken) const {
     RetryPolicy                  retry;
-    std::shared_ptr<LLMProvider> adapter = resolve_adapter(config.provider, retry);
+    std::shared_ptr<LLMProvider> adapter = resolve_adapter(config, retry);
     return Task<PreparedCall>{
         PreparedCall{std::move(adapter), std::move(retry), std::move(config)}};
 }
@@ -302,7 +337,7 @@ Task<LLMResponse> LlmRuntime::stream(const FrozenRequest& request,
                                      StreamSink          sink,
                                      CancellationToken   cancel) {
     RetryPolicy                  retry;
-    std::shared_ptr<LLMProvider> adapter = resolve_adapter(request.config().provider, retry);
+    std::shared_ptr<LLMProvider> adapter = resolve_adapter(request.config(), retry);
 
     std::vector<StreamInterceptor> chain;
     {
@@ -330,14 +365,52 @@ Task<LLMResponse> LlmRuntime::stream(const FrozenRequest& request,
     return next(request, std::move(sink), cancel);
 }
 
-std::shared_ptr<LLMProvider> LlmRuntime::resolve_adapter(const ProviderId& requested,
-                                                         RetryPolicy&      out_retry) const {
+std::shared_ptr<LLMProvider> LlmRuntime::resolve_adapter(const LlmCallConfig& config,
+                                                         RetryPolicy& out_retry) const {
+    if (!config.endpoint.empty()) {
+        const RouteKey wanted{RouteKind::Endpoint, config.endpoint, config.profile_id};
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const Registration& registration : registrations_) {
+                if (std::find(registration.routes.begin(), registration.routes.end(), wanted) !=
+                    registration.routes.end()) {
+                    out_retry = registration.retry;
+                    return registration.adapter;
+                }
+            }
+        }
+
+        std::optional<RouteResolver> resolver;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            resolver = resolver_;
+        }
+        if (resolver.has_value()) {
+            const std::shared_ptr<LLMProvider> built =
+                (*resolver)(config.endpoint, config.profile_id);
+            if (built != nullptr) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (const Registration& registration : registrations_) {
+                    if (std::find(registration.routes.begin(), registration.routes.end(), wanted) !=
+                        registration.routes.end()) {
+                        out_retry = registration.retry;
+                        return registration.adapter;
+                    }
+                }
+            }
+        }
+
+        throw NoProviderRouteError{LLMErrorCode::NoProviderRoute, config.provider,
+                                   "no route for config.endpoint"};
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     const Registration*         match = nullptr;
 
-    if (!requested.empty()) {
+    if (!config.provider.empty()) {
+        const RouteKey wanted{RouteKind::Provider, config.provider, std::string{}};
         for (const Registration& registration : registrations_) {
-            if (std::find(registration.routes.begin(), registration.routes.end(), requested) !=
+            if (std::find(registration.routes.begin(), registration.routes.end(), wanted) !=
                 registration.routes.end()) {
                 match = &registration;
                 break;
@@ -347,7 +420,9 @@ std::shared_ptr<LLMProvider> LlmRuntime::resolve_adapter(const ProviderId& reque
         for (const Registration& registration : registrations_) {
             const auto route = std::find_if(
                 registration.routes.begin(), registration.routes.end(),
-                [](const ProviderId& candidate) { return !candidate.empty(); });
+                [](const RouteKey& candidate) {
+                    return candidate.kind == RouteKind::Provider && !candidate.name.empty();
+                });
             if (route != registration.routes.end()) {
                 match = &registration;
                 break;
@@ -356,7 +431,7 @@ std::shared_ptr<LLMProvider> LlmRuntime::resolve_adapter(const ProviderId& reque
     }
 
     if (match == nullptr) {
-        throw NoProviderRouteError{LLMErrorCode::NoProviderRoute, requested,
+        throw NoProviderRouteError{LLMErrorCode::NoProviderRoute, config.provider,
                                    "no route for config.provider"};
     }
     out_retry = match->retry;

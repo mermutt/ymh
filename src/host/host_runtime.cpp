@@ -636,6 +636,7 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
         SessionOptions options;
         options.serverProfile = object.value("server_profile", std::string{"interactive"});
         options.model         = runtime_.agent_config().model;
+        options.model_name    = runtime_.agent_config().model_name;
         // 53-D2/H5: the `model` param is an `llm.models` NAME (or a literal id);
         // resolve it to the entry's wire id BEFORE it reaches the header/event.
         if (const auto model_it = object.find("model"); model_it != object.end()) {
@@ -649,7 +650,8 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
                 throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
                                        "InvalidParams"});
             }
-            options.model = entry->model_id;
+            options.model      = entry->model_id;
+            options.model_name = entry->name;
         }
         options.title = object.value("title", std::string{});
         options.cwd = runtime_.root();
@@ -788,19 +790,19 @@ protocol::SetModelResult HostRuntime::setSessionModel(const nlohmann::json& para
             throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
                                    "InvalidParams"});
         }
-        // 53-I9: compare the full ResolvedEndpoint identity (name/base_url), not
-        // the ProviderId, which two distinct endpoints commonly share.
-        const ResolvedEndpoint& registered = runtime_.model_catalog().default_entry().endpoint;
-        if (entry->endpoint.name != registered.name ||
-            entry->endpoint.base_url != registered.base_url) {
+        // 54-D4: reject only a target whose endpoint NAME is not in the daemon's
+        // routable set. Membership is by name; `base_url` is not compared and a
+        // shared ProviderId neither satisfies nor defeats the guard.
+        if (!runtime_.is_routable_endpoint(entry->endpoint.name)) {
             throw_mapped(WireError{protocol::code_value(protocol::AppCode::EndpointNotRouted),
                                    "EndpointNotRouted"});
         }
         // agentStatus throws UnknownSession for an id the daemon does not know.
         const bool turn_open = agentStatus(id) != "Idle";
         std::shared_ptr<Session> session = runtime_.sessions().sessionPtr(id);
-        const ModelSelection     selection{entry->model_id, entry->name, entry->parameters,
-                                           entry->profile, entry->endpoint.provider};
+        const ModelSelection     selection{entry->model_id, entry->name, entry->endpoint.name,
+                                           entry->parameters, entry->profile,
+                                           entry->endpoint.provider};
         const ModelSetResult result =
             runtime_.model_selection().set(*session, turn_open, selection);
         return protocol::SetModelResult{id, entry->model_id, entry->name,

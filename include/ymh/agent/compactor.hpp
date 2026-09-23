@@ -26,6 +26,8 @@
 
 namespace ymh {
 
+class ModelCatalog;
+
 // The compaction tunables (13 §3.2). The daemon builds one from the layered
 // config (§37) and injects it into the `ContextCompactor`; nothing reads
 // global state.
@@ -127,7 +129,8 @@ public:
                      LLMPool&              pool,
                      const TokenEstimator& estimator,
                      CompactionPolicy      policy,
-                     WallClock             clock = std::chrono::system_clock::now);
+                     WallClock             clock = std::chrono::system_clock::now,
+                     const ModelCatalog*   catalog = nullptr);
 
     std::optional<payload::ContextCompaction>
     run(const Session&, const std::vector<Message>&, CancellationToken) override;
@@ -166,6 +169,7 @@ private:
     const TokenEstimator& estimator_;
     CompactionPolicy      policy_;
     WallClock             clock_;
+    const ModelCatalog*   catalog_ = nullptr;
 };
 
 } // namespace ymh

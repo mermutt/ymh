@@ -273,7 +273,7 @@ protected:
         started.session_id = id;
         started.timestamp =
             std::chrono::system_clock::time_point{std::chrono::milliseconds{updated_at}};
-        started.payload = payload::SessionStarted{"test-model", "interactive", "t"};
+        started.payload = payload::SessionStarted{"test-model", "interactive", "t", ""};
         store->append(id, encode(started));
 
         if (prompted) {
