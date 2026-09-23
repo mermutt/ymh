@@ -508,6 +508,14 @@ struct ResolvedModel {
 // `deepseek-flash`. Throws `ConfigError` for an unknown active model/endpoint.
 [[nodiscard]] ResolvedModel resolve_model(const Config& config);
 
+// 52 review (2A): re-check the LLM cross-references a `Config` carries
+// (`llm.default.profile`, every `llm.models.*` endpoint/profile, and the
+// `active_model`/`active_endpoint` selectors). `load_config` runs this after the
+// file/env layers; the CLI runs it again after applying `--model`/`--endpoint`/…
+// so an unknown selector exits 2 instead of throwing from `resolve_model` on an
+// uncaught dispatch path.
+void validate_llm_references(const Config& config);
+
 // 52-D15: the deployment permission baseline. When `permissions.default_preset`
 // names a preset its settings govern; otherwise the baseline is
 // `{agent.sandbox, "ask"}`. A preset binding may only narrow this baseline
