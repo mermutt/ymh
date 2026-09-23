@@ -161,6 +161,9 @@ private:
     void                      appendContextInjected(const ContextMessage& context);
     void                      materializeContexts(const PromptAssembly& assembly);
     void                      materializeInstructions();
+    // 52 review (3A): the mounted preset scope for this agent, resolved once
+    // from the roster. Absent means the root prompt layer only.
+    [[nodiscard]] const std::optional<std::string>& active_scope();
     void                      appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message);
     CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn,
                                             CompactionTrigger trigger);
@@ -206,6 +209,8 @@ private:
     std::atomic<bool>                   running_{false};
     std::atomic<AgentState>             state_{AgentState::Idle};
     std::size_t                         compactions_this_turn_ = 0;  // worker-only
+    std::optional<std::string>          scope_;             // worker-only, resolved once
+    bool                                scope_resolved_ = false;  // worker-only
     std::optional<LlmCallConfig>        held_config_;               // worker-only
     std::optional<CallPurpose>          held_purpose_;              // worker-only
     std::optional<std::string>          held_prompt_digest_;        // worker-only

@@ -22,6 +22,11 @@ inline constexpr std::string_view kRuntimeContextHeader =
 struct RuntimeContextConfig {
     std::string cwd;
     std::string model;
+    // 52 review (3C): the deployment facts the model needs to reason about its
+    // own reach. Empty fields are omitted from the rendered snapshot.
+    std::string sandbox;     // workspace | read-only | unrestricted
+    std::string approval;    // the pinned default permission preset name
+    std::string delegation;  // e.g. "available (max depth 3)" | "disabled"
 };
 
 using DateProvider = std::function<std::string()>;

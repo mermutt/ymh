@@ -5,6 +5,7 @@
 #include <mutex>
 #include <utility>
 
+#include "ymh/agent/preset.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/errors.hpp"
@@ -106,6 +107,14 @@ std::expected<AgentId, AgentError> AgentRegistry::registerAgent(const SessionId&
         // Resolve the owning session handle before taking mutex_ (lock order:
         // SessionManager::mutex_ then AgentRegistry::mutex_, never held upward).
         std::shared_ptr<Session> session = services_.sessions->sessionPtr(sessionId);
+        if (services_.presets != nullptr) {
+            AgentContext ctx{agentId, {}};
+            try {
+                services_.presets->mount(ctx, session->header().agent_preset);
+            } catch (const std::exception&) {
+                // An absent/unavailable preset leaves the agent on the root layer.
+            }
+        }
         std::shared_ptr<AgentLoop> agent =
             std::make_shared<AgentLoop>(agentId, std::move(session), std::move(services), config_);
         std::lock_guard<std::mutex> lock(mutex_);

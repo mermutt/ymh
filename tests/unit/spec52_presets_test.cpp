@@ -263,7 +263,8 @@ TEST(Preset52Persona, MinimalPersonaCompleteSuppressesRuntimeContext) {
     write_preset(env.shipped_root, "standard", kStandardPreset);
 
     const ContextHandle runtime_handle =
-        register_runtime_context(env.prompt, RuntimeContextConfig{"/tmp/ws", "test-model"});
+        register_runtime_context(env.prompt,
+                                 RuntimeContextConfig{.cwd = "/tmp/ws", .model = "test-model", .sandbox = {}, .approval = {}, .delegation = {}});
     (void)runtime_handle;
 
     AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions, shipped_config());
@@ -533,6 +534,49 @@ TEST(Preset52Permission, SessionPinningSurvivesConfigChangeAndFork) {
     std::shared_ptr<Session> forked_session = env.sessions.sessionPtr(forked);
     ASSERT_TRUE(forked_session->header().permission_preset.has_value());
     EXPECT_EQ(*forked_session->header().permission_preset, "workspace-write");
+}
+
+// ---------------------------------------------------------------------------
+// 52 review (3B): the preset instruction override
+// ---------------------------------------------------------------------------
+
+TEST(Preset52Instructions, RowOverrideIsFolded) {
+    RosterEnv env("spec52_instructions");
+    ScopedEnv presets_dir{"YMH_PRESETS_DIR", env.shipped_root.string()};
+    write_preset(env.shipped_root, "standard", R"({
+        "id": "standard",
+        "display_name": "Standard",
+        "rows": [
+            {"id": "instructions", "instructions": {"max_bytes": 4096}},
+            {"id": "later", "instructions": {"enabled": false, "max_bytes": 8192}}
+        ]
+    })");
+
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions, shipped_config());
+
+    const std::optional<PresetInstructions> folded = roster.instructions_for("standard");
+    ASSERT_TRUE(folded.has_value());
+    EXPECT_FALSE(folded->enabled);
+    ASSERT_TRUE(folded->max_bytes.has_value());
+    EXPECT_EQ(*folded->max_bytes, 8192u);
+
+    EXPECT_FALSE(roster.instructions_for("absent").has_value());
+    EXPECT_FALSE(roster.instructions_for(std::nullopt).has_value());
+}
+
+TEST(Preset52Instructions, ShippedStandardRowIsNotANoOp) {
+    RosterEnv env("spec52_shipped_instructions");
+    PresetConfig config = root_only_config(std::filesystem::path{YMH_SOURCE_DIR} / "presets");
+    config.default_id   = "standard";
+    AgentPresetRoster roster(env.prompt, env.tools, env.skills, env.sessions, config);
+
+    const std::optional<PresetInstructions> standard = roster.instructions_for("standard");
+    ASSERT_TRUE(standard.has_value()) << "the shipped standard 'instructions' row must bind";
+    EXPECT_TRUE(standard->enabled);
+    ASSERT_TRUE(standard->max_bytes.has_value());
+    EXPECT_EQ(*standard->max_bytes, 65536u);
+
+    EXPECT_FALSE(roster.instructions_for("minimal").has_value());
 }
 
 // ---------------------------------------------------------------------------

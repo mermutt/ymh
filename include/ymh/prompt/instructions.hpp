@@ -24,8 +24,10 @@ struct InstructionFileConfig {
     // 50-D1.5: ordered global candidates; the loader reads at most one file per
     // parent directory (the first that exists). Empty => the default list.
     std::vector<std::filesystem::path> global_candidates;
-    bool                     load_local = false;
-    std::size_t              max_bytes = 0;  // REQUIRED when enabled; 0 means unset
+    // 52 review (3B): dsh's `standard` preset reads the `.local` overlays and
+    // caps the rendered batch at 65536 bytes (`maxBytes`); match both defaults.
+    bool                     load_local = true;
+    std::size_t              max_bytes = 65536;
     std::size_t              max_source_bytes = 1048576;
 };
 

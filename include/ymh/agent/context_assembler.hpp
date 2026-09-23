@@ -28,6 +28,10 @@ struct TurnContext {
     StepId                      step = 0;
     std::vector<Message>        inbox;
     std::vector<ContextMessage> injected;
+    // 52 review (3A): the session's mounted preset scope, when one exists. The
+    // registry render and the tool waterfall resolve their scoped rows through
+    // it; absent means the root layer only.
+    std::optional<std::string>  scope;
 };
 
 class ContextAssembler {
@@ -36,6 +40,12 @@ public:
 
     virtual std::vector<Message> assemble(const Session&, const TurnContext&) const = 0;
     virtual std::vector<ToolSchema> tools() const = 0;
+    // 52 review (3A): scope-aware tool waterfall. The default forwards to the
+    // scope-free overload so existing implementations stay valid.
+    virtual std::vector<ToolSchema> tools(const std::optional<std::string>& scope) const {
+        (void)scope;
+        return tools();
+    }
 };
 
 class TokenEstimator {
@@ -75,6 +85,7 @@ public:
 
     std::vector<Message> assemble(const Session&, const TurnContext&) const override;
     std::vector<ToolSchema> tools() const override;
+    std::vector<ToolSchema> tools(const std::optional<std::string>& scope) const override;
 
 private:
     ToolRegistry&                              tools_;

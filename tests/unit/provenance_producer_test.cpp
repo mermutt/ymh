@@ -178,7 +178,8 @@ TEST(ProvenanceProducer, InstructionsCarryPluginAndForm) {
 TEST(ProvenanceProducer, RuntimeContextCarriesSnapshotSections) {
     SystemPrompt prompt;
     [[maybe_unused]] const ContextHandle handle =
-        register_runtime_context(prompt, RuntimeContextConfig{"/workspace", "fake-model"},
+        register_runtime_context(prompt,
+                                 RuntimeContextConfig{.cwd = "/workspace", .model = "fake-model", .sandbox = {}, .approval = {}, .delegation = {}},
                                  [] { return std::string{"2026-09-19"}; });
 
     AgentEnv env("prov_ctx",

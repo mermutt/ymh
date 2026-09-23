@@ -9,6 +9,6 @@
         "suffix": "Your working directory is {{cwd}}."
       }
     },
-    { "id": "instructions" }
+    { "id": "instructions", "instructions": { "max_bytes": 65536 } }
   ]
 }
