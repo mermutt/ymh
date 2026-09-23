@@ -59,6 +59,9 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
     header.updatedAt     = header.createdAt;
     header.title         = options.title;
     header.model         = options.model;
+    if (!options.model_name.empty()) {
+        header.model_name = options.model_name;
+    }
     header.serverProfile = options.serverProfile;
     header.kind          = options.kind;
     header.parentSession = options.parentSession;
@@ -75,6 +78,7 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
         .model         = header.model,
         .serverProfile = header.serverProfile,
         .title         = header.title,
+        .model_name    = header.model_name.value_or(""),
     });
     return header.id;
 }

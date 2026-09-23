@@ -83,13 +83,11 @@ std::string default_plan_section() {
         "/plan off.";
 }
 
-LLMProviderConfig to_provider_config(const Config& config) {
-    const ResolvedModel  resolved = resolve_model(config);
-    const ResolvedEndpoint& endpoint = resolved.endpoint;
-    LLMProviderConfig    provider;
+LLMProviderConfig to_provider_config(const ResolvedEndpoint& endpoint,
+                                     const ModelProfile&     profile) {
+    LLMProviderConfig provider;
     provider.provider     = endpoint.provider;
     provider.base_url     = endpoint.base_url;
-    provider.model        = resolved.model_id;
     provider.api_key_env  = endpoint.api_key_env;
     provider.api_key      = endpoint.api_key;
     provider.headers      = endpoint.headers;
@@ -101,7 +99,14 @@ LLMProviderConfig to_provider_config(const Config& config) {
     provider.retry.max_delay         = endpoint.retry.max_delay;
     provider.retry.jitter            = endpoint.retry.jitter;
     provider.retry.honor_retry_after = endpoint.retry.honor_retry_after;
-    provider.profile = resolved.profile;
+    provider.profile = profile;
+    return provider;
+}
+
+LLMProviderConfig to_provider_config(const Config& config) {
+    const ResolvedModel resolved = resolve_model(config);
+    LLMProviderConfig   provider = to_provider_config(resolved.endpoint, resolved.profile);
+    provider.model               = resolved.model_id;
     return provider;
 }
 
@@ -231,6 +236,8 @@ AgentConfig to_agent_config(const Config& config) {
     AgentConfig agent;
     agent.provider    = resolved.endpoint.provider;
     agent.model       = resolved.model_id;
+    agent.endpoint    = resolved.endpoint.name;
+    agent.model_name  = resolved.model_name;
     agent.max_steps   = config.agent.max_steps;
     agent.sandbox     = effective_sandbox_mode(config);
     agent.persist_prompt_text = config.session.persist_prompt_text;

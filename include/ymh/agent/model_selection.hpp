@@ -32,6 +32,7 @@ namespace ymh {
 struct ModelSelection {
     std::string          model;       // wire id (NEVER an llm.models name)
     std::string          model_name;  // llm.models entry name; "" for a literal
+    std::string          endpoint;    // 54-D2: endpoint name; "" = anonymous default
     GenerationParameters parameters;  // selected entry's resolved params
     ModelProfile         profile;     // selected entry's profile
     ProviderId           provider;    // selected entry's endpoint provider

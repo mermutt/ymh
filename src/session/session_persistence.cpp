@@ -247,10 +247,11 @@ constexpr std::string_view kMetadataKey    = "metadata";
 constexpr std::string_view kAgentPresetKey = "agent_preset";
 constexpr std::string_view kDepthKey       = "depth";
 constexpr std::string_view kPermissionPresetKey = "permission_preset";
+constexpr std::string_view kModelNameKey        = "model_name";
 
 std::optional<std::string> encode_metadata_column(const SessionHeader& header) {
     if (!header.metadata.has_value() && !header.agent_preset.has_value() && header.depth == 0 &&
-        !header.permission_preset.has_value()) {
+        !header.permission_preset.has_value() && !header.model_name.has_value()) {
         return std::nullopt;
     }
     nlohmann::json object = nlohmann::json::object();
@@ -261,6 +262,9 @@ std::optional<std::string> encode_metadata_column(const SessionHeader& header) {
     }
     if (header.permission_preset.has_value()) {
         object[std::string{kPermissionPresetKey}] = *header.permission_preset;
+    }
+    if (header.model_name.has_value()) {
+        object[std::string{kModelNameKey}] = *header.model_name;
     }
     object[std::string{kDepthKey}] = header.depth;
     return object.dump();
@@ -278,7 +282,8 @@ bool bag_carries_reserved_key(const std::string& bag) {
     }
     return parsed.contains(std::string{kAgentPresetKey}) ||
            parsed.contains(std::string{kDepthKey}) ||
-           parsed.contains(std::string{kPermissionPresetKey});
+           parsed.contains(std::string{kPermissionPresetKey}) ||
+           parsed.contains(std::string{kModelNameKey});
 }
 
 void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader& header) {
@@ -286,6 +291,7 @@ void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader
     header.agent_preset      = std::nullopt;
     header.depth             = 0;
     header.permission_preset = std::nullopt;
+    header.model_name        = std::nullopt;
     if (!raw.has_value()) {
         return;
     }
@@ -303,7 +309,8 @@ void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader
     const bool has_envelope = object.contains(std::string{kMetadataKey});
     const bool has_reserved =
         object.contains(std::string{kAgentPresetKey}) || object.contains(std::string{kDepthKey}) ||
-        object.contains(std::string{kPermissionPresetKey});
+        object.contains(std::string{kPermissionPresetKey}) ||
+        object.contains(std::string{kModelNameKey});
     if (!has_envelope) {
         if (has_reserved) {
             throw CorruptionError(
@@ -337,6 +344,13 @@ void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader
             throw CorruptionError("sessions.metadata permission_preset must be a string");
         }
         header.permission_preset = preset.get<std::string>();
+    }
+    if (object.contains(std::string{kModelNameKey})) {
+        const nlohmann::json& name = object.at(std::string{kModelNameKey});
+        if (!name.is_string()) {
+            throw CorruptionError("sessions.metadata model_name must be a string");
+        }
+        header.model_name = name.get<std::string>();
     }
     if (object.contains(std::string{kDepthKey})) {
         const nlohmann::json& depth = object.at(std::string{kDepthKey});

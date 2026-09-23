@@ -510,6 +510,10 @@ struct ResolvedModel {
 // `deepseek-flash`. Throws `ConfigError` for an unknown active model/endpoint.
 [[nodiscard]] ResolvedModel resolve_model(const Config& config);
 
+// 54-D4: the resolved endpoint for one `llm.endpoints` name. `name == ""` is the
+// anonymous default endpoint. Throws `ConfigError` for an unknown named endpoint.
+[[nodiscard]] ResolvedEndpoint resolve_endpoint(const Config& config, std::string_view name);
+
 // 52 review (2A): re-check the LLM cross-references a `Config` carries
 // (`llm.default.profile`, every `llm.models.*` endpoint/profile, and the
 // `active_model`/`active_endpoint` selectors). `load_config` runs this after the

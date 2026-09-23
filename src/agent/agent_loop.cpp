@@ -536,8 +536,8 @@ CompactionOutcome AgentLoop::runCompactionNow(const std::vector<Message>& messag
 }
 
 ModelSelection AgentLoop::effective_model_selection() const {
-    const ModelSelection configured{config_.model, "", config_.parameters, config_.profile,
-                                    config_.provider};
+    const ModelSelection configured{config_.model, config_.model_name, config_.endpoint,
+                                    config_.parameters, config_.profile, config_.provider};
     if (services_.model_selection == nullptr) {
         return configured;
     }
@@ -576,6 +576,8 @@ FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
 
     LlmCallConfig config;
     config.provider         = selected.provider;
+    config.endpoint         = selected.endpoint;
+    config.profile_id       = selected.profile.id;
     config.model            = selected.model;
     config.reasoning_effort = selected.parameters.reasoning_effort;
     config.temperature      = selected.parameters.temperature;

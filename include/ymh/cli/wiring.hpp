@@ -22,6 +22,12 @@ namespace ymh {
 
 [[nodiscard]] LLMProviderConfig to_provider_config(const Config& config);
 
+// 54-D5: one config from an endpoint's resolved connection plus the selected
+// model's profile. `model` is deliberately NOT copied (dispatch-inert, 54-D1(c));
+// the per-request `LLMRequest.model` is authoritative.
+[[nodiscard]] LLMProviderConfig to_provider_config(const ResolvedEndpoint& endpoint,
+                                                   const ModelProfile&     profile);
+
 [[nodiscard]] PermissionConfig to_permission_config(const Config& config);
 
 // 15 §4.1/§5.6: map the layered `[mcp]` section onto the adapter config.

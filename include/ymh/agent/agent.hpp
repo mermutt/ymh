@@ -111,6 +111,12 @@ struct AgentConfig {
     // populated from `config.llm.provider`. Empty => the runtime default route.
     ProviderId               provider;
     ModelId                  model;
+    // 54-D2/A9: the resolved default endpoint NAME ("" = the anonymous default)
+    // and its `llm.models` entry name ("" for a literal), so the no-controller
+    // `effective_model_selection` fallback routes to the configured default
+    // endpoint instead of the anonymous default route.
+    std::string              endpoint;
+    std::string              model_name;
     GenerationParameters     parameters;
     ModelProfile             profile;   // 47-D1/D2 (inert by default)
     std::size_t              max_steps = 100;

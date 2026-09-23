@@ -12,6 +12,8 @@
 #include "support/test_env.hpp"
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/compactor.hpp"
+#include "ymh/agent/model_selection.hpp"
+#include "ymh/config/config.hpp"
 #include "ymh/core/cancellation.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/event_bus.hpp"
@@ -719,6 +721,53 @@ TEST(CompactionLoopTest, RequestAfterDisposeAppendsNothing) {
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code, AgentErrorCode::AgentDisposed);
     EXPECT_EQ(session.events().size(), before);
+}
+
+// 54-U12 (54-D7): a named summarizer override routes through that entry's own
+// endpoint (and profile), not the session/startup endpoint.
+TEST(CompactionRouting54, SummarizerOverrideRoutesToItsOwnEndpoint) {
+    Config          config;
+    EndpointSettings endpoint_a;
+    endpoint_a.base_url = "https://a.example/v1";
+    EndpointSettings endpoint_b;
+    endpoint_b.base_url = "https://b.example/v1";
+    config.llm.endpoints["a"] = endpoint_a;
+    config.llm.endpoints["b"] = endpoint_b;
+    ModelSettings alpha;
+    alpha.endpoint = "a";
+    alpha.model    = "alpha-model";
+    ModelSettings beta;
+    beta.endpoint = "b";
+    beta.model    = "beta-model";
+    config.llm.models["alpha"] = alpha;
+    config.llm.models["beta"]  = beta;
+    config.llm.active_model    = "alpha";
+    const ModelCatalog catalog = ModelCatalog::build(config);
+
+    SessionFixture fixture("alpha-model");
+    fixture.append_turn(1, "u1", "a1");
+    fixture.append_turn(2, "u2", "a2");
+    fixture.append_turn(3, "u3", "a3");
+
+    CompactionPolicy policy = base_policy();
+    policy.summarizer_model = "beta-model";
+    policy.provider         = "openai-compatible";
+
+    ProviderRuntime provider(FakeScript{{text_step("UNUSED")}});
+    auto            endpoint_provider = std::make_shared<FakeLLM>(FakeScript{{text_step("FROM-B")}});
+    auto endpoint_handle = provider.runtime().register_endpoint_route("b", "", endpoint_provider);
+    (void)endpoint_handle;
+
+    LLMPool               pool(1);
+    DefaultTokenEstimator estimator;
+    ContextCompactor compactor(provider.runtime(), pool, estimator, policy, fixed_clock, &catalog);
+
+    const CompactionResult result =
+        compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
+    ASSERT_EQ(result.outcome, CompactionOutcome::Compacted);
+    ASSERT_TRUE(result.compaction.has_value());
+    EXPECT_EQ(result.compaction->summary, "FROM-B");
+    EXPECT_EQ(result.compaction->model, "beta-model");
 }
 
 } // namespace

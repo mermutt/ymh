@@ -2384,4 +2384,11 @@ ResolvedModel resolve_model(const Config& config) {
     return resolved;
 }
 
+ResolvedEndpoint resolve_endpoint(const Config& config, std::string_view name) {
+    if (name.empty()) {
+        return default_endpoint(config);
+    }
+    return resolve_named_endpoint(config, std::string{name});
+}
+
 } // namespace ymh

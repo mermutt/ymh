@@ -15,8 +15,9 @@ bool same_params(const GenerationParameters& a, const GenerationParameters& b) {
 }
 
 bool selection_equals(const ModelSelection& a, const ModelSelection& b) {
-    return a.model == b.model && a.model_name == b.model_name && a.provider == b.provider &&
-           a.profile.id == b.profile.id && same_params(a.parameters, b.parameters);
+    return a.model == b.model && a.model_name == b.model_name && a.endpoint == b.endpoint &&
+           a.provider == b.provider && a.profile.id == b.profile.id &&
+           same_params(a.parameters, b.parameters);
 }
 
 int ascii_compare_ci(std::string_view a, std::string_view b) {
@@ -164,7 +165,12 @@ std::optional<ModelSelection> ModelSelectionController::durable_(const Session& 
         }
     }
     std::optional<ModelSelection> resolved;
-    const std::string             wire_id = session.header().model;
+    const SessionHeader           header = session.header();
+    // 54-D8: prefer the `llm.models` entry name (unambiguous) when the durable
+    // header carries it; fall back to the wire id for pre-54 sessions.
+    const std::string wire_id =
+        (header.model_name.has_value() && !header.model_name->empty()) ? *header.model_name
+                                                                      : header.model;
     if (!wire_id.empty() && resolve_ != nullptr) {
         resolved = resolve_(wire_id);
     }

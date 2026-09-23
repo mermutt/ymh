@@ -31,6 +31,12 @@ using ModelId    = std::string;
 // dispatch (26 §4.3.1 :177-180; T-M5).
 struct LlmCallConfig {
     ProviderId                   provider;  // source + default-route fallback: 28 §3.5
+    // 54-D2: the endpoint NAME (the `llm.endpoints` key; "" = the anonymous
+    // default endpoint) and the selected model's profile id (`ModelProfile::id`;
+    // "" = inert). Route resolution is endpoint-first, with `provider` retained
+    // as the default/legacy fallback ONLY when `endpoint` is empty (54-D3).
+    std::string                  endpoint;
+    std::string                  profile_id;
     ModelId                      model;
     std::optional<std::string>   reasoning_effort;
     std::optional<double>        temperature;
@@ -84,6 +90,12 @@ enum class CallPurpose : std::uint8_t {
 inline void to_json(nlohmann::json& json, const LlmCallConfig& config) {
     json = nlohmann::json::object();
     json["provider"] = config.provider;
+    if (!config.endpoint.empty()) {
+        json["endpoint"] = config.endpoint;
+    }
+    if (!config.profile_id.empty()) {
+        json["profile_id"] = config.profile_id;
+    }
     json["model"]    = config.model;
     if (config.reasoning_effort.has_value()) {
         json["reasoning_effort"] = *config.reasoning_effort;
@@ -111,8 +123,10 @@ inline void to_json(nlohmann::json& json, const LlmCallConfig& config) {
 
 inline void from_json(const nlohmann::json& json, LlmCallConfig& config) {
     config = LlmCallConfig{};
-    config.provider = json.value("provider", std::string{});
-    config.model    = json.value("model", std::string{});
+    config.provider   = json.value("provider", std::string{});
+    config.endpoint   = json.value("endpoint", std::string{});
+    config.profile_id = json.value("profile_id", std::string{});
+    config.model      = json.value("model", std::string{});
     if (json.contains("reasoning_effort")) {
         config.reasoning_effort = json.at("reasoning_effort").get<std::string>();
     }

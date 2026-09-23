@@ -393,7 +393,7 @@ TEST(Session, AppendIncreasesSequenceAndTracksUpdatedAt) {
 
     store.create(header);
     Session session(header, store, bus);
-    const Sequence first  = session.append(payload::SessionStarted{"m", "interactive", "t"});
+    const Sequence first  = session.append(payload::SessionStarted{"m", "interactive", "t", ""});
     const Sequence second = session.append(payload::TurnStarted{1, payload::TurnOrigin::User});
     EXPECT_LT(first, second);
 
@@ -445,7 +445,7 @@ TEST(Session, AL_U9_AppendPublishesCommittedRecordWithStoreSequence) {
     auto subscription = bus.subscribeCommitted(
         [&committed](const EventRecord& record) { committed.push_back(record); });
 
-    const Sequence first = session.append(payload::SessionStarted{"m", "interactive", "t"});
+    const Sequence first = session.append(payload::SessionStarted{"m", "interactive", "t", ""});
     ASSERT_EQ(committed.size(), 1u);
     EXPECT_EQ(committed[0].seq, first);
     EXPECT_EQ(committed[0].event.type, EventType::SessionStarted);
@@ -611,10 +611,10 @@ TEST(SessionStoreDefaults, FakeStoreHeadSequenceAndBoundedReadAfter) {
 
     const Sequence first = store.append(
         header.id,
-        record(1, header.id, payload::SessionStarted{"test-model", "interactive", "t"}).event);
+        record(1, header.id, payload::SessionStarted{"test-model", "interactive", "t", ""}).event);
     const Sequence second = store.append(
         header.id,
-        record(2, header.id, payload::SessionStarted{"test-model", "interactive", "t"}).event);
+        record(2, header.id, payload::SessionStarted{"test-model", "interactive", "t", ""}).event);
 
     EXPECT_EQ(store.headSequence(header.id), second);
     EXPECT_TRUE(store.readAfter(header.id, 0, 0).empty());
@@ -632,7 +632,7 @@ TEST(SessionStoreDefaults, SL5_SL_U4_FakeStoreIsUnpromptedHasDependentsAndEraseW
     store.create(parent);
     EXPECT_TRUE(store.isUnprompted(parent.id));
     store.append(parent.id,
-                 record(1, parent.id, payload::SessionStarted{"test-model", "interactive", "t"}).event);
+                 record(1, parent.id, payload::SessionStarted{"test-model", "interactive", "t", ""}).event);
     EXPECT_TRUE(store.isUnprompted(parent.id));
     store.append(
         parent.id,
@@ -682,7 +682,7 @@ TEST(SessionRename, WireNameIsPinned) {
 TEST(SessionRename, DeriveMessagesIgnoresRename) {
     const SessionId session = make_session_id();
     const EventRange before  = {
-        record(1, session, payload::SessionStarted{"m", "interactive", "t"}),
+        record(1, session, payload::SessionStarted{"m", "interactive", "t", ""}),
         record(2, session, payload::UserMessage{MessageId{"m1"}, {text_block("hi")}}),
     };
     EventRange with_rename = before;

@@ -58,7 +58,7 @@ SessionHeader make_header() {
 EventRange make_events() {
     EventRange events;
     events.push_back(record(1, 1700000000000, EventType::SessionStarted,
-                            payload::SessionStarted{"deepseek-flash", "default", "Fix login bug"}));
+                            payload::SessionStarted{"deepseek-flash", "default", "Fix login bug", ""}));
     events.push_back(record(2, 1700000000500, EventType::TurnStarted,
                             payload::TurnStarted{1, payload::TurnOrigin::User}));
     events.push_back(record(

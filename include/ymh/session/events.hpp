@@ -34,6 +34,7 @@ struct SessionStarted {
     std::string model;
     std::string serverProfile;
     std::string title;
+    std::string model_name;
 };
 
 enum class SessionEndReason : std::uint8_t {
