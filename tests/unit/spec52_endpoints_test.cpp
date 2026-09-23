@@ -321,11 +321,16 @@ TEST(Config52, HeadersGlobalOnly) {
                  ConfigError);
 
     test::TempWorkspace world_readable("s52_headers_0644");
-    EXPECT_THROW(
+    try {
         (void)load_global(world_readable,
                           R"JSON({"llm":{"endpoints":{"e":{"headers":{"X":"1"}}}}})JSON",
-                          0644),
-        ConfigError);
+                          0644);
+        FAIL() << "a 0644 config carrying headers must be rejected";
+    } catch (const ConfigError& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("llm.endpoints.e.headers"), std::string::npos) << message;
+        EXPECT_EQ(message.find("llm.api_key"), std::string::npos) << message;
+    }
 
     test::TempWorkspace ok("s52_headers_ok");
     const Config config =

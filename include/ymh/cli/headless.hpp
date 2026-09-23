@@ -33,6 +33,7 @@ struct HeadlessOptions {
     std::filesystem::path workspace;  // canonicalised by the runner
     std::string           task;
     std::optional<SessionId> resume;  // resume this session instead of creating one
+    std::optional<std::string> agent_preset;  // 52-D15: pins the session preset
     Config                config;
     bool                  verbose = false;  // echo reasoning deltas to stderr
 

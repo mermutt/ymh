@@ -21,20 +21,6 @@ PolicyVerdict parse_verdict(std::string_view value, std::string_view key) {
                       " must be one of: allow, ask, deny (got '" + std::string{value} + "')");
 }
 
-SandboxMode parse_sandbox(std::string_view value) {
-    if (value == "workspace") {
-        return SandboxMode::Workspace;
-    }
-    if (value == "read-only") {
-        return SandboxMode::ReadOnly;
-    }
-    if (value == "unrestricted") {
-        return SandboxMode::Unrestricted;
-    }
-    throw ConfigError("[agent].sandbox must be one of: workspace, read-only, unrestricted (got '" +
-                      std::string{value} + "')");
-}
-
 void add_rule(PermissionConfig& config,
               std::string_view tool,
               PolicyVerdict verdict,
@@ -100,6 +86,11 @@ PermissionConfig to_permission_config(const Config& config) {
     const PolicyVerdict            default_verdict =
         parse_verdict(config.permissions.default_verdict, "default");
     const PermissionPresetSettings baseline = deployment_permission_baseline(config);
+    // 52-I11/FIX-5: `baseline.approval == "never"` (the `danger-full-access`
+    // preset) is a deliberate deployment-level escape hatch, not a session
+    // narrowing. `permissions.default_preset`/`permissions.presets` are
+    // global-layer only (52-D15), so a workspace/cloned repo cannot reach this
+    // switch; the sandbox dimension is still clamped by `effective_sandbox_mode`.
     const bool master = default_verdict == PolicyVerdict::Allow || baseline.approval == "never";
     permissions.default_verdict = master ? PolicyVerdict::Allow : default_verdict;
 
@@ -216,10 +207,7 @@ AgentConfig to_agent_config(const Config& config) {
     agent.provider    = resolved.endpoint.provider;
     agent.model       = resolved.model_id;
     agent.max_steps   = config.agent.max_steps;
-    const PermissionPresetSettings effective_sandbox = narrow_permission_preset(
-        PermissionPresetSettings{config.agent.sandbox, "ask"},
-        deployment_permission_baseline(config));
-    agent.sandbox = parse_sandbox(effective_sandbox.sandbox);
+    agent.sandbox     = effective_sandbox_mode(config);
     agent.persist_prompt_text = config.session.persist_prompt_text;
     agent.system_prompt =
         config.agent.system_prompt.empty() ? default_system_prompt() : config.agent.system_prompt;

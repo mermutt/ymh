@@ -99,6 +99,27 @@ TEST(Policy, LayerTieBreakAndEffectTieBreak) {
               PolicyVerdict::Deny);
 }
 
+TEST(Policy, ProfileCannotOverrideDeploymentDeny) {
+    PermissionConfig config;
+    config.rules.push_back(rule("shell", "", PolicyVerdict::Allow,
+                                PolicyRule::Layer::Profile));
+    config.rules.push_back(rule("shell", "", PolicyVerdict::Deny,
+                                PolicyRule::Layer::Global));
+    RulePermissionPolicy policy(config);
+    ymh::test::TempWorkspace workspace("policy_profile_global_deny");
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell")),
+              PolicyVerdict::Deny);
+
+    PermissionConfig narrowing;
+    narrowing.rules.push_back(rule("shell", "", PolicyVerdict::Allow,
+                                   PolicyRule::Layer::Global));
+    narrowing.rules.push_back(rule("shell", "", PolicyVerdict::Deny,
+                                   PolicyRule::Layer::Profile));
+    RulePermissionPolicy narrow_policy(narrowing);
+    EXPECT_EQ(narrow_policy.evaluate(request_for(workspace.path(), "shell")),
+              PolicyVerdict::Deny);
+}
+
 TEST(Policy, DefaultIsFailClosedAsk) {
     RulePermissionPolicy policy(PermissionConfig{});
     ymh::test::TempWorkspace workspace("policy_default");

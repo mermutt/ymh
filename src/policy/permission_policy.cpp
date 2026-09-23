@@ -291,14 +291,20 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request) c
         }
     }
 
-    // 46-D2.13: a matching non-grant deny vetoes an Allow durable grant,
-    // regardless of specificity (LocalGrant outranks Project in rule_greater).
-    if (winner != nullptr && winner->effect == PolicyVerdict::Allow &&
-        winner->layer == PolicyRule::Layer::LocalGrant) {
+    // 46-D2.13 / 52-FIX-6: a matching deny from a config layer vetoes an Allow
+    // from a narrowing layer (a durable grant, or a preset `Profile` rule),
+    // regardless of specificity. `Profile` ranks below `Project` but above
+    // `Global`, so this veto is what makes a Global deny beat a Profile allow.
+    const bool narrowing_allow =
+        winner != nullptr && winner->effect == PolicyVerdict::Allow &&
+        (winner->layer == PolicyRule::Layer::LocalGrant ||
+         winner->layer == PolicyRule::Layer::Profile);
+    if (narrowing_allow) {
         for (const PolicyRule& candidate : candidates) {
             if (candidate.effect == PolicyVerdict::Deny &&
                 candidate.layer != PolicyRule::Layer::LocalGrant &&
                 candidate.layer != PolicyRule::Layer::SessionGrant &&
+                candidate.layer != PolicyRule::Layer::Profile &&
                 rule_matches(candidate, request)) {
                 return PolicyVerdict::Deny;
             }

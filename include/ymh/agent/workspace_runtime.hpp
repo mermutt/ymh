@@ -165,6 +165,12 @@ public:
     // 52-D15/52-I12: the deployment default permission preset name pinned into
     // each new session.
     [[nodiscard]] const std::string&       default_permission_preset() const noexcept;
+    // 52-D15/52-I11: the permission preset name to pin for a session started
+    // with `agent_preset`. The preset's row binding is honored only when it does
+    // not widen the deployment baseline; otherwise the deployment default is
+    // returned.
+    [[nodiscard]] std::string effective_permission_preset(
+        const std::optional<std::string>& agent_preset) const;
     [[nodiscard]] const LLMProviderConfig& provider_config() const noexcept;
 
     // 18 §3.4 (CX-08): read-only accessors for the assembled-context inspector.

@@ -796,6 +796,16 @@ bool validate_imported_mcp(nlohmann::json& document, const nlohmann::json& local
     return true;
 }
 
+void fsync_parent_directory(const std::filesystem::path& file) {
+    const std::filesystem::path directory =
+        file.parent_path().empty() ? std::filesystem::path{"."} : file.parent_path();
+    const int dir_fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+        (void)::fsync(dir_fd);
+        ::close(dir_fd);
+    }
+}
+
 bool write_imported_config(const nlohmann::json& document,
                            const std::filesystem::path& global_config, std::ostream& err) {
     const auto fail_import = [&](const std::string& reason) {
@@ -838,6 +848,9 @@ bool write_imported_config(const nlohmann::json& document,
         }
         written += static_cast<std::size_t>(count);
     }
+    if (ok && ::fsync(fd) != 0) {
+        ok = false;
+    }
     if (::close(fd) != 0) {
         ok = false;
     }
@@ -854,10 +867,21 @@ bool write_imported_config(const nlohmann::json& document,
         return fail_import(error_.what());
     }
 
-    if (::rename(temp.c_str(), global_config.c_str()) != 0) {
+    // 52-F21: install the validated temp file without ever overwriting an
+    // existing config. `link` fails EEXIST, closing the check-then-rename race
+    // that a bare `rename` would leave open.
+    if (::link(temp.c_str(), global_config.c_str()) != 0) {
+        const int link_errno = errno;
         (void)::unlink(temp.c_str());
-        return fail_import("cannot rename temp file");
+        if (link_errno == EEXIST) {
+            err << "ymh: not importing localcode config: '" << global_config.string()
+                << "' already exists\n";
+            return false;
+        }
+        return fail_import("cannot install temp file");
     }
+    (void)::unlink(temp.c_str());
+    fsync_parent_directory(global_config);
     return true;
 }
 

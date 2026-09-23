@@ -100,19 +100,6 @@ std::vector<std::string> permission_preset_names(const Config& config) {
     return names;
 }
 
-SandboxMode effective_sandbox_mode(const Config& config) {
-    const PermissionPresetSettings baseline = deployment_permission_baseline(config);
-    const PermissionPresetSettings effective = narrow_permission_preset(
-        PermissionPresetSettings{config.agent.sandbox, "ask"}, baseline);
-    if (effective.sandbox == "read-only") {
-        return SandboxMode::ReadOnly;
-    }
-    if (effective.sandbox == "unrestricted") {
-        return SandboxMode::Unrestricted;
-    }
-    return SandboxMode::Workspace;
-}
-
 } // namespace
 
 bool skill_tool_usable(const PermissionPolicy& policy, bool prompt_path_available) {
@@ -157,6 +144,8 @@ public:
                                             category_logger(LogCategory::Tool))),
           permission_config_(to_permission_config(config)),
           default_permission_preset_(default_permission_preset_name(config)),
+          permission_defaults_(config.permissions),
+          permission_baseline_(deployment_permission_baseline(config)),
           policy_(permission_config_, grant_store),
           gate_(policy_, permission_config_),
           agent_config_(make_agent_config(config, *skill_catalog_, policy_,
@@ -279,6 +268,8 @@ public:
     std::unique_ptr<McpManager>        mcp_;
     PermissionConfig                   permission_config_;
     std::string                        default_permission_preset_;
+    PermissionDefaults                 permission_defaults_;
+    PermissionPresetSettings           permission_baseline_;
     RulePermissionPolicy               policy_;
     PermissionGate                     gate_;
     AgentConfig                        agent_config_;
@@ -418,6 +409,17 @@ const AgentConfig& WorkspaceRuntime::agent_config() const noexcept { return impl
 
 const std::string& WorkspaceRuntime::default_permission_preset() const noexcept {
     return impl_->default_permission_preset_;
+}
+
+std::string WorkspaceRuntime::effective_permission_preset(
+    const std::optional<std::string>& agent_preset) const {
+    std::optional<std::string> binding;
+    if (agent_preset.has_value() && !agent_preset->empty()) {
+        binding = impl_->roster_->permission_preset_for(agent_preset);
+    }
+    return effective_permission_preset_name(impl_->permission_defaults_,
+                                            impl_->permission_baseline_,
+                                            impl_->default_permission_preset_, binding);
 }
 
 const LLMProviderConfig& WorkspaceRuntime::provider_config() const noexcept {

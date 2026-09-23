@@ -633,7 +633,6 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
         options.model = object.value("model", runtime_.agent_config().model);
         options.title = object.value("title", std::string{});
         options.cwd = runtime_.root();
-        options.permission_preset = runtime_.default_permission_preset();
         if (object.contains("agent_preset")) {
             if (!object.at("agent_preset").is_string()) {
                 throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
@@ -644,6 +643,7 @@ protocol::SessionCreated HostRuntime::createSession(const nlohmann::json& params
                 options.agent_preset = preset;
             }
         }
+        options.permission_preset = runtime_.effective_permission_preset(options.agent_preset);
         if (object.contains("cwd")) {
             if (!object.at("cwd").is_string()) {
                 throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),

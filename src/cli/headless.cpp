@@ -157,7 +157,11 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         session_options.serverProfile = "automation";
         session_options.model         = agent_config.model;
         session_options.title         = first_line(options.task, 60);
-        session_options.permission_preset = runtime->default_permission_preset();
+        if (options.agent_preset.has_value() && !options.agent_preset->empty()) {
+            session_options.agent_preset = options.agent_preset;
+        }
+        session_options.permission_preset =
+            runtime->effective_permission_preset(session_options.agent_preset);
         std::expected<AgentId, AgentError> created = registry.create(session_options);
         if (!created.has_value()) {
             err << "ymh: cannot create session: " << created.error().detail << '\n';
