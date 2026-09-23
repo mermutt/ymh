@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include "ymh/agent/preset.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/assistant_stream.hpp"
@@ -398,6 +399,16 @@ void AgentLoop::appendContextInjected(const ContextMessage& context) {
     session_.append(injected);
 }
 
+const std::optional<std::string>& AgentLoop::active_scope() {
+    if (!scope_resolved_) {
+        scope_resolved_ = true;
+        if (services_.presets != nullptr) {
+            scope_ = services_.presets->scope_for(id_);
+        }
+    }
+    return scope_;
+}
+
 void AgentLoop::materializeInstructions() {
     if (services_.instructions == nullptr || instructions_loaded_) {
         return;
@@ -526,7 +537,7 @@ FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
     request.model    = config_.model;
     request.messages = messages;
     if (services_.context != nullptr) {
-        request.tools = services_.context->tools();
+        request.tools = services_.context->tools(active_scope());
     }
     request.parameters = config_.parameters;
     request.session_id = session_.id();
@@ -852,7 +863,8 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
     std::vector<Message> messages;
     try {
         (void)pruner_.prune_session(session_);
-        messages = services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+        messages =
+            services_.context->assemble(session_, TurnContext{turn, step, {}, {}, active_scope()});
     } catch (const std::exception& error) {
         appendTurnFailed(turn, AgentErrorCode::ContextAssemblyFailed, error.what());
         return;
@@ -914,10 +926,11 @@ void AgentLoop::runTurn() {
 
     const auto assemble_messages = [&](StepId step) -> std::vector<Message> {
         (void)pruner_.prune_session(session_);
+        const std::optional<std::string>& scope = active_scope();
         if (services_.prompt != nullptr) {
-            materializeContexts(services_.prompt->assemble(AssembleContext{}));
+            materializeContexts(services_.prompt->assemble(AssembleContext{.scope = scope}));
         }
-        return services_.context->assemble(session_, TurnContext{turn, step, {}, {}});
+        return services_.context->assemble(session_, TurnContext{turn, step, {}, {}, scope});
     };
 
     const auto compaction_available = [&]() -> bool {

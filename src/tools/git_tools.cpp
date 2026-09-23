@@ -52,7 +52,8 @@ public:
         return ToolSchema{
             ToolName{"git_status"},
             ToolVersion{1, 0},
-            "Summarize working-tree and index status (read-only, porcelain-ish).",
+            "Summarize the working-tree and index status (read-only). Use it to see what changed "
+            "before committing or to confirm the repository is clean.",
             object_schema(nlohmann::json::object(), nlohmann::json::array()),
             false};
     }
@@ -86,7 +87,8 @@ public:
         return ToolSchema{
             ToolName{"git_diff"},
             ToolVersion{1, 0},
-            "Show a unified diff (unstaged, staged, or against a ref; read-only).",
+            "Show a unified diff of changes (read-only). Choose unstaged changes (the default), "
+            "staged changes, or the diff against a ref; narrow to one path when useful.",
             object_schema(nlohmann::json{{"path", string_type()},
                                          {"staged", boolean_type()},
                                          {"ref", string_type()}},

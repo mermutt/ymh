@@ -51,6 +51,13 @@ struct PromptSectionSpec {
     std::string  text;
 };
 
+// 52 review (3B): a row's instruction-loader override, mirroring dsh's
+// `@deepseek-ai/dsh-agent-instructions` row config (`maxBytes`).
+struct PresetInstructions {
+    bool                       enabled = true;
+    std::optional<std::size_t> max_bytes;
+};
+
 // 42-D17: one preset composition row (42 §2.1.1 pins the file vocabulary).
 // 52-D10 adds `persona` (reusing PersonaConfig verbatim; PersonaRow was deleted
 // in Rev 2), `permission_preset`, `model`, and `capabilities` (§5.7).
@@ -67,6 +74,7 @@ struct PresetRow {
     std::optional<std::string>     permission_preset;
     std::optional<std::string>     model;  // reserved (52-OQ-6)
     std::vector<std::string>       capabilities;
+    std::optional<PresetInstructions> instructions;
     std::optional<std::string>     config;
 };
 
@@ -187,6 +195,12 @@ public:
     [[nodiscard]] std::optional<std::string> permission_preset_for(
         const std::optional<std::string>& id) const;
 
+    // 52 review (3B): the instruction-loader override a preset binds, folded
+    // from its enabled rows (last row wins). Nullopt when the preset is absent,
+    // unknown, or declares no `instructions` row; never throws.
+    [[nodiscard]] std::optional<PresetInstructions> instructions_for(
+        const std::optional<std::string>& id) const;
+
     // 42 §3.2/§2.2: mount the preset once (idempotent), register its rows into
     // the standing scope, then join the agent's leaf to that standing mount and
     // record it. A second call for the same id registers nothing twice (42-I1).
@@ -202,6 +216,11 @@ public:
     [[nodiscard]] const PresetConfig& config() const noexcept;
 
     [[nodiscard]] AgentContext leaf_for(AgentId agent) const;
+
+    // 52 review (3A): the mounted leaf scope for `agent`, or nullopt when the
+    // agent has no mounted preset. Non-throwing, so the loop can call it on the
+    // assembly path without an exception for the common unmounted case.
+    [[nodiscard]] std::optional<ScopeKey> scope_for(AgentId agent) const noexcept;
 
     // Blank-session-only switch; appends `agent_preset/selected` after commit.
     void select(Agent& agent, const std::string& preset);

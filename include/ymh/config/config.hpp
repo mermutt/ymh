@@ -307,7 +307,9 @@ struct SessionSettings {
 
 // [prompt] — the prompt registry (36 §5). Additive.
 struct PromptSettings {
-    bool                  instructions_enabled = false;
+    // 52 review (3B): on by default, matching dsh's `standard` preset, which
+    // mounts `@deepseek-ai/dsh-agent-instructions` with `maxBytes: 65536`.
+    bool                  instructions_enabled = true;
     InstructionFileConfig instructions;
 };
 

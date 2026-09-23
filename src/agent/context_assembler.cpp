@@ -48,7 +48,7 @@ std::vector<Message> SessionContextAssembler::assemble(const Session& session,
     std::vector<Message> messages = session.deriveMessages();
     std::string system_text;
     if (prompt_ != nullptr) {
-        system_text = prompt_->render(AssembleContext{});
+        system_text = prompt_->render(AssembleContext{.scope = context.scope});
     } else {
         system_text = systemPrompt_;
     }
@@ -74,8 +74,12 @@ std::vector<Message> SessionContextAssembler::assemble(const Session& session,
 }
 
 std::vector<ToolSchema> SessionContextAssembler::tools() const {
+    return tools(std::nullopt);
+}
+
+std::vector<ToolSchema> SessionContextAssembler::tools(const std::optional<std::string>& scope) const {
     if (prompt_ != nullptr) {
-        return prompt_->assemble(AssembleContext{}).tools;
+        return prompt_->assemble(AssembleContext{.scope = scope}).tools;
     }
     return tools_.schemas();
 }

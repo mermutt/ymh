@@ -23,6 +23,15 @@ std::string render_runtime_context(const RuntimeContextConfig& config, const std
     out += "\n\n";
     out += "- Working directory: " + config.cwd + "\n";
     out += "- Model: " + config.model + "\n";
+    if (!config.sandbox.empty()) {
+        out += "- Sandbox: " + config.sandbox + "\n";
+    }
+    if (!config.approval.empty()) {
+        out += "- Approval: " + config.approval + "\n";
+    }
+    if (!config.delegation.empty()) {
+        out += "- Delegation: " + config.delegation + "\n";
+    }
     out += "- Date: " + date;
     return out;
 }

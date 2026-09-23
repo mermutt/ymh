@@ -13,12 +13,14 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/context_assembler.hpp"
+#include "ymh/agent/preset.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/execution/asio_executor.hpp"
 #include "ymh/execution/environment.hpp"
+#include "ymh/llm/fake_llm.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session.hpp"
@@ -267,6 +269,159 @@ TEST_F(WorkspaceRuntimeTest, ExecutorInjectionEnablesPtyAndTerminalTool) {
     EXPECT_TRUE(runtime.environment().pty().available());
     EXPECT_TRUE(runtime.tools().contains(ToolName{"terminal"}));
     EXPECT_TRUE(runtime.tools().contains(ToolName{"shell"}));
+}
+
+namespace {
+
+void write_preset_file(const std::filesystem::path& root, const std::string& id,
+                       const std::string& body) {
+    const std::filesystem::path dir = root / id;
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "preset.jsonc", std::ios::binary) << body;
+}
+
+Message preset_test_user_message(std::string text) {
+    Message      message;
+    message.role = Role::User;
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = std::move(text);
+    message.content.push_back(std::move(block));
+    return message;
+}
+
+} // namespace
+
+TEST_F(WorkspaceRuntimeTest, PresetScopeReachesAssembledSystemPrompt) {
+    TempWorkspace              workspace("runtime_preset_scope");
+    const std::filesystem::path presets = workspace.path() / "presets";
+    write_preset_file(presets, "minimal",
+                      R"JSON({
+                        "id": "minimal",
+                        "display_name": "Minimal",
+                        "rows": [
+                          {"id": "persona", "persona": {
+                            "prefix": "MINIMAL-PERSONA-SENTINEL",
+                            "complete": true,
+                            "include_runtime_context": false}},
+                          {"id": "shell", "tools": {"allow": ["shell"]}}
+                        ]
+                      })JSON");
+    write_preset_file(presets, "standard",
+                      R"JSON({
+                        "id": "standard",
+                        "display_name": "Standard",
+                        "rows": [
+                          {"id": "persona", "persona": {
+                            "prefix": "STANDARD-PERSONA-SENTINEL"}}
+                        ]
+                      })JSON");
+
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.config.presets.root                 = presets;
+    options.config.presets.include_shipped_root = false;
+    options.config.presets.include_user_root    = false;
+    options.config.session.persist_prompt_text  = true;
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        FakeScript script;
+        for (int index = 0; index < 4; ++index) {
+            FakeResponseStep step;
+            step.text = "ok";
+            script.steps.push_back(step);
+        }
+        return std::make_unique<FakeLLM>(std::move(script));
+    };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    const auto run_and_read_system_prompt = [&](const std::string& preset) -> std::string {
+        SessionOptions session_options;
+        session_options.cwd           = workspace.path();
+        session_options.serverProfile = "automation";
+        session_options.model         = "fake-model";
+        session_options.agent_preset  = preset;
+        const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+        EXPECT_TRUE(created.has_value()) << created.error().detail;
+        std::shared_ptr<AgentLoop> agent = runtime.agents().getShared(*created);
+        EXPECT_NE(agent, nullptr);
+
+        const std::optional<ScopeKey> scope = runtime.presets().scope_for(agent->id());
+        EXPECT_TRUE(scope.has_value()) << "agent on preset '" << preset << "' is not mounted";
+
+        EXPECT_EQ(agent->send(preset_test_user_message("go")), InboxResult::Accepted);
+
+        std::string system_prompt;
+        const SessionId session_id = agent->session();
+        for (const EventRecord& record : runtime.sessions().sessionPtr(session_id)->events()) {
+            if (record.event.type != EventType::LlmRequestHeader) {
+                continue;
+            }
+            const auto& header = record.event.payload.get<payload::LlmRequestHeader>();
+            if (header.system_prompt.has_value()) {
+                system_prompt = *header.system_prompt;
+            }
+        }
+        return system_prompt;
+    };
+
+    const std::string minimal  = run_and_read_system_prompt("minimal");
+    const std::string standard = run_and_read_system_prompt("standard");
+
+    ASSERT_FALSE(minimal.empty());
+    ASSERT_FALSE(standard.empty());
+    EXPECT_NE(minimal, standard);
+    EXPECT_NE(minimal.find("MINIMAL-PERSONA-SENTINEL"), std::string::npos) << minimal;
+    EXPECT_NE(standard.find("STANDARD-PERSONA-SENTINEL"), std::string::npos) << standard;
+}
+
+TEST_F(WorkspaceRuntimeTest, WorkspaceAgentsMdReachesTheSession) {
+    TempWorkspace workspace("runtime_instructions");
+    workspace.write("AGENTS.md", "INSTRUCTION-SENTINEL-67890\n");
+
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        FakeScript script;
+        FakeResponseStep step;
+        step.text = "ok";
+        script.steps.push_back(step);
+        return std::make_unique<FakeLLM>(std::move(script));
+    };
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    SessionOptions session_options;
+    session_options.cwd           = workspace.path();
+    session_options.serverProfile = "automation";
+    session_options.model         = "fake-model";
+    const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+    std::shared_ptr<AgentLoop> agent = runtime.agents().getShared(*created);
+    ASSERT_NE(agent, nullptr);
+    EXPECT_EQ(agent->send(preset_test_user_message("go")), InboxResult::Accepted);
+
+    bool found_instructions = false;
+    bool found_sandbox      = false;
+    const SessionId session_id = agent->session();
+    for (const EventRecord& record : runtime.sessions().sessionPtr(session_id)->events()) {
+        if (record.event.type != EventType::ContextInjected) {
+            continue;
+        }
+        const auto& injected = record.event.payload.get<payload::ContextInjected>();
+        if (injected.text.find("INSTRUCTION-SENTINEL-67890") != std::string::npos) {
+            found_instructions = true;
+        }
+        if (injected.text.find("- Sandbox: workspace") != std::string::npos) {
+            found_sandbox = true;
+        }
+    }
+    EXPECT_TRUE(found_instructions) << "the workspace AGENTS.md did not reach the session";
+    EXPECT_TRUE(found_sandbox) << "the runtime context omitted the sandbox fact";
 }
 
 TEST_F(WorkspaceRuntimeTest, WithoutExecutorPtyIsUnavailableAndToolAbsent) {

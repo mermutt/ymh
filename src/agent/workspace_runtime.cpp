@@ -40,6 +40,18 @@
 namespace ymh {
 namespace {
 
+std::string sandbox_mode_name(SandboxMode mode) {
+    switch (mode) {
+        case SandboxMode::Workspace:
+            return "workspace";
+        case SandboxMode::ReadOnly:
+            return "read-only";
+        case SandboxMode::Unrestricted:
+            return "unrestricted";
+    }
+    return "workspace";
+}
+
 std::shared_ptr<SkillCatalog> make_skill_catalog(const Config& config,
                                                  const ExecutionEnvironment& environment,
                                                  Logger& logger) {
@@ -206,13 +218,29 @@ public:
             [this](const AssembleContext&) { return tools_.schemas(); });
         if (include_runtime_context) {
             RuntimeContextConfig runtime;
-            runtime.cwd   = root_.string();
-            runtime.model = agent_config_.model;
+            runtime.cwd        = root_.string();
+            runtime.model      = agent_config_.model;
+            runtime.sandbox    = sandbox_mode_name(agent_config_.sandbox);
+            runtime.approval   = default_permission_preset_;
+            runtime.delegation = config.presets.max_depth == 0
+                                     ? std::string{"disabled"}
+                                     : "available (max depth " +
+                                           std::to_string(config.presets.max_depth) + ")";
             runtime_context_ = register_runtime_context(prompt_, std::move(runtime));
         }
-        if (config.prompt.instructions_enabled) {
-            instructions_ = std::make_unique<InstructionLoader>(config.prompt.instructions,
-                                                                *environment_);
+        bool                  instructions_enabled = config.prompt.instructions_enabled;
+        InstructionFileConfig instruction_config   = config.prompt.instructions;
+        if (const std::optional<PresetInstructions> row =
+                roster_->instructions_for(roster_->config().default_id);
+            row.has_value()) {
+            instructions_enabled = row->enabled;
+            if (row->max_bytes.has_value()) {
+                instruction_config.max_bytes = *row->max_bytes;
+            }
+        }
+        if (instructions_enabled) {
+            instructions_ =
+                std::make_unique<InstructionLoader>(instruction_config, *environment_);
         }
         assembler_.set_system_prompt(&prompt_);
 

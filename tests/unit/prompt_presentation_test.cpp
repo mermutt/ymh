@@ -104,11 +104,20 @@ TEST(PromptPresentation, ConfigToolOrderDrivesAssembleOrder) {
     EXPECT_EQ(assembly.tools[1].name.value, "read_file");
 }
 
-TEST(PromptPresentation, InstructionsRequireMaxBytes) {
+TEST(PromptPresentation, InstructionsExplicitZeroMaxBytesRejected) {
     TempWorkspace workspace("prompt_present_instr_required");
     workspace.write(".ymh/config.jsonc",
-                    "{ \"prompt\": { \"instructions\": { \"enabled\": true } } }\n");
+                    "{ \"prompt\": { \"instructions\": { \"enabled\": true, \"max_bytes\": 0 } } }\n");
     EXPECT_THROW((void)load_workspace(workspace), ConfigError);
+}
+
+TEST(PromptPresentation, InstructionsEnabledByDefaultWithDshBudget) {
+    TempWorkspace workspace("prompt_present_instr_default");
+    workspace.write(".ymh/config.jsonc", "{}\n");
+    const Config config = load_workspace(workspace);
+    EXPECT_TRUE(config.prompt.instructions_enabled);
+    EXPECT_EQ(config.prompt.instructions.max_bytes, 65536u);
+    EXPECT_TRUE(config.prompt.instructions.load_local);
 }
 
 TEST(PromptPresentation, InstructionsParse) {

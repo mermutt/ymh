@@ -143,7 +143,7 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
         reject_unknown(row, file, label,
                        {"id", "group", "disabled", "persona", "persona_prefix", "persona_suffix",
                         "tools", "skills", "sections", "permission_preset", "model",
-                        "capabilities", "config"});
+                        "capabilities", "instructions", "config"});
 
         const Json* id = member(row, "id");
         if (id == nullptr || !id->is_string() || id->get<std::string>().empty()) {
@@ -329,6 +329,27 @@ AgentPreset parse_preset(const std::filesystem::path& dir) {
                                         capability + "' (52-F13)");
                 }
             }
+        }
+        if (const Json* instructions = member(row, "instructions")) {
+            if (!instructions->is_object()) {
+                load_fail(file, "invalid type for '" + label + ".instructions'");
+            }
+            reject_unknown(*instructions, file, label + ".instructions",
+                           {"enabled", "max_bytes"});
+            PresetInstructions settings;
+            if (const Json* enabled = member(*instructions, "enabled")) {
+                if (!enabled->is_boolean()) {
+                    load_fail(file, "invalid type for '" + label + ".instructions.enabled'");
+                }
+                settings.enabled = enabled->get<bool>();
+            }
+            if (const Json* max_bytes = member(*instructions, "max_bytes")) {
+                if (!max_bytes->is_number_integer() || max_bytes->get<std::int64_t>() < 0) {
+                    load_fail(file, "invalid type for '" + label + ".instructions.max_bytes'");
+                }
+                settings.max_bytes = static_cast<std::size_t>(max_bytes->get<std::int64_t>());
+            }
+            parsed.instructions = std::move(settings);
         }
         if (const Json* config = member(row, "config")) {
             parsed.config = config->dump();
@@ -592,6 +613,29 @@ std::optional<std::string> AgentPresetRoster::permission_preset_for(
     }
 }
 
+std::optional<PresetInstructions> AgentPresetRoster::instructions_for(
+    const std::optional<std::string>& id) const {
+    if (!id.has_value() || id->empty()) {
+        return std::nullopt;
+    }
+    try {
+        std::optional<PresetInstructions> binding;
+        for (const PresetRow& row : resolve(*id).rows) {
+            if (row.disabled) {
+                continue;
+            }
+            if (row.instructions.has_value()) {
+                binding = row.instructions;
+            }
+        }
+        return binding;
+    } catch (const PresetError&) {
+        return std::nullopt;
+    } catch (const ConfigError&) {
+        return std::nullopt;
+    }
+}
+
 AgentPresetRoster::~AgentPresetRoster() = default;
 
 void AgentPresetRoster::ensure_standing(const AgentPreset& preset) {
@@ -780,6 +824,14 @@ AgentContext AgentPresetRoster::leaf_for(AgentId agent) const {
         throw UnknownAgent("agent is not mounted: " + agent.value);
     }
     return it->second;
+}
+
+std::optional<ScopeKey> AgentPresetRoster::scope_for(AgentId agent) const noexcept {
+    const auto it = leaves_.find(agent.value);
+    if (it == leaves_.end()) {
+        return std::nullopt;
+    }
+    return it->second.scope;
 }
 
 bool AgentPresetRoster::is_blank(const Session& session) {

@@ -582,7 +582,11 @@ nlohmann::json HostRuntime::showContext(const SessionId& id) {
 
         // Bind to named locals: ContextSnapshotInputs holds references, and a
         // temporary would dangle before build_context_snapshot() runs.
-        const std::vector<ToolSchema> tools = runtime_.context().tools();
+        std::optional<std::string> scope;
+        if (std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id); agent != nullptr) {
+            scope = runtime_.presets().scope_for(agent->id());
+        }
+        const std::vector<ToolSchema> tools = runtime_.context().tools(scope);
         const CompactionPolicy*       policy = runtime_.compaction_policy();
 
         // MCP status is best-effort (CTX-F6): a failure degrades to an empty

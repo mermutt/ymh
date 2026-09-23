@@ -79,10 +79,31 @@ std::vector<payload::ContextInjected> injected_contexts(const EventRange& events
     return injected;
 }
 
+TEST(PromptRuntimeContext, RendersSandboxApprovalAndDelegationFacts) {
+    const std::string text = render_runtime_context(
+        RuntimeContextConfig{.cwd        = "/ws",
+                             .model      = "m",
+                             .sandbox    = "workspace",
+                             .approval   = "workspace-write",
+                             .delegation = "available (max depth 3)"},
+        "2026-09-19");
+    EXPECT_NE(text.find("- Sandbox: workspace"), std::string::npos);
+    EXPECT_NE(text.find("- Approval: workspace-write"), std::string::npos);
+    EXPECT_NE(text.find("- Delegation: available (max depth 3)"), std::string::npos);
+
+    const std::string bare = render_runtime_context(
+        RuntimeContextConfig{.cwd = "/ws", .model = "m", .sandbox = {}, .approval = {},
+                             .delegation = {}},
+        "2026-09-19");
+    EXPECT_EQ(bare.find("- Sandbox:"), std::string::npos);
+    EXPECT_EQ(bare.find("- Approval:"), std::string::npos);
+    EXPECT_EQ(bare.find("- Delegation:"), std::string::npos);
+}
+
 TEST(PromptRuntimeContext, ProducerRendersHeaderAndSources) {
     SystemPrompt prompt;
     const ContextHandle handle = register_runtime_context(
-        prompt, RuntimeContextConfig{"/workspace", "deepseek-flash"},
+        prompt, RuntimeContextConfig{.cwd = "/workspace", .model = "deepseek-flash", .sandbox = {}, .approval = {}, .delegation = {}},
         [] { return std::string{"2026-09-19"}; });
 
     const PromptAssembly assembly = prompt.assemble(AssembleContext{});
@@ -99,7 +120,8 @@ TEST(PromptRuntimeContext, MaterializedOnceAndOnlyOnChangedText) {
     std::string date = "2026-09-19";
     SystemPrompt prompt;
     const ContextHandle handle = register_runtime_context(
-        prompt, RuntimeContextConfig{"/workspace", "deepseek-flash"}, [&date] { return date; });
+        prompt, RuntimeContextConfig{.cwd = "/workspace", .model = "deepseek-flash", .sandbox = {}, .approval = {}, .delegation = {}},
+        [&date] { return date; });
 
     AgentEnv env("prompt_runtime_timing",
                  std::make_unique<FakeLLM>(

@@ -109,7 +109,9 @@ public:
         return ToolSchema{
             ToolName{"read_file"},
             ToolVersion{1, 0},
-            "Read a text file under the workspace root.",
+            "Read a UTF-8 text file under the workspace root and return its content. Use offset "
+            "(1-based) and limit to page through large files; output may be truncated. Read a "
+            "file before editing it.",
             object_schema(nlohmann::json{{"path", string_type()},
                                          {"offset", integer_type()},
                                          {"limit", integer_type()}},
@@ -148,7 +150,9 @@ public:
         return ToolSchema{
             ToolName{"write_file"},
             ToolVersion{1, 0},
-            "Create or overwrite a file under the workspace root.",
+            "Create or fully replace a UTF-8 text file under the workspace root. The content is "
+            "written verbatim, overwriting any existing file; use edit_file for targeted changes "
+            "to an existing file.",
             object_schema(nlohmann::json{{"path", string_type()},
                                          {"content", string_type()}},
                           nlohmann::json::array({"path", "content"})),
@@ -178,7 +182,10 @@ public:
         return ToolSchema{
             ToolName{"edit_file"},
             ToolVersion{1, 0},
-            "Replace text in an existing file under the workspace root.",
+            "Replace a literal string in an existing UTF-8 text file under the workspace root. "
+            "old_string must match exactly; unless replace_all is true it must appear exactly "
+            "once, so include enough surrounding text to be unique. Prefer this over write_file "
+            "for small, targeted edits.",
             object_schema(nlohmann::json{{"path", string_type()},
                                          {"old_string", string_type()},
                                          {"new_string", string_type()},
@@ -245,7 +252,10 @@ public:
         return ToolSchema{
             ToolName{"grep"},
             ToolVersion{1, 0},
-            "Search file contents with an ECMAScript regular expression.",
+            "Search file contents with an ECMAScript regular expression and return the matches. "
+            "Narrow the search with path and a single glob filter; choose output_mode content "
+            "(matching lines), files_with_matches, or count. Use read_file on a matched file for "
+            "surrounding context.",
             object_schema(nlohmann::json{{"pattern", string_type()},
                                          {"path", string_type()},
                                          {"glob", string_type()},
@@ -324,7 +334,10 @@ public:
         return ToolSchema{
             ToolName{"glob"},
             ToolVersion{1, 0},
-            "List files matching a path glob under the workspace root.",
+            "List files whose paths match a glob pattern under the workspace root, in "
+            "modification-time order. A pattern with no '/' matches the basename at any depth "
+            "(e.g. \"*.ts\"); include a separator to anchor the depth. Use grep to search file "
+            "contents.",
             object_schema(nlohmann::json{{"pattern", string_type()},
                                          {"path", string_type()}},
                           nlohmann::json::array({"pattern"})),
@@ -367,7 +380,10 @@ public:
         return ToolSchema{
             ToolName{"shell"},
             ToolVersion{1, 0},
-            "Run a command with /bin/bash -lc in the workspace root.",
+            "Run a shell command with /bin/bash -lc in the workspace root and return its combined "
+            "output. Prefer the dedicated tools (read_file, grep, glob) over their shell "
+            "equivalents; avoid commands that may produce a very large amount of output, and set "
+            "timeout_ms for commands that may run long.",
             object_schema(nlohmann::json{{"command", string_type()},
                                          {"timeout_ms", integer_type()}},
                           nlohmann::json::array({"command"})),
