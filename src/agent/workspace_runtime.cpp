@@ -1,5 +1,6 @@
 #include "ymh/agent/workspace_runtime.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <functional>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -18,6 +20,8 @@
 #include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/preset.hpp"
+#include "ymh/agent/session_activator.hpp"
+#include "ymh/agent/subagent_service.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
@@ -26,6 +30,8 @@
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/pty.hpp"
 #include "ymh/execution/resource_governor.hpp"
+#include "ymh/jobs/job_registry.hpp"
+#include "ymh/jobs/job_wakeup.hpp"
 #include "ymh/llm/llm_runtime.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
@@ -40,6 +46,7 @@
 #include "ymh/skills/workspace_trust.hpp"
 #include "ymh/tools/builtin_tools.hpp"
 #include "ymh/tools/plan_tools.hpp"
+#include "ymh/tools/subagent_tools.hpp"
 #include "ymh/tools/terminal_tool.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
@@ -107,6 +114,85 @@ PresetConfig make_preset_config(const Config& config) {
     preset.max_depth            = config.presets.max_depth;
     return preset;
 }
+
+// 55-D6/§4: the live route-catalog seam. Backs `list_subagent_models` and the
+// D6 model/effort validation; composes `ModelCatalog` with the configured
+// endpoint set.
+class WorkspaceRouteCatalog final : public RouteCatalog {
+public:
+    explicit WorkspaceRouteCatalog(const ModelCatalog& catalog) : catalog_(catalog) {}
+
+    std::vector<std::string> routable_endpoints() const override {
+        std::vector<std::string> out{std::string{}};
+        for (const ModelCatalogEntry& entry : catalog_.entries()) {
+            if (!entry.endpoint.name.empty() &&
+                std::find(out.begin(), out.end(), entry.endpoint.name) == out.end()) {
+                out.push_back(entry.endpoint.name);
+            }
+        }
+        return out;
+    }
+
+    bool is_routable_endpoint(std::string_view endpoint) const override {
+        if (endpoint.empty()) {
+            return true;
+        }
+        for (const ModelCatalogEntry& entry : catalog_.entries()) {
+            if (std::string_view{entry.endpoint.name} == endpoint) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::vector<std::string> models_for(std::string_view endpoint) const override {
+        std::vector<std::string> out;
+        for (const ModelCatalogEntry& entry : catalog_.entries()) {
+            if (std::string_view{entry.endpoint.name} == endpoint) {
+                out.push_back(entry.name.empty() ? entry.model_id : entry.name);
+            }
+        }
+        return out;
+    }
+
+    std::vector<std::string> efforts_for(std::string_view, std::string_view) const override {
+        return {};
+    }
+
+    bool is_catalog_member(std::string_view endpoint, std::string_view model) const override {
+        for (const ModelCatalogEntry& entry : catalog_.entries()) {
+            if (std::string_view{entry.endpoint.name} != endpoint) {
+                continue;
+            }
+            if (entry.model_id == model || entry.name == model) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    const ModelCatalog& catalog_;
+};
+
+// 55-D11: the live background-activation seam. Runs the child's activation on a
+// detached worker so it never blocks the caller and never sets
+// `HostRuntime::active_session_`.
+class ThreadedActivator final : public SessionActivator {
+public:
+    void set_service(SubagentService* service) { service_ = service; }
+
+    bool submit(const SessionId& child) override {
+        if (service_ == nullptr) {
+            return false;
+        }
+        std::thread([this, child] { static_cast<void>(service_->activateChild(child)); }).detach();
+        return true;
+    }
+
+private:
+    SubagentService* service_ = nullptr;
+};
 
 std::vector<std::string> permission_preset_names(const Config& config) {
     std::vector<std::string> names;
@@ -239,7 +325,6 @@ public:
             mcp_->setClientFactory(std::move(mcp_client_factory));
         }
         mcp_->start({}).get();
-        tools_.freeze();
 
         assembler_.set_plan_policy_provider(
             [this](const Session& session) -> std::string {
@@ -323,7 +408,46 @@ public:
             services_.context_compactor = compactor_.get();
         }
 
+        route_catalog_ = std::make_unique<WorkspaceRouteCatalog>(model_catalog_);
+        services_.route_catalog = route_catalog_.get();
         agents_ = std::make_unique<AgentRegistry>(services_, agent_config_);
+
+        job_wakeup_ = std::make_unique<JobWakeupPolicy>(job_registry_, bus_,
+                                                        JobWakeupConfig{}, *agents_);
+        job_wakeup_->start();
+
+        session_activator_ = std::make_unique<ThreadedActivator>();
+        subagent_service_  = std::make_unique<SubagentService>(
+            *agents_, sessions_, roster_.get(), job_registry_, *job_wakeup_, model_selection_,
+            *route_catalog_, runtime_, *session_activator_, bus_);
+        session_activator_->set_service(subagent_service_.get());
+
+        DelegationToolConfig one_shot;
+        one_shot.provider        = "subagent";
+        one_shot.tool_name       = "subagent";
+        one_shot.background_mode = DelegationToolConfig::BackgroundMode::OneShot;
+        one_shot.model_selection = true;
+        registrations_.push_back(tools_.add(make_subagent_tool(
+            *subagent_service_, SubagentCallerResolver{}, std::move(one_shot))));
+
+        DelegationToolConfig continuable;
+        continuable.provider        = "subagent_continuable";
+        continuable.tool_name       = "subagent_continuable";
+        continuable.background_mode = DelegationToolConfig::BackgroundMode::Continuable;
+        continuable.model_selection = true;
+        registrations_.push_back(tools_.add(make_subagent_tool(
+            *subagent_service_, SubagentCallerResolver{}, std::move(continuable))));
+
+        registrations_.push_back(
+            tools_.add(make_send_message_tool(*subagent_service_, SubagentCallerResolver{})));
+        registrations_.push_back(
+            tools_.add(make_interrupt_agent_tool(*subagent_service_, SubagentCallerResolver{})));
+        registrations_.push_back(
+            tools_.add(make_list_agents_tool(*subagent_service_, SubagentCallerResolver{})));
+        registrations_.push_back(
+            tools_.add(make_list_subagent_models_tool(*route_catalog_)));
+
+        tools_.freeze();
     }
 
     std::shared_ptr<LLMProvider> resolve_endpoint_provider(std::string_view endpoint_name,
@@ -403,6 +527,11 @@ public:
     std::unique_ptr<AgentPresetRoster> roster_;
     AgentServices                      services_;
     std::unique_ptr<AgentRegistry>     agents_;
+    std::unique_ptr<RouteCatalog>      route_catalog_;
+    JobRegistry                        job_registry_;
+    std::unique_ptr<JobWakeupPolicy>   job_wakeup_;
+    std::unique_ptr<ThreadedActivator> session_activator_;
+    std::unique_ptr<SubagentService>   subagent_service_;
     ProviderRegistry                   providers_;
     std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)> provider_factory_;
     std::map<std::string, ResolvedEndpoint> endpoints_;

@@ -84,6 +84,8 @@ JobId JobRegistry::start(JobStart start) {
     record.snapshot.owner              = start.owner;
     record.snapshot.status             = JobStatus::Running;
     record.snapshot.started_at         = now_ms();
+    record.snapshot.notice_plugin      = start.notice_plugin;
+    record.snapshot.notice_text        = start.notice_text;
     record.hooks                       = std::move(hooks);
     jobs_.push_back(std::move(record));
 
@@ -176,6 +178,9 @@ void JobRegistry::settle(JobId id, JobOutcome outcome) {
     record.snapshot.status       = outcome.status;
     record.snapshot.detail       = outcome.detail;
     record.snapshot.finished_at  = now_ms();
+    if (outcome.notice_text.has_value()) {
+        record.snapshot.notice_text = outcome.notice_text;
+    }
     if (record.hooks.read_output) {
         record.final_output = record.hooks.read_output();
     } else {

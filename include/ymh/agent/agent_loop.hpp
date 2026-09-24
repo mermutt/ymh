@@ -47,6 +47,7 @@ class SystemPrompt;
 class InstructionLoader;
 class AgentPresetRoster;
 struct PromptAssembly;
+class RouteCatalog;
 
 struct AgentServices {
     using PermissionResolver =
@@ -85,6 +86,9 @@ struct AgentServices {
     // 42 §3.2 / 43 §4: the Wave-5 roster. When null, Wave-5 composition is off
     // and the delegation path applies no composition.
     AgentPresetRoster*    presets = nullptr;
+    // 55-D8/55-H5: the route-catalog seam used by `AgentRegistry::createChild`
+    // to validate a child route's model/effort before any session is created.
+    RouteCatalog*         route_catalog = nullptr;
 
     // 34-D4: monotonic source for `TimedStreamEvent.at`. Production default is
     // steady_clock::now; tests inject a deterministic reader.
@@ -123,6 +127,7 @@ public:
     void cancel() override;
     void dispose() override;
     void whenIdle(std::function<void()> callback) override;
+    void onSettled(std::function<void()> callback) override;
 
     // Additive enqueue target for the manual `/compact` path
     // (13-context-compaction.md §6.8, errata A5). Enqueue-only, executor-thread
@@ -179,6 +184,11 @@ private:
     [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,
                                              TurnId turn, StepId step, std::size_t turn_step);
     void                      flushIdleCallbacks();
+    // 55-D10: drain one-shot settlement callbacks whose registration predates
+    // the current terminal generation. Called at the end of activate().
+    void                      flushSettleCallbacks();
+    // 55-D10: record that a terminal event was appended this activation.
+    void                      noteTerminal();
 
     // 40 §2.4: the per-call body split so the scheduler can overlap only the
     // execution while the loop thread keeps the durable appends (40-I4).
@@ -209,6 +219,9 @@ private:
 
     std::deque<InboxItem>               inbox_;              // control_mutex_
     std::vector<std::function<void()>>  idle_callbacks_;     // control_mutex_
+    // 55-D10: (registration generation, callback); control_mutex_.
+    std::vector<std::pair<std::uint64_t, std::function<void()>>> settle_callbacks_;  // control_mutex_
+    std::uint64_t                       settle_generation_ = 0;  // control_mutex_
     std::string                         cancel_reason_;      // control_mutex_
     bool                                pending_maintenance_failure_ = false;  // control_mutex_
     mutable std::mutex                  control_mutex_;      // leaf: no blocking op inside

@@ -49,6 +49,10 @@ struct SessionHeader {
     std::string                title;
     std::string                model;
     std::optional<std::string> model_name;  // 54-D8: llm.models entry name, when known
+    // 55-A7: the durable route pair; preferred by ModelSelectionController so a
+    // resumed session rebuilds the exact route (endpoint name + 54 profile id).
+    std::optional<std::string> endpoint;
+    std::optional<std::string> profile_id;
     std::string                serverProfile;
     SessionKind                kind = SessionKind::Root;
     std::optional<SessionId>   parentSession;

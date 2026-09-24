@@ -40,6 +40,13 @@ struct SessionOptions {
     std::optional<std::string> agent_preset;
     // 52-D15/52-I12: the permission preset pinned for the session.
     std::optional<std::string> permission_preset;
+    // 55-A7/55-D6: the child route written at creation. `endpoint`/`profile_id`
+    // are persisted on SessionHeader; `reasoning_effort`/`max_tokens` are the
+    // creation-time call shape.
+    std::optional<std::string>   endpoint;
+    std::optional<std::string>   profile_id;
+    std::optional<std::string>   reasoning_effort;
+    std::optional<std::uint32_t> max_tokens;
 };
 
 class SessionManager {

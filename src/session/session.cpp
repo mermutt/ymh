@@ -276,6 +276,10 @@ void to_json(nlohmann::json& json, const SessionHeader& header) {
         {"model", header.model},
         {"model_name", header.model_name ? nlohmann::json(*header.model_name)
                                          : nlohmann::json(nullptr)},
+        {"endpoint", header.endpoint ? nlohmann::json(*header.endpoint)
+                                     : nlohmann::json(nullptr)},
+        {"profile_id", header.profile_id ? nlohmann::json(*header.profile_id)
+                                         : nlohmann::json(nullptr)},
         {"server_profile", header.serverProfile},
         {"kind", std::string{session_kind_name(header.kind)}},
         {"parent_session", header.parentSession ? nlohmann::json(header.parentSession->value)
@@ -302,6 +306,16 @@ void from_json(const nlohmann::json& json, SessionHeader& header) {
         header.model_name = json.at("model_name").get<std::string>();
     } else {
         header.model_name = std::nullopt;
+    }
+    if (json.contains("endpoint") && !json.at("endpoint").is_null()) {
+        header.endpoint = json.at("endpoint").get<std::string>();
+    } else {
+        header.endpoint = std::nullopt;
+    }
+    if (json.contains("profile_id") && !json.at("profile_id").is_null()) {
+        header.profile_id = json.at("profile_id").get<std::string>();
+    } else {
+        header.profile_id = std::nullopt;
     }
     header.serverProfile = json.value("server_profile", std::string{});
     header.kind          = parse_session_kind(json.at("kind").get<std::string>())

@@ -68,6 +68,8 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
     header.depth         = options.depth;
     header.agent_preset  = options.agent_preset;
     header.permission_preset = options.permission_preset;
+    header.endpoint      = options.endpoint;
+    header.profile_id    = options.profile_id;
     validateHeader(header);
 
     store_->create(header);

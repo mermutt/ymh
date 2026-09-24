@@ -163,6 +163,8 @@ struct MessageSource {
     std::string                   provider;               // Kind::Model
     std::string                   model;                  // Kind::Model
     std::optional<GoalMessageRef> goal;                   // Kind::Goal
+    // 55-A6/55-D12: a `Kind::Plugin` relay's sender SessionId ("" otherwise).
+    std::string                   sender{};
 
     void validate() const {
         const bool has_plugin   = !plugin.empty();
@@ -171,9 +173,11 @@ struct MessageSource {
         const bool has_provider = !provider.empty();
         const bool has_model    = !model.empty();
         const bool has_goal     = goal.has_value();
+        const bool has_sender   = !sender.empty();
         switch (kind) {
             case Kind::User:
-                if (has_plugin || has_context || has_call || has_provider || has_model || has_goal) {
+                if (has_plugin || has_context || has_call || has_provider || has_model || has_goal ||
+                    has_sender) {
                     throw std::invalid_argument("message source kind user carries gated fields");
                 }
                 break;
@@ -183,17 +187,19 @@ struct MessageSource {
                 }
                 break;
             case Kind::Model:
-                if (has_plugin || has_context || has_call || has_goal) {
+                if (has_plugin || has_context || has_call || has_goal || has_sender) {
                     throw std::invalid_argument("message source kind model carries gated fields");
                 }
                 break;
             case Kind::Tool:
-                if (has_plugin || has_context || has_provider || has_model || has_goal) {
+                if (has_plugin || has_context || has_provider || has_model || has_goal ||
+                    has_sender) {
                     throw std::invalid_argument("message source kind tool carries gated fields");
                 }
                 break;
             case Kind::Goal:
-                if (has_plugin || has_context || has_call || has_provider || has_model) {
+                if (has_plugin || has_context || has_call || has_provider || has_model ||
+                    has_sender) {
                     throw std::invalid_argument("message source kind goal carries gated fields");
                 }
                 break;
@@ -363,6 +369,9 @@ inline void to_json(nlohmann::json& json, const MessageSource& value) {
             if (value.context != ContextFormed{}) {
                 json["context"] = value.context;
             }
+            if (!value.sender.empty()) {
+                json["sender"] = value.sender;
+            }
             break;
         case MessageSource::Kind::Model:
             if (!value.provider.empty()) {
@@ -410,6 +419,9 @@ inline void from_json(const nlohmann::json& json, MessageSource& value) {
     }
     if (json.contains("goal") && !json.at("goal").is_null()) {
         decoded.goal = json.at("goal").get<GoalMessageRef>();
+    }
+    if (json.contains("sender")) {
+        decoded.sender = json.at("sender").get<std::string>();
     }
     decoded.validate();
     value = std::move(decoded);

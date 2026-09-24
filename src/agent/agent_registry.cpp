@@ -1,5 +1,6 @@
 #include "ymh/agent/agent_registry.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -73,6 +74,122 @@ std::expected<AgentId, AgentError> AgentRegistry::create(const SessionOptions& o
         return std::unexpected(AgentError{AgentErrorCode::StoreUnavailable, error.what()});
     }
     return registerAgent(sessionId);
+}
+
+bool AgentRegistry::reserveSubagentSlot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t cap =
+        services_.governor != nullptr ? services_.governor->caps().max_live_subagents : 8;
+    if (live_subagent_count_ >= cap) {
+        return false;
+    }
+    ++live_subagent_count_;
+    return true;
+}
+
+void AgentRegistry::releaseSubagentSlot() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (live_subagent_count_ > 0) {
+        --live_subagent_count_;
+    }
+}
+
+std::size_t AgentRegistry::liveSubagentCount() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return live_subagent_count_;
+}
+
+std::expected<AgentId, AgentError> AgentRegistry::createChild(const ChildSpawnRequest& request) {
+    if (services_.sessions == nullptr) {
+        return std::unexpected(AgentError{AgentErrorCode::Internal, "no session manager"});
+    }
+    if (const std::optional<AgentError> depth =
+            check_delegation_depth(request.parent_depth, request.max_depth);
+        depth.has_value()) {
+        return std::unexpected(*depth);
+    }
+    if (request.route.has_value() && services_.route_catalog != nullptr) {
+        const ChildRoute& route = *request.route;
+        if (!services_.route_catalog->is_routable_endpoint(route.endpoint)) {
+            return std::unexpected(
+                AgentError{AgentErrorCode::ProviderFailed, "unknown endpoint: " + route.endpoint});
+        }
+        if (!services_.route_catalog->is_catalog_member(route.endpoint, route.model)) {
+            return std::unexpected(AgentError{AgentErrorCode::ProviderFailed,
+                                              "model is not a catalog member: " + route.model});
+        }
+        if (route.reasoning_effort.has_value()) {
+            const std::vector<std::string> efforts =
+                services_.route_catalog->efforts_for(route.endpoint, route.model);
+            if (!efforts.empty() && std::find(efforts.begin(), efforts.end(),
+                                              *route.reasoning_effort) == efforts.end()) {
+                return std::unexpected(
+                    AgentError{AgentErrorCode::ProviderFailed, "unsupported reasoning_effort"});
+            }
+        }
+    }
+    if (!reserveSubagentSlot()) {
+        return std::unexpected(AgentError{AgentErrorCode::InboxFull, "fan-out cap exceeded"});
+    }
+
+    SessionOptions options = request.options;
+    options.kind           = SessionKind::Subagent;
+    options.depth          = request.parent_depth + 1;
+    if (request.route.has_value()) {
+        options.endpoint         = request.route->endpoint;
+        options.profile_id       = request.route->profile_id;
+        options.model            = request.route->model;
+        options.model_name       = request.route->model_name;
+        options.reasoning_effort = request.route->reasoning_effort;
+        options.max_tokens       = request.route->max_tokens;
+    }
+
+    SessionId session_id;
+    try {
+        session_id = services_.sessions->createSession(options);
+    } catch (const std::invalid_argument& error) {
+        releaseSubagentSlot();
+        return std::unexpected(AgentError{AgentErrorCode::UnknownSession, error.what()});
+    } catch (const LeaseLost& error) {
+        releaseSubagentSlot();
+        return std::unexpected(AgentError{AgentErrorCode::LeaseHeldByOther, error.what()});
+    } catch (const std::exception& error) {
+        releaseSubagentSlot();
+        return std::unexpected(AgentError{AgentErrorCode::StoreUnavailable, error.what()});
+    }
+
+    const std::expected<AgentId, AgentError> registered = registerAgent(session_id);
+    if (!registered.has_value()) {
+        releaseSubagentSlot();
+        try {
+            services_.sessions->closeSession(session_id);
+        } catch (const std::exception&) {
+        }
+        return registered;
+    }
+
+    if (services_.presets != nullptr && request.composition.has_value()) {
+        try {
+            std::shared_ptr<AgentLoop> parent;
+            if (options.parentSession.has_value()) {
+                parent = findShared(*options.parentSession);
+            }
+            if (parent != nullptr) {
+                AgentContext child_context{*registered, {}};
+                services_.presets->apply_child_composition(child_context, *parent,
+                                                           *request.composition);
+            }
+        } catch (const std::exception& error) {
+            dispose(*registered);
+            releaseSubagentSlot();
+            try {
+                services_.sessions->closeSession(session_id);
+            } catch (const std::exception&) {
+            }
+            return std::unexpected(AgentError{AgentErrorCode::Internal, error.what()});
+        }
+    }
+    return registered;
 }
 
 std::expected<AgentId, AgentError> AgentRegistry::resume(const SessionId& id) {

@@ -237,6 +237,11 @@ public:
     [[nodiscard]] Task<PreparedCall> prepare_call(LlmCallConfig config,
                                                   CancellationToken cancel) const;
 
+    // 55-A10/55-R3-H1: public route preflight. Resolves the effective route
+    // through `resolve_adapter` WITHOUT binding a call generation; throws
+    // `NoProviderRouteError` on a miss. Used by `SubagentService` D6 step 4.
+    void preflight_route(const LlmCallConfig& config) const;
+
     // The public interceptor-chain entry for callers that already hold a
     // `FrozenRequest` and need no one-shot generation binding (28 §3.1).
     [[nodiscard]] Task<LLMResponse> stream(const FrozenRequest& request,

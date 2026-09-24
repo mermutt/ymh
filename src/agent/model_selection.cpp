@@ -149,8 +149,11 @@ bool catalog_entry_less(const ModelCatalogEntry& a, const ModelCatalogEntry& b) 
 
 } // namespace
 
-ModelSelectionController::ModelSelectionController(AppendFn append, ResolveFn resolve)
-    : append_(std::move(append)), resolve_(std::move(resolve)) {}
+ModelSelectionController::ModelSelectionController(AppendFn append, ResolveFn resolve,
+                                                   RouteResolveFn resolve_route)
+    : append_(std::move(append)),
+      resolve_(std::move(resolve)),
+      resolve_route_(std::move(resolve_route)) {}
 
 std::optional<ModelSelection> ModelSelectionController::durable_(const Session& session) const {
     const SessionId id = session.id();
@@ -171,7 +174,11 @@ std::optional<ModelSelection> ModelSelectionController::durable_(const Session& 
     const std::string wire_id =
         (header.model_name.has_value() && !header.model_name->empty()) ? *header.model_name
                                                                       : header.model;
-    if (!wire_id.empty() && resolve_ != nullptr) {
+    // 55-A7/55-H4: the persisted (endpoint, profile_id) pair is the preferred
+    // durable route; only fall back to the wire-id catalog lookup without it.
+    if (header.endpoint.has_value() && resolve_route_ != nullptr) {
+        resolved = resolve_route_(*header.endpoint, header.profile_id.value_or(""), wire_id);
+    } else if (!wire_id.empty() && resolve_ != nullptr) {
         resolved = resolve_(wire_id);
     }
     std::lock_guard<std::mutex> lock(mutex_);

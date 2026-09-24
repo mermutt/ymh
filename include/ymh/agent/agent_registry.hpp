@@ -17,12 +17,23 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_loop.hpp"
 #include "ymh/agent/llm_pool.hpp"
+#include "ymh/agent/subagent_types.hpp"
 #include "ymh/session/session_handle.hpp"
 #include "ymh/session/session_manager.hpp"
 
 namespace ymh {
 
 class LlmRuntime;
+
+// 55-D8: the single child-creation seam. `max_depth` is REQUIRED (the caller
+// passes the resolved `presets.max_depth`; no second default lives here).
+struct ChildSpawnRequest {
+    SessionOptions                  options;  // cwd, kind=Subagent, parentSession, depth, preset
+    std::uint32_t                   parent_depth = 0;
+    std::uint32_t                   max_depth = 0;
+    std::optional<ChildComposition> composition;
+    std::optional<ChildRoute>       route;
+};
 
 class AgentRegistry {
 public:
@@ -40,6 +51,15 @@ public:
 
     std::expected<AgentId, AgentError> create(const SessionOptions& options);
     std::expected<AgentId, AgentError> resume(const SessionId& id);
+
+    // 55-D8: applies depth pre-flight, route/model/effort validation, atomic
+    // fan-out reservation, session create, agent registration + preset mount,
+    // `apply_child_composition`, and route application. Leaves NO child on any
+    // failure (compensating rollback).
+    [[nodiscard]] std::expected<AgentId, AgentError> createChild(const ChildSpawnRequest& request);
+
+    // 55-D7: the live delegated-child count for the fan-out cap.
+    [[nodiscard]] std::size_t liveSubagentCount() const noexcept;
 
     // 24-D14/24-D17: the only handle-producing accessors. Each locks mutex_
     // only long enough to copy the shared_ptr; the returned strong reference
@@ -92,6 +112,11 @@ public:
 private:
     std::expected<AgentId, AgentError> registerAgent(const SessionId& sessionId);
 
+    // 55-D7/55-I33: atomic admission reservation under `mutex_`, taken before
+    // `createSession` and released on success/rollback.
+    [[nodiscard]] bool reserveSubagentSlot();
+    void               releaseSubagentSlot() noexcept;
+
     std::unique_ptr<LLMPool>     poolStorage_;
     LLMPool*                     pool_ = nullptr;
     AgentServices                services_;
@@ -103,6 +128,8 @@ private:
     std::unordered_map<std::string, AgentId>                      bySession_;
     std::unordered_map<std::string, std::shared_ptr<AgentLoop>>   agents_;
     std::unordered_map<std::string, std::unique_ptr<SessionHandle>> leases_;
+    // 55-D7: reserved+registered live delegated children; guarded by mutex_.
+    std::size_t                                                   live_subagent_count_ = 0;
 };
 
 } // namespace ymh

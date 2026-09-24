@@ -41,6 +41,9 @@ struct JobOutcome {
     JobStatus                  status = JobStatus::Completed;
     std::optional<std::string> detail;
     std::optional<std::string> output;
+    // 55-A12: settlement-supplied notice text; `settle` copies it onto the
+    // settled snapshot so `deliver` can use it in place of the generic text.
+    std::optional<std::string> notice_text = std::nullopt;
 };
 
 // dsh types.d.ts:64-83.
@@ -62,6 +65,10 @@ struct JobSnapshot {
     std::int64_t               started_at = 0;
     std::optional<std::int64_t> finished_at;
     bool                       reported = false;
+    // 55-A12: the per-job notice correlation (`MessageSource::plugin`) and text
+    // override, copied from `JobStart` by `start` / from `JobOutcome` by `settle`.
+    std::optional<std::string> notice_plugin = std::nullopt;
+    std::optional<std::string> notice_text = std::nullopt;
 
     bool operator==(const JobSnapshot&) const = default;
 };
@@ -73,6 +80,10 @@ struct JobStart {
     std::optional<std::size_t> output_limit_bytes;
     std::optional<AgentId>     owner;
     std::function<JobHooks()>  run;
+    // 55-A12: the per-job notice source stamped onto the wakeup message, and the
+    // registration-time base text.
+    std::optional<std::string> notice_plugin = std::nullopt;
+    std::optional<std::string> notice_text = std::nullopt;
 };
 
 struct JobRead {
