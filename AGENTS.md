@@ -141,7 +141,22 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
   the compiler.
 - Each component spec must contain: C++ interface sketches, invariants,
   F#-tagged failure modes (F1–F12, §54), dsh mapping, and a test plan. Match the
-  style of `00-architecture.md`.
+  style of `00-architecture.md`. **Every non-mirror cell in the dsh-mapping
+  table carries its justification with a concrete anchor (56-D6).**
+- **Fidelity divergences carry a reason.** When a spec records a dsh (or other
+  reference) **non-mirror** — a capability deliberately not mirrored — it must
+  state *why* the divergence is acceptable (an architectural absence, an
+  unbuilt feature with its seam and missing consumer, or a deliberate scope
+  decision with a citation), not merely record that it is not mirrored.
+  "Recorded as not mirrored" is insufficient; the reason goes inline in the
+  dsh-mapping table's non-mirror cell **and cites a concrete anchor** — a
+  decision ID (`00` §55's omitted list, a `55-OQ-n`, a `52-D15`, …) or a
+  `file:line`. A cell whose reason restates the omission ("not in scope",
+  "coarser") or cites nothing is a finding, not a disposition: independent
+  review **must log it** and the spec **cannot be marked `verified`** while it
+  is open — the rule applies **before a spec is marked `verified`**. See
+  `56-dsh-fidelity-gap-closure-errata.md` §3 (56-D6) for the convention and
+  worked examples.
 - Work targets **one component at a time**.
 - **Commit when a coherent change is done** — build green, full suite green,
   warnings-as-errors clean. Keep commits atomic and scoped to one logical change,
