@@ -3,9 +3,11 @@
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <asio.hpp>
 
@@ -14,6 +16,7 @@
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/preset.hpp"
+#include "ymh/agent/provenance.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
@@ -433,6 +436,75 @@ TEST_F(WorkspaceRuntimeTest, WithoutExecutorPtyIsUnavailableAndToolAbsent) {
 
     EXPECT_FALSE(runtime.environment().pty().available());
     EXPECT_FALSE(runtime.tools().contains(ToolName{"terminal"}));
+}
+
+std::vector<std::string> settlement_plugins(const EventRange& events) {
+    std::vector<std::string> plugins;
+    for (const EventRecord& record : events) {
+        std::optional<MessageSource> source;
+        if (record.event.type == EventType::ContextInjected) {
+            source = record.event.payload.get<payload::ContextInjected>().source;
+        } else if (record.event.type == EventType::UserMessage) {
+            source = record.event.payload.get<payload::UserMessage>().source;
+        } else {
+            continue;
+        }
+        if (source.has_value() && source->plugin.rfind("subagent-settlement:", 0) == 0) {
+            plugins.push_back(source->plugin);
+        }
+    }
+    return plugins;
+}
+
+TEST_F(WorkspaceRuntimeTest, DaemonStartReplaysUnreportedSettlementExactlyOnce) {
+    TempWorkspace workspace("runtime_settlement_replay");
+    SessionId     parent;
+
+    {
+        std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+            make_workspace_runtime(options_for(workspace));
+        ASSERT_TRUE(created.has_value()) << created.error().detail;
+        WorkspaceRuntime& runtime = **created;
+
+        SessionOptions session_options;
+        session_options.cwd           = workspace.path();
+        session_options.serverProfile = "automation";
+        session_options.model         = "fake-model";
+        session_options.title         = "parent";
+        const std::expected<AgentId, AgentError> agent = runtime.agents().create(session_options);
+        ASSERT_TRUE(agent.has_value()) << agent.error().detail;
+        parent = runtime.agents().getShared(*agent)->session();
+
+        payload::SubagentFanIn fan_in;
+        fan_in.subagent        = SessionId{"child-1"};
+        fan_in.outcome         = payload::SubagentOutcome::Completed;
+        fan_in.summary         = "done";
+        fan_in.notice_expected = true;
+        runtime.sessions().sessionPtr(parent)->append(fan_in);
+
+        payload::SubagentFanIn foreground;
+        foreground.subagent        = SessionId{"child-2"};
+        foreground.outcome         = payload::SubagentOutcome::Completed;
+        foreground.notice_expected = false;
+        runtime.sessions().sessionPtr(parent)->append(foreground);
+    }
+
+    {
+        std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+            make_workspace_runtime(options_for(workspace));
+        ASSERT_TRUE(created.has_value()) << created.error().detail;
+        EXPECT_EQ(settlement_plugins((**created).store().read(parent)),
+                  (std::vector<std::string>{"subagent-settlement:child-1#1"}));
+    }
+
+    {
+        std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+            make_workspace_runtime(options_for(workspace));
+        ASSERT_TRUE(created.has_value()) << created.error().detail;
+        EXPECT_EQ(settlement_plugins((**created).store().read(parent)),
+                  (std::vector<std::string>{"subagent-settlement:child-1#1"}))
+            << "a second daemon start must not re-deliver";
+    }
 }
 
 } // namespace

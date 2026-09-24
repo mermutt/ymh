@@ -450,6 +450,7 @@ void HostRuntime::ensureAgent(const SessionId& id) {
     if (!resumed.has_value()) {
         throw_mapped(map_agent_error(resumed.error()));
     }
+    runtime_.replayUnreportedSettlements(id);
 }
 
 void HostRuntime::acquireLeaseOrThrow(const SessionId& id) {
@@ -817,6 +818,7 @@ protocol::SessionResumed HostRuntime::resumeSession(const SessionId& id) {
             throw_mapped(map_agent_error(resumed.error()));
         }
         acquireLeaseOrThrow(id);
+        runtime_.replayUnreportedSettlements(id);
         return protocol::SessionResumed{id, agentStatus(id)};
     });
 }

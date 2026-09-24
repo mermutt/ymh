@@ -581,6 +581,24 @@ TEST_F(HostRuntimeTest, ErrorTableMapsStoreAndRegistryRows) {
               protocol::code_value(protocol::AppCode::RegistryUnavailable));
 }
 
+std::vector<std::string> settlement_plugins(const EventRange& events) {
+    std::vector<std::string> plugins;
+    for (const EventRecord& record : events) {
+        std::optional<MessageSource> source;
+        if (record.event.type == EventType::ContextInjected) {
+            source = record.event.payload.get<payload::ContextInjected>().source;
+        } else if (record.event.type == EventType::UserMessage) {
+            source = record.event.payload.get<payload::UserMessage>().source;
+        } else {
+            continue;
+        }
+        if (source.has_value() && source->plugin.rfind("subagent-settlement:", 0) == 0) {
+            plugins.push_back(source->plugin);
+        }
+    }
+    return plugins;
+}
+
 TEST_F(HostRuntimeTest, CreateResumeForkDeleteWriteJunction) {
     Bridge bridge("hr_lifecycle");
 
@@ -602,6 +620,29 @@ TEST_F(HostRuntimeTest, CreateResumeForkDeleteWriteJunction) {
     bridge.host().deleteSession(forked.session);
     EXPECT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(), 1u);
     EXPECT_FALSE(bridge.host().sessionExists(forked.session));
+}
+
+TEST_F(HostRuntimeTest, ResumeReplaysUnreportedSettlementExactlyOnce) {
+    Bridge bridge("hr_settlement_replay");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_FALSE(created.session.value.empty());
+
+    payload::SubagentFanIn fan_in;
+    fan_in.subagent        = SessionId{"child-1"};
+    fan_in.outcome         = payload::SubagentOutcome::Completed;
+    fan_in.summary         = "done";
+    fan_in.notice_expected = true;
+    bridge.runtime().sessions().sessionPtr(created.session)->append(fan_in);
+
+    const protocol::SessionResumed resumed = bridge.host().resumeSession(created.session);
+    EXPECT_EQ(resumed.status, "Idle");
+    EXPECT_EQ(settlement_plugins(bridge.runtime().store().read(created.session)),
+              (std::vector<std::string>{"subagent-settlement:child-1#1"}));
+
+    (void)bridge.host().resumeSession(created.session);
+    EXPECT_EQ(settlement_plugins(bridge.runtime().store().read(created.session)),
+              (std::vector<std::string>{"subagent-settlement:child-1#1"}))
+        << "a second resume must not re-deliver";
 }
 
 // 25 review H1: a restarted daemon's controller memo is cold, but the durable
