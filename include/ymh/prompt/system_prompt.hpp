@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -31,7 +32,16 @@ using ScopeKey = std::string;
 struct AssembleContext {
     std::optional<ScopeKey> scope;
     CancellationToken*      signal = nullptr;
+    // 56-D2: the model-facing tool names visible in this assembly — the
+    // post-restriction, post-`tool_order` names of `PromptAssembly::tools`.
+    // `assemble()` points this at a local set for the section/context text
+    // pass. `nullptr` means "outside `assemble()`": tool-gated text MUST treat
+    // every tool as invisible (fail closed). Never retained past the call.
+    const std::set<std::string>* visible_tools = nullptr;
 };
+
+// 56-D2: the fail-closed membership test.
+[[nodiscard]] bool tool_visible(const AssembleContext& context, std::string_view name);
 
 struct PromptSection {
     std::string name;
