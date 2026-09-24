@@ -618,7 +618,9 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
                                            options.attach_permission_resolver, options.executor,
                                            std::move(options.mcp_client_factory),
                                            options.grant_store);
-        return std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
+        auto runtime = std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
+        runtime->replayUnreportedSettlements();
+        return runtime;
     } catch (const std::exception& build_error) {
         return std::unexpected(
             WorkspaceRuntimeError{WorkspaceRuntimeErrorCode::Internal, build_error.what()});
@@ -727,6 +729,53 @@ void WorkspaceRuntime::renewLeases() {
         return;
     }
     impl_->persistence_->renewLeases();
+}
+
+namespace {
+
+bool has_background_fanin(SessionStore& store, const SessionId& id) {
+    try {
+        for (const EventRecord& record : store.read(id)) {
+            if (record.event.type != EventType::SubagentFanIn) {
+                continue;
+            }
+            if (record.event.payload.get<payload::SubagentFanIn>().notice_expected) {
+                return true;
+            }
+        }
+    } catch (const std::exception&) {
+    }
+    return false;
+}
+
+} // namespace
+
+void WorkspaceRuntime::replayUnreportedSettlements(const SessionId& parent) {
+    try {
+        (void)acquireLease(parent);
+    } catch (const std::exception&) {
+        // Best effort: the append below throws `LeaseLost` and this pass is a
+        // no-op (at-least-once; the next resume/daemon start retries).
+    }
+    try {
+        impl_->subagent_service_->replayUnreportedSettlements(parent);
+    } catch (const std::exception&) {
+    }
+}
+
+void WorkspaceRuntime::replayUnreportedSettlements() {
+    std::vector<SessionHeader> headers;
+    try {
+        headers = impl_->store_->list();
+    } catch (const std::exception&) {
+        return;
+    }
+    for (const SessionHeader& header : headers) {
+        if (!has_background_fanin(*impl_->store_, header.id)) {
+            continue;
+        }
+        replayUnreportedSettlements(header.id);
+    }
 }
 
 } // namespace ymh

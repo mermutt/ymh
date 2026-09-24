@@ -216,6 +216,19 @@ public:
     bool releaseLease(const SessionId& id);
     void renewLeases();
 
+    // 55-D4 step 4: the durable settlement replay. `replayUnreportedSettlements(parent)`
+    // delivers the notices for one parent log (called on parent resume); the
+    // no-argument overload scans every stored session (called on daemon start).
+    // Exactly one correlated notice per unreported **background** `SubagentFanIn`
+    // (`notice_expected == true`); foreground fan-ins are never replayed. The
+    // ordinal is reconstructed from the log as `existing_count + 1`, matching the
+    // registration site. Idempotent — a delivered notice carries
+    // `subagent-settlement:<child>#<n>` in its source plugin and is its own
+    // durable marker. At-least-once: a crash between append and the next pass may
+    // re-deliver.
+    void replayUnreportedSettlements(const SessionId& parent);
+    void replayUnreportedSettlements();
+
 private:
     class Impl;
 

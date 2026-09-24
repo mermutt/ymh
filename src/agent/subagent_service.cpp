@@ -816,6 +816,9 @@ std::expected<SettlementResult, AgentError> SubagentService::settle(
 void SubagentService::replayUnreportedSettlements(const SessionId& parent) {
     std::shared_ptr<Session> session;
     try {
+        // On daemon start the parent is not resident yet: `sessionPtr` only
+        // returns loaded sessions, so load it (idempotent) before the scan.
+        impl_->sessions.resumeSession(parent);
         session = impl_->sessions.sessionPtr(parent);
     } catch (const std::exception&) {
         return;
