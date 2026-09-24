@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -25,6 +27,7 @@
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
+#include "ymh/permission/permission_broker.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -92,6 +95,25 @@ void render_tool_result(std::ostream& out, const payload::ToolResult& result) {
     out << '\n';
 }
 
+// The daemon resolves an `Ask` through a `PermissionBroker` over the socket; a
+// session with no Interactive subscriber (background or unattended work) fails
+// closed with `Deny{"no-subscribers"}` (src/permission/permission_broker.cpp).
+// The headless runner has no client at all, so it reuses that exact unattended
+// policy: the same broker over an inert transport whose subscriber count is
+// always zero. This replaces the agent loop's internal
+// "no permission resolver attached" fallback with the daemon's own typed
+// fail-closed decision. `attach_permission_resolver` stays false: the broker
+// has no prompt path, so a default-`Ask` tool (`skill`) must still not
+// advertise itself (20 §5.5).
+class HeadlessPermissionTransport final : public PermissionTransport {
+public:
+    bool broadcast_permission_request(protocol::PermissionRequest) override { return false; }
+
+    bool schedule_after(std::chrono::milliseconds, std::function<void()>) override {
+        return false;
+    }
+};
+
 } // namespace
 
 HeadlessResult run_headless(const HeadlessOptions& options) {
@@ -138,6 +160,20 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         return result;
     }
     std::unique_ptr<WorkspaceRuntime> runtime      = std::move(*runtime_result);
+
+    HeadlessPermissionTransport headless_transport;
+    PermissionBroker            headless_broker(runtime->policy(), headless_transport,
+                                                to_permission_config(options.config));
+    runtime->agents().set_permission_resolver(
+        [&headless_broker](const PermissionRequest& request,
+                           CancellationToken token) -> PermissionOutcome {
+            std::future<PermissionOutcome> outcome = headless_broker.resolve(request, token);
+            if (!outcome.valid()) {
+                return PermissionOutcome{payload::PermissionDecisionKind::Deny, "no-resolver"};
+            }
+            return outcome.get();
+        });
+
     AgentRegistry&                    registry     = runtime->agents();
     const AgentConfig&                agent_config = runtime->agent_config();
 

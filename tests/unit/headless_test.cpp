@@ -148,6 +148,112 @@ TEST_F(HeadlessTest, ExecutesToolCallAndPrintsActivity) {
     EXPECT_NE(out.str().find("file-body"), std::string::npos);
 }
 
+TEST_F(HeadlessTest, DelegationAskResolvesThroughTheHeadlessResolver) {
+    test::TempWorkspace workspace("headless_delegation_ask");
+    std::ostringstream out;
+    std::ostringstream err;
+
+    HeadlessOptions options;
+    options.workspace = workspace.path();
+    options.task      = "delegate the work";
+    options.out       = &out;
+    options.err       = &err;
+    // Default `Config{}` leaves `permissions.default == "ask"`, so the
+    // delegation tool is an Ask and must resolve through the headless
+    // resolver instead of the agent loop's internal fallback.
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        FakeScript script;
+        FakeResponseStep call;
+        call.tool_calls.push_back(FakeToolCallStep{
+            "subagent_continuable",
+            {{"description", "child task"}, {"prompt", "report 42"}},
+            std::nullopt});
+        call.finish = FinishReason::ToolCalls;
+        script.steps.push_back(std::move(call));
+        FakeResponseStep answer;
+        answer.text   = "done";
+        answer.finish = FinishReason::Stop;
+        script.steps.push_back(std::move(answer));
+        return std::make_unique<FakeLLM>(std::move(script));
+    };
+
+    const HeadlessResult result = run_headless(options);
+    ASSERT_EQ(result.exit_code, 0);
+    EXPECT_EQ(out.str().find("no permission resolver attached"), std::string::npos) << out.str();
+
+    PersistenceConfig read_config;
+    read_config.db_path   = workspace.path() / ".ymh" / "sessions.db";
+    read_config.lock_path = workspace.path() / ".ymh" / "sessions.lock";
+    read_config.boot_id   = BootId{"headless-delegation-reader"};
+    std::unique_ptr<SessionPersistence> store = SessionPersistence::openReadOnly(read_config);
+    ASSERT_NE(store, nullptr);
+
+    bool saw_decision    = false;
+    bool saw_denied_tool = false;
+    for (const EventRecord& record : store->read(result.session)) {
+        if (record.event.type == EventType::PermissionDecision) {
+            const auto& decision = record.event.payload.get<payload::PermissionDecision>();
+            EXPECT_EQ(decision.decision, payload::PermissionDecisionKind::Deny);
+            EXPECT_EQ(decision.reason, "no-subscribers")
+                << "headless must reuse the daemon's unattended fail-closed reason";
+            saw_decision = true;
+        } else if (record.event.type == EventType::ToolResult) {
+            const auto& tool_result = record.event.payload.get<payload::ToolResult>();
+            if (tool_result.name != "subagent_continuable") {
+                continue;
+            }
+            EXPECT_EQ(tool_result.outcome, payload::ToolOutcome::Denied);
+            EXPECT_NE(tool_result.output, "no permission resolver attached");
+            saw_denied_tool = true;
+        }
+    }
+    EXPECT_TRUE(saw_decision);
+    EXPECT_TRUE(saw_denied_tool);
+    store->close();
+}
+
+TEST_F(HeadlessTest, DelegationRunsWhenPolicyAllowsIt) {
+    test::TempWorkspace workspace("headless_delegation_allow");
+    std::ostringstream out;
+    std::ostringstream err;
+
+    Config config;
+    PermissionRuleSettings allow_delegation;
+    allow_delegation.tool   = "subagent";
+    allow_delegation.effect = "allow";
+    allow_delegation.id     = "test.subagent.allow";
+    config.permissions.rules.push_back(allow_delegation);
+
+    HeadlessOptions options;
+    options.workspace = workspace.path();
+    options.task      = "delegate the work";
+    options.config    = config;
+    options.out       = &out;
+    options.err       = &err;
+    options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        FakeScript script;
+        FakeResponseStep call;
+        call.tool_calls.push_back(FakeToolCallStep{
+            "subagent", {{"description", "child task"}, {"prompt", "report 42"}}, std::nullopt});
+        call.finish = FinishReason::ToolCalls;
+        script.steps.push_back(std::move(call));
+        FakeResponseStep child;
+        child.text   = "child says 42";
+        child.finish = FinishReason::Stop;
+        script.steps.push_back(std::move(child));
+        FakeResponseStep answer;
+        answer.text   = "parent done";
+        answer.finish = FinishReason::Stop;
+        script.steps.push_back(std::move(answer));
+        return std::make_unique<FakeLLM>(std::move(script));
+    };
+
+    const HeadlessResult result = run_headless(options);
+    ASSERT_EQ(result.exit_code, 0);
+    EXPECT_NE(out.str().find("child says 42"), std::string::npos) << out.str();
+    EXPECT_EQ(out.str().find("no permission resolver attached"), std::string::npos) << out.str();
+}
+
 TEST_F(HeadlessTest, ProviderFailureSetsNonZeroExit) {
     test::TempWorkspace workspace("headless_fail");
     std::ostringstream out;
