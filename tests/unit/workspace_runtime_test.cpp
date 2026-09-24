@@ -17,6 +17,7 @@
 #include "ymh/agent/context_assembler.hpp"
 #include "ymh/agent/preset.hpp"
 #include "ymh/agent/provenance.hpp"
+#include "ymh/agent/subagent_types.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event_bus.hpp"
@@ -505,6 +506,155 @@ TEST_F(WorkspaceRuntimeTest, DaemonStartReplaysUnreportedSettlementExactlyOnce) 
                   (std::vector<std::string>{"subagent-settlement:child-1#1"}))
             << "a second daemon start must not re-deliver";
     }
+}
+
+std::string system_text_of(const std::vector<Message>& messages) {
+    if (messages.empty() || messages.front().role != Role::System) {
+        return {};
+    }
+    std::string text;
+    for (const ContentBlock& block : messages.front().content) {
+        text += block.text;
+    }
+    return text;
+}
+
+// 56-U10
+TEST_F(WorkspaceRuntimeTest, DefaultCompositionRendersContinuableGuidance) {
+    TempWorkspace workspace("runtime_guidance_default");
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(options_for(workspace));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    EXPECT_TRUE(runtime.tools().contains(ToolName{"subagent_continuable"}));
+    EXPECT_TRUE(runtime.tools().contains(ToolName{"subagent"}));
+
+    SessionOptions session_options;
+    session_options.cwd           = workspace.path();
+    session_options.serverProfile = "automation";
+    session_options.model         = "fake-model";
+    const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+    auto session = runtime.sessions().sessionPtr(runtime.agents().getShared(*created)->session());
+
+    const std::string text =
+        system_text_of(runtime.context().assemble(*session, TurnContext{}));
+    const std::string continuable = delegation_guidance_text("subagent_continuable");
+    const std::string one_shot    = delegation_guidance_text("subagent");
+    const std::size_t first       = text.find(continuable);
+    EXPECT_NE(first, std::string::npos);
+    EXPECT_EQ(text.find(continuable, first + 1), std::string::npos);
+    EXPECT_EQ(text.find(one_shot), std::string::npos);
+
+    runtime.agents().dispose(*created);
+}
+
+// 56-U12
+TEST_F(WorkspaceRuntimeTest, PresetToolFilterSuppressesGuidanceAndToolsTogether) {
+    TempWorkspace              workspace("runtime_guidance_child_scope");
+    const std::filesystem::path presets = workspace.path() / "presets";
+    write_preset_file(presets, "minimal",
+                      R"JSON({
+                        "id": "minimal",
+                        "display_name": "Minimal",
+                        "rows": [
+                          {"id": "persona", "persona": {
+                            "prefix": "MINIMAL-PERSONA-SENTINEL",
+                            "complete": true,
+                            "include_runtime_context": false}},
+                          {"id": "shell", "tools": {"allow": ["shell"]}}
+                        ]
+                      })JSON");
+    write_preset_file(presets, "standard",
+                      R"JSON({
+                        "id": "standard",
+                        "display_name": "Standard",
+                        "rows": [
+                          {"id": "persona", "persona": {
+                            "prefix": "STANDARD-PERSONA-SENTINEL",
+                            "include_runtime_context": false}}
+                        ]
+                      })JSON");
+
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.config.presets.root                 = presets;
+    options.config.presets.include_shipped_root = false;
+    options.config.presets.include_user_root    = false;
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    struct Rendered {
+        std::string              system_text;
+        std::vector<std::string> tool_names;
+    };
+    const auto render = [&](const std::string& preset) -> Rendered {
+        SessionOptions session_options;
+        session_options.cwd           = workspace.path();
+        session_options.serverProfile = "automation";
+        session_options.model         = "fake-model";
+        session_options.agent_preset  = preset;
+        const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+        EXPECT_TRUE(created.has_value()) << created.error().detail;
+        std::shared_ptr<AgentLoop> agent = runtime.agents().getShared(*created);
+        const std::optional<ScopeKey> scope = runtime.presets().scope_for(agent->id());
+        EXPECT_TRUE(scope.has_value());
+        auto session = runtime.sessions().sessionPtr(agent->session());
+
+        TurnContext turn;
+        turn.scope = scope;
+        Rendered result;
+        result.system_text = system_text_of(runtime.context().assemble(*session, turn));
+        for (const ToolSchema& tool : runtime.context().tools(scope)) {
+            result.tool_names.push_back(tool.name.value);
+        }
+        runtime.agents().dispose(*created);
+        return result;
+    };
+
+    const Rendered minimal  = render("minimal");
+    const Rendered standard = render("standard");
+
+    const std::string guidance = delegation_guidance_text("subagent_continuable");
+    EXPECT_NE(standard.system_text.find(guidance), std::string::npos);
+    EXPECT_EQ(minimal.system_text.find(guidance), std::string::npos);
+
+    EXPECT_NE(std::find(standard.tool_names.begin(), standard.tool_names.end(),
+                        "subagent_continuable"),
+              standard.tool_names.end());
+    EXPECT_EQ(std::find(minimal.tool_names.begin(), minimal.tool_names.end(),
+                        "subagent_continuable"),
+              minimal.tool_names.end());
+}
+
+// 56-U13
+TEST_F(WorkspaceRuntimeTest, DepthCapDoesNotSuppressGuidance) {
+    TempWorkspace workspace("runtime_guidance_depth_cap");
+    WorkspaceRuntimeOptions options = options_for(workspace);
+    options.config.presets.max_depth = 0;
+
+    std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =
+        make_workspace_runtime(std::move(options));
+    ASSERT_TRUE(runtime_result.has_value()) << runtime_result.error().detail;
+    WorkspaceRuntime& runtime = **runtime_result;
+
+    EXPECT_TRUE(runtime.tools().contains(ToolName{"subagent_continuable"}));
+
+    SessionOptions session_options;
+    session_options.cwd           = workspace.path();
+    session_options.serverProfile = "automation";
+    session_options.model         = "fake-model";
+    const std::expected<AgentId, AgentError> created = runtime.agents().create(session_options);
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+    auto session = runtime.sessions().sessionPtr(runtime.agents().getShared(*created)->session());
+
+    const std::string text = system_text_of(runtime.context().assemble(*session, TurnContext{}));
+    EXPECT_NE(text.find(delegation_guidance_text("subagent_continuable")), std::string::npos);
+
+    runtime.agents().dispose(*created);
 }
 
 } // namespace

@@ -457,6 +457,7 @@ add_library(ymh_agent STATIC
     src/agent/repeat_tool_reminder.cpp
     src/agent/subagent.cpp
     src/agent/subagent_service.cpp
+    src/agent/subagent_types.cpp
     src/agent/tool_result_pruner.cpp
     src/commands/command_registry.cpp
     src/commands/goal_command.cpp

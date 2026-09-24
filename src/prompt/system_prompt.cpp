@@ -378,6 +378,11 @@ std::vector<const SystemPrompt::ScopeLayer*> SystemPrompt::scope_chain(
     return reverse_chain;
 }
 
+bool tool_visible(const AssembleContext& context, std::string_view name) {
+    return context.visible_tools != nullptr &&
+           context.visible_tools->contains(std::string{name});
+}
+
 PromptAssembly SystemPrompt::assemble(const AssembleContext& context) const {
     PromptAssembly assembly;
 
@@ -408,6 +413,72 @@ PromptAssembly SystemPrompt::assemble(const AssembleContext& context) const {
         }
     }
 
+    std::vector<ToolSchema> provider_tools;
+    if (tool_provider_) {
+        provider_tools = tool_provider_(context);
+    }
+    for (const ScopeLayer* layer : chain) {
+        if (layer->tool_filter) {
+            provider_tools = layer->tool_filter(std::move(provider_tools));
+        }
+    }
+    std::sort(provider_tools.begin(), provider_tools.end(),
+              [](const ToolSchema& left, const ToolSchema& right) {
+                  return left.name.value < right.name.value;
+              });
+
+    assembly.tool_order = tool_order_;
+    if (tool_order_.empty()) {
+        assembly.tools = std::move(provider_tools);
+    } else {
+        std::set<std::string> named;
+        std::size_t           rest_count = 0;
+        for (const std::string& entry : tool_order_) {
+            if (entry == kUnlistedTools) {
+                ++rest_count;
+                continue;
+            }
+            if (!named.insert(entry).second) {
+                throw ConfigError("duplicate tool_order entry '" + entry + "'");
+            }
+            const bool known =
+                std::any_of(provider_tools.begin(), provider_tools.end(),
+                            [&entry](const ToolSchema& schema) {
+                                return schema.name.value == entry;
+                            });
+            if (!known) {
+                throw ConfigError("unknown tool_order entry '" + entry + "'");
+            }
+        }
+        if (rest_count != 1) {
+            throw ConfigError("tool_order must contain <unlisted-tools> exactly once");
+        }
+
+        for (const std::string& entry : tool_order_) {
+            if (entry == kUnlistedTools) {
+                for (const ToolSchema& schema : provider_tools) {
+                    if (named.count(schema.name.value) == 0) {
+                        assembly.tools.push_back(schema);
+                    }
+                }
+                continue;
+            }
+            for (const ToolSchema& schema : provider_tools) {
+                if (schema.name.value == entry) {
+                    assembly.tools.push_back(schema);
+                    break;
+                }
+            }
+        }
+    }
+
+    std::set<std::string> visible;
+    for (const ToolSchema& schema : assembly.tools) {
+        visible.insert(schema.name.value);
+    }
+    AssembleContext gated = context;
+    gated.visible_tools   = &visible;
+
     std::vector<const PromptSection*> ordered_sections;
     ordered_sections.reserve(merged_sections.size());
     for (const auto& [name, section] : merged_sections) {
@@ -425,7 +496,7 @@ PromptAssembly SystemPrompt::assemble(const AssembleContext& context) const {
     std::vector<AssembledSection> effective;
     effective.reserve(ordered_sections.size());
     for (const PromptSection* section : ordered_sections) {
-        std::string text = section->text ? section->text(context) : std::string{};
+        std::string text = section->text ? section->text(gated) : std::string{};
         if (text.empty()) {
             continue;
         }
@@ -466,7 +537,7 @@ PromptAssembly SystemPrompt::assemble(const AssembleContext& context) const {
               });
     for (const PromptContext* prompt_context : ordered_contexts) {
         std::string text =
-            prompt_context->text ? prompt_context->text(context) : std::string{};
+            prompt_context->text ? prompt_context->text(gated) : std::string{};
         if (text.empty()) {
             continue;
         }
@@ -479,68 +550,11 @@ PromptAssembly SystemPrompt::assemble(const AssembleContext& context) const {
     for (const auto& [name, provider] : merged_variables) {
         std::optional<std::string> value;
         if (provider != nullptr && *provider) {
-            value = (*provider)(context);
+            value = (*provider)(gated);
         }
         assembly.variables.emplace(name, std::move(value));
     }
 
-    std::vector<ToolSchema> provider_tools;
-    if (tool_provider_) {
-        provider_tools = tool_provider_(context);
-    }
-    for (const ScopeLayer* layer : chain) {
-        if (layer->tool_filter) {
-            provider_tools = layer->tool_filter(std::move(provider_tools));
-        }
-    }
-    std::sort(provider_tools.begin(), provider_tools.end(),
-              [](const ToolSchema& left, const ToolSchema& right) {
-                  return left.name.value < right.name.value;
-              });
-
-    assembly.tool_order = tool_order_;
-    if (tool_order_.empty()) {
-        assembly.tools = std::move(provider_tools);
-        return assembly;
-    }
-
-    std::set<std::string> named;
-    std::size_t           rest_count = 0;
-    for (const std::string& entry : tool_order_) {
-        if (entry == kUnlistedTools) {
-            ++rest_count;
-            continue;
-        }
-        if (!named.insert(entry).second) {
-            throw ConfigError("duplicate tool_order entry '" + entry + "'");
-        }
-        const bool known =
-            std::any_of(provider_tools.begin(), provider_tools.end(),
-                        [&entry](const ToolSchema& schema) { return schema.name.value == entry; });
-        if (!known) {
-            throw ConfigError("unknown tool_order entry '" + entry + "'");
-        }
-    }
-    if (rest_count != 1) {
-        throw ConfigError("tool_order must contain <unlisted-tools> exactly once");
-    }
-
-    for (const std::string& entry : tool_order_) {
-        if (entry == kUnlistedTools) {
-            for (const ToolSchema& schema : provider_tools) {
-                if (named.count(schema.name.value) == 0) {
-                    assembly.tools.push_back(schema);
-                }
-            }
-            continue;
-        }
-        for (const ToolSchema& schema : provider_tools) {
-            if (schema.name.value == entry) {
-                assembly.tools.push_back(schema);
-                break;
-            }
-        }
-    }
     return assembly;
 }
 

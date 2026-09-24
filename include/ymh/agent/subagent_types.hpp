@@ -73,4 +73,7 @@ struct DelegationToolConfig {
     std::optional<ToolRestriction> tool_filter;
 };
 
+// 56-D1: the verbatim dsh `tool:<toolName>` guidance, `{tool}` = `tool_name`.
+[[nodiscard]] std::string delegation_guidance_text(std::string_view tool_name);
+
 } // namespace ymh

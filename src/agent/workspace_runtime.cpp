@@ -37,6 +37,7 @@
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/prompt/instructions.hpp"
+#include "ymh/prompt/order.hpp"
 #include "ymh/prompt/persona.hpp"
 #include "ymh/prompt/runtime_context.hpp"
 #include "ymh/prompt/system_prompt.hpp"
@@ -435,8 +436,29 @@ public:
         continuable.tool_name       = "subagent_continuable";
         continuable.background_mode = DelegationToolConfig::BackgroundMode::Continuable;
         continuable.model_selection = true;
+
+        // 56-D1/D4: capture the section identity before the by-value move into
+        // make_subagent_tool; the moved-from config's tool_name is empty.
+        const std::string tool_name = continuable.tool_name;
+        const bool        guidance_enabled =
+            continuable.enable_run_in_background &&
+            continuable.background_mode == DelegationToolConfig::BackgroundMode::Continuable;
+
         registrations_.push_back(tools_.add(make_subagent_tool(
             *subagent_service_, SubagentCallerResolver{}, std::move(continuable))));
+
+        if (guidance_enabled) {
+            PromptSection guidance;
+            guidance.name  = "tool:" + tool_name;
+            guidance.order = section_order("TOOL_SUBAGENT");
+            guidance.text  = [tool = tool_name](const AssembleContext& context) {
+                if (!tool_visible(context, tool)) {
+                    return std::string{};
+                }
+                return delegation_guidance_text(tool);
+            };
+            delegation_guidance_.push_back(prompt_.section(std::move(guidance)));
+        }
 
         registrations_.push_back(
             tools_.add(make_send_message_tool(*subagent_service_, SubagentCallerResolver{})));
@@ -509,6 +531,7 @@ public:
     AgentConfig                        agent_config_;
     SystemPrompt                       prompt_;
     DefaultPromptHandles               default_prompt_;
+    std::vector<SectionHandle>         delegation_guidance_;
     ContextHandle                      runtime_context_;
     std::unique_ptr<InstructionLoader> instructions_;
     SessionContextAssembler            assembler_;
