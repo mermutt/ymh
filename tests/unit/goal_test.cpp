@@ -57,6 +57,7 @@ public:
     void cancel() override {}
     void dispose() override {}
     void whenIdle(std::function<void()>) override {}
+    void onSettled(std::function<void()>) override {}
 
     Message      last;
     int          followups      = 0;

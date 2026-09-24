@@ -246,6 +246,7 @@ void AgentLoop::activate() {
     if (state_ != AgentState::Error) {
         state_ = AgentState::Idle;
     }
+    flushSettleCallbacks();
     flushIdleCallbacks();
 }
 
@@ -332,6 +333,7 @@ void AgentLoop::dispose() {
         }
         inbox_.clear();
         pending_maintenance_failure_ = false;
+        settle_callbacks_.clear();
     }
     state_   = AgentState::Idle;
     running_ = false;
@@ -365,6 +367,43 @@ void AgentLoop::flushIdleCallbacks() {
         }
         callbacks = std::move(idle_callbacks_);
         idle_callbacks_.clear();
+    }
+    for (auto& callback : callbacks) {
+        callback();
+    }
+}
+
+void AgentLoop::onSettled(std::function<void()> callback) {
+    if (!callback) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (disposed_) {
+        return;
+    }
+    settle_callbacks_.emplace_back(settle_generation_, std::move(callback));
+}
+
+void AgentLoop::noteTerminal() {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    ++settle_generation_;
+}
+
+void AgentLoop::flushSettleCallbacks() {
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (running_ || hasTurnTriggerLocked() || turnInFlight()) {
+            return;
+        }
+        for (auto it = settle_callbacks_.begin(); it != settle_callbacks_.end();) {
+            if (it->first < settle_generation_) {
+                callbacks.push_back(std::move(it->second));
+                it = settle_callbacks_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     for (auto& callback : callbacks) {
         callback();
@@ -472,6 +511,7 @@ void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string m
     failed.message = std::move(message);
     session_.append(failed);
     state_ = AgentState::Error;
+    noteTerminal();
 }
 
 CompactionOutcome AgentLoop::commitCompactionResult(const CompactionResult& result, TurnId turn) {
@@ -911,6 +951,7 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
         }
         session_.append(payload::TurnCancelled{turn, reason});
         state_ = AgentState::Idle;
+        noteTerminal();
         return;
     }
     if (outcome == CompactionOutcome::Failed) {
@@ -918,8 +959,9 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
         return;
     }
     session_.append(payload::StepEnded{turn, step});
-    session_.append(payload::TurnEnded{turn});
+    session_.append(payload::TurnEnded{turn, std::nullopt});
     state_ = AgentState::Idle;
+    noteTerminal();
 }
 
 void AgentLoop::runTurn() {
@@ -1175,6 +1217,7 @@ void AgentLoop::runTurn() {
         if (response.outcome == StreamOutcome::Cancelled) {
             session_.append(payload::TurnCancelled{turn, cancelReason});
             state_ = AgentState::Idle;
+            noteTerminal();
             return;
         }
         if (response.outcome == StreamOutcome::Failed) {
@@ -1190,8 +1233,9 @@ void AgentLoop::runTurn() {
                 session_.append(payload::TokenUsage{*usage, turn});
             }
             session_.append(payload::StepEnded{turn, step});
-            session_.append(payload::TurnEnded{turn});
+            session_.append(payload::TurnEnded{turn, response.finish});
             state_ = AgentState::Idle;
+            noteTerminal();
             return;
         }
 

@@ -365,9 +365,13 @@ Task<LLMResponse> LlmRuntime::stream(const FrozenRequest& request,
     return next(request, std::move(sink), cancel);
 }
 
+void LlmRuntime::preflight_route(const LlmCallConfig& config) const {
+    RetryPolicy retry;
+    (void)resolve_adapter(config, retry);
+}
+
 std::shared_ptr<LLMProvider> LlmRuntime::resolve_adapter(const LlmCallConfig& config,
-                                                         RetryPolicy& out_retry) const {
-    if (!config.endpoint.empty()) {
+                                                         RetryPolicy& out_retry) const {    if (!config.endpoint.empty()) {
         const RouteKey wanted{RouteKind::Endpoint, config.endpoint, config.profile_id};
         {
             std::lock_guard<std::mutex> lock(mutex_);

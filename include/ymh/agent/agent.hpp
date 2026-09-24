@@ -151,6 +151,10 @@ public:
     virtual void cancel() = 0;
     virtual void dispose() = 0;
     virtual void whenIdle(std::function<void()>) = 0;
+    // 55-A8/55-D10: register a one-shot settlement callback. It fires exactly
+    // once and is ALWAYS posted/deferred (never synchronously inside this call,
+    // even when the agent is idle). A disposed agent never fires it.
+    virtual void onSettled(std::function<void()> callback) = 0;
 };
 
 } // namespace ymh

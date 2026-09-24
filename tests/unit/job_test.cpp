@@ -53,6 +53,7 @@ public:
     void cancel() override {}
     void dispose() override {}
     void whenIdle(std::function<void()>) override {}
+    void onSettled(std::function<void()>) override {}
 
     AgentStatus   agent_status    = AgentStatus::Idle;
     bool          pending         = false;

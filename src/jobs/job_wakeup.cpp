@@ -21,7 +21,7 @@ std::string notice_text(const JobSnapshot& snapshot) {
     return text;
 }
 
-Message wake_message(const std::string& text) {
+Message wake_message(const JobSnapshot& snapshot, const std::string& text) {
     Message message;
     message.role    = Role::User;
     ContentBlock block;
@@ -29,15 +29,21 @@ Message wake_message(const std::string& text) {
     block.text = text;
     message.content = {std::move(block)};
     message.source  = message_source(MessageSource::Kind::Plugin);
+    if (snapshot.notice_plugin.has_value()) {
+        message.source->plugin = *snapshot.notice_plugin;
+    }
     message.context = ContextFormed{ContextForm::Notice, {}, text};
     return message;
 }
 
-ContextMessage inject_message(const std::string& text) {
+ContextMessage inject_message(const JobSnapshot& snapshot, const std::string& text) {
     ContextMessage message;
     message.role    = Role::System;
     message.text    = text;
     message.source  = message_source(MessageSource::Kind::Plugin);
+    if (snapshot.notice_plugin.has_value()) {
+        message.source.plugin = *snapshot.notice_plugin;
+    }
     message.context = ContextFormed{ContextForm::Notice, {}, text};
     return message;
 }
@@ -121,22 +127,24 @@ void JobWakeupPolicy::on_message(const Event& event) {
 }
 
 void JobWakeupPolicy::deliver(const JobSnapshot& snapshot, Agent& owner) {
-    const std::string text = notice_text(snapshot);
+    const std::string text =
+        snapshot.notice_text.has_value() ? *snapshot.notice_text : notice_text(snapshot);
     if (busy(owner)) {
-        owner.inject(inject_message(text));
+        owner.inject(inject_message(snapshot, text));
         return;
     }
-    if (config_.delivery == CompletionDelivery::Quiet) {
+    if (config_.delivery == CompletionDelivery::Quiet &&
+        !snapshot.notice_plugin.has_value()) {
         return;
     }
     const std::string key = owner.id().value;
     const std::size_t wakes = consecutive_wakes(owner.id());
     if (wakes >= config_.max_consecutive_wakes) {
-        owner.inject(inject_message(text));
+        owner.inject(inject_message(snapshot, text));
         return;
     }
-    if (owner.followup(wake_message(text)) != InboxResult::Accepted) {
-        owner.inject(inject_message(text));
+    if (owner.followup(wake_message(snapshot, text)) != InboxResult::Accepted) {
+        owner.inject(inject_message(snapshot, text));
         return;
     }
     wakes_[key] = wakes + 1;

@@ -319,10 +319,22 @@ void from_json(const nlohmann::json& json, TurnStarted& value) {
 
 void to_json(nlohmann::json& json, const TurnEnded& value) {
     json = nlohmann::json{{"turn", value.turn}};
+    if (value.finish_reason.has_value() && *value.finish_reason != FinishReason::Stop) {
+        json["finish_reason"] = std::string{to_string(*value.finish_reason)};
+    }
 }
 
 void from_json(const nlohmann::json& json, TurnEnded& value) {
     value.turn = json.at("turn").get<TurnId>();
+    if (json.contains("finish_reason") && !json.at("finish_reason").is_null()) {
+        const auto reason = parse_finish_reason(json.at("finish_reason").get<std::string>());
+        if (!reason.has_value()) {
+            reject_enum("finish reason", json.at("finish_reason").get<std::string>());
+        }
+        value.finish_reason = *reason;
+    } else {
+        value.finish_reason = std::nullopt;
+    }
 }
 
 void to_json(nlohmann::json& json, const TurnCancelled& value) {
@@ -638,12 +650,16 @@ void to_json(nlohmann::json& json, const SubagentFanIn& value) {
         {"outcome", std::string{subagent_outcome_name(value.outcome)}},
         {"summary", value.summary},
     };
+    if (value.notice_expected) {
+        json["notice_expected"] = true;
+    }
 }
 
 void from_json(const nlohmann::json& json, SubagentFanIn& value) {
     value.subagent.value = json.at("subagent").get<std::string>();
     value.outcome        = parse_subagent_outcome(json.at("outcome").get<std::string>());
     value.summary        = json.value("summary", std::string{});
+    value.notice_expected = json.value("notice_expected", false);
 }
 
 void to_json(nlohmann::json& json, const SessionRenamed& value) {

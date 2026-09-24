@@ -44,8 +44,13 @@ class ModelSelectionController {
 public:
     using AppendFn = std::function<void(const SessionId&, payload::SessionModelChanged)>;
     using ResolveFn = std::function<std::optional<ModelSelection>(const std::string& wire_id)>;
+    // 55-A7/55-H4: rebuilds the route from the persisted (endpoint, profile_id)
+    // pair, so a literal wire id shared by two endpoints cannot rebind wrongly.
+    using RouteResolveFn = std::function<std::optional<ModelSelection>(
+        const std::string& endpoint, const std::string& profile_id, const std::string& wire_id)>;
 
-    ModelSelectionController(AppendFn append, ResolveFn resolve);
+    ModelSelectionController(AppendFn append, ResolveFn resolve,
+                             RouteResolveFn resolve_route = nullptr);
 
     ModelSetResult set(const Session& session, bool turn_open, ModelSelection selection);
 
@@ -76,6 +81,7 @@ private:
 
     AppendFn                            append_;
     ResolveFn                           resolve_;
+    RouteResolveFn                      resolve_route_;
     mutable std::mutex                  mutex_;
     std::mutex                          commit_mutex_;
     std::map<SessionId, ModelSelection> pending_;

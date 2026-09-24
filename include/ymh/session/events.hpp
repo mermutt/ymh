@@ -23,6 +23,7 @@
 #include "ymh/jobs/job_types.hpp"
 #include "ymh/llm/assistant_stream.hpp"
 #include "ymh/llm/llm_call_config.hpp"
+#include "ymh/llm/stream.hpp"
 #include "ymh/session/ids.hpp"
 
 namespace ymh {
@@ -66,6 +67,9 @@ struct TurnStarted {
 
 struct TurnEnded {
     TurnId turn = 0;
+    // 55-A13: additive persisted finish reason (omitted when Stop); lets the
+    // 55-D9 token-limit/refusal stop-reason rows be derived from the log.
+    std::optional<FinishReason> finish_reason = std::nullopt;
 };
 
 struct TurnCancelled {
@@ -225,6 +229,9 @@ struct SubagentFanIn {
     SessionId       subagent;
     SubagentOutcome outcome = SubagentOutcome::Completed;
     std::string     summary;
+    // 55-A11: true iff the epoch was background-registered (any non-foreground
+    // epoch, including one opened by send_message); the replay rule filters on it.
+    bool            notice_expected = false;
 };
 
 // ---- rename (19 §5.1) ------------------------------------------------------
