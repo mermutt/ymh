@@ -1,7 +1,7 @@
 # 55 — Multi-Agent Delegation (errata)
 
-Status: **draft (Rev 6)** — NOT verified. No implementation may begin until this
-spec is independently gated (AGENTS.md "The rule"). It is an **errata**: it
+Status: **verified (Rev 6)** — the five-reviewer gate PASSED (0 open HIGH / 0
+MEDIUM); implementation may begin (AGENTS.md "The rule"). It is an **errata**: it
 amends `06` §7 and §4, `42` §3.3–§3.5, `44` §3.3 and §5.5 (jobs), `54` §3–§5,
 `01`/`37` (provenance, the subagent `SubagentFanIn` event, and the persisted
 `finish_reason`), `02` (`SessionOptions`/header), `28` (`LlmRuntime` route
