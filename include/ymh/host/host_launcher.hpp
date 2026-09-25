@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,8 +54,14 @@ public:
     // SIGTERM. Explicit supervisor-driven stop, never orphan reaping (H11).
     virtual void requestStop(HostPid pid, ShutdownReason reason) = 0;
 
-    // True iff kill(pid, 0) does not report ESRCH. A hint only (03 §6.3).
+    // True iff kill(pid, 0) does not report ESRCH. A hint only (03 §6.3): a
+    // zombie still satisfies it, so never use it alone to detect an exit.
     [[nodiscard]] virtual bool isAlive(HostPid pid) const = 0;
+
+    // Reaps a spawned child that has already exited; returns WEXITSTATUS (or
+    // 128+signal), else `nullopt` while it runs or when the pid is not this
+    // process's child (an injected fake). The authoritative early-exit signal.
+    [[nodiscard]] virtual std::optional<int> tryReap(HostPid /*pid*/) { return std::nullopt; }
 };
 
 // Real launcher: fork + setsid + open log sink + dup2 + execve the absolute
@@ -68,6 +75,7 @@ public:
     SpawnResult spawn(const HostConfig& config) override;
     void        requestStop(HostPid pid, ShutdownReason reason) override;
     [[nodiscard]] bool isAlive(HostPid pid) const override;
+    [[nodiscard]] std::optional<int> tryReap(HostPid pid) override;
 
     void setExecutable(std::filesystem::path executable) {
         executable_ = std::move(executable);
