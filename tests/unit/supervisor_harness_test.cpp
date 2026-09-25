@@ -1707,17 +1707,41 @@ TEST(SupervisorHarnessTest, UI46_D7_ResumeInFlightBeatsListReply) {
               resumed);
 }
 
-// 46-D7.1: a live session is still focused directly on attach.
-TEST(SupervisorHarnessTest, UI46_D7_LiveSessionStillFocused) {
-    D7Fixture     fixture("ymh46d7live");
+// 50-D2.1 / 50-I7: a fresh launch always creates. A pre-existing live session is
+// never auto-focused; opening one is explicit only (`/sessions`, Ctrl-S,
+// `--resume`). This supersedes the old 46-D7.1 auto-focus assertion.
+TEST(SupervisorHarnessTest, UI50_D2_FreshAttachDoesNotFocusLiveSession) {
+    D7Fixture     fixture("ymh50d2live");
     const SessionId live{"live-session"};
+    fixture.harness->drop_connection(fixture.workspace);
     fixture.harness->install_session_list_reply(stored_session_list(live, true), 0);
 
     fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
     drain_fully(*fixture.harness);
 
-    EXPECT_EQ(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(), live);
-    ASSERT_NE(fixture.harness->model().session(live), nullptr);
+    EXPECT_NE(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(), live)
+        << "a fresh attach auto-focused a pre-existing live session";
+}
+
+// 50-D2.1: fresh attach with exactly one live session creates a NEW session (a
+// `session.create` is submitted) instead of focusing the live one. The dropped
+// connection makes the create reply synchronously, so the attempt is observable
+// without a daemon.
+TEST(SupervisorHarnessTest, UI50_D2_FreshAttachWithLiveSessionCreatesNew) {
+    D7Fixture     fixture("ymh50d2createnew");
+    const SessionId live{"live-session"};
+    fixture.harness->drop_connection(fixture.workspace);
+    fixture.harness->install_session_list_reply(stored_session_list(live, true), 0);
+
+    fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
+    drain_fully(*fixture.harness);
+
+    EXPECT_EQ(fixture.harness->submitted_count(std::string(protocol::method::kSessionCreate)), 1u)
+        << "a fresh attach with one live session did not create a new session";
+    EXPECT_NE(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(), live)
+        << "the pre-existing live session was focused";
+    EXPECT_TRUE(has_notice(*fixture.harness, "cannot create session"))
+        << "the create was not attempted through the spec path";
 }
 
 // 46-F9: a failed `session.create` on a fresh launch surfaces the create notice.

@@ -1670,9 +1670,10 @@ private:
     // entries become cells and are subscribed. The focus/create decision is
     // scoped to the user's ACTIVE workspace: a background workspace is only
     // observed (its live sessions render as leaves) and never steals focus. A
-    // fresh launch with no live session creates a clean, empty session (46-D7);
-    // the reply is gated while a resume is in flight so a list reply that lands
-    // between a resume submit and its reply can never create a stray session.
+    // fresh launch always creates a clean, empty session (46-D7 / 50-D2.1), even
+    // when a live session exists; the reply is gated while a resume is in flight
+    // so a list reply that lands between a resume submit and its reply can never
+    // create a stray session.
     void refresh_sessions(const WorkspaceId& workspace) {
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
@@ -1716,16 +1717,20 @@ private:
                     if (it->second.activeSessionId().value.empty() &&
                         model_.activeWorkspaceId == workspace &&
                         resume_in_flight_.count(workspace) == 0) {
-                        if (!live.empty()) {
-                            // A live session can be focused directly.
-                            activate_session(workspace, live.front().first);
-                            // 25 review M3: plain attach must refresh the context.
-                            refresh_status_context(workspace, live.front().first);
-                        } else {
-                            // Attach (existing daemon) and spawn paths both
-                            // converge here, so auto-create the first session.
-                            create_session(workspace, std::string{});
-                        }
+                        // 50-D2.1: a fresh launch always creates. The condition
+                        // reaching this branch (active workspace, no active
+                        // session, no resume in flight) is precisely the
+                        // fresh-launch/reconnect case, so never auto-focus a
+                        // pre-existing live session. Opening an existing session
+                        // is explicit only (`/sessions`, Ctrl-S, `--resume <id>`).
+                        // A reconnect has a non-empty `activeSessionId` and never
+                        // reaches this branch, so no spurious sessions appear
+                        // (50-I10). The created session's context is refreshed by
+                        // `apply_create_reply`, so the removed plain-attach
+                        // `refresh_status_context` (25 review M3) is superseded.
+                        // Attach (existing daemon) and spawn paths both converge
+                        // here, so auto-create the first session.
+                        create_session(workspace, std::string{});
                     }
                 });
             });
