@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -67,6 +69,39 @@ FakeResponseStep text_step(std::string text) {
     step.finish = FinishReason::Stop;
     return step;
 }
+
+class RecordingProvider final : public LLMProvider {
+public:
+    explicit RecordingProvider(FakeScript script) : fake_(std::move(script)) {}
+
+    ProviderId id() const override { return "recording"; }
+    ProviderCapabilities capabilities() const override { return fake_.capabilities(); }
+    std::vector<ModelInfo> models() const override { return fake_.models(); }
+
+    Task<LLMResponse> stream(const LLMRequest& request, StreamSink sink,
+                             CancellationToken cancel) override {
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+        return fake_.stream(request, std::move(sink), cancel);
+    }
+
+    std::size_t count() const {
+        std::lock_guard lock(mutex_);
+        return requests_.size();
+    }
+
+    LLMRequest at(std::size_t index) const {
+        std::lock_guard lock(mutex_);
+        return requests_.at(index);
+    }
+
+private:
+    mutable std::mutex      mutex_;
+    std::vector<LLMRequest> requests_;
+    FakeLLM                 fake_;
+};
 
 std::vector<payload::ContextInjected> injected_contexts(const EventRange& events) {
     std::vector<payload::ContextInjected> injected;
@@ -177,6 +212,49 @@ TEST(PromptRuntimeContext, InstructionsMaterializedOnceAtFirstRequest) {
     EXPECT_EQ(injected[0].role, Role::User);
     EXPECT_EQ(injected[0].text.rfind("<system-reminder>", 0), 0u);
     EXPECT_NE(injected[0].text.find("workspace rules"), std::string::npos);
+}
+
+TEST(PromptRuntimeContext, UserPromptIsLastUserMessageOnFirstTurn) {
+    SystemPrompt prompt;
+    [[maybe_unused]] const ContextHandle handle = register_runtime_context(
+        prompt, RuntimeContextConfig{.cwd = "/workspace", .model = "fake-model", .sandbox = {}, .approval = {}, .delegation = {}},
+        [] { return std::string{"2026-09-19"}; });
+
+    auto               provider     = std::make_unique<RecordingProvider>(script_of({text_step("ok")}));
+    RecordingProvider* provider_raw = provider.get();
+    AgentEnv env("prompt_runtime_order", std::move(provider), AgentConfig{},
+                 allow_all_permission_config(), {}, false, 4, nullptr, false, std::nullopt,
+                 std::chrono::system_clock::now, false, &prompt);
+    auto  agent_owner = env.createAgent();
+    Agent& agent      = *agent_owner;
+
+    ASSERT_EQ(agent.send(user_message("what is the capital of France?")), InboxResult::Accepted);
+    ASSERT_EQ(provider_raw->count(), 1u);
+
+    const std::vector<Message> messages = provider_raw->at(0).messages;
+    std::optional<std::size_t> prompt_index;
+    std::optional<std::size_t> context_index;
+    std::size_t                context_count = 0;
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        if (messages[i].role != Role::User) {
+            continue;
+        }
+        const std::string text =
+            messages[i].content.empty() ? std::string{} : messages[i].content.at(0).text;
+        if (text == "what is the capital of France?") {
+            prompt_index = i;
+        }
+        if (text.rfind(std::string{kRuntimeContextHeader}, 0) == 0) {
+            ++context_count;
+            context_index = i;
+        }
+    }
+
+    ASSERT_TRUE(prompt_index.has_value());
+    EXPECT_EQ(*prompt_index, messages.size() - 1);
+    ASSERT_TRUE(context_index.has_value());
+    EXPECT_LT(*context_index, *prompt_index);
+    EXPECT_EQ(context_count, 1u);
 }
 
 } // namespace
