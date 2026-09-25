@@ -348,6 +348,28 @@ TEST(SessionCatalogRead, SW_U4_TiesBreakByIdAscending) {
     EXPECT_LT(history.sessions[0].id.value, history.sessions[1].id.value);
 }
 
+// 57-U6 (57-D6): `read_workspace_history` materializes `lastUsedAt` as the max
+// `updatedAt` over the materialized sessions; a degraded read leaves it 0.
+TEST(SessionCatalogRead, SW_U6_LastUsedAtIsMaxMaterializedUpdatedAt) {
+    TempDir workspace("ymh_catalog_lastused");
+    std::vector<SessionHeader> headers;
+    headers.push_back(make_header(workspace.path(), 100, 3000, "newest", "model-a"));
+    headers.push_back(make_header(workspace.path(), 100, 1000, "oldest", "model-b"));
+    headers.push_back(make_header(workspace.path(), 100, 2000, "middle", "model-c"));
+    create_valid_db(workspace.path(), std::move(headers));
+
+    const WorkspaceHistory history =
+        read_workspace_history(record_for(workspace.path(), "ws"), false);
+    ASSERT_FALSE(history.note.has_value());
+    ASSERT_EQ(history.sessions.size(), 3u);
+    EXPECT_EQ(history.lastUsedAt, 3000);
+
+    const WorkspaceHistory missing =
+        read_workspace_history(record_for(workspace.path() / "gone", "gone"), false);
+    ASSERT_TRUE(missing.note.has_value());
+    EXPECT_EQ(missing.lastUsedAt, 0);
+}
+
 TEST(SessionCatalogRead, SL_I3_CatalogConsumerHidesUnpromptedRootWhileDirectReadReturnsIt) {
     TempDir workspace("ymh_catalog_sli3");
     SessionHeader prompted   = make_header(workspace.path(), 100, 3000, "prompted", "model-a");
@@ -637,7 +659,6 @@ TEST(SessionCatalogReaderTest, SW_U5_DeliversSnapshotAndBumpsGeneration) {
     ASSERT_EQ(first.workspaces.size(), 1u);
     EXPECT_EQ(first.workspaces[0].title, "one");
     ASSERT_EQ(first.workspaces[0].sessions.size(), 1u);
-    EXPECT_GT(first.capturedAtMs, 0);
     EXPECT_EQ(first.generation, 1u);
 
     reader.refreshNow();

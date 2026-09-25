@@ -1133,8 +1133,9 @@ TEST(UiModel, NoticeRingIsBounded) {
     EXPECT_EQ(model.notices.front().text, "n3");
 }
 
-// SW-U15 (22 §3.7): case-insensitive title order with a cwd tie-break; the Live
-// source preserves the daemon's session.list order.
+// SW-U15 (22 §3.7, extended by 57-D5): effective-root first, then `lastUsedAt`
+// desc, then case-insensitive title order with a path tie-break; the Live source
+// preserves the daemon's session.list order.
 TEST(UiModel, SwitcherOrderingAndSessionOrder) {
     UiModel model;
     model.activeWorkspaceId = WorkspaceId{"ws-b"};
@@ -1160,12 +1161,24 @@ TEST(UiModel, SwitcherOrderingAndSessionOrder) {
     first.title = "one";
     model.workspaces[WorkspaceId{"ws-b"}].sessions = {second, first};
     add_catalog_sessions(model, WorkspaceId{"ws-b"}, {SessionId{"s2"}, SessionId{"s1"}});
+    model.catalog.workspaces[0].lastUsedAt = 50;  // ws-b
+    const auto add_live_history = [&model](const char* id, const char* path, std::int64_t used) {
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.canonicalPath = path;
+        history.lastUsedAt = used;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_live_history("ws-a", "/a", 5000);
+    add_live_history("ws-g", "/g", 3000);
+    add_live_history("ws-beta", "/beta", 4000);
+    model.cwdWorkspacePath = "/g";
 
     model.openSwitcher();
     ASSERT_EQ(model.switcher.workspaces.size(), 4u);
-    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
-    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-g"});
-    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-g"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-beta"});
     EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-b"});
     ASSERT_EQ(model.switcher.workspaces[3].sessions.size(), 2u);
     EXPECT_EQ(model.switcher.workspaces[3].sessions[0].id, SessionId{"s2"});
@@ -1176,18 +1189,20 @@ TEST(UiModel, SwitcherOrderingAndSessionOrder) {
     model.catalog.workspaces.clear();
     model.catalog.loaded = false;
     model.catalog.generation = 0;
-    const auto add_history = [&model](const char* id, const char* title, const char* path) {
+    const auto add_history = [&model](const char* id, const char* title, const char* path,
+                                      std::int64_t used) {
         WorkspaceHistory history;
         history.id = WorkspaceId{id};
         history.title = title;
         history.canonicalPath = path;
         history.live = false;
+        history.lastUsedAt = used;
         model.catalog.workspaces.push_back(std::move(history));
     };
-    add_history("ws-b", "same", "/b");
-    add_history("ws-a", "same", "/a");
-    add_history("ws-g", "Gamma", "/g");
-    add_history("ws-beta", "beta", "/beta");
+    add_history("ws-b", "same", "/b", 50);
+    add_history("ws-a", "same", "/a", 5000);
+    add_history("ws-g", "Gamma", "/g", 3000);
+    add_history("ws-beta", "beta", "/beta", 4000);
     model.catalog.loaded = true;
 
     SessionHistoryEntry older;
@@ -1200,13 +1215,199 @@ TEST(UiModel, SwitcherOrderingAndSessionOrder) {
 
     model.switcher.openHistory(model);
     ASSERT_EQ(model.switcher.workspaces.size(), 4u);
-    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
-    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-g"});
-    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-g"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-beta"});
     EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-b"});
     ASSERT_EQ(model.switcher.workspaces[3].sessions.size(), 2u);
     EXPECT_EQ(model.switcher.workspaces[3].sessions[0].id, SessionId{"s2"});
     EXPECT_EQ(model.switcher.workspaces[3].sessions[1].id, SessionId{"s1"});
+}
+
+// 57-U1 (57-D5/57-I11): the effective-root workspace sorts first; the rest by
+// `lastUsedAt` desc, then title/path.
+TEST(UiModel, SwitcherOrdersEffectiveRootFirstThenLastUsed) {
+    UiModel model;
+    const auto add_history = [&model](const char* id, const char* title, const char* path,
+                                      std::int64_t used) {
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.title = title;
+        history.canonicalPath = path;
+        history.lastUsedAt = used;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_history("ws-beta", "beta", "/beta", 100);
+    add_history("ws-alpha", "alpha", "/alpha", 5000);
+    add_history("ws-gamma", "gamma", "/gamma", 3000);
+    add_history("ws-delta", "delta", "/delta", 3000);
+    model.catalog.loaded = true;
+    model.cwdWorkspacePath = "/beta";
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 4u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-alpha"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-delta"});
+    EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-gamma"});
+}
+
+// 57-U2 (57-D5/57-I12): equal `lastUsedAt` falls back to title asc
+// (case-insensitive), then canonical path asc.
+TEST(UiModel, SwitcherOrderTieBreak) {
+    UiModel model;
+    const auto add_history = [&model](const char* id, const char* title, const char* path) {
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.title = title;
+        history.canonicalPath = path;
+        history.lastUsedAt = 100;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_history("ws-b", "Tie", "/b");
+    add_history("ws-a", "Tie", "/a");
+    add_history("ws-z", "Aardvark", "/z");
+    model.catalog.loaded = true;
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 3u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-z"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-a"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-b"});
+}
+
+// 57-U3 (57-D5/57-I12): a zero `lastUsedAt` (unknown) sorts after every dated
+// node.
+TEST(UiModel, SwitcherOrderZeroLastUsedLast) {
+    UiModel model;
+    const auto add_history = [&model](const char* id, const char* title, const char* path,
+                                      std::int64_t used) {
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.title = title;
+        history.canonicalPath = path;
+        history.lastUsedAt = used;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_history("ws-old", "old", "/old", 0);
+    add_history("ws-new", "new", "/new", 50);
+    model.catalog.loaded = true;
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 2u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-new"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-old"});
+}
+
+// 57-U4 (57-D5/57-I11): an effective-root path matching no node never fires; a
+// filter that excludes the effective-root node leaves the rule un-fired.
+TEST(UiModel, SwitcherOrderEffectiveRootAbsentOrFiltered) {
+    UiModel model;
+    const auto add_history = [&model](const char* id, const char* title, const char* path,
+                                      std::int64_t used) {
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.title = title;
+        history.canonicalPath = path;
+        history.lastUsedAt = used;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_history("ws-alpha", "alpha", "/alpha", 5000);
+    add_history("ws-beta", "beta", "/beta", 100);
+    model.catalog.loaded = true;
+    model.cwdWorkspacePath = "/missing";
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 2u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-alpha"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-beta"});
+
+    model.switcher.filter = "alpha";
+    model.cwdWorkspacePath = "/beta";
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-alpha"});
+}
+
+// 57-U5 (57-D5/57-D6): the same rule through the Live source, using
+// `WorkspaceModel::cwd` for the effective-root match.
+TEST(UiModel, SwitcherOrderLiveSource) {
+    UiModel model;
+    const auto add_live = [&model](const char* id, const char* title, const char* cwd,
+                                   std::int64_t used) {
+        WorkspaceModel workspace;
+        workspace.id = WorkspaceId{id};
+        workspace.title = title;
+        workspace.cwd = cwd;
+        workspace.daemonStatus = DaemonStatus::Attached;
+        workspace.live = true;
+        model.workspaces.emplace(workspace.id, std::move(workspace));
+        WorkspaceHistory history;
+        history.id = WorkspaceId{id};
+        history.canonicalPath = cwd;
+        history.lastUsedAt = used;
+        model.catalog.workspaces.push_back(std::move(history));
+    };
+    add_live("ws-beta", "beta", "/beta", 100);
+    add_live("ws-alpha", "alpha", "/alpha", 5000);
+    model.catalog.loaded = true;
+    model.cwdWorkspacePath = "/beta";
+
+    model.switcher.open(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 2u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-alpha"});
+}
+
+// 57-U7 (57-I2): after 57-D1 the per-session `· <relative>` leaf still renders
+// from `catalog.nowMs`.
+TEST(UiModel, PerSessionLeafStillRendersAfterD1) {
+    UiModel model;
+    WorkspaceHistory history;
+    history.id = WorkspaceId{"ws"};
+    history.title = "ws";
+    history.canonicalPath = "/ws";
+    SessionHistoryEntry entry;
+    entry.id = SessionId{"s1"};
+    entry.title = "kept";
+    entry.kind = "root";
+    entry.model = "m";
+    entry.updatedAt = 1000;
+    history.sessions.push_back(entry);
+    model.catalog.workspaces.push_back(history);
+    model.catalog.loaded = true;
+    model.catalog.nowMs = 1000 + 60'000;
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+
+    const std::string rendered =
+        render_to_ansi(model, TerminalSize{100, 30}, Theme{false});
+    EXPECT_NE(rendered.find("kept · root · m · 1m"), std::string::npos);
+    EXPECT_EQ(rendered.find("captured"), std::string::npos);
+}
+
+// 57-U8 (57-I11/57-I19): Live `open` before any catalog snapshot still pins the
+// effective-root node (via `WorkspaceModel::cwd`); the rest tie-break by title.
+TEST(UiModel, SwitcherEffectiveRootRuleWhenCatalogUnloaded) {
+    UiModel model;
+    const auto add_live = [&model](const char* id, const char* title, const char* cwd) {
+        WorkspaceModel workspace;
+        workspace.id = WorkspaceId{id};
+        workspace.title = title;
+        workspace.cwd = cwd;
+        workspace.daemonStatus = DaemonStatus::Attached;
+        workspace.live = true;
+        model.workspaces.emplace(workspace.id, std::move(workspace));
+    };
+    add_live("ws-beta", "beta", "/beta");
+    add_live("ws-alpha", "alpha", "/alpha");
+    model.catalog.loaded = false;
+    model.cwdWorkspacePath = "/beta";
+
+    model.switcher.open(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 2u);
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-beta"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-alpha"});
 }
 
 // SW-U16 (22 §3.6, L1): openSwitcher resets the source to Live; close leaves it.
@@ -1306,24 +1507,31 @@ TEST(UiModel, SwitcherOpenHistoryBuildsFromCatalog) {
 
     model.catalog.workspaces = {live, stopped, tie_b, tie_a};
     model.catalog.loaded = true;
+    // 57-D5 extension: effective root `/stopped`, then lastUsedAt desc, then the
+    // title/path tie-break.
+    model.catalog.workspaces[0].lastUsedAt = 100;  // live
+    model.catalog.workspaces[1].lastUsedAt = 500;  // stopped
+    model.catalog.workspaces[2].lastUsedAt = 200;  // tie-b
+    model.catalog.workspaces[3].lastUsedAt = 200;  // tie-a
+    model.cwdWorkspacePath = "/stopped";
 
     model.switcher.openHistory(model);
     EXPECT_EQ(model.switcher.source, SwitcherSource::History);
 
     ASSERT_EQ(model.switcher.workspaces.size(), 4u);
-    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-live"});
-    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-stop"});
-    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-tie-a"});
-    EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-tie-b"});
+    EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-stop"});
+    EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-tie-a"});
+    EXPECT_EQ(model.switcher.workspaces[2].id, WorkspaceId{"ws-tie-b"});
+    EXPECT_EQ(model.switcher.workspaces[3].id, WorkspaceId{"ws-live"});
 
-    const WorkspaceNode& stopped_node = model.switcher.workspaces[1];
+    const WorkspaceNode& stopped_node = model.switcher.workspaces[0];
     EXPECT_TRUE(stopped_node.historyOnly);
     EXPECT_FALSE(stopped_node.live);
     ASSERT_TRUE(stopped_node.note.has_value());
     EXPECT_EQ(*stopped_node.note, "corrupt");
     EXPECT_TRUE(stopped_node.sessions.empty());
 
-    const WorkspaceNode& live_node = model.switcher.workspaces[0];
+    const WorkspaceNode& live_node = model.switcher.workspaces[3];
     EXPECT_FALSE(live_node.historyOnly);
     EXPECT_TRUE(live_node.live);
     EXPECT_FALSE(live_node.note.has_value());

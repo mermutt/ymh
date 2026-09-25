@@ -108,8 +108,10 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
   durable row in `registry.db`; a **session** is stored per-workspace event-log
   history on disk (`<workspace>/.ymh/sessions.db`). The **Ctrl-S switcher is
   live-only** (live daemon with `Attached`/`Stopping`; entries are evicted when
-  the daemon dies; `NotRunning`/`Unreachable` never render), ordered by title
-  ascending, case-insensitive, `canonical_path` tie-break. **`/sessions`** lists
+  the daemon dies; `NotRunning`/`Unreachable` never render), ordered
+  effective-root-first, then last-usage descending (`max(sessions.updated_at)`),
+  tie-broken by title ascending (case-insensitive) then `canonical_path` (57-D5,
+  superseding 22-D1's workspace-order half). **`/sessions`** lists
   stored sessions read **directly from disk** for every **registered** workspace,
   live or not (no daemon needed; orphan DBs are not scanned). Selecting a session
   in a non-running workspace spawns/attaches its daemon then resumes it, and a

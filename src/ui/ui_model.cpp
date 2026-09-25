@@ -155,6 +155,30 @@ std::string lower_ascii(std::string value) {
     return value;
 }
 
+// 57-D5: effective root first, then `lastUsedAt` desc, then title asc
+// (case-insensitive), then canonical path asc. `cwd_path` is the effective root
+// (`UiModel::cwdWorkspacePath`); an empty path never matches.
+[[nodiscard]] bool switcher_workspace_less(const WorkspaceNode& left,
+                                           const WorkspaceNode& right,
+                                           const std::string& cwd_path,
+                                           const std::string& left_path,
+                                           const std::string& right_path) {
+    const bool left_root = !cwd_path.empty() && !left_path.empty() && left_path == cwd_path;
+    const bool right_root = !cwd_path.empty() && !right_path.empty() && right_path == cwd_path;
+    if (left_root != right_root) {
+        return left_root;
+    }
+    if (left.lastUsedAt != right.lastUsedAt) {
+        return left.lastUsedAt > right.lastUsedAt;
+    }
+    const std::string left_title = lower_ascii(left.title);
+    const std::string right_title = lower_ascii(right.title);
+    if (left_title != right_title) {
+        return left_title < right_title;
+    }
+    return left_path < right_path;
+}
+
 // 22 §3.3 (L3): validate the switcher cursor against the node list it just
 // built, not against `UiModel::workspaces`. Shared by `open` (Live) and
 // `openHistory` (History) so a filtered-out workspace cannot leave a dangling
@@ -1263,6 +1287,7 @@ void SwitcherOverlayModel::open(const UiModel& model) {
         for (const WorkspaceHistory& history : model.catalog.workspaces) {
             if (history.id == workspace_id) {
                 node.note = history.note;
+                node.lastUsedAt = history.lastUsedAt;
                 break;
             }
         }
@@ -1297,28 +1322,18 @@ void SwitcherOverlayModel::open(const UiModel& model) {
         workspaces.push_back(std::move(node));
     }
 
-    const auto lower = [](std::string value) {
-        for (char& character : value) {
-            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-        }
-        return value;
-    };
     std::sort(workspaces.begin(), workspaces.end(),
-              [&model, &lower](const WorkspaceNode& left, const WorkspaceNode& right) {
-                  const std::string left_title = lower(left.title);
-                  const std::string right_title = lower(right.title);
-                  if (left_title != right_title) {
-                      return left_title < right_title;
-                  }
+              [&model](const WorkspaceNode& left, const WorkspaceNode& right) {
                   const auto left_workspace = model.workspaces.find(left.id);
                   const auto right_workspace = model.workspaces.find(right.id);
-                  const std::string& left_path = left_workspace == model.workspaces.end()
-                                                     ? left.title
-                                                     : left_workspace->second.cwd;
-                  const std::string& right_path = right_workspace == model.workspaces.end()
-                                                      ? right.title
-                                                      : right_workspace->second.cwd;
-                  return left_path < right_path;
+                  const std::string left_path = left_workspace == model.workspaces.end()
+                                                    ? left.title
+                                                    : left_workspace->second.cwd;
+                  const std::string right_path = right_workspace == model.workspaces.end()
+                                                     ? right.title
+                                                     : right_workspace->second.cwd;
+                  return switcher_workspace_less(left, right, model.cwdWorkspacePath, left_path,
+                                                 right_path);
               });
 
     revalidate_switcher_cursor(*this, model);
@@ -1354,6 +1369,7 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
         node.live = history.live;
         node.historyOnly = !history.live;
         node.note = history.note;
+        node.lastUsedAt = history.lastUsedAt;
         if (history.live) {
             node.status = DaemonStatus::Attached;
             node.mark = OwnershipMark::Owned;
@@ -1401,13 +1417,9 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
     }
 
     std::sort(workspaces.begin(), workspaces.end(),
-              [&path_of](const WorkspaceNode& left, const WorkspaceNode& right) {
-                  const std::string left_title = lower_ascii(left.title);
-                  const std::string right_title = lower_ascii(right.title);
-                  if (left_title != right_title) {
-                      return left_title < right_title;
-                  }
-                  return path_of(left.id) < path_of(right.id);
+              [&path_of, &model](const WorkspaceNode& left, const WorkspaceNode& right) {
+                  return switcher_workspace_less(left, right, model.cwdWorkspacePath,
+                                                 path_of(left.id), path_of(right.id));
               });
 
     revalidate_switcher_cursor(*this, model);

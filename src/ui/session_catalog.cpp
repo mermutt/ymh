@@ -12,7 +12,6 @@
 
 #include <unistd.h>
 
-#include "ymh/core/clock.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session_persistence.hpp"
 
@@ -157,6 +156,15 @@ WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live
     } catch (const std::exception& error) {
         history.note = "unavailable: " + std::string{error.what()};
     }
+    // 57-D6: after the try/catch so a mid-loop throw leaves `lastUsedAt == 0`
+    // (never a partial value); `note_history` keeps the default 0.
+    if (!history.note.has_value()) {
+        std::int64_t last_used = 0;
+        for (const SessionHistoryEntry& entry : history.sessions) {
+            last_used = std::max(last_used, entry.updatedAt);
+        }
+        history.lastUsedAt = last_used;
+    }
     return history;
 }
 
@@ -219,7 +227,6 @@ void SessionCatalogReader::refreshNow() {
 
 SessionCatalogSnapshot SessionCatalogReader::build() const {
     SessionCatalogSnapshot snapshot;
-    snapshot.capturedAtMs = epoch_ms(std::chrono::system_clock::now());
     const std::vector<WorkspaceRecord> records = source_.list();
     snapshot.workspaces.reserve(records.size());
     bool complete = true;

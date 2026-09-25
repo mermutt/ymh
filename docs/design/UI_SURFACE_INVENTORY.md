@@ -64,8 +64,10 @@ Ownership legend: **SPEC-16** = spec 16 owns the change; **SPEC-22** =
   true` AND `daemonStatus ∈ {Attached, Stopping}`, and entries are **evicted**
   when their daemon dies (`evict_dead_workspaces`,
   `src/ui/supervisor.cpp:995`). `NotRunning` and `Unreachable` no longer render;
-  only `Owned`/`Stopping` marks remain reachable (§3.4). Ordering is **title
-  ascending, case-insensitive, tie-broken by `canonical_path`** (§3.7, 22-D1).
+  only `Owned`/`Stopping` marks remain reachable (§3.4). Ordering is
+  **effective-root first, then last usage descending, tie-broken by title
+  ascending (case-insensitive) then `canonical_path`** (57-D5, superseding
+  22-D1's workspace-order half).
   The old "across **all** `model.workspaces`, sorted by title" claim and the
   "title order matches the registry canonical-path order" claim are both false
   and superseded (§1.3.1 22-S1/22-S3, 22-A5). Rendered by `render_switcher()`
@@ -83,7 +85,7 @@ Ownership legend: **SPEC-16** = spec 16 owns the change; **SPEC-22** =
   with a note when a DB is missing / not a file / unreadable / corrupt / schema
   mismatch / read-only / unavailable (§4.1, §4.4, §4.5). Sessions are
   newest-first (`updated_at` desc, `id` asc); workspace groups use the same
-  title/`canonical_path` rule (§3.7). Selecting a stored session in a
+  effective-root/last-usage rule (57-D5). Selecting a stored session in a
   non-running workspace spawns/attaches that daemon then resumes it
   (`resume_from_history`, `src/ui/supervisor.cpp:888`; §5); a spawn/resume
   failure surfaces a workspace-independent status-bar notice and never injects a

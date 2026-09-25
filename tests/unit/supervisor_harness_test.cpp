@@ -1315,7 +1315,6 @@ SessionCatalogSnapshot catalog_snapshot(const WorkspaceId& workspace, const Sess
                                         bool live) {
     SessionCatalogSnapshot snapshot;
     snapshot.generation   = 1;
-    snapshot.capturedAtMs = 1;
     snapshot.complete     = true;
     WorkspaceHistory history;
     history.id            = workspace;

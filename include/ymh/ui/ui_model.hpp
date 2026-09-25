@@ -402,6 +402,9 @@ struct WorkspaceNode {
     // (`!catalog.loaded || generation == 0`); the renderer shows
     // `(loading live sessions…)`.
     bool                       catalog_pending = false;
+    // 57-D5/57-D6: epoch ms of the workspace's last usage (max session updatedAt);
+    // 0 == unknown, sorts last.
+    std::int64_t               lastUsedAt = 0;
     std::vector<SessionNode>   sessions;
 };
 
@@ -520,7 +523,7 @@ struct PermissionDialogModel {
 // 16 §7.6 / §4.2: the last-supervisor exit confirmation. Counts and workspace
 // titles only; never a per-session list (C2). `selected` is 0=Terminate,
 // 1=Cancel. It defaults to Terminate (0) to match the intent that opened it:
-// this popup is only reachable through an explicit exit action (Ctrl-D /
+// this popup is only reachable through an explicit exit action (Ctrl-Q /
 // `/exit`), so Enter confirming the exit is the natural outcome. Trade-off:
 // a stray Enter now tears daemons down instead of merely cancelling; Escape /
 // Ctrl-C / `n` remain the safe cancel paths.
@@ -550,13 +553,14 @@ struct ContextOverlayModel {
 
 // 22 §4.6 (S2): the last delivered catalog snapshot, projected for `/sessions`.
 // `nowMs` is additive (Wave C): the UI-thread wall clock at store time, so the
-// pure renderer can derive `captured <relative> ago` and the per-session
-// relative update without reading a clock (10 U3/D16).
+// pure renderer can derive the per-session relative update without reading a
+// clock (10 U3/D16). 57-D1 removed the footer's `captured <relative> ago` label
+// and its `capturedAtMs` carrier; `nowMs` is retained for the per-session leaf
+// (57-I2).
 struct SessionCatalogModel {
     std::vector<WorkspaceHistory> workspaces;
     bool                          loaded = false;
     bool                          complete = false;
-    std::int64_t                  capturedAtMs = 0;
     std::uint64_t                 generation = 0;
     std::int64_t                  nowMs = 0;
 };
@@ -572,6 +576,10 @@ struct ReasoningSpinnerState {
 struct UiModel {
     std::map<WorkspaceId, WorkspaceModel> workspaces;
     WorkspaceId                           activeWorkspaceId;
+    // 57-D5/57-D6: canonical path of `options_.initial_workspace` (the effective
+    // root, not getcwd); empty == no effective-root match. Assigned once in
+    // `SupervisorApp::run()`; never focus-derived.
+    std::string                           cwdWorkspacePath;
     std::map<SessionId, SessionUiState>   sessions;
     // 49-D1: the zero-workspace composer. Before the first prompt creates a
     // workspace/session there is no `SessionUiState` in `sessions`; the draft and
