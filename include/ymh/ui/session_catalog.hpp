@@ -51,15 +51,18 @@ struct WorkspaceHistory {
     bool                             live = false;
     std::optional<std::string>       note;
     std::vector<SessionHistoryEntry> sessions;  // updatedAt desc, id asc
+    // 57-D6: max(session.updatedAt) over the materialized `sessions` (post the
+    // `isUnprompted` filter); 0 == none/unknown. Ordering is model-only (57-I13,
+    // 57-D5): the renderer never sorts.
+    std::int64_t                     lastUsedAt = 0;
 };
 
 // §4.2: an immutable catalog snapshot. `workspaces` is in registry storage
-// order (canonical_path); the renderer sorts by title (22-D1). `complete` is
-// false iff at least one workspace has a `note`.
+// order (canonical_path); ordering is applied by the model (57-I13). `complete`
+// is false iff at least one workspace has a `note`.
 struct SessionCatalogSnapshot {
     std::vector<WorkspaceHistory> workspaces;
     bool                          complete = false;
-    std::int64_t                  capturedAtMs = 0;
     std::uint64_t                 generation = 0;
 };
 

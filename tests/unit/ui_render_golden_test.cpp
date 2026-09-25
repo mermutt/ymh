@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -83,6 +84,66 @@ std::string normalize(const std::string& input) {
         result += lines[index];
     }
     return result;
+}
+
+std::vector<std::string> split_lines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::string              current;
+    for (const char character : text) {
+        if (character == '\n') {
+            lines.push_back(current);
+            current.clear();
+        } else {
+            current.push_back(character);
+        }
+    }
+    lines.push_back(current);
+    return lines;
+}
+
+// The contiguous run of SGR escapes immediately preceding `pos`. FTXUI emits one
+// escape per attribute, so this is the cell's full style.
+std::string trailing_sgr(const std::string& text, std::size_t pos) {
+    std::string run;
+    while (pos > 0 && text[pos - 1] == 'm') {
+        const std::size_t start = text.rfind("\x1b[", pos - 1);
+        if (start == std::string::npos) {
+            break;
+        }
+        run = text.substr(start, pos - start) + run;
+        pos = start;
+    }
+    return run;
+}
+
+// 57-G4: the centered window's border columns on its top-border row (the '╭' at
+// x > 0 excludes the main UI's screen-edge border). Measured in cells.
+std::pair<int, int> window_border_columns(const ftxui::Screen& screen) {
+    for (int y = 0; y < screen.dimy(); ++y) {
+        int left  = -1;
+        int right = -1;
+        for (int x = 0; x < screen.dimx(); ++x) {
+            const std::string& glyph = screen.PixelAt(x, y).character;
+            if (glyph == "╭" && x > 0 && left < 0) {
+                left = x;
+            }
+            if (glyph == "╮") {
+                right = x;
+            }
+        }
+        if (left > 0 && right > left) {
+            return {left, right};
+        }
+    }
+    return {-1, -1};
+}
+
+int window_total_width(const ftxui::Screen& screen) {
+    const std::pair<int, int> columns = window_border_columns(screen);
+    if (columns.first < 0) {
+        return -1;
+    }
+    return columns.second - columns.first + 1;
 }
 
 Event make_event(EventType type, const nlohmann::json& payload) {
@@ -1374,8 +1435,35 @@ UiModel history_model() {
     model.catalog.workspaces = {zeta, alpha};
     model.catalog.loaded = true;
     model.catalog.complete = false;
-    model.catalog.capturedAtMs = 1'000'000;
     model.catalog.nowMs = 1'005'000;
+    return model;
+}
+
+// 57-G3/G6: a Live model whose cursor is on a session target that is armed for
+// deletion, so the inline badge renders on that row.
+UiModel armed_session_model() {
+    UiModel model = build_model();
+    WorkspaceModel beta;
+    beta.id           = WorkspaceId{"workspace-beta"};
+    beta.title        = "beta";
+    beta.cwd          = "/work/beta";
+    beta.daemonStatus = DaemonStatus::Attached;
+    beta.live         = true;
+    SessionCell beta_cell;
+    beta_cell.id    = SessionId{"beta-session"};
+    beta_cell.title = "beta-session";
+    beta.sessions.push_back(beta_cell);
+    model.workspaces.emplace(beta.id, std::move(beta));
+    model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
+    model.openSwitcher();
+
+    SwitcherCursor cursor;
+    cursor.workspace             = WorkspaceId{"workspace-beta"};
+    cursor.session               = SessionId{"beta-session"};
+    model.switcher.cursor        = cursor;
+    model.switcher.delete_arm    = EscArm::Armed;
+    model.switcher.delete_target = cursor;
     return model;
 }
 
@@ -1408,8 +1496,11 @@ TEST(UiRenderGolden, HistoryOverlayGroupsAndLeaves) {
     EXPECT_LT(rendered.find("first · root"), rendered.find("second · fork"));
 
     EXPECT_NE(rendered.find("stored sessions"), std::string::npos);
-    EXPECT_NE(rendered.find("captured 5s ago"), std::string::npos);
     EXPECT_NE(rendered.find("partial"), std::string::npos);
+    // 57-G1/57-D1: the frozen `captured <relative> ago` segment is gone; the
+    // persistent delete hint (57-D2) is present.
+    EXPECT_EQ(rendered.find("captured"), std::string::npos);
+    EXPECT_NE(rendered.find("Ctrl+D delete"), std::string::npos);
 }
 
 // SW-G2 variant: a stored session whose title is still a creation placeholder
@@ -1500,7 +1591,6 @@ TEST(UiRenderGolden, HistoryOverlayDegradationNotesRender) {
     model.activeWorkspaceId = WorkspaceId{"ws-good"};
     model.catalog.loaded = true;
     model.catalog.complete = false;
-    model.catalog.capturedAtMs = 10'000;
     model.catalog.nowMs = 20'000;
     model.catalog.workspaces = {bad_history, nodb_history, gone_history, read_only, good};
     model.switcher.openHistory(model);
@@ -2374,9 +2464,37 @@ TEST(UiRenderGolden, UI51_D3_TableInUserBlockUsesNestedWidth) {
     EXPECT_NE(fallback.find("| a | b | c | d | e | f |"), std::string::npos);
 }
 
-// 51-I21: the switcher shows the double-Ctrl+D confirmation while armed, and a
-// workspace target states the junction count (51-D4.5).
-TEST(UiRenderGolden, UI51_D4_SwitcherDeleteHintGolden) {
+// 57-G3 (57-D3, updates UI51_D4_SwitcherDeleteHintGolden): the double-Ctrl+D
+// confirmation renders inline on the armed target's own row (same line as the
+// name) as a red badge, never as an appended row; the badge is not reverse-videoed
+// by the row highlight (57-I17).
+TEST(UiRenderGolden, SwitcherDeleteConfirmInline) {
+    const UiModel model = armed_session_model();
+
+    const std::string colored = render_to_ansi(model, TerminalSize{80, 24}, Theme{true});
+    const std::size_t badge_pos = colored.find("press Ctrl+d again to confirm");
+    ASSERT_NE(badge_pos, std::string::npos);
+    const std::string badge_sgr = trailing_sgr(colored, badge_pos);
+    EXPECT_NE(badge_sgr.find("\x1b[41m"), std::string::npos) << badge_sgr;
+    EXPECT_EQ(badge_sgr.find("\x1b[7m"), std::string::npos) << badge_sgr;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    bool same_line = false;
+    for (const std::string& line : split_lines(rendered)) {
+        if (line.find("beta-session") != std::string::npos &&
+            line.find("press Ctrl+d again to confirm") != std::string::npos) {
+            same_line = true;
+        }
+        EXPECT_EQ(line.find("- one more Ctrl+D to delete"), std::string::npos);
+    }
+    EXPECT_TRUE(same_line);
+}
+
+// 57-G4 (57-I5/57-I16/57-I20): arming adds no line and does not change the
+// popup's width. Measured in CELLS (`string_width`/`PixelAt`), never bytes.
+TEST(UiRenderGolden, SwitcherDeleteConfirmInvariants) {
     UiModel model = build_model();
     WorkspaceModel beta;
     beta.id           = WorkspaceId{"workspace-beta"};
@@ -2385,32 +2503,166 @@ TEST(UiRenderGolden, UI51_D4_SwitcherDeleteHintGolden) {
     beta.daemonStatus = DaemonStatus::Attached;
     beta.live         = true;
     SessionCell beta_cell;
-    beta_cell.id = SessionId{"beta-session"};
+    beta_cell.id    = SessionId{"beta-session"};
+    beta_cell.title = "beta-session";
     beta.sessions.push_back(beta_cell);
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     model.openSwitcher();
 
-    SwitcherCursor session_cursor;
-    session_cursor.workspace = WorkspaceId{"workspace-beta"};
-    session_cursor.session   = SessionId{"beta-session"};
-    model.switcher.delete_arm = EscArm::Armed;
-    model.switcher.delete_target = session_cursor;
-    const std::string session_hint =
-        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
-    SCOPED_TRACE(session_hint);
-    EXPECT_NE(session_hint.find("- one more Ctrl+D to delete"), std::string::npos);
+    SwitcherCursor cursor;
+    cursor.workspace      = WorkspaceId{"workspace-beta"};
+    cursor.session        = SessionId{"beta-session"};
+    model.switcher.cursor = cursor;
 
+    const TerminalSize size{80, 24};
+    const ftxui::Screen disarmed = render_screen(model, size, Theme{false});
+    const std::pair<int, int> disarmed_border = window_border_columns(disarmed);
+    ASSERT_GE(disarmed_border.first, 0);
+    const int w = window_total_width(disarmed) - 2;
+    const std::string disarmed_text = normalize(render_to_ansi(model, size, Theme{false}));
+
+    model.switcher.delete_arm    = EscArm::Armed;
+    model.switcher.delete_target = cursor;
+    const ftxui::Screen armed = render_screen(model, size, Theme{false});
+    const std::string armed_text = normalize(render_to_ansi(model, size, Theme{false}));
+
+    EXPECT_EQ(window_border_columns(armed), disarmed_border);
+    EXPECT_EQ(window_total_width(armed), w + 2);
+    EXPECT_EQ(split_lines(disarmed_text).size(), split_lines(armed_text).size());
+    EXPECT_NE(armed_text.find("press Ctrl+d again to confirm"), std::string::npos);
+
+    // Workspace target at a width >= kDeleteBadgeReserve: the `(N sessions)`
+    // suffix is rendered in full, not ellipsized to {} (57-I6).
     SwitcherCursor workspace_cursor;
     workspace_cursor.workspace = WorkspaceId{"workspace-beta"};
+    model.switcher.cursor      = workspace_cursor;
     model.switcher.delete_target = workspace_cursor;
     model.switcher.delete_target_session_count = 3;
-    const std::string workspace_hint =
-        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
-    SCOPED_TRACE(workspace_hint);
-    EXPECT_NE(workspace_hint.find("- one more Ctrl+D to delete"), std::string::npos);
-    EXPECT_NE(workspace_hint.find("3 sessions"), std::string::npos);
+    const std::string workspace_text =
+        normalize(render_to_ansi(model, TerminalSize{120, 24}, Theme{false}));
+    SCOPED_TRACE(workspace_text);
+    EXPECT_NE(workspace_text.find("press Ctrl+d again to confirm"), std::string::npos);
+    EXPECT_NE(workspace_text.find("3 sessions"), std::string::npos);
+}
+
+// 57-G5 (57-D5/57-I11): the effective-root workspace renders first even when it
+// is last by title/lastUsed.
+TEST(UiRenderGolden, SwitcherEffectiveRootFirstGolden) {
+    UiModel model = history_model();
+    model.cwdWorkspacePath = "/zeta";
+    model.switcher.openHistory(model);
+    model.mode = UiMode::Switcher;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    const std::size_t zeta  = rendered.find("Zeta");
+    const std::size_t alpha = rendered.find("alpha");
+    ASSERT_NE(zeta, std::string::npos);
+    ASSERT_NE(alpha, std::string::npos);
+    EXPECT_LT(zeta, alpha);
+}
+
+// 57-G6 (57-I18): the badge obeys the colour gate; in colour mode it carries the
+// red background and is not inverted, in monochrome it is inverted|bold and
+// distinguished from the session-name highlight by `bold`.
+TEST(UiRenderGolden, SwitcherDeleteConfirmColourGate) {
+    const UiModel model = armed_session_model();
+
+    const std::string plain = render_to_ansi(model, TerminalSize{80, 24}, Theme{false});
+    const std::size_t plain_badge = plain.find("press Ctrl+d again to confirm");
+    ASSERT_NE(plain_badge, std::string::npos);
+    const std::string plain_badge_sgr = trailing_sgr(plain, plain_badge);
+    EXPECT_NE(plain_badge_sgr.find("\x1b[1m"), std::string::npos) << plain_badge_sgr;
+    EXPECT_NE(plain_badge_sgr.find("\x1b[7m"), std::string::npos) << plain_badge_sgr;
+    EXPECT_EQ(plain_badge_sgr.find("\x1b[3"), std::string::npos) << plain_badge_sgr;
+    EXPECT_EQ(plain_badge_sgr.find("\x1b[4"), std::string::npos) << plain_badge_sgr;
+
+    const std::size_t plain_name = plain.find("    [beta-session");
+    ASSERT_NE(plain_name, std::string::npos);
+    const std::string plain_name_sgr = trailing_sgr(plain, plain_name);
+    EXPECT_NE(plain_name_sgr.find("\x1b[7m"), std::string::npos) << plain_name_sgr;
+    EXPECT_EQ(plain_name_sgr.find("\x1b[1m"), std::string::npos) << plain_name_sgr;
+
+    const std::string colored = render_to_ansi(model, TerminalSize{80, 24}, Theme{true});
+    const std::size_t colored_badge = colored.find("press Ctrl+d again to confirm");
+    ASSERT_NE(colored_badge, std::string::npos);
+    const std::string colored_badge_sgr = trailing_sgr(colored, colored_badge);
+    EXPECT_NE(colored_badge_sgr.find("\x1b[41m"), std::string::npos) << colored_badge_sgr;
+    EXPECT_EQ(colored_badge_sgr.find("\x1b[7m"), std::string::npos) << colored_badge_sgr;
+
+    const std::size_t colored_name = colored.find("    [beta-session");
+    ASSERT_NE(colored_name, std::string::npos);
+    EXPECT_NE(trailing_sgr(colored, colored_name).find("\x1b[7m"), std::string::npos);
+}
+
+// 57-G7 (57-D3): rows are styled from their own
+// workspace/session/cursor/attention fields — a cursor workspace is cyan/bold, a
+// cursor session inverted, an attention session red.
+TEST(UiRenderGolden, SwitcherRowStyleAlignment) {
+    UiModel model = build_model();
+    WorkspaceModel alpha;
+    alpha.id           = WorkspaceId{"ws-alpha"};
+    alpha.title        = "Alpha";
+    alpha.cwd          = "/alpha";
+    alpha.daemonStatus = DaemonStatus::Attached;
+    alpha.live         = true;
+    SessionCell one;
+    one.id        = SessionId{"a1"};
+    one.title     = "one";
+    one.attention = true;
+    SessionCell two;
+    two.id    = SessionId{"a2"};
+    two.title = "two";
+    alpha.sessions = {one, two};
+    model.workspaces.emplace(alpha.id, alpha);
+
+    WorkspaceHistory history;
+    history.id            = alpha.id;
+    history.title         = alpha.title;
+    history.canonicalPath = alpha.cwd;
+    history.live          = true;
+    SessionHistoryEntry entry_one;
+    entry_one.id    = one.id;
+    entry_one.title = one.title;
+    SessionHistoryEntry entry_two;
+    entry_two.id    = two.id;
+    entry_two.title = two.title;
+    history.sessions = {entry_one, entry_two};
+    model.catalog.workspaces.push_back(std::move(history));
+    model.catalog.loaded     = true;
+    model.catalog.generation = 1;
+
+    model.openSwitcher();
+    SwitcherCursor session_cursor;
+    session_cursor.workspace = alpha.id;
+    session_cursor.session   = two.id;
+    model.switcher.cursor    = session_cursor;
+
+    const std::string rendered =
+        render_to_ansi(model, TerminalSize{100, 30}, Theme{true});
+    const std::size_t workspace_pos = rendered.find("- Alpha");
+    ASSERT_NE(workspace_pos, std::string::npos);
+    EXPECT_EQ(trailing_sgr(rendered, workspace_pos).find("\x1b[36m"), std::string::npos);
+
+    const std::size_t attention_pos = rendered.find("    [one");
+    ASSERT_NE(attention_pos, std::string::npos);
+    EXPECT_NE(trailing_sgr(rendered, attention_pos).find("\x1b[31m"), std::string::npos);
+
+    const std::size_t cursor_pos = rendered.find("    [two");
+    ASSERT_NE(cursor_pos, std::string::npos);
+    EXPECT_NE(trailing_sgr(rendered, cursor_pos).find("\x1b[7m"), std::string::npos);
+
+    model.switcher.cursor = SwitcherCursor{alpha.id, std::nullopt};
+    const std::string workspace_rendered =
+        render_to_ansi(model, TerminalSize{100, 30}, Theme{true});
+    const std::size_t cursor_workspace = workspace_rendered.find("- Alpha");
+    ASSERT_NE(cursor_workspace, std::string::npos);
+    const std::string workspace_sgr = trailing_sgr(workspace_rendered, cursor_workspace);
+    EXPECT_NE(workspace_sgr.find("\x1b[36m"), std::string::npos) << workspace_sgr;
+    EXPECT_NE(workspace_sgr.find("\x1b[1m"), std::string::npos) << workspace_sgr;
 }
 
 } // namespace

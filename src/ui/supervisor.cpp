@@ -408,6 +408,10 @@ public:
             model_.pushNotice(*options_.initial_notice);
         }
         model_.resolved_model = display_model(resolve_model(options_.config));
+        // 57-D5/57-D6: the effective root (the canonicalised `--workspace` root,
+        // or the resumed session's workspace, per `cli.cpp`) pins the switcher's
+        // first row. Deliberately not `getcwd()` (path-safety, `00` §18).
+        model_.cwdWorkspacePath = options_.initial_workspace.string();
         for (const SupervisorWorkspace& workspace : options_.workspaces) {
             attach_workspace(workspace);
         }
@@ -946,7 +950,6 @@ private:
         model_.catalog.workspaces = std::move(snapshot.workspaces);
         model_.catalog.loaded = true;
         model_.catalog.complete = snapshot.complete;
-        model_.catalog.capturedAtMs = snapshot.capturedAtMs;
         model_.catalog.nowMs = epoch_ms(options_.wall_clock());
         model_.catalog.generation = snapshot.generation;
         if (model_.mode == UiMode::Switcher &&

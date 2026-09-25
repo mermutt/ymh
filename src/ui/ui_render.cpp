@@ -893,19 +893,73 @@ std::string history_session_leaf(const SessionNode& session, const UiModel& mode
     return body;
 }
 
-Element render_switcher(const UiModel& model, const Theme& theme) {
+// 57-D3: the pinned width of the inline delete-confirmation badge
+// (`press Ctrl+d again to confirm`). `ftxui::string_width` is a runtime function,
+// so these are runtime `const int`s, not `constexpr`.
+const int kDeleteBadgeWidth = 29;
+const int kDeleteSuffixReserve = 17;  // string_width(" (99999 sessions)")
+// 5 == string_width("    ["); the two 1s are the badge's surrounding spaces.
+const int kDeleteBadgeReserve = 5 + 1 + kDeleteBadgeWidth + 1 + kDeleteSuffixReserve;
+
+// 57-D3/57-I18: the inline confirmation badge. Never ellipsized; obeys the
+// colour gate (Red/White with colour, inverted|bold without) and is never passed
+// through the row highlight, so its explicit fg/bg survives.
+Element delete_confirm_badge(const Theme& theme) {
+    Element badge = ftxui::text("press Ctrl+d again to confirm");
+    if (theme.color) {
+        return badge | ftxui::bgcolor(ftxui::Color::Red) | ftxui::color(ftxui::Color::White) |
+               ftxui::bold;
+    }
+    return badge | ftxui::inverted | ftxui::bold;
+}
+
+// 57-D3: build the armed target's one-line row as an hbox of
+// { name_element, text(" "), badge [, text(" "), dim(suffix)] }. The caller
+// builds the already-ellipsized `name_element`; the badge is a separate child so
+// the row highlight (applied to `name_element` only) never reverse-videos it.
+Element with_delete_confirm(Element name_element, std::string suffix, const Theme& theme) {
+    Elements cells;
+    cells.push_back(std::move(name_element));
+    cells.push_back(ftxui::text(" "));
+    cells.push_back(delete_confirm_badge(theme));
+    if (!suffix.empty()) {
+        cells.push_back(ftxui::text(" "));
+        cells.push_back(ftxui::text(std::move(suffix)) | ftxui::dim);
+    }
+    return ftxui::hbox(std::move(cells));
+}
+
+enum class SwitcherRowKind { Leaf, Note, Separator, Footer };
+
+// 57-D3: the exact per-node inputs the renderer reads. A Leaf row sets at most
+// one of `workspace`/`session`; Note/Separator/Footer rows leave all five
+// unset/false. `text` is the pre-ellipsize string.
+struct SwitcherRow {
+    std::string                text;
+    SwitcherRowKind            kind = SwitcherRowKind::Note;
+    std::optional<WorkspaceId> workspace;
+    std::optional<SessionId>   session;
+    bool                       cursor    = false;
+    bool                       attention = false;
+    bool                       from_disk = false;
+};
+
+// 57-D3: the single source of truth for the popup's disarmed rows. Both the
+// renderer and `switcher_content_width` consume this vector, so row order and
+// per-row styling cannot drift. Separator rows carry an empty text; the footer
+// is the row with kind == Footer. The window title row is a renderer prelude.
+std::vector<SwitcherRow> switcher_disarmed_rows(const UiModel& model) {
     const SwitcherOverlayModel& switcher = model.switcher;
     const bool history = switcher.source == SwitcherSource::History;
-    Elements rows;
-    rows.push_back(ftxui::text(history ? "sessions" : "Switcher") | ftxui::bold);
-    rows.push_back(ftxui::separator());
+    std::vector<SwitcherRow> rows;
     if (switcher.workspaces.empty()) {
+        SwitcherRow empty;
         if (history && !model.catalog.loaded) {
-            rows.push_back(ftxui::text("loading stored sessions…") | ftxui::dim);
+            empty.text = "loading stored sessions…";
         } else {
-            rows.push_back(
-                ftxui::text(history ? "(no stored sessions)" : "(no workspaces)") | ftxui::dim);
+            empty.text = history ? "(no stored sessions)" : "(no workspaces)";
         }
+        rows.push_back(std::move(empty));
     }
     for (const WorkspaceNode& workspace : switcher.workspaces) {
         const bool on_workspace = switcher.cursor.workspace == workspace.id &&
@@ -913,94 +967,210 @@ Element render_switcher(const UiModel& model, const Theme& theme) {
         const bool collapsed = switcher.collapsed.find(workspace.id) != switcher.collapsed.end();
         const std::string title =
             workspace.title.empty() ? workspace.id.value : workspace.title;
-        Element row;
+        SwitcherRow row;
+        row.kind = SwitcherRowKind::Leaf;
+        row.workspace = workspace.id;
+        row.cursor = on_workspace;
         if (history) {
             const std::string tail = workspace.historyOnly
                                          ? std::string("· [history]")
                                          : std::string(daemon_status_glyph(workspace.status)) +
                                                " [owned]";
-            row = ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " + tail);
+            row.text = std::string(collapsed ? "+ " : "- ") + title + "  " + tail;
         } else {
-            row = ftxui::text(std::string(collapsed ? "+ " : "- ") + title + "  " +
-                              daemon_status_glyph(workspace.status) + " [" +
-                              ownership_mark_name(workspace.mark) + "]");
+            row.text = std::string(collapsed ? "+ " : "- ") + title + "  " +
+                       daemon_status_glyph(workspace.status) + " [" +
+                       ownership_mark_name(workspace.mark) + "]";
         }
-        if (on_workspace) {
-            row = paint(row, ftxui::Color::Cyan, theme) | ftxui::bold;
-        }
-        rows.push_back(row);
+        rows.push_back(std::move(row));
         if (collapsed) {
             continue;
         }
         if (workspace.sessions.empty()) {
-            std::string leaf;
+            SwitcherRow leaf;
             if (!history && workspace.catalog_pending) {
-                leaf = "(loading live sessions…)";
+                leaf.text = "    (loading live sessions…)";
             } else if (workspace.note.has_value()) {
-                leaf = history_note_leaf(*workspace.note);
+                leaf.text = "    " + history_note_leaf(*workspace.note);
             } else if (workspace.sessions_hidden_by_focus) {
-                leaf = "(current session hidden)";
+                leaf.text = "    (current session hidden)";
             } else if (history) {
-                leaf = "(no stored sessions)";
+                leaf.text = "    (no stored sessions)";
             } else {
-                leaf = "(no live sessions)";
+                leaf.text = "    (no live sessions)";
             }
-            rows.push_back(ftxui::text("    " + leaf) | ftxui::dim);
+            rows.push_back(std::move(leaf));
             continue;
         }
         for (const SessionNode& session : workspace.sessions) {
             const bool on_session = switcher.cursor.workspace == workspace.id &&
                                     switcher.cursor.session.has_value() &&
                                     *switcher.cursor.session == session.id;
-            Element leaf_element;
+            SwitcherRow leaf;
+            leaf.kind = SwitcherRowKind::Leaf;
+            leaf.workspace = workspace.id;
+            leaf.session = session.id;
+            leaf.cursor = on_session;
+            leaf.attention = session.attention;
+            leaf.from_disk = session.fromDisk;
             if (session.fromDisk) {
-                leaf_element = ftxui::text("    [" + history_session_leaf(session, model) + "]");
+                leaf.text = "    [" + history_session_leaf(session, model) + "]";
             } else {
                 const std::string leaf_title = session_row_title(session.title, session.id);
-                std::string leaf = "    [" + leaf_title + " " + state_glyph(session.state);
+                std::string text = "    [" + leaf_title + " " + state_glyph(session.state);
                 if (session.attention) {
-                    leaf += "!";
+                    text += "!";
                 }
-                leaf += "]";
-                leaf_element = ftxui::text(leaf);
+                text += "]";
+                leaf.text = std::move(text);
             }
-            if (on_session) {
-                leaf_element = leaf_element | ftxui::inverted;
-            }
-            if (session.attention) {
-                leaf_element = paint(leaf_element, ftxui::Color::Red, theme);
-            }
-            rows.push_back(leaf_element);
+            rows.push_back(std::move(leaf));
         }
     }
-    rows.push_back(ftxui::separator());
+    SwitcherRow separator;
+    separator.kind = SwitcherRowKind::Separator;
+    rows.push_back(std::move(separator));
+    SwitcherRow footer;
+    footer.kind = SwitcherRowKind::Footer;
     if (history) {
-        std::string footer = "stored sessions";
-        if (model.catalog.capturedAtMs > 0 && model.catalog.nowMs > 0) {
-            footer += " · captured " +
-                      relative_age_label(model.catalog.nowMs - model.catalog.capturedAtMs) +
-                      " ago";
-        }
+        std::string text = "stored sessions";
         if (!model.catalog.complete) {
-            footer += " · partial";
+            text += " · partial";
         }
-        footer += " · r refresh · Enter resume · Esc close";
-        rows.push_back(ftxui::text(footer) | ftxui::dim);
+        text += " · r refresh · Ctrl+D delete · Enter resume · Esc close";
+        footer.text = std::move(text);
     } else {
-        rows.push_back(ftxui::text("j/k move · Tab expand · Enter focus · Esc close") | ftxui::dim);
+        footer.text = "j/k move · Tab expand · Ctrl+D delete · Enter focus · Esc close";
     }
-    // 51-D4.3: the double-press delete confirmation; a workspace target states
-    // the number of sessions the cascade will destroy (51-D4.5).
-    if (switcher.delete_arm == EscArm::Armed) {
-        std::string hint = "  - one more Ctrl+D to delete";
-        if (switcher.delete_target.has_value() && !switcher.delete_target->session.has_value()) {
-            hint += " workspace and its " +
-                    std::to_string(switcher.delete_target_session_count) + " sessions";
+    rows.push_back(std::move(footer));
+    return rows;
+}
+
+// 57-D3/57-I16: the pinned window CONTENT width, computed once from the disarmed
+// rows plus the fixed, state-independent `kDeleteBadgeReserve`, then clamped for
+// the 2 border columns. Applied to the content inside the window so the window
+// auto-sizes to total `w + 2`.
+int switcher_content_width(const UiModel& model, int available_width) {
+    int computed = kDeleteBadgeReserve;
+    for (const SwitcherRow& row : switcher_disarmed_rows(model)) {
+        computed = std::max(computed, ftxui::string_width(row.text));
+    }
+    return std::max(0, std::min(computed, available_width - 2));
+}
+
+const WorkspaceNode* find_workspace_node(const SwitcherOverlayModel& switcher,
+                                         const WorkspaceId& id) {
+    for (const WorkspaceNode& node : switcher.workspaces) {
+        if (node.id == id) {
+            return &node;
         }
-        rows.push_back(ftxui::text(hint) | ftxui::dim);
     }
-    return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"),
-                         ftxui::vbox(std::move(rows))) |
+    return nullptr;
+}
+
+const SessionNode* find_session_node(const SwitcherOverlayModel& switcher,
+                                     const WorkspaceId& workspace, const SessionId& session) {
+    const WorkspaceNode* node = find_workspace_node(switcher, workspace);
+    if (node == nullptr) {
+        return nullptr;
+    }
+    for (const SessionNode& candidate : node->sessions) {
+        if (candidate.id == session) {
+            return &candidate;
+        }
+    }
+    return nullptr;
+}
+
+// 57-D3/57-I20: the armed target's row. The name is ellipsized to its budget;
+// the fixed prefix and the badge are never ellipsized, so the badge stays fully
+// visible for `w >= string_width(fixed_prefix) + 1 + kDeleteBadgeWidth`.
+Element render_armed_row(const UiModel& model, const SwitcherRow& row, const Theme& theme,
+                         int w) {
+    const SwitcherOverlayModel& switcher = model.switcher;
+    const WorkspaceId workspace = row.workspace.value_or(WorkspaceId{});
+    if (row.session.has_value()) {
+        const std::string fixed_prefix = "    [";
+        const SessionNode* node = find_session_node(switcher, workspace, *row.session);
+        const std::string name =
+            node != nullptr ? session_row_title(node->title, node->id) : std::string{};
+        const int budget = w - (ftxui::string_width(fixed_prefix) + 1 + kDeleteBadgeWidth);
+        Element name_element =
+            ftxui::text(fixed_prefix + ellipsize_text(name, budget)) | ftxui::inverted;
+        return with_delete_confirm(std::move(name_element), std::string{}, theme);
+    }
+    const bool collapsed = switcher.collapsed.find(workspace) != switcher.collapsed.end();
+    const std::string fixed_prefix = collapsed ? "+ " : "- ";
+    const WorkspaceNode* node = find_workspace_node(switcher, workspace);
+    const std::string name =
+        node != nullptr ? (node->title.empty() ? node->id.value : node->title) : std::string{};
+    const std::string raw_suffix =
+        "(" + std::to_string(switcher.delete_target_session_count) + " sessions)";
+    const std::string suffix_full = ellipsize_text(raw_suffix, kDeleteSuffixReserve);
+    const int base = ftxui::string_width(fixed_prefix) + 1 + kDeleteBadgeWidth + 1;
+    int name_budget = 0;
+    std::string suffix;
+    if (w >= base + kDeleteSuffixReserve) {
+        name_budget = w - base - kDeleteSuffixReserve;
+        suffix = suffix_full;
+    } else {
+        suffix = ellipsize_text(suffix_full, w - base);
+    }
+    Element name_element =
+        paint(ftxui::text(fixed_prefix + ellipsize_text(name, name_budget)), ftxui::Color::Cyan,
+              theme) |
+        ftxui::bold;
+    return with_delete_confirm(std::move(name_element), std::move(suffix), theme);
+}
+
+bool is_armed_row(const SwitcherOverlayModel& switcher, const SwitcherRow& row) {
+    if (switcher.delete_arm != EscArm::Armed || !switcher.delete_target.has_value()) {
+        return false;
+    }
+    const SwitcherCursor& target = *switcher.delete_target;
+    if (target.session.has_value()) {
+        return row.session.has_value() && row.workspace == target.workspace &&
+               *row.session == *target.session;
+    }
+    return !row.session.has_value() && row.workspace.has_value() &&
+           *row.workspace == target.workspace;
+}
+
+Element render_switcher(const UiModel& model, const Theme& theme, int available_width) {
+    const SwitcherOverlayModel& switcher = model.switcher;
+    const bool history = switcher.source == SwitcherSource::History;
+    const int w = switcher_content_width(model, available_width);
+    Elements elements;
+    elements.push_back(ftxui::text(history ? "sessions" : "Switcher") | ftxui::bold);
+    elements.push_back(ftxui::separator());
+    for (const SwitcherRow& row : switcher_disarmed_rows(model)) {
+        if (is_armed_row(switcher, row)) {
+            elements.push_back(render_armed_row(model, row, theme, w));
+            continue;
+        }
+        if (row.kind == SwitcherRowKind::Separator) {
+            elements.push_back(ftxui::separator());
+            continue;
+        }
+        Element element = ftxui::text(row.text);
+        if (row.kind == SwitcherRowKind::Note || row.kind == SwitcherRowKind::Footer) {
+            element = element | ftxui::dim;
+        } else {
+            if (row.cursor) {
+                if (row.session.has_value()) {
+                    element = element | ftxui::inverted;
+                } else {
+                    element = paint(element, ftxui::Color::Cyan, theme) | ftxui::bold;
+                }
+            }
+            if (row.attention) {
+                element = paint(element, ftxui::Color::Red, theme);
+            }
+        }
+        elements.push_back(std::move(element));
+    }
+    Element content = ftxui::vbox(std::move(elements)) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, w);
+    return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"), std::move(content)) |
            ftxui::clear_under | ftxui::center;
 }
 
@@ -1444,7 +1614,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
         return ftxui::dbox({main, render_notice(model, theme)});
     }
     if (model.mode == UiMode::Switcher) {
-        return ftxui::dbox({main, render_switcher(model, theme)});
+        return ftxui::dbox({main, render_switcher(model, theme, size.width)});
     }
     if (model.mode == UiMode::ModelPicker && model.model_picker.visible) {
         return ftxui::dbox({main, render_model_picker(model, theme)});
