@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <asio.hpp>
@@ -155,6 +156,30 @@ std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& soc
                         "attach identity mismatch at " + socket_path.string());
     }
     return connection;
+}
+
+std::string describe_host_exit(int status) {
+    switch (static_cast<HostExitCode>(status)) {
+        case HostExitCode::Ok:
+            return "exited cleanly";
+        case HostExitCode::WorkspaceBusy:
+            return "another daemon holds the workspace lock (WorkspaceBusy)";
+        case HostExitCode::WorkspaceMissing:
+            return "the workspace root is missing (WorkspaceMissing)";
+        case HostExitCode::StoreOpenFailed:
+            return "the session store could not be opened (StoreOpenFailed)";
+        case HostExitCode::RegistryFailed:
+            return "the shared registry could not be opened (RegistryFailed)";
+        case HostExitCode::SocketBindFailed:
+            return "the daemon socket could not be bound (SocketBindFailed)";
+        case HostExitCode::SocketPathTooLong:
+            return "the daemon socket path is too long (SocketPathTooLong)";
+        case HostExitCode::StartupRejected:
+            return "startup was rejected (StartupRejected)";
+        case HostExitCode::Internal:
+            return "an internal error occurred (Internal)";
+    }
+    return "exit code " + std::to_string(status);
 }
 
 } // namespace
@@ -1108,6 +1133,24 @@ bool ForkExecLauncher::isAlive(HostPid pid) const {
     return errno != ESRCH;
 }
 
+std::optional<int> ForkExecLauncher::tryReap(HostPid pid) {
+    if (pid <= 0) {
+        return std::nullopt;
+    }
+    int         status = 0;
+    const pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+    if (result <= 0) {
+        return std::nullopt;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return -1;
+}
+
 HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     HostConfig config;
     config.workspace      = record.id;
@@ -1139,8 +1182,18 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
     const HostLauncher::SpawnResult     spawned = launcher_.spawn(config);
     const std::chrono::steady_clock::time_point deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    std::string last_error;
+    std::optional<int> daemon_exit;
+    std::string        last_error;
     while (std::chrono::steady_clock::now() < deadline) {
+        // A zombie satisfies `isAlive` (kill(pid,0) succeeds), so reap first: an
+        // exited daemon is authoritative and must end the wait at once instead
+        // of spinning the whole budget into a misleading "not yet published".
+        if (const std::optional<int> status = launcher_.tryReap(spawned.pid);
+            status.has_value()) {
+            daemon_exit = status;
+            last_error  = describe_host_exit(*status);
+            break;
+        }
         // Ordering invariant: the daemon binds its socket before publishing its
         // claim, so a published claim implies the socket is bound. Gate readiness
         // on the claim and connect second; the retry loop covers a socket that is
@@ -1166,18 +1219,24 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
             last_error = "host claim not yet published";
         }
         if (!launcher_.isAlive(spawned.pid)) {
+            last_error = "daemon exited before publishing its claim";
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{20});
     }
-    launcher_.requestStop(spawned.pid, ShutdownReason::StartupFailure);
+    if (!daemon_exit.has_value()) {
+        launcher_.requestStop(spawned.pid, ShutdownReason::StartupFailure);
+    }
 
     // D-F1 spawn race: another supervisor may have won the workspace flock and
     // our daemon exited `WorkspaceBusy`. Attach to the winner instead of
-    // failing; never signal it.
+    // failing; never signal it. Any other exit is not a race, so fail fast.
+    const bool race_possible =
+        !daemon_exit.has_value() ||
+        *daemon_exit == static_cast<int>(HostExitCode::WorkspaceBusy);
     const std::chrono::steady_clock::time_point winner_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (std::chrono::steady_clock::now() < winner_deadline) {
+    while (race_possible && std::chrono::steady_clock::now() < winner_deadline) {
         const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
         if (current.has_value() && current->host.has_value()) {
             try {

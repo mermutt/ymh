@@ -547,12 +547,14 @@ public:
     }
     void requestStop(HostPid pid, ShutdownReason) override { stopped_pid = pid; }
     [[nodiscard]] bool isAlive(HostPid) const override { return alive; }
+    [[nodiscard]] std::optional<int> tryReap(HostPid) override { return reap_status; }
 
     int                               spawn_count = 0;
     std::filesystem::path             spawned_socket;
     HostConfig                        last_config;
     HostPid                           stopped_pid = 0;
     bool                              alive = false;
+    std::optional<int>                reap_status;
 };
 
 TEST(HostLifecycleTest, EnsureRunningSpawnsWhenNoClaim) {
@@ -571,6 +573,38 @@ TEST(HostLifecycleTest, EnsureRunningSpawnsWhenNoClaim) {
                  HostError);
     EXPECT_EQ(launcher.spawn_count, 1);
     EXPECT_EQ(launcher.stopped_pid, 4242);
+}
+
+// Regression: an exited daemon is a zombie, so `isAlive` (kill(pid,0)) stays
+// true. Without reaping, `spawnAndAttach` burns the 10 s claim deadline plus the
+// 5 s winner window and reports "host claim not yet published". The reaped exit
+// status must end the wait at once, name the real cause, and never signal a pid
+// that has already been reaped.
+TEST(HostLifecycleTest, ExitedDaemonFailsFastWithRealReason) {
+    ShortTempRoot root("ymh-lifecycle-exit");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "lifecycle");
+
+    FakeLauncher launcher;
+    launcher.alive       = true;
+    launcher.reap_status = static_cast<int>(HostExitCode::RegistryFailed);
+
+    HostLifecycle lifecycle(launcher, *registry);
+    const auto    started = std::chrono::steady_clock::now();
+    try {
+        (void)lifecycle.ensureRunning(
+            record.id, AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                      protocol::ClientRole::Supervisor});
+        FAIL() << "expected HostError";
+    } catch (const HostError& error) {
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        EXPECT_LT(elapsed, std::chrono::seconds{2});
+        EXPECT_NE(std::string{error.what()}.find("RegistryFailed"), std::string::npos)
+            << error.what();
+    }
+    EXPECT_EQ(launcher.stopped_pid, 0) << "a reaped pid must never be signalled";
 }
 
 TEST(HostLifecycleTest, ReapIfStaleClearsStaleClaim) {
