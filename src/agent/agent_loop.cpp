@@ -984,6 +984,16 @@ void AgentLoop::runTurn() {
     if (trigger.kind == InboxKind::Inject) {
         appendContextInjected(trigger.context);
     } else {
+        // 36 §2.7: the durable prefix (workspace instructions, then the
+        // runtime-context snapshot) is materialized before the user prompt so
+        // the prompt is the last user-role message in the assembled request.
+        // The per-step `assemble_messages` re-materialization stays for the
+        // changed-snapshot refresh; `materializeContexts` dedups identical text.
+        materializeInstructions();
+        if (services_.prompt != nullptr) {
+            materializeContexts(
+                services_.prompt->assemble(AssembleContext{.scope = active_scope()}));
+        }
         appendUserMessage(trigger.message);
     }
     session_.append(payload::TurnStarted{turn, trigger.origin});
