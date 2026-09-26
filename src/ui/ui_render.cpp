@@ -357,7 +357,14 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
             break;
         }
         case ConversationRole::Assistant:
-            rows.push_back(markdown.render(MarkdownBlock{entry.text}, context));
+            // A pure tool-call turn leaves the assistant message with no text.
+            // Rendering that empty document emits one blank row (markdown
+            // render_children falls back to text("")), stacking a second blank
+            // on the Reasoning separator; skip it so the separator stays the
+            // single blank line the transcript contract promises.
+            if (!entry.text.empty()) {
+                rows.push_back(markdown.render(MarkdownBlock{entry.text}, context));
+            }
             break;
         case ConversationRole::Reasoning:
             return apply_presentation(

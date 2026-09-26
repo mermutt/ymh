@@ -2410,6 +2410,67 @@ TEST(UiRenderGolden, ReasoningBlankLineSeparator) {
     EXPECT_EQ(previous.find_first_not_of(" \xE2\x94\x82"), std::string::npos) << rendered;
 }
 
+TEST(UiRenderGolden, ReasoningToToolHasExactlyOneBlankLine) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel workspace;
+    workspace.id           = model.activeWorkspaceId;
+    workspace.cwd          = "/work";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live         = true;
+    model.workspaces.emplace(workspace.id, workspace);
+    model.focusSessionIn(workspace.id, kSession);
+    model.session(kSession)->status.model = "test-model";
+    SessionUiState* state = model.session(kSession);
+    ToolCallView call;
+    call.id        = "t1";
+    call.name      = "shell";
+    call.arguments = R"({"command":"ls"})";
+    state->tools.by_id["t1"] = state->tools.calls.size();
+    state->tools.calls.push_back(std::move(call));
+
+    ConversationEntry reasoning;
+    reasoning.role = ConversationRole::Reasoning;
+    reasoning.text = "thinking";
+    // A pure tool-call turn finishes the assistant message with no text; the
+    // entry still exists in the transcript but must render no row.
+    ConversationEntry assistant;
+    assistant.role = ConversationRole::Assistant;
+    ConversationEntry tool;
+    tool.role         = ConversationRole::Tool;
+    tool.tool_name    = "shell";
+    tool.tool_call_id = "t1";
+    state->conversation.entries.push_back(std::move(reasoning));
+    state->conversation.entries.push_back(std::move(assistant));
+    state->conversation.entries.push_back(std::move(tool));
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{60, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    const std::vector<std::string> lines = split_lines(rendered);
+    std::size_t thinking = lines.size();
+    std::size_t shell    = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (thinking == lines.size() && lines[i].find("Thinking") != std::string::npos) {
+            thinking = i;
+        }
+        if (shell == lines.size() && lines[i].find("\u25b8 shell") != std::string::npos) {
+            shell = i;
+        }
+    }
+    ASSERT_LT(thinking, lines.size());
+    ASSERT_LT(shell, lines.size());
+    ASSERT_LT(thinking, shell);
+    int blanks = 0;
+    for (std::size_t i = thinking + 1; i < shell; ++i) {
+        // A transcript blank row carries only the border glyph and padding.
+        if (lines[i].find_first_not_of(" \xE2\x94\x82") == std::string::npos) {
+            ++blanks;
+        }
+    }
+    EXPECT_EQ(blanks, 1) << rendered;
+}
+
 TEST(UiRenderGolden, UI51_D3_TableGolden) {
     const UiModel model = build_message_model(
         ConversationRole::Assistant, "| A | B |\n|---|---|\n| 1 | 2 |\n");
