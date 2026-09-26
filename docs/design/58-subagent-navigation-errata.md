@@ -1,12 +1,15 @@
 # 58 — Subagent Navigation Errata (enter / view / return)
 
 ```
-Status: verified (Rev 6) · GATED — the gate closed after **6 revisions**: on
-        Rev 6 all five adversarial reviewers returned **PASS**, and Oracle's
-        fourth and final independent pass returned **PASS**, stating the spec may
-        be marked `verified` (0 open HIGH/MEDIUM; the four residual LOWs were
-        documentation-only and are swept here). This is the design-first gate
-        artifact; implementation may now begin (AGENTS.md "The rule"). It is
+Status: verified (Rev 7) · GATED — the gate closed at **Rev 6** after **6
+        revisions**: on Rev 6 all five adversarial reviewers returned **PASS**,
+        and Oracle's fourth and final independent pass returned **PASS**, stating
+        the spec may be marked `verified` (0 open HIGH/MEDIUM; the four residual
+        LOWs were documentation-only and are swept here). **Rev 7 is an
+        implementation-reconciliation addendum only (§15): the Rev 6 gate closure
+        is unchanged, and no design decision, invariant, or edit changed.** This
+        is the design-first gate artifact; implementation may now begin
+        (AGENTS.md "The rule"). It is
         authored in two parts, Part A (UI) first, then Part B (implementation),
         per the user's explicit ordering ("Design UI first and then design
         implementation and then implement").
@@ -2320,7 +2323,9 @@ glyph.
 - **58-H11** `UnsubscribeOnPop` — enter then return submits exactly one
   `event.subscribe` and one `event.unsubscribe` for the child; a second
   enter/return pair leaves the tracked/subscribed set at its pre-entry size
-  (58-I18).
+  (58-I18). Asserts the counts through the observation-only
+  `SupervisorConnection` counters (`subscribe_request_count`/
+  `unsubscribe_request_count`; Rev 7, §15 `R7`).
 - **58-H12** `UnknownChildSurfacesNotice` — entering a child whose log was
   deleted yields the `subagent unavailable:` notice and pops the path; the view
   never renders blank (58-I20/F12).
@@ -2376,12 +2381,13 @@ glyph.
 ### 12.5 PTY / live
 
 - **58-P1** `SubagentNavigationPty` — **hermetic**, in
-  `tests/unit/ui_supervisor_pty_test.cpp` (FakeLLM): spawn a continuable child,
-  `Ctrl+T`, `Enter`, assert the child's transcript and breadcrumb render, `Esc`
-  returns. **Must not be gated on `YMH_LIVE_LLM`** (that file has no
-  `live_enabled()` and `tests/support/host_harness.hpp:110` strips the variable;
-  gating a FakeLLM test on it is spec 57's exact bug class). Rev 2 fix for
-  R4-H2.
+  `tests/unit/ui_supervisor_pty_test.cpp` (FakeLLM): spawn a **continuable**
+  child (`subagent_continuable`, the ongoing case `P1` names — a one-shot
+  `subagent` would only exercise a completed child), `Ctrl+T`, `Enter`, assert
+  the child's transcript and breadcrumb render, `Esc` returns. **Must not be
+  gated on `YMH_LIVE_LLM`** (that file has no `live_enabled()` and
+  `tests/support/host_harness.hpp:110` strips the variable; gating a FakeLLM
+  test on it is spec 57's exact bug class). Rev 2 fix for R4-H2.
 - **58-P2** (opt-in, `YMH_LIVE_LLM=1`) — **`tests/unit/ui_live_pty_test.cpp`**
   (`:24-29`), against real DeepSeek: delegate a task, enter the running child,
   observe streaming, let it finish, observe `finished`, return. Rev 2 moves this
@@ -2396,6 +2402,13 @@ the component gate before any code (AGENTS.md).
 
 ## 14. Revision log
 
+- **Rev 7 (2026-09-26)** — **implementation-reconciliation addendum** (no design
+  change; §15). Records the seven points the implementation of `2787f5b9d` and
+  `929ffff42` resolved where §6.A/§6.B/§6.C were silent or imprecise, each with
+  the `file:line` that resolves it (`R1`–`R7`). The Rev 6 gate closure is
+  unchanged; precedence is unchanged (§6 wins). Two test-plan rows are corrected
+  to match the shipped tests: `58-P1` names the continuable child and `58-H11`
+  names the RPC-count assertions.
 - **Rev 6 (2026-09-26)** — fix pass, applying the Rev 5 re-check (R1–R5: three
   PASSes, two DO NOT APPROVEs on two narrow MEDIUMs). Every change is inside the
   normative §6.A/§6.B/§6.C or its §11/§12 echo; no `src/`/`tests/` file changed.
@@ -2559,3 +2572,52 @@ the component gate before any code (AGENTS.md).
   (implementation). Decisions 58-D1–58-D8; invariants 58-I1–58-I16; failure
   modes 58-F1–58-F12. No new RPC, no new persistence. Rejected by the gate (≥5
   HIGH).
+
+## 15. Implementation reconciliation (Rev 7)
+
+This is an **implementation-reconciliation addendum**, not a design revision. It
+records the seven points the implementation — commits `2787f5b9d` (`ui: subagent
+navigation (spec 58)`) and `929ffff42` (`ui: fix subagent status default and
+tighten spec 58 tests`) — had to resolve where §6.A/§6.B/§6.C were **silent or
+imprecise**. It adds **no semantics and changes no design decision, invariant, or
+edit**: every entry is either (a) a symbol the design implied but did not list,
+(b) a mechanism the design named but did not pin, or (c) a sketch line corrected
+to conform to an already-documented contract. **Precedence is unchanged — if this
+section and §6.A/§6.B/§6.C disagree, the normative §6 wins.** Each entry was
+checked against §6/§8 and none contradicts the design; the Rev 6 gate closure
+remains the verified design.
+
+### 15.1 Reconciliation register (R1–R7)
+
+| ID | Spec anchor | Where the spec was silent / imprecise | Resolution (code) |
+|---|---|---|---|
+| R1 | §6.A/§6.B E35; §3 / 58-D3; 58-G1/58-G7 | `render_subagent_breadcrumb` is required by the goldens and specified as a screen row, but §6.A's new-symbol list and §6.B's edit list did not name it | Added `render_subagent_breadcrumb`, called from `build_ui` (E35) — `src/ui/ui_render.cpp:1330` (definition), `:1713` (call in `build_ui`, `:1689`) |
+| R2 | §6.B E5 ("no `source ==` in the renderer") | E5 named the policy substitution and the History loading override but did not pin how the local `history` flag is derived, nor the Subagents per-node `(no subagents)` leaf (58-G4) | Derive `history` from `policy.r_refreshes` (true only for History, A3.1); use `policy.enter == SwitcherEnter::EnterChild` for the Subagents empty-state leaf — `src/ui/ui_render.cpp:1023`, `:1067` |
+| R3 | §6.A A6 `untrack` (`:1174-1192`); §6.B E28; 58-I18 | A6's sketch called `connection_->request` directly from the UI thread, breaking the documented pump-thread fd contract (the `HostConnection` rule) | Marshalled the best-effort `event.unsubscribe` through `submit()`; behaviour is identical and no unsubscribe is lost (the pump thread issues the same `request`) — `src/ui/supervisor_connection.cpp:98` (submit), `:446` (pump `request`) |
+| R4 | §8 58-I20; §12.4 58-H12; §6.A A6 / §6.B E29 | `on_subscribe_error` was specified to "reconcile the path", but the failed child's state was not pinned as erased — without the erase the reconcile cannot pop | `handle_subscribe_error` erases the child state (`model_.eraseSession`) before `reconcile_subagent_path()` — `src/ui/supervisor.cpp:1085` (definition), `:1092` (erase), `:1094` (reconcile) |
+| R5 | §12.1/§12.4 (58-U1/U8/U16/U18/U19/U20) | The test plan implied model-only unit files, but these six assertions exercise `SupervisorApp`-private paths | Kept them in the harness test file — `tests/unit/errata58_ui_test.cpp:1-5` (rationale), `:619` (`U1`/`U18`), `:650` (`U8`), `:672` (`U16`), `:684` (`U19`), `:701` (`U20`) |
+| R6 | §12.5 58-P1 | `P1` names the ongoing/continuable case, but the first hermetic PTY test drove the one-shot `subagent` tool (only a completed child) | `58-P1` now spawns the continuable child `subagent_continuable` — `tests/unit/ui_supervisor_pty_test.cpp:2034` (test), `:2050` (FakeLLM script), `:2044-2048` (rationale) |
+| R7 | §12.4 58-H11 | `H11` asserted the subscribe/unsubscribe behaviour but not the RPC counts; the unsubscribe was otherwise only covered at connection level | Added observation-only `SupervisorConnection` counters + harness accessors — `include/ymh/ui/supervisor_connection.hpp:205-206` (counters), `:144-145` (accessors), `src/ui/supervisor_connection.cpp:73`/`:85` (increments), `include/ymh/ui/supervisor_harness.hpp:190-195` (harness), `src/ui/supervisor.cpp:4187-4197` (impl), `tests/unit/errata58_ui_test.cpp:338-370` (test) |
+
+### 15.2 Notes
+
+- **`R3` is behaviour-preserving.** The subscription id is still read and erased
+  under the mutex, and the release is still best-effort (`submit(..., nullptr)`);
+  `submit` only moves the `connection_->request` call from the UI thread to the
+  pump thread, which is the thread that owns the fd. No unsubscribe is dropped
+  and `58-I18` is unchanged.
+- **`R6` is the `58-P1` definition.** A continuable child (`subagent_continuable`,
+  `run_in_background` default) is the case the spec's `P1` names; the one-shot
+  `subagent` tool exercises only a completed child and is therefore insufficient.
+- **`R7` counters are observation-only.** `subscribe_requests_`/
+  `unsubscribe_requests_` are incremented beside the existing `track`/`untrack`
+  bookkeeping and are read only by the harness accessors; they change no
+  behaviour and no RPC. They were added because `58-H11`'s unsubscribe assertion
+  was otherwise satisfiable only at the connection level, not end-to-end through
+  the supervisor's `untrack`.
+- **No entry contradicts the design.** `R1` adds an implied symbol; `R2` pins a
+  derivation and preserves E5's "no `source ==` in the renderer" (the renderer
+  has none); `R4` pins the erase that lets the already-specified reconcile pop;
+  `R5` records test placement; `R6`/`R7` correct the test plan to the shipped
+  tests. The normative §6, the invariants (§8), and the gate closure (Rev 6) are
+  unchanged.
