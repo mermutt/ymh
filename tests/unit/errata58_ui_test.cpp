@@ -263,6 +263,72 @@ TEST(Errata58, UI58_H6_ScrollKeysActOnViewedChild) {
     EXPECT_TRUE(fixture.model().session(kS1)->scroll.following);
 }
 
+// 60-U2 (60-I5/58-I12): the Shift+Page bindings act on the viewed child.
+TEST(Errata58, UI60_ShiftPageKeysActOnViewedChild) {
+    SubagentFixture fixture("ymh_60_shift_page_child");
+    fixture.seed_child(kS1, kChild, "task");
+    fixture.enter_first_child();
+
+    ASSERT_TRUE(fixture.model().session(kChild)->scroll.following);
+    ASSERT_TRUE(fixture.model().session(kS1)->scroll.following);
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("shift-page-up"));
+    EXPECT_FALSE(fixture.model().session(kChild)->scroll.following);
+    EXPECT_EQ(fixture.model().session(kChild)->scroll.top, 0);
+    EXPECT_TRUE(fixture.model().session(kS1)->scroll.following);
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("shift-page-down"));
+    EXPECT_TRUE(fixture.model().session(kChild)->scroll.following);
+    EXPECT_TRUE(fixture.model().session(kS1)->scroll.following);
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("shift-up"));
+    EXPECT_FALSE(fixture.model().session(kChild)->scroll.following);
+    EXPECT_TRUE(fixture.model().session(kS1)->scroll.following);
+}
+
+// 60-U5 (60-I6/57-I15): an open popup consumes the new binding.
+TEST(Errata58, UI60_ShiftPageConsumedByPopup) {
+    SubagentFixture fixture("ymh_60_shift_page_popup");
+    fixture.harness->open_switcher();
+    drain_fully(*fixture.harness);
+    ASSERT_EQ(fixture.model().mode, UiMode::Switcher);
+    SessionUiState* state = fixture.model().session(kS1);
+    ASSERT_NE(state, nullptr);
+    ASSERT_TRUE(state->scroll.following);
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("shift-page-up"));
+    EXPECT_TRUE(state->scroll.following);
+    EXPECT_TRUE(fixture.harness->dispatch_key("page-up"));
+    EXPECT_TRUE(state->scroll.following);
+}
+
+// 60-U5 (60-I6): without a popup the new binding reaches the viewed session.
+TEST(Errata58, UI60_ShiftPageActsWithoutPopup) {
+    SubagentFixture fixture("ymh_60_shift_page_nopopup");
+    SessionUiState* state = fixture.model().session(kS1);
+    ASSERT_NE(state, nullptr);
+    ASSERT_TRUE(state->scroll.following);
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("shift-page-up"));
+    EXPECT_FALSE(state->scroll.following);
+}
+
+// 60-U6 (60-I7): the new binding never mutates the composer.
+TEST(Errata58, UI60_ShiftPageDoesNotMutateComposer) {
+    SubagentFixture fixture("ymh_60_shift_page_composer");
+    SessionUiState* state = fixture.model().session(kS1);
+    ASSERT_NE(state, nullptr);
+    state->input.draft  = "hello";
+    state->input.cursor = 2;
+    const std::size_t history_before = state->input.history.size();
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("shift-page-up"));
+
+    EXPECT_EQ(state->input.draft, "hello");
+    EXPECT_EQ(state->input.cursor, 2u);
+    EXPECT_EQ(state->input.history.size(), history_before);
+}
+
 // 58-H7 (58-I13): a child SessionUiState never appears in the Live switcher.
 TEST(Errata58, UI58_H7_ChildNotInLiveSwitcher) {
     SubagentFixture fixture("ymh_58_h7");
