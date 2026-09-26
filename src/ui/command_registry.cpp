@@ -241,6 +241,13 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "subagents", "enter a subagent of the current session",
+        [](CommandContext& context, const std::string&) {
+            if (context.subagents) {
+                context.subagents();
+            }
+        }});
+    registry.add(Command{
         "mcp", "list configured MCP servers and their tools",
         [](CommandContext& context, const std::string&) {
             if (context.mcp) {

@@ -19,6 +19,10 @@ namespace {
     return error.code() == static_cast<int>(protocol::AppCode::UnknownSession);
 }
 
+[[nodiscard]] bool is_subscription_limit(const protocol::RpcException& error) {
+    return error.code() == static_cast<int>(protocol::AppCode::SubscriptionLimit);
+}
+
 } // namespace
 
 const char* supervisor_link_state_name(SupervisorLinkState state) noexcept {
@@ -73,11 +77,22 @@ void SupervisorConnection::track(const SessionId& session) {
 }
 
 void SupervisorConnection::untrack(const SessionId& session) {
+    protocol::SubscriptionId id;
     {
         std::lock_guard lock(mutex_);
         tracked_.erase(std::remove(tracked_.begin(), tracked_.end(), session), tracked_.end());
+        if (const auto it = subscriptions_.find(session); it != subscriptions_.end()) {
+            id = it->second;
+            subscriptions_.erase(it);
+        }
         subscribed_.erase(session);
         cursors_.erase(session);
+    }
+    if (id.value != 0) {
+        // 58-A6/E28: best-effort release, marshalled onto the pump thread so the
+        // fd is only ever touched there (the `HostConnection` contract).
+        submit(std::string(protocol::method::kEventUnsubscribe),
+               nlohmann::json{{"subscription", id.value}}, nullptr);
     }
 }
 
@@ -212,6 +227,7 @@ bool SupervisorConnection::attempt_attach() {
         {
             std::lock_guard lock(mutex_);
             subscribed_.clear();
+            subscriptions_.clear();
             client_id_ = hello.client_id;
         }
         connection_ = std::move(connection);
@@ -269,21 +285,23 @@ void SupervisorConnection::subscribe_one(const SessionId& session) {
     nlohmann::json params;
     protocol::to_json(params, protocol::SubscribeParams{session, from});
     try {
-        static_cast<void>(connection_->request(protocol::method::kEventSubscribe, params,
-                                               config_.request_timeout));
-        {
-            std::lock_guard lock(mutex_);
-            subscribed_.insert(session);
-        }
-        cv_.notify_all();
+        const nlohmann::json result = connection_->request(
+            protocol::method::kEventSubscribe, params, config_.request_timeout);
+        protocol::SubscribeResult subscribed;
+        protocol::from_json(result, subscribed);
+        record_subscription(session, subscribed.subscription);
         return;
     } catch (const protocol::RpcException& error) {
-        if (is_unknown_session(error)) {
+        if (is_unknown_session(error) || is_subscription_limit(error)) {
             {
                 std::lock_guard lock(mutex_);
                 subscribed_.insert(session);
             }
             cv_.notify_all();
+            if (sink_.on_subscribe_error) {
+                sink_.on_subscribe_error(
+                    session, is_unknown_session(error) ? "unknown session" : "subscription limit");
+            }
             return;
         }
         if (!is_cursor_invalid(error)) {
@@ -303,16 +321,39 @@ void SupervisorConnection::subscribe_one(const SessionId& session) {
     nlohmann::json retry;
     protocol::to_json(retry, protocol::SubscribeParams{session, beginning});
     try {
-        static_cast<void>(connection_->request(protocol::method::kEventSubscribe, retry,
-                                               config_.request_timeout));
-        {
-            std::lock_guard lock(mutex_);
-            subscribed_.insert(session);
-        }
-        cv_.notify_all();
+        const nlohmann::json result = connection_->request(
+            protocol::method::kEventSubscribe, retry, config_.request_timeout);
+        protocol::SubscribeResult subscribed;
+        protocol::from_json(result, subscribed);
+        record_subscription(session, subscribed.subscription);
     } catch (const std::exception&) {
         // Left unsubscribed; the next reconnect retries the whole phase.
     }
+}
+
+void SupervisorConnection::record_subscription(const SessionId& session,
+                                               protocol::SubscriptionId subscription) {
+    protocol::SubscriptionId created;
+    {
+        std::lock_guard lock(mutex_);
+        if (std::find(tracked_.begin(), tracked_.end(), session) != tracked_.end()) {
+            subscriptions_[session] = subscription;
+            subscribed_.insert(session);
+        } else {
+            created = subscription;
+        }
+    }
+    if (created.value != 0) {
+        // 58-A6: `untrack` ran while the subscribe was in flight and found no
+        // id, so release the just-created subscription here.
+        nlohmann::json release{{"subscription", created.value}};
+        try {
+            static_cast<void>(connection_->request(protocol::method::kEventUnsubscribe,
+                                                   release, config_.request_timeout));
+        } catch (const std::exception&) {
+        }
+    }
+    cv_.notify_all();
 }
 
 void SupervisorConnection::dispatch(const protocol::Notification& notification) {
@@ -447,6 +488,7 @@ void SupervisorConnection::handle_disconnect(const std::string& detail) {
     {
         std::lock_guard lock(mutex_);
         subscribed_.clear();
+        subscriptions_.clear();
         client_id_ = protocol::ClientId{};
     }
     // 46-D7 / O-H3: drain requests submitted while a batch was in flight, with
@@ -486,6 +528,7 @@ void SupervisorConnection::pump() {
             {
                 std::lock_guard lock(mutex_);
                 subscribed_.clear();
+                subscriptions_.clear();
             }
             set_state(SupervisorLinkState::Dead, "reconnect requested");
         }

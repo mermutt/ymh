@@ -168,11 +168,24 @@ struct AgentStateChanged {
     AgentState newState = AgentState::Idle;
 };
 
+// 58-D5: the durable spawn→fan-in edge state, distinct from the live-process
+// `AgentState`. Rendered by `subagent_status_glyph` (58-A8), never by
+// `state_glyph`.
+enum class SubagentStatus : std::uint8_t { Running, Completed, Failed, Cancelled };
+
+// 58-D5 (NEW UI event): a child appears in the parent's strip/picker at spawn.
+struct SubagentSpawned {
+    SessionId   session;    // parent
+    SessionId   subagent;   // child
+    std::string task;       // -> SubagentView::summary
+};
+
 struct SubagentUpdated {
-    SessionId   session;
-    SessionId   subagent;
-    std::string summary;
-    AgentState  state = AgentState::Idle;
+    SessionId      session;
+    SessionId      subagent;
+    std::string    summary;
+    AgentState     state = AgentState::Idle;
+    SubagentStatus status = SubagentStatus::Running;   // 58-D5 (amended)
 };
 
 struct ErrorOccurred {
@@ -237,6 +250,7 @@ struct UiEvent {
         PermissionRequested,
         PermissionResolved,
         AgentStateChanged,
+        SubagentSpawned,
         SubagentUpdated,
         ErrorOccurred,
         TokenUsageUpdated,

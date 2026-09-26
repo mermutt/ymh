@@ -910,7 +910,7 @@ TEST(UiModel, WorkspaceEventCarriesSessionId) {
     EXPECT_EQ(*event.session, SessionId{"peer-session"});
 }
 
-TEST(UiModel, SessionOpenedInsertsCellAndIsIdempotent) {
+TEST(UiModel, SessionOpenedInsertsStateWithoutCell) {
     UiModel model = make_model();
     const SessionId peer{"peer-session"};
     WorkspaceEvent event;
@@ -923,13 +923,15 @@ TEST(UiModel, SessionOpenedInsertsCellAndIsIdempotent) {
 
     const auto workspace = model.workspaces.find(WorkspaceId{"workspace"});
     ASSERT_NE(workspace, model.workspaces.end());
+    // 58-E25: SessionOpened materializes state WITHOUT a cell (cells come from
+    // `refresh_sessions`), so a SessionCreated notice cannot leak one.
     std::size_t matches = 0;
     for (const SessionCell& cell : workspace->second.sessions) {
         if (cell.id == peer) {
             ++matches;
         }
     }
-    EXPECT_EQ(matches, 1u) << "double-applied SessionCreated must be idempotent";
+    EXPECT_EQ(matches, 0u) << "SessionOpened must not insert a cell (58-E25)";
     EXPECT_NE(model.session(peer), nullptr);
     EXPECT_EQ(model.session(peer)->workspace, WorkspaceId{"workspace"});
 }
@@ -1535,14 +1537,18 @@ TEST(UiModel, SwitcherOpenHistoryBuildsFromCatalog) {
     EXPECT_FALSE(live_node.historyOnly);
     EXPECT_TRUE(live_node.live);
     EXPECT_FALSE(live_node.note.has_value());
-    ASSERT_EQ(live_node.sessions.size(), 3u);
-    EXPECT_EQ(live_node.sessions[0].id, SessionId{"s-mid"});
-    EXPECT_EQ(live_node.sessions[1].id, SessionId{"s-new"});
-    EXPECT_EQ(live_node.sessions[2].id, SessionId{"s-old"});
+    // 58-E19: `kind == "subagent"` rows are filtered out of the History source.
+    ASSERT_EQ(live_node.sessions.size(), 2u);
+    EXPECT_EQ(live_node.sessions[0].id, SessionId{"s-new"});
+    EXPECT_EQ(live_node.sessions[1].id, SessionId{"s-old"});
+    for (const SessionNode& node : live_node.sessions) {
+        EXPECT_NE(node.id, SessionId{"s-mid"});
+        EXPECT_NE(node.kind, "subagent");
+    }
     EXPECT_TRUE(live_node.sessions[0].fromDisk);
-    EXPECT_EQ(live_node.sessions[2].kind, "fork");
-    EXPECT_EQ(live_node.sessions[2].model, "m2");
-    EXPECT_EQ(live_node.sessions[2].updatedAt, 1000);
+    EXPECT_EQ(live_node.sessions[1].kind, "fork");
+    EXPECT_EQ(live_node.sessions[1].model, "m2");
+    EXPECT_EQ(live_node.sessions[1].updatedAt, 1000);
 }
 
 // SW-U7 (22 §4.3/§4.6): `/sessions` dispatch opens the History source in
@@ -1860,6 +1866,286 @@ TEST(UiModel, UI46_D12_ApiKeyNeverRendered) {
     ASSERT_FALSE(model.notices.empty());
     EXPECT_EQ(model.notices.back().text.find("SECRET123"), std::string::npos);
     EXPECT_NE(model.notices.back().text.find("[REDACTED]"), std::string::npos);
+}
+
+// ---- spec 58 (subagent navigation) -----------------------------------------
+
+const WorkspaceId kWs58{"workspace"};
+
+void seed_child(UiModel& model, const SessionId& parent, const SessionId& child,
+                const std::string& summary, SubagentStatus status) {
+    SessionUiState* state = model.session(parent);
+    ASSERT_NE(state, nullptr);
+    state->subagents.agents.push_back(
+        SubagentView{child, summary, AgentState::Idle, status});
+}
+
+bool has_cell(const UiModel& model, const WorkspaceId& workspace, const SessionId& id) {
+    const auto it = model.workspaces.find(workspace);
+    if (it == model.workspaces.end()) {
+        return false;
+    }
+    for (const SessionCell& cell : it->second.sessions) {
+        if (cell.id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 58-U2 (58-I2): a session/workspace switch clears the subagent path.
+TEST(UiModel, UI58_U2_SubagentPathClearedOnSessionSwitch) {
+    UiModel model = make_model();
+    const SessionId child{"child"};
+    model.subagent_path.push_back(child);
+    model.focusSessionIn(kWs58, kSession);
+    EXPECT_TRUE(model.subagent_path.empty());
+
+    model.subagent_path.push_back(child);
+    model.focusWorkspace(kWs58);
+    EXPECT_TRUE(model.subagent_path.empty());
+}
+
+// 58-U3 (58-I14): the deepest path entry is viewed; a missing id yields nullptr.
+TEST(UiModel, UI58_U3_ViewedSessionReturnsDeepestChild) {
+    UiModel model = make_model();
+    const SessionId a{"a"};
+    const SessionId b{"b"};
+    model.ensureSubagentState(kWs58, a);
+    model.ensureSubagentState(kWs58, b);
+
+    model.subagent_path = {a, b};
+    EXPECT_EQ(model.viewedSession(), model.session(b));
+
+    model.subagent_path = {SessionId{"missing"}};
+    EXPECT_EQ(model.viewedSession(), nullptr);
+
+    model.subagent_path.clear();
+    EXPECT_EQ(model.viewedSession(), model.activeSession());
+}
+
+// 58-U4 (58-I5): SubagentSpawned adds a Running entry, idempotently.
+TEST(UiModel, UI58_U4_SubagentSpawnedAddsRunningEntry) {
+    UiModel model = make_model();
+    model.apply(UiEvent{SubagentSpawned{kSession, SessionId{"c1"}, "task one"}});
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->subagents.agents.size(), 1u);
+    EXPECT_EQ(state->subagents.agents[0].id, SessionId{"c1"});
+    EXPECT_EQ(state->subagents.agents[0].summary, "task one");
+    EXPECT_EQ(state->subagents.agents[0].status, SubagentStatus::Running);
+
+    model.apply(UiEvent{SubagentSpawned{kSession, SessionId{"c1"}, "task one"}});
+    EXPECT_EQ(state->subagents.agents.size(), 1u);
+}
+
+// 58-U5 (58-I6): fan-in maps the four terminal statuses distinctly.
+TEST(UiModel, UI58_U5_SubagentFanInMarksTerminal) {
+    UiModel model = make_model();
+    const SessionId a{"a"};
+    const SessionId b{"b"};
+    const SessionId c{"c"};
+    model.apply(UiEvent{SubagentSpawned{kSession, a, "A"}});
+    model.apply(UiEvent{SubagentSpawned{kSession, b, "B"}});
+    model.apply(UiEvent{SubagentSpawned{kSession, c, "C"}});
+
+    model.apply(UiEvent{
+        SubagentUpdated{kSession, a, "done", AgentState::Idle, SubagentStatus::Completed}});
+    model.apply(UiEvent{
+        SubagentUpdated{kSession, b, "bad", AgentState::Error, SubagentStatus::Failed}});
+    model.apply(UiEvent{
+        SubagentUpdated{kSession, c, "stop", AgentState::Idle, SubagentStatus::Cancelled}});
+
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->subagents.agents.size(), 3u);
+    EXPECT_EQ(state->subagents.agents[0].status, SubagentStatus::Completed);
+    EXPECT_EQ(state->subagents.agents[1].status, SubagentStatus::Failed);
+    EXPECT_EQ(state->subagents.agents[2].status, SubagentStatus::Cancelled);
+}
+
+// 58-U6 (58-I13): ensureSubagentState materializes state and no cell.
+TEST(UiModel, UI58_U6_EnsureSubagentStateHasNoCell) {
+    UiModel model = make_model();
+    const SessionId child{"child"};
+    model.ensureCellIn(kWs58, child);
+    ASSERT_TRUE(has_cell(model, kWs58, child));
+
+    SessionUiState& state = model.ensureSubagentState(kWs58, child);
+    EXPECT_TRUE(state.subagent);
+    EXPECT_EQ(state.workspace, kWs58);
+    EXPECT_FALSE(has_cell(model, kWs58, child));
+}
+
+// 58-U7 (58-I7): the picker lists the viewed level's direct children only.
+TEST(UiModel, UI58_U7_PickerListsOnlyViewedChildren) {
+    UiModel model = make_model();
+    const SessionId a{"a"};
+    const SessionId b{"b"};
+    const SessionId c{"c"};
+    model.apply(UiEvent{SubagentSpawned{kSession, a, "A"}});
+    model.apply(UiEvent{SubagentSpawned{kSession, b, "B"}});
+    model.ensureSubagentState(kWs58, a);
+    seed_child(model, a, c, "C", SubagentStatus::Running);
+    model.subagent_path = {a};
+
+    model.switcher.openSubagents(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    const WorkspaceNode& node = model.switcher.workspaces[0];
+    ASSERT_EQ(node.sessions.size(), 1u);
+    EXPECT_EQ(node.sessions[0].id, c);
+    EXPECT_EQ(node.sessions[0].kind, "subagent");
+}
+
+// 58-U9 (58-E25): a SessionOpened for a materialized child creates no cell.
+TEST(UiModel, UI58_U9_SessionOpenedCreatesNoCellForSubagent) {
+    UiModel model = make_model();
+    const SessionId child{"child"};
+    model.ensureSubagentState(kWs58, child);
+
+    WorkspaceEvent opened;
+    opened.workspace = kWs58;
+    opened.kind = WorkspaceEventKind::SessionOpened;
+    opened.session = child;
+    model.apply(opened);
+
+    EXPECT_FALSE(has_cell(model, kWs58, child));
+    ASSERT_NE(model.session(child), nullptr);
+    EXPECT_TRUE(model.session(child)->subagent);
+}
+
+// 58-U10 (58-I26): the Live leaf predicate excludes subagent entries.
+TEST(UiModel, UI58_U10_CatalogPredicateExcludesSubagent) {
+    UiModel model = make_model();
+    const SessionId child{"child"};
+    add_catalog_sessions(model, kWs58, {child});
+    EXPECT_TRUE(model.catalog_has_session(kWs58, child));
+
+    model.catalog.workspaces[0].sessions[0].kind = "subagent";
+    EXPECT_FALSE(model.catalog_has_session(kWs58, child));
+}
+
+// 58-U11 (58-I16): a nested chain resolves level by level and never revisits.
+TEST(UiModel, UI58_U11_SubagentPathCannotCycle) {
+    UiModel model = make_model();
+    const SessionId a{"a"};
+    const SessionId b{"b"};
+    model.apply(UiEvent{SubagentSpawned{kSession, a, "A"}});
+    model.ensureSubagentState(kWs58, a);
+    seed_child(model, a, b, "B", SubagentStatus::Running);
+
+    model.ensureSubagentState(kWs58, b);
+    model.subagent_path = {a};
+    EXPECT_EQ(model.viewedSession(), model.session(a));
+    model.subagent_path.push_back(b);
+    EXPECT_EQ(model.viewedSession(), model.session(b));
+
+    // At depth 1 the picker lists only b's children (none), never a or main.
+    model.switcher.openSubagents(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
+}
+
+// 58-U12 (58-D8): a terminal status while viewed keeps the path and transcript.
+TEST(UiModel, UI58_U12_ChildFinishWhileViewedStays) {
+    UiModel model = make_model();
+    const SessionId a{"a"};
+    model.apply(UiEvent{SubagentSpawned{kSession, a, "A"}});
+    model.ensureSubagentState(kWs58, a);
+    model.subagent_path = {a};
+
+    model.apply(UiEvent{
+        SubagentUpdated{kSession, a, "done", AgentState::Idle, SubagentStatus::Completed}});
+
+    ASSERT_EQ(model.subagent_path.size(), 1u);
+    EXPECT_EQ(model.viewedSession(), model.session(a));
+    ASSERT_EQ(model.session(kSession)->subagents.agents.size(), 1u);
+    EXPECT_EQ(model.session(kSession)->subagents.agents[0].status, SubagentStatus::Completed);
+}
+
+// 58-U13/58-U14 (58-D8): clamp keeps a stale cursor valid after a resnapshot.
+TEST(UiModel, UI58_U13_U14_PickerClampManyChildren) {
+    UiModel model = make_model();
+    for (int index = 0; index < 100; ++index) {
+        const std::string id = "c" + std::to_string(index);
+        model.apply(UiEvent{SubagentSpawned{kSession, SessionId{id}, id}});
+    }
+    model.switcher.openSubagents(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    EXPECT_EQ(model.switcher.cursor.workspace, kWs58);
+    EXPECT_EQ(model.switcher.workspaces[0].sessions.size(), 100u);
+
+    model.switcher.cursor.session = SessionId{"missing"};
+    model.switcher.clamp_cursor();
+    EXPECT_FALSE(model.switcher.cursor.session.has_value());
+    EXPECT_EQ(model.switcher.cursor.workspace, kWs58);
+}
+
+// 58-U15 (58-I3): a spawn for the viewed child updates the viewed strip.
+TEST(UiModel, UI58_U15_SpawnWhileViewingUpdatesStrip) {
+    UiModel model = make_model();
+    const SessionId a{"a"};
+    const SessionId c{"c"};
+    model.apply(UiEvent{SubagentSpawned{kSession, a, "A"}});
+    model.ensureSubagentState(kWs58, a);
+    model.subagent_path = {a};
+
+    model.apply(UiEvent{SubagentSpawned{a, c, "C"}});
+    ASSERT_NE(model.session(a), nullptr);
+    ASSERT_EQ(model.session(a)->subagents.agents.size(), 1u);
+    EXPECT_EQ(model.session(a)->subagents.agents[0].id, c);
+}
+
+// 58-U17 (58-I13): the History source excludes subagent rows.
+TEST(UiModel, UI58_U17_HistoryFiltersSubagents) {
+    UiModel model = make_model();
+    const SessionId root{"root"};
+    const SessionId child{"child"};
+    add_catalog_sessions(model, kWs58, {root, child});
+    model.catalog.workspaces[0].sessions[1].kind = "subagent";
+
+    model.switcher.openHistory(model);
+    ASSERT_EQ(model.switcher.workspaces.size(), 1u);
+    const WorkspaceNode& node = model.switcher.workspaces[0];
+    ASSERT_EQ(node.sessions.size(), 1u);
+    EXPECT_EQ(node.sessions[0].id, root);
+}
+
+// 58-U21 (58-A3.1/P2): the pinned per-source policy values.
+TEST(UiModel, UI58_U21_SwitcherPolicyTable) {
+    const SwitcherSourcePolicy& live = switcher_policy(SwitcherSource::Live);
+    EXPECT_EQ(live.window_title, "workspaces");
+    EXPECT_EQ(live.heading, "Switcher");
+    EXPECT_EQ(live.footer, "j/k move · Tab expand · Ctrl+D delete · Enter focus · Esc close");
+    EXPECT_EQ(live.empty_state, "(no workspaces)");
+    EXPECT_EQ(live.enter, SwitcherEnter::Focus);
+    EXPECT_TRUE(live.ctrl_d_enabled);
+    EXPECT_TRUE(live.tab_expands);
+    EXPECT_FALSE(live.ctrl_t_closes);
+    EXPECT_FALSE(live.r_refreshes);
+
+    const SwitcherSourcePolicy& history = switcher_policy(SwitcherSource::History);
+    EXPECT_EQ(history.window_title, "sessions");
+    EXPECT_EQ(history.heading, "sessions");
+    EXPECT_EQ(history.footer,
+              "stored sessions · r refresh · Ctrl+D delete · Enter resume · Esc close");
+    EXPECT_EQ(history.empty_state, "(no stored sessions)");
+    EXPECT_EQ(history.enter, SwitcherEnter::Resume);
+    EXPECT_TRUE(history.ctrl_d_enabled);
+    EXPECT_TRUE(history.tab_expands);
+    EXPECT_FALSE(history.ctrl_t_closes);
+    EXPECT_TRUE(history.r_refreshes);
+
+    const SwitcherSourcePolicy& subagents = switcher_policy(SwitcherSource::Subagents);
+    EXPECT_EQ(subagents.window_title, "subagents");
+    EXPECT_EQ(subagents.heading, "subagents");
+    EXPECT_EQ(subagents.footer, "Enter enter · Esc close");
+    EXPECT_EQ(subagents.empty_state, "(no subagents)");
+    EXPECT_EQ(subagents.enter, SwitcherEnter::EnterChild);
+    EXPECT_FALSE(subagents.ctrl_d_enabled);
+    EXPECT_FALSE(subagents.tab_expands);
+    EXPECT_TRUE(subagents.ctrl_t_closes);
+    EXPECT_FALSE(subagents.r_refreshes);
 }
 
 } // namespace

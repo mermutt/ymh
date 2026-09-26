@@ -166,6 +166,27 @@ public:
     [[nodiscard]] virtual std::optional<std::string> spec_boot_id(
         const WorkspaceId& workspace) const = 0;
     [[nodiscard]] virtual bool worker_joinable() const = 0;
+
+    // ---- spec 58 (subagent navigation) test seams --------------------------
+    // Feed one decoded session envelope straight into the adapter (simulates a
+    // replayed or live child event without a daemon).
+    virtual void feed_session_envelope(const WorkspaceId& workspace,
+                                       const protocol::SessionEnvelope& envelope) = 0;
+    // Drive the sink's UI-thread host-notice handling (untrack + apply +
+    // reconcile on SessionClosed).
+    virtual void deliver_host_notice(const WorkspaceId& workspace,
+                                     const protocol::HostNotice& notice) = 0;
+    // Drive `SupervisorSink::on_subscribe_error`'s supervisor-side handling.
+    virtual void deliver_subscribe_error(const SessionId& session,
+                                         const std::string& detail) = 0;
+    // Drive `apply_session_deleted` (E43, the external `session.delete` seam).
+    virtual void apply_session_deleted(const WorkspaceId& workspace,
+                                       const SessionId& session) = 0;
+    // Drive `select_history` (E20's subagent refusal).
+    virtual void select_history(const SwitcherCursor& cursor) = 0;
+    [[nodiscard]] virtual std::size_t viewed_children_count() const = 0;
+    [[nodiscard]] virtual std::optional<WorkspaceId> viewed_child_workspace(
+        const SessionId& id) const = 0;
 };
 
 [[nodiscard]] std::unique_ptr<SupervisorHarness> make_supervisor_harness(

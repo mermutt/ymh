@@ -2028,4 +2028,83 @@ TEST(UiSupervisorPty, UI49_P2_TwoWorkspacesWithSessionsShowsSwitcher) {
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
+// 58-P1 (58-D1/D2/D6, §7): hermetic PTY navigation — delegate to a child, enter
+// it, view its transcript and breadcrumb, then return. Driven by a FakeLLM
+// script and deliberately NOT gated on `YMH_LIVE_LLM`.
+TEST(UiSupervisorPty, UI58_P1_SubagentNavigationPty) {
+    ShortTempRoot root("ymh_pty_58p1");
+    const std::filesystem::path state = root.state_dir();
+    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
+    ::setenv("HOME", root.path().c_str(), 1);
+    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+
+    const std::filesystem::path workspace = root.path() / "subagent-ws";
+    std::filesystem::create_directories(workspace);
+    const std::filesystem::path canonical = std::filesystem::canonical(workspace);
+    root.write("fake.json", R"([
+      {"tool_calls":[{"name":"subagent","arguments":{"description":"child task","prompt":"do the thing"}}]},
+      {"text":"child-output-marker","finish":"stop"},
+      {"text":"parent-done-marker","finish":"stop"}
+    ])");
+
+    std::map<std::string, std::string> env = pty_env(root.path(), state);
+    env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
+
+    PtyChild child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), workspace, env));
+    ASSERT_TRUE(child.wait_for(canonical.string(), 25s)) << child.text();
+    ASSERT_TRUE(child.wait_for("↑0 ↓0", 25s)) << child.text();
+
+    child.write("delegate now\r");
+    const auto delegate_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{45};
+    bool answered_permission = false;
+    bool parent_done         = false;
+    while (std::chrono::steady_clock::now() < delegate_deadline) {
+        if (!answered_permission &&
+            child.wait_for_frame_contains("Permission required", 100ms)) {
+            child.write("\r");
+            answered_permission = true;
+        }
+        if (child.wait_for_frame_contains("parent-done-marker", 100ms)) {
+            parent_done = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(parent_done) << child.text();
+
+    std::string workspace_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::openReadOnly(pty_registry_config(state));
+        const std::optional<WorkspaceRecord> row = registry->findByCanonicalPath(canonical);
+        ASSERT_TRUE(row.has_value());
+        workspace_id = row->id.value;
+    }
+    HostDaemonGuard guard(workspace_id);
+
+    // Ctrl+T opens the picker at the current view level.
+    const std::size_t picker_mark = child.raw_size();
+    child.write("\x14");
+    ASSERT_TRUE(child.wait_for_since(picker_mark, "Enter enter · Esc close", 15s))
+        << child.text();
+
+    // Move onto the child row and enter it.
+    const std::size_t enter_mark = child.raw_size();
+    child.write("\x1b[B");
+    child.write("\r");
+    ASSERT_TRUE(child.wait_for_since(enter_mark, "Esc return", 15s)) << child.text();
+    EXPECT_NE(child.text().find("↳ "), std::string::npos) << child.text();
+    EXPECT_NE(child.text().find("child-output-marker"), std::string::npos) << child.text();
+
+    // Esc returns to the main agent.
+    const std::size_t return_mark = child.raw_size();
+    child.write("\x1b");
+    ASSERT_TRUE(child.wait_for_since(return_mark, "parent-done-marker", 15s)) << child.text();
+
+    child.terminate();
+    guard.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
 } // namespace
