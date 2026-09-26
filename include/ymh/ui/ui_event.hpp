@@ -185,7 +185,7 @@ struct SubagentUpdated {
     SessionId      subagent;
     std::string    summary;
     AgentState     state = AgentState::Idle;
-    SubagentStatus status = SubagentStatus::Running;   // 58-D5 (amended)
+    SubagentStatus status = SubagentStatus::Completed;   // 58-A1 (from SubagentOutcome)
 };
 
 struct ErrorOccurred {

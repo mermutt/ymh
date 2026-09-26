@@ -70,6 +70,7 @@ void SupervisorConnection::track(const SessionId& session) {
         std::lock_guard lock(mutex_);
         if (std::find(tracked_.begin(), tracked_.end(), session) == tracked_.end()) {
             tracked_.push_back(session);
+            ++subscribe_requests_;
         }
         subscribe_pending_ = true;
     }
@@ -80,6 +81,9 @@ void SupervisorConnection::untrack(const SessionId& session) {
     protocol::SubscriptionId id;
     {
         std::lock_guard lock(mutex_);
+        if (std::find(tracked_.begin(), tracked_.end(), session) != tracked_.end()) {
+            ++unsubscribe_requests_;
+        }
         tracked_.erase(std::remove(tracked_.begin(), tracked_.end(), session), tracked_.end());
         if (const auto it = subscriptions_.find(session); it != subscriptions_.end()) {
             id = it->second;
@@ -147,6 +151,16 @@ std::optional<protocol::EventCursor> SupervisorConnection::cursor(const SessionI
 std::uint64_t SupervisorConnection::attachCount() const {
     std::lock_guard lock(mutex_);
     return attach_count_;
+}
+
+std::size_t SupervisorConnection::subscribe_requests() const {
+    std::lock_guard lock(mutex_);
+    return subscribe_requests_;
+}
+
+std::size_t SupervisorConnection::unsubscribe_requests() const {
+    std::lock_guard lock(mutex_);
+    return unsubscribe_requests_;
 }
 
 bool SupervisorConnection::subscribed(const SessionId& session) const {

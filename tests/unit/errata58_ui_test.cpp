@@ -268,8 +268,9 @@ TEST(Errata58, UI58_H7_ChildNotInLiveSwitcher) {
     SubagentFixture fixture("ymh_58_h7");
     fixture.seed_child(kS1, kChild, "task");
     fixture.enter_first_child();
-    fixture.harness->dispatch_key("escape");
-    drain_fully(*fixture.harness);
+    // The child state must still exist when the Live switcher is built, else the
+    // absence assertion below cannot fail.
+    ASSERT_EQ(fixture.model().subagent_path.size(), 1u);
 
     fixture.harness->open_switcher();
     drain_fully(*fixture.harness);
@@ -338,20 +339,34 @@ TEST(Errata58, UI58_H11_UnsubscribeOnPop) {
     SubagentFixture fixture("ymh_58_h11");
     fixture.seed_child(kS1, kChild, "task");
     const std::size_t before = fixture.harness->viewed_children_count();
+    const std::size_t subscribe_before =
+        fixture.harness->subscribe_request_count(fixture.workspace);
+    const std::size_t unsubscribe_before =
+        fixture.harness->unsubscribe_request_count(fixture.workspace);
 
     fixture.enter_first_child();
     EXPECT_EQ(fixture.harness->viewed_children_count(), before + 1);
     ASSERT_TRUE(fixture.harness->viewed_child_workspace(kChild).has_value());
     EXPECT_EQ(*fixture.harness->viewed_child_workspace(kChild), fixture.workspace);
+    EXPECT_EQ(fixture.harness->subscribe_request_count(fixture.workspace),
+              subscribe_before + 1);
+    EXPECT_EQ(fixture.harness->unsubscribe_request_count(fixture.workspace),
+              unsubscribe_before);
 
     EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
     drain_fully(*fixture.harness);
     EXPECT_EQ(fixture.harness->viewed_children_count(), before);
+    EXPECT_EQ(fixture.harness->unsubscribe_request_count(fixture.workspace),
+              unsubscribe_before + 1);
 
     fixture.enter_first_child();
     EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
     drain_fully(*fixture.harness);
     EXPECT_EQ(fixture.harness->viewed_children_count(), before);
+    EXPECT_EQ(fixture.harness->subscribe_request_count(fixture.workspace),
+              subscribe_before + 2);
+    EXPECT_EQ(fixture.harness->unsubscribe_request_count(fixture.workspace),
+              unsubscribe_before + 2);
 }
 
 // 58-H12 (58-I20/F12): a subscribe failure surfaces the notice and pops.

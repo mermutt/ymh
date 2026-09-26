@@ -2827,12 +2827,14 @@ TEST(UiRenderGolden, UI58_G5_SubagentStripRunningGlyph) {
 
 // 58-G6 (58-I24/E33/E35): the composer is read-only while a child is viewed.
 TEST(UiRenderGolden, UI58_G6_SubagentComposerReadOnly) {
-    const UiModel model = subagent_model();
+    UiModel model = subagent_model();
+    model.session(kSession)->input.draft = "PARENT-DRAFT-MARKER";
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("(viewing subagent a1b2c3d4"), std::string::npos);
     EXPECT_NE(rendered.find("Ctrl+T children · Esc return)"), std::string::npos);
+    EXPECT_EQ(rendered.find("PARENT-DRAFT-MARKER"), std::string::npos);
 }
 
 // 58-G7: the breadcrumb's width is measured in CELLS, never UTF-8 bytes.

@@ -4184,6 +4184,18 @@ public:
         return it->second;
     }
 
+    [[nodiscard]] std::size_t subscribe_request_count(
+        const WorkspaceId& workspace) const override {
+        const auto it = app_.connections_.find(workspace);
+        return it == app_.connections_.end() ? 0 : it->second->subscribe_requests();
+    }
+
+    [[nodiscard]] std::size_t unsubscribe_request_count(
+        const WorkspaceId& workspace) const override {
+        const auto it = app_.connections_.find(workspace);
+        return it == app_.connections_.end() ? 0 : it->second->unsubscribe_requests();
+    }
+
 private:
     SupervisorApp app_;
 };

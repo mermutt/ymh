@@ -138,6 +138,11 @@ public:
     [[nodiscard]] protocol::ClientId clientId() const;
     [[nodiscard]] std::optional<protocol::EventCursor> cursor(const SessionId& session) const;
     [[nodiscard]] std::uint64_t attachCount() const;   // successful hello+subscribe phases
+    // 58-H11 test seam: `event.subscribe` requests issued for newly tracked
+    // sessions, and `event.unsubscribe` requests issued when a tracked session is
+    // released. Counts the request intent (the pump may defer the actual send).
+    [[nodiscard]] std::size_t subscribe_requests() const;
+    [[nodiscard]] std::size_t unsubscribe_requests() const;
     // True once the per-session `event.subscribe` has been acknowledged on the
     // live link (the deterministic barrier for "a turn event cannot be missed").
     [[nodiscard]] bool subscribed(const SessionId& session) const;
@@ -197,6 +202,8 @@ private:
     bool                                             force_reconnect_ = false;
     bool                                             subscribe_pending_ = false;
     std::uint64_t                                    attach_count_ = 0;
+    std::size_t                                      subscribe_requests_ = 0;
+    std::size_t                                      unsubscribe_requests_ = 0;
     std::uint64_t                                    state_generation_ = 0;
     std::chrono::steady_clock::time_point            last_ping_ = std::chrono::steady_clock::now();
 };
