@@ -2041,10 +2041,15 @@ TEST(UiSupervisorPty, UI58_P1_SubagentNavigationPty) {
     const std::filesystem::path workspace = root.path() / "subagent-ws";
     std::filesystem::create_directories(workspace);
     const std::filesystem::path canonical = std::filesystem::canonical(workspace);
+    // 58-P1 names a *continuable* child (`subagent_continuable`, run_in_background
+    // default). Parent and child share one FakeLLM script and run concurrently,
+    // so the two post-delegation steps are byte-identical: whichever call wins
+    // the atomic step index, both sides render `shared-marker`, making the
+    // scenario deterministic without serializing the child.
     root.write("fake.json", R"([
-      {"tool_calls":[{"name":"subagent","arguments":{"description":"child task","prompt":"do the thing"}}]},
-      {"text":"child-output-marker","finish":"stop"},
-      {"text":"parent-done-marker","finish":"stop"}
+      {"tool_calls":[{"name":"subagent_continuable","arguments":{"description":"child task","prompt":"do the thing"}}]},
+      {"text":"shared-marker","finish":"stop"},
+      {"text":"shared-marker","finish":"stop"}
     ])");
 
     std::map<std::string, std::string> env = pty_env(root.path(), state);
@@ -2059,19 +2064,21 @@ TEST(UiSupervisorPty, UI58_P1_SubagentNavigationPty) {
     const auto delegate_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{45};
     bool answered_permission = false;
-    bool parent_done         = false;
+    bool child_spawned       = false;
     while (std::chrono::steady_clock::now() < delegate_deadline) {
         if (!answered_permission &&
             child.wait_for_frame_contains("Permission required", 100ms)) {
             child.write("\r");
             answered_permission = true;
         }
-        if (child.wait_for_frame_contains("parent-done-marker", 100ms)) {
-            parent_done = true;
+        // The strip renders only once the parent's `SubagentSpawned` lands, so
+        // this is the deterministic barrier before opening the picker.
+        if (child.wait_for_frame_contains("subagents:", 100ms)) {
+            child_spawned = true;
             break;
         }
     }
-    ASSERT_TRUE(parent_done) << child.text();
+    ASSERT_TRUE(child_spawned) << child.text();
 
     std::string workspace_id;
     {
@@ -2090,17 +2097,16 @@ TEST(UiSupervisorPty, UI58_P1_SubagentNavigationPty) {
         << child.text();
 
     // Move onto the child row and enter it.
-    const std::size_t enter_mark = child.raw_size();
     child.write("\x1b[B");
     child.write("\r");
-    ASSERT_TRUE(child.wait_for_since(enter_mark, "Esc return", 15s)) << child.text();
-    EXPECT_NE(child.text().find("↳ "), std::string::npos) << child.text();
-    EXPECT_NE(child.text().find("child-output-marker"), std::string::npos) << child.text();
+    ASSERT_TRUE(child.wait_for_frame_contains("Esc return", 15s)) << child.text();
+    EXPECT_NE(child.last_frame().find("↳ "), std::string::npos) << child.last_frame();
+    ASSERT_TRUE(child.wait_for_frame_contains("shared-marker", 15s)) << child.text();
 
     // Esc returns to the main agent.
     const std::size_t return_mark = child.raw_size();
     child.write("\x1b");
-    ASSERT_TRUE(child.wait_for_since(return_mark, "parent-done-marker", 15s)) << child.text();
+    ASSERT_TRUE(child.wait_for_since(return_mark, "delegate now", 15s)) << child.text();
 
     child.terminate();
     guard.stop();

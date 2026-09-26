@@ -187,6 +187,12 @@ public:
     [[nodiscard]] virtual std::size_t viewed_children_count() const = 0;
     [[nodiscard]] virtual std::optional<WorkspaceId> viewed_child_workspace(
         const SessionId& id) const = 0;
+    // 58-H11: `event.subscribe`/`event.unsubscribe` requests the workspace
+    // connection has issued for tracked sessions.
+    [[nodiscard]] virtual std::size_t subscribe_request_count(
+        const WorkspaceId& workspace) const = 0;
+    [[nodiscard]] virtual std::size_t unsubscribe_request_count(
+        const WorkspaceId& workspace) const = 0;
 };
 
 [[nodiscard]] std::unique_ptr<SupervisorHarness> make_supervisor_harness(
