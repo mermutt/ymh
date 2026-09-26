@@ -1,0 +1,19 @@
+# Build output
+build/
+cmake-build-*/
+compile_commands.json
+*.o
+*.a
+*.so
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Agent scratch
+.sisyphus/
+
+# ymh per-workspace state (sessions.db, sessions.lock, host.sock, host.log)
+.ymh/
+build-tsan/

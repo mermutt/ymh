@@ -1,0 +1,117 @@
+#pragma once
+
+// McpManager: the daemon-owned orchestrator (15 §4.7). It turns `McpConfig` into
+// registered tools, owns every `McpClient`, and is the only MCP type that knows
+// about the registry, the bus, and the environment.
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "ymh/core/event_bus.hpp"
+#include "ymh/core/logger.hpp"
+#include "ymh/core/task.hpp"
+#include "ymh/execution/config.hpp"
+#include "ymh/execution/environment.hpp"
+#include "ymh/execution/resource_governor.hpp"
+#include "ymh/mcp/mcp_client.hpp"
+#include "ymh/mcp/mcp_types.hpp"
+#include "ymh/tools/tool_registry.hpp"
+
+namespace ymh {
+
+// Deterministic backoff schedule (§5.4): base * 2^attempt, capped at
+// reconnect_max_backoff, then scaled by the +/- jitter band. `jitter_roll` in
+// [0,1] is the test seam (0.5 is the un-jittered midpoint).
+[[nodiscard]] std::chrono::milliseconds compute_mcp_backoff(std::uint32_t attempt,
+                                                            const McpConfig& config,
+                                                            double jitter_roll);
+
+// 25-D16: the daemon's own semantic checks, extracted from
+// `McpManager::validate()` so the first-run importer can run them on an
+// in-memory document before writing. Each returns an empty string when valid,
+// else a human-readable reason that NEVER contains an env/header value.
+[[nodiscard]] std::string validate_mcp_server(const McpServerConfig& server,
+                                              const McpConfig& config,
+                                              const ToolConfig& tools);
+[[nodiscard]] std::string validate_mcp_config(const McpConfig& config,
+                                              const ToolConfig& tools);
+
+class McpManager {
+public:
+    McpManager(McpConfig               config,
+               const ToolConfig&       tools,
+               ExecutionEnvironment&   environment,
+               ResourceGovernor&       governor,
+               ToolRegistry&           registry,
+               EventBus&               bus,
+               Logger&                 logger,
+               McpClockReader          now = McpClock::now);
+
+    ~McpManager();
+
+    McpManager(const McpManager&) = delete;
+    McpManager& operator=(const McpManager&) = delete;
+
+    Task<void> start(CancellationToken cancel);
+
+    Task<void> refresh(McpServerId id, CancellationToken cancel);
+
+    Task<void> shutdown(std::chrono::milliseconds grace);
+
+    [[nodiscard]] std::vector<McpServerStatus> statuses() const;
+
+    void setClientFactory(McpClientFactory factory);
+
+private:
+    struct ServerSlot {
+        McpServerConfig                           config;
+        std::shared_ptr<McpClient>                client;
+        std::optional<ToolRegistry::AdapterScope> scope;
+        McpServerState                            state{McpServerState::Disabled};
+        std::uint32_t                             reconnect_attempt{0};
+        std::chrono::milliseconds                 next_backoff{0};
+        std::vector<std::string>                  skipped_tools;
+        std::size_t                               tool_count{0};
+        std::string                               last_error;
+    };
+
+    void validate() const;
+    std::unique_ptr<McpClient> makeClient(const McpServerConfig& config,
+                                          std::chrono::milliseconds handshake_timeout);
+    std::size_t effectiveResultBytes(const McpServerConfig& config) const;
+
+    // 18 §3.5 (C8): lock-held helpers. The caller holds `mutex_`; none of these
+    // acquires it (the mutex is non-recursive, so a re-lock would deadlock).
+    ServerSlot* findSlotLocked(const McpServerId& id);
+    Event       makeStatusEventLocked(const ServerSlot& slot, std::string reason);
+    Event       setStateLocked(ServerSlot& slot, McpServerState state, std::string reason);
+    Event       installToolsLocked(ServerSlot& slot, std::vector<McpToolInfo> tools);
+
+    McpConfig              config_;
+    ToolConfig             tool_config_;
+    ExecutionEnvironment&  environment_;
+    ResourceGovernor&      governor_;
+    ToolRegistry&          registry_;
+    EventBus&              bus_;
+    Logger&                logger_;
+    McpClockReader         now_;
+    McpClientFactory       factory_;
+    std::vector<ServerSlot> slots_;
+    bool                   shutdown_ = false;
+    std::uint64_t          status_sequence_ = 0;
+
+    // 18 §3.5 (C8): the sole synchronization for `slots_` and every
+    // `ServerSlot` field. `mutable` because `statuses()` is const. Entry points
+    // (`start`/`refresh`/`shutdown`/`statuses`) take it; the helpers above never
+    // re-lock; it is never held across a blocking client call and the bus is
+    // published only after it is released.
+    mutable std::mutex mutex_;
+};
+
+} // namespace ymh
