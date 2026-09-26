@@ -26,6 +26,41 @@ std::string display_model(const ymh::Config& config, const std::string& model_id
     return model_id;
 }
 
+// 58-A3.1 (P2): the pinned per-source policy table, indexed by `SwitcherSource`.
+constexpr SwitcherSourcePolicy kSwitcherPolicy[3] = {
+    {.window_title = "workspaces",
+     .heading = "Switcher",
+     .footer = "j/k move · Tab expand · Ctrl+D delete · Enter focus · Esc close",
+     .empty_state = "(no workspaces)",
+     .enter = SwitcherEnter::Focus,
+     .ctrl_d_enabled = true,
+     .tab_expands = true,
+     .ctrl_t_closes = false,
+     .r_refreshes = false},
+    {.window_title = "sessions",
+     .heading = "sessions",
+     .footer = "stored sessions · r refresh · Ctrl+D delete · Enter resume · Esc close",
+     .empty_state = "(no stored sessions)",
+     .enter = SwitcherEnter::Resume,
+     .ctrl_d_enabled = true,
+     .tab_expands = true,
+     .ctrl_t_closes = false,
+     .r_refreshes = true},
+    {.window_title = "subagents",
+     .heading = "subagents",
+     .footer = "Enter enter · Esc close",
+     .empty_state = "(no subagents)",
+     .enter = SwitcherEnter::EnterChild,
+     .ctrl_d_enabled = false,
+     .tab_expands = false,
+     .ctrl_t_closes = true,
+     .r_refreshes = false},
+};
+
+const SwitcherSourcePolicy& switcher_policy(SwitcherSource source) noexcept {
+    return kSwitcherPolicy[static_cast<std::size_t>(source)];
+}
+
 void ModelPickerModel::open(const ymh::Config& config, const std::string& current_display) {
     rows.clear();
     selected = 0;
@@ -697,7 +732,7 @@ bool UiModel::catalog_has_session(const WorkspaceId& workspace,
         }
         for (const SessionHistoryEntry& entry : history.sessions) {
             if (entry.id == session_id) {
-                return true;
+                return entry.kind != "subagent";
             }
         }
         return false;
@@ -746,11 +781,64 @@ SessionUiState& UiModel::ensureSessionIn(const WorkspaceId& workspace, const Ses
         ensureCellIn(workspace, id);
         return it->second;
     }
+    // 58-E26: a viewed-child state is never a cell.
+    if (it->second.subagent) {
+        return it->second;
+    }
     if (it->second.workspace.value.empty()) {
         it->second.workspace = workspace;
         ensureCellIn(workspace, id);
     }
     return it->second;
+}
+
+SessionUiState& UiModel::ensureSessionState(const WorkspaceId& workspace, const SessionId& id) {
+    SessionUiState& state = sessions[id];
+    if (state.id.value.empty()) {
+        state.id = id;
+    }
+    if (state.workspace.value.empty()) {
+        state.workspace = workspace;
+    }
+    return state;
+}
+
+SessionUiState& UiModel::ensureSubagentState(const WorkspaceId& workspace, const SessionId& id) {
+    SessionUiState& state = ensureSessionState(workspace, id);
+    state.subagent = true;
+    if (const auto workspace_it = workspaces.find(workspace); workspace_it != workspaces.end()) {
+        auto& cells = workspace_it->second.sessions;
+        cells.erase(std::remove_if(cells.begin(), cells.end(),
+                                   [&id](const SessionCell& cell) { return cell.id == id; }),
+                    cells.end());
+    }
+    return state;
+}
+
+SessionUiState* UiModel::viewedSession() {
+    if (subagent_path.empty()) {
+        return activeSession();
+    }
+    return session(subagent_path.back());
+}
+
+const SessionUiState* UiModel::viewedSession() const {
+    if (subagent_path.empty()) {
+        const auto workspace = workspaces.find(activeWorkspaceId);
+        return workspace == workspaces.end() ? nullptr
+                                             : session(workspace->second.activeSessionId());
+    }
+    return session(subagent_path.back());
+}
+
+void UiModel::disarm(const SessionId& id) {
+    const auto it = sessions.find(id);
+    if (it == sessions.end()) {
+        return;
+    }
+    it->second.esc_arm = EscArm::Disarmed;
+    it->second.esc_armed_at.reset();
+    dirty.mark(id, UiDirtyFlag::Input);
 }
 
 void UiModel::refreshCell(const SessionId& id) {
@@ -1083,18 +1171,33 @@ void UiModel::apply(const UiEvent& event) {
                 }
                 dirty.mark(e.session, UiDirtyFlag::Attention | UiDirtyFlag::Status |
                                            UiDirtyFlag::SessionBar);
+            } else if constexpr (std::is_same_v<T, SubagentSpawned>) {
+                bool found = false;
+                for (const SubagentView& agent : state.subagents.agents) {
+                    if (agent.id == e.subagent) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    state.subagents.agents.push_back(
+                        SubagentView{e.subagent, e.task, AgentState::Idle, SubagentStatus::Running});
+                }
+                dirty.mark(e.session, UiDirtyFlag::Subagents);
             } else if constexpr (std::is_same_v<T, SubagentUpdated>) {
                 bool found = false;
                 for (SubagentView& agent : state.subagents.agents) {
                     if (agent.id == e.subagent) {
                         agent.summary = e.summary;
                         agent.state = e.state;
+                        agent.status = e.status;
                         found = true;
                         break;
                     }
                 }
                 if (!found) {
-                    state.subagents.agents.push_back(SubagentView{e.subagent, e.summary, e.state});
+                    state.subagents.agents.push_back(
+                        SubagentView{e.subagent, e.summary, e.state, e.status});
                 }
                 dirty.mark(e.session, UiDirtyFlag::Subagents);
             } else if constexpr (std::is_same_v<T, ErrorOccurred>) {
@@ -1194,7 +1297,7 @@ void UiModel::apply(const WorkspaceEvent& event) {
                 break;
             case WorkspaceEventKind::SessionOpened:
                 if (event.session.has_value()) {
-                    ensureSessionIn(event.workspace, *event.session);
+                    ensureSessionState(event.workspace, *event.session);
                 }
                 break;
             case WorkspaceEventKind::SessionClosed:
@@ -1218,6 +1321,7 @@ void UiModel::focusWorkspace(const WorkspaceId& workspace) {
     if (workspaces.find(workspace) == workspaces.end()) {
         return;
     }
+    subagent_path.clear();
     activeWorkspaceId = workspace;
     dirty.markAggregate();
 }
@@ -1253,6 +1357,7 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
         }
     }
     ensureSessionIn(workspace, id);
+    subagent_path.clear();
     activeWorkspaceId = workspace;
     workspace_it->second.setActiveSessionId(id);
     mode = UiMode::Conversation;
@@ -1379,6 +1484,9 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
         }
         std::size_t hidden_by_focus = 0;
         for (const SessionHistoryEntry& entry : history.sessions) {
+            if (entry.kind == "subagent") {
+                continue;
+            }
             const bool matches =
                 !filtering || entry.title.find(*filter) != std::string::npos ||
                 entry.id.value.find(*filter) != std::string::npos;
@@ -1422,6 +1530,33 @@ void SwitcherOverlayModel::openHistory(const UiModel& model) {
                                                  path_of(left.id), path_of(right.id));
               });
 
+    revalidate_switcher_cursor(*this, model);
+}
+
+void SwitcherOverlayModel::openSubagents(const UiModel& model) {
+    workspaces.clear();
+    cursor = SwitcherCursor{};
+    filter.reset();
+    disarm_delete();
+    const SessionUiState* viewed = model.viewedSession();
+    WorkspaceNode node;
+    node.id = model.activeWorkspaceId;
+    const auto workspace = model.workspaces.find(model.activeWorkspaceId);
+    node.title = workspace != model.workspaces.end()
+                     ? (workspace->second.title.empty() ? workspace->second.cwd
+                                                        : workspace->second.title)
+                     : model.activeWorkspaceId.value;
+    if (viewed != nullptr) {
+        for (const SubagentView& agent : viewed->subagents.agents) {
+            SessionNode leaf;
+            leaf.id    = agent.id;
+            leaf.title = agent.summary.empty() ? agent.id.value : agent.summary;
+            leaf.state = agent.state;
+            leaf.kind  = "subagent";
+            node.sessions.push_back(std::move(leaf));
+        }
+    }
+    workspaces.push_back(std::move(node));
     revalidate_switcher_cursor(*this, model);
 }
 

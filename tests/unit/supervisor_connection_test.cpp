@@ -104,6 +104,11 @@ public:
         return subscribes_;
     }
 
+    [[nodiscard]] std::vector<nlohmann::json> unsubscribes() const {
+        const std::lock_guard lock(state_mutex_);
+        return unsubscribes_;
+    }
+
     [[nodiscard]] std::optional<protocol::HelloParams> last_hello() const {
         const std::lock_guard lock(state_mutex_);
         return last_hello_;
@@ -280,6 +285,14 @@ private:
             respond(request->id, body, client);
             return;
         }
+        if (request->method == protocol::method::kEventUnsubscribe) {
+            {
+                const std::lock_guard lock(state_mutex_);
+                unsubscribes_.push_back(request->params);
+            }
+            respond(request->id, nlohmann::json::object(), client);
+            return;
+        }
         if (request->method == protocol::method::kPermissionDecide) {
             if (reject_second_decide_.load() && decision_count_.fetch_add(1) > 0) {
                 send_to(client, protocol::encode(protocol::ErrorResponse{
@@ -339,6 +352,7 @@ private:
     std::atomic<bool> reject_second_decide_{false};
     mutable std::mutex state_mutex_;
     std::vector<protocol::SubscribeParams> subscribes_;
+    std::vector<nlohmann::json> unsubscribes_;
     std::optional<protocol::HelloParams> last_hello_;
     mutable std::mutex clients_mutex_;
     std::vector<int> clients_;
@@ -734,6 +748,31 @@ TEST(SupervisorConnection, UI46_D7_DisconnectDrainsPendingResume) {
     ASSERT_TRUE(connection.waitUntil([&replies] { return replies.load() == 2; }, 5s))
         << "a pending request was abandoned without a reply";
     EXPECT_EQ(failures.load(), 2) << "a drained reply was not a connection-lost failure";
+    connection.stop();
+}
+
+// 58-I18 (58-A6/E28): `untrack` releases the daemon subscription it recorded.
+TEST(SupervisorConnection, UI58_UntrackReleasesSubscription) {
+    test::ShortTempRoot root("ymh_sup_untrack");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected collected;
+
+    SupervisorConnection connection(config_for(socket_path), sink_for(collected));
+    connection.track(kSession);
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Attached, 3s));
+    ASSERT_TRUE(connection.waitUntil([&server] { return !server.subscribes().empty(); }, 3s));
+    ASSERT_TRUE(connection.subscribed(kSession));
+
+    connection.untrack(kSession);
+    ASSERT_TRUE(
+        connection.waitUntil([&server] { return !server.unsubscribes().empty(); }, 3s));
+    EXPECT_EQ(server.unsubscribes().front().value("subscription", 0), 1)
+        << "the recorded SubscriptionId must be released";
+    EXPECT_FALSE(connection.subscribed(kSession));
+
     connection.stop();
 }
 

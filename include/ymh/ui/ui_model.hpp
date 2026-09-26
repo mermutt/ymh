@@ -262,9 +262,10 @@ struct AttentionState {
 };
 
 struct SubagentView {
-    SessionId   id;
-    std::string summary;
-    AgentState  state = AgentState::Idle;
+    SessionId      id;
+    std::string    summary;
+    AgentState     state = AgentState::Idle;
+    SubagentStatus status = SubagentStatus::Running;
 };
 
 struct SubagentModel {
@@ -299,6 +300,10 @@ struct SessionUiState {
     // never persisted and never written to the event log.
     EscArm esc_arm = EscArm::Disarmed;
     std::optional<std::chrono::steady_clock::time_point> esc_armed_at;
+
+    // 58-D7: true for a materialized viewed-child state. Such a state is never a
+    // `SessionCell` and never appears in the Live switcher or `/sessions`.
+    bool subagent = false;
 
     AgentState agent_state = AgentState::Idle;
 };
@@ -377,11 +382,35 @@ struct SessionNode {
 };
 
 // 22 §3.6: the switcher's projection source. `History` is declared for S2 and
-// is unused by S1.
+// is unused by S1. 58-D9 adds `Subagents` (the viewed session's child picker).
 enum class SwitcherSource : std::uint8_t {
     Live,
     History,
+    Subagents,
 };
+
+// 58-D9: what Enter does for a source. Data, consumed by E4.
+enum class SwitcherEnter : std::uint8_t {
+    Focus,
+    Resume,
+    EnterChild,
+};
+
+// 58-D9/P2: the per-source policy. The single place the nine per-source
+// presentation/action divergences live; the shared widget/handler consult it.
+struct SwitcherSourcePolicy {
+    std::string_view window_title;
+    std::string_view heading;
+    std::string_view footer;
+    std::string_view empty_state;
+    SwitcherEnter    enter;
+    bool             ctrl_d_enabled;
+    bool             tab_expands;
+    bool             ctrl_t_closes;
+    bool             r_refreshes;
+};
+
+[[nodiscard]] const SwitcherSourcePolicy& switcher_policy(SwitcherSource source) noexcept;
 
 struct WorkspaceNode {
     WorkspaceId                id;
@@ -439,6 +468,10 @@ public:
     // 22 §3.6/§4.3 (S2): History source — builds nodes from `model.catalog`
     // (every registered workspace, live or not). Sets `source = History`.
     void openHistory(const UiModel& model);
+    // 58-D1/A7: Subagents source — one node whose leaves are exactly
+    // `viewedSession()->subagents.agents` (the current view level). The caller
+    // sets `source = Subagents`.
+    void openSubagents(const UiModel& model);
     void close();
     void moveDown();
     void moveUp();
@@ -581,6 +614,10 @@ struct UiModel {
     // `SupervisorApp::run()`; never focus-derived.
     std::string                           cwdWorkspacePath;
     std::map<SessionId, SessionUiState>   sessions;
+    // 58-D2: the active session's subagent focus path (outermost first). Empty
+    // == main agent. Scoped to the active workspace/session; cleared by
+    // `focusWorkspace`/`focusSessionIn`/`focusSession` (E22).
+    std::vector<SessionId> subagent_path;
     // 49-D1: the zero-workspace composer. Before the first prompt creates a
     // workspace/session there is no `SessionUiState` in `sessions`; the draft and
     // its command hints live here so the empty screen is typeable. Never a
@@ -609,8 +646,22 @@ struct UiModel {
     [[nodiscard]] SessionUiState*  session(const SessionId& id);
     [[nodiscard]] const SessionUiState* session(const SessionId& id) const;
 
+    // 58-D2/A4: the deepest path entry's state, or the active session when the
+    // path is empty. Returns nullptr (never default-constructs) when the deepest
+    // id has no materialized state; callers reconcile first (58-I14).
+    [[nodiscard]] SessionUiState*       viewedSession();
+    [[nodiscard]] const SessionUiState* viewedSession() const;
+
     SessionUiState& ensureSession(const SessionId& id);
     SessionUiState& ensureSessionIn(const WorkspaceId& workspace, const SessionId& id);
+    // 58-D7/A4: materialize a SessionUiState (subagent == true) and erase any
+    // existing SessionCell for it; called before `track`.
+    SessionUiState& ensureSubagentState(const WorkspaceId& workspace, const SessionId& id);
+    // 58-D7/A4: materialize a SessionUiState WITHOUT a SessionCell (used by
+    // `apply(SessionOpened)` so a SessionCreated notice cannot leak a cell).
+    SessionUiState& ensureSessionState(const WorkspaceId& workspace, const SessionId& id);
+    // 58-D4/A4: clear the per-session Esc arm of a child leaving the view.
+    void            disarm(const SessionId& id);
     void            ensureCell(const SessionId& id);
     void            ensureCellIn(const WorkspaceId& workspace, const SessionId& id);
     void            refreshCell(const SessionId& id);

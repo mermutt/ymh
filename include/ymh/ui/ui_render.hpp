@@ -45,6 +45,9 @@ struct ContextGridGeometry {
 [[nodiscard]] std::string render_to_ansi(const UiModel& model, TerminalSize size,
                                          const Theme& theme = {});
 
+// 58-A8/58-I6: the four distinct subagent edge glyphs (`>`/`✓`/`✗`/`-`).
+[[nodiscard]] const char* subagent_status_glyph(SubagentStatus status);
+
 // 48-D7.2: the one-line tool-argument summary. Parses `arguments_json` and
 // prefers command/path/pattern/query/url/name; falls back to the compact JSON
 // or the raw string on parse failure. Pure; never throws.

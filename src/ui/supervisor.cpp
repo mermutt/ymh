@@ -864,6 +864,10 @@ private:
                     }
                 }
                 adapter_.onHostNotice(workspace_id, notice);
+                if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
+                    notice.session.has_value()) {
+                    reconcile_subagent_path_for(*notice.session, "closed");
+                }
                 if (notice.kind == protocol::HostNoticeKind::SessionCreated) {
                     // 16 §7.6: one refresh fills the new cell's title; the
                     // broadcast notice itself carries only the SessionId.
@@ -873,6 +877,10 @@ private:
         };
         sink.on_state = [this, workspace_id](SupervisorLinkState state, std::string detail) {
             on_link_state(workspace_id, state, std::move(detail));
+        };
+        // 58-E29/58-I20: a child's subscribe failed (unknown session / limit).
+        sink.on_subscribe_error = [this](const SessionId& session, const std::string& detail) {
+            enqueue([this, session, detail] { handle_subscribe_error(session, detail); });
         };
 
         auto connection =
@@ -976,6 +984,116 @@ private:
     }
 
     void push_notice(std::string text) { model_.pushNotice(std::move(text)); }
+
+    // 58-A5: the only connection resolver. A missing entry is normal, not an
+    // error (eviction erases the connection before the model cleanup runs).
+    SupervisorConnection* connection_for(const WorkspaceId& ws) {
+        const auto it = connections_.find(ws);
+        return it == connections_.end() ? nullptr : it->second.get();
+    }
+
+    SessionUiState* viewed() { return model_.viewedSession(); }
+
+    // 58-A5/58-I22: the only place that tracks/untracks view children. Derives
+    // the tracked map from `subagent_path`; untracks + forgets + erases every
+    // child that left it, and tracks every child that entered it. Idempotent,
+    // and safe on a workspace whose connection is already gone (E37).
+    void sync_subagent_subscriptions() {
+        const std::set<SessionId> keep(model_.subagent_path.begin(), model_.subagent_path.end());
+        for (auto it = viewed_children_.begin(); it != viewed_children_.end();) {
+            const SessionId id = it->first;
+            if (keep.count(id) == 0) {
+                const WorkspaceId child_ws = it->second;   // recorded at track time
+                model_.disarm(id);
+                if (SupervisorConnection* connection = connection_for(child_ws);
+                    connection != nullptr) {
+                    connection->untrack(id);
+                }
+                adapter_.forget_session(id);
+                model_.eraseSession(child_ws, id);
+                model_.dirty.markAggregate();
+                it = viewed_children_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (const SessionId& id : model_.subagent_path) {
+            const WorkspaceId child_ws = model_.activeWorkspaceId;
+            viewed_children_.insert_or_assign(id, child_ws);
+            if (SupervisorConnection* connection = connection_for(child_ws);
+                connection != nullptr) {
+                connection->track(id);
+            }
+        }
+    }
+
+    // 58-E14: materialize the child (no cell) before tracking it; never a
+    // `focusSessionIn` (58-I1).
+    void enter_subagent(const SessionId& id) {
+        const WorkspaceId ws = model_.activeWorkspaceId;
+        SessionUiState& state = model_.ensureSubagentState(ws, id);
+        state.subagent = true;
+        model_.subagent_path.push_back(id);
+        model_.dirty.markAggregate();
+        sync_subagent_subscriptions();
+    }
+
+    // 58-E15: the pop precedes every erase (58-I25); sync does the release.
+    void return_subagent() {
+        if (model_.subagent_path.empty()) {
+            return;
+        }
+        model_.subagent_path.pop_back();
+        model_.dirty.markAggregate();
+        sync_subagent_subscriptions();
+    }
+
+    // 58-E16: pop every id whose state is gone (closed/deleted/evicted), then
+    // release the dropped children.
+    void reconcile_subagent_path() {
+        while (!model_.subagent_path.empty() &&
+               model_.session(model_.subagent_path.back()) == nullptr) {
+            model_.subagent_path.pop_back();
+        }
+        model_.dirty.markAggregate();
+        sync_subagent_subscriptions();
+    }
+
+    void reconcile_subagent_path_for(const SessionId& id, const std::string& reason) {
+        if (std::find(model_.subagent_path.begin(), model_.subagent_path.end(), id) ==
+            model_.subagent_path.end()) {
+            return;
+        }
+        reconcile_subagent_path();
+        push_notice("subagent session " + reason + " — returned to main");
+    }
+
+    // 58-E13: open the picker at the current view level.
+    void open_subagents() {
+        SessionUiState* v = model_.viewedSession();
+        if (v == nullptr) {
+            push_notice("no session to show subagents for");
+            return;
+        }
+        model_.switcher.source = SwitcherSource::Subagents;
+        model_.switcher.openSubagents(model_);
+        model_.mode = UiMode::Switcher;
+        model_.dirty.markAggregate();
+    }
+
+    // 58-I20/E29: a child's subscribe failed; reconcile and surface the notice.
+    void handle_subscribe_error(const SessionId& session, const std::string& detail) {
+        if (std::find(model_.subagent_path.begin(), model_.subagent_path.end(), session) ==
+            model_.subagent_path.end()) {
+            return;
+        }
+        if (const auto tracked = viewed_children_.find(session);
+            tracked != viewed_children_.end()) {
+            model_.eraseSession(tracked->second, session);
+        }
+        reconcile_subagent_path();
+        push_notice("subagent unavailable: " + detail);
+    }
 
     // 49-D5.1: a workspace's session membership is "unknown" while the catalog
     // is not loaded, when the workspace is absent from the snapshot, or when its
@@ -1461,6 +1579,7 @@ private:
         // workspace's active session and switches `activeWorkspaceId`, so a
         // session selected in another workspace becomes the visible one.
         model_.focusSession(session);
+        sync_subagent_subscriptions();
     }
 
     // 45-D10.8 (45-F23): drop a daemon-rejected session (which clears the focus
@@ -1469,6 +1588,8 @@ private:
     // dangles on a session the daemon will reject.
     void recover_unknown_session(const WorkspaceId& workspace, const SessionId& session) {
         model_.eraseSession(workspace, session);
+        // 58-E42: a dropped child's subscription is released and the path popped.
+        reconcile_subagent_path();
         push_notice("session no longer exists");
         const auto it = model_.workspaces.find(workspace);
         if (it == model_.workspaces.end()) {
@@ -1476,6 +1597,7 @@ private:
         }
         if (!it->second.sessions.empty()) {
             model_.focusSessionIn(workspace, it->second.sessions.front().id);
+            sync_subagent_subscriptions();
         } else {
             create_session(workspace, std::string{});
         }
@@ -1538,6 +1660,8 @@ private:
                     connections_.erase(connection);
                     specs_.erase(pinned);
                     model_.eraseWorkspace(spec.id);
+                    // 58-E45: a boot-id-change eviction drops any viewed child.
+                    reconcile_subagent_path();
                 }
             }
             for (const SupervisorWorkspace& spec : live) {
@@ -1582,6 +1706,10 @@ private:
             pending_creates_.erase(id);
             pending_resume_.erase(id);
             model_.eraseWorkspace(id);
+            // 58-E37: after `eraseWorkspace` (so the reconcile can pop); the
+            // connection is already gone, so the subscription calls are no-ops
+            // while the model/adapter cleanup still runs.
+            reconcile_subagent_path();
         }
         if (!doomed.empty()) {
             model_.dirty.markAggregate();
@@ -1630,6 +1758,12 @@ private:
             it->second.daemonStatus = daemon_status_for(state);
             apply_daemon_status_liveness(it->second, it->second.daemonStatus);
             model_.dirty.markAggregate();
+            // 58-E36: fast-path guard; inert while the child state survives (the
+            // real clear is the eviction, E37).
+            if (state == SupervisorLinkState::Dead &&
+                model_.activeWorkspaceId == workspace && !model_.subagent_path.empty()) {
+                reconcile_subagent_path();
+            }
             if (state == SupervisorLinkState::Attached) {
                 // 49-D1 step 6: a lazily-created workspace's first prompt rides
                 // `pending_creates_`. Consume it BEFORE `refresh_sessions`, whose
@@ -1665,6 +1799,7 @@ private:
 
     void activate_session(const WorkspaceId& workspace, const SessionId& session) {
         model_.focusSessionIn(workspace, session);
+        sync_subagent_subscriptions();
     }
 
     // The Live switcher's session source is the daemon's OPEN/LIVE set, never
@@ -1689,6 +1824,11 @@ private:
                     for (const nlohmann::json& entry : reply.result) {
                         const std::string id = entry.value("id", std::string{});
                         if (id.empty()) {
+                            continue;
+                        }
+                        // 58-E18: a resident child is neither auto-tracked nor
+                        // given a cell; only entered children are tracked.
+                        if (entry.value("kind", std::string{}) == "subagent") {
                             continue;
                         }
                         if (entry.value("live", false)) {
@@ -2507,6 +2647,7 @@ private:
         };
         context.context = [this] { open_context(); };
         context.sessions = [this] { open_sessions(); };
+        context.subagents = [this] { open_subagents(); };
         context.mcp = [this] { request_mcp(); };
         context.status = [this] { request_status(); };
         return registry_.dispatch(line, context);
@@ -2631,7 +2772,7 @@ private:
     }
 
     void scroll_by(bool up, bool page) {
-        SessionUiState* state = active();
+        SessionUiState* state = viewed();
         if (state == nullptr) {
             return;
         }
@@ -2648,7 +2789,7 @@ private:
     }
 
     void scroll_to_top() {
-        SessionUiState* state = active();
+        SessionUiState* state = viewed();
         if (state == nullptr) {
             return;
         }
@@ -2657,7 +2798,7 @@ private:
     }
 
     void scroll_to_bottom() {
-        SessionUiState* state = active();
+        SessionUiState* state = viewed();
         if (state == nullptr) {
             return;
         }
@@ -2666,7 +2807,7 @@ private:
     }
 
     void toggle_folds() {
-        SessionUiState* state = active();
+        SessionUiState* state = viewed();
         if (state == nullptr) {
             return;
         }
@@ -2752,6 +2893,19 @@ private:
     // an unmodeled workspace is reported through the notice ring (H1).
     void select_history(const SwitcherCursor& cursor) {
         if (cursor.session.has_value()) {
+            for (const WorkspaceNode& node : model_.switcher.workspaces) {
+                if (node.id != cursor.workspace) {
+                    continue;
+                }
+                for (const SessionNode& session : node.sessions) {
+                    if (session.id == *cursor.session && session.kind == "subagent") {
+                        // 58-E20/58-D7: a child is never resumed from `/sessions`.
+                        push_notice("subagent sessions are viewed from their parent (/subagents)");
+                        return;
+                    }
+                }
+                break;
+            }
             resume_from_history(cursor.workspace, *cursor.session);
             return;
         }
@@ -2760,14 +2914,20 @@ private:
                               connection->second->state() == SupervisorLinkState::Attached;
         if (attached) {
             model_.focusWorkspace(cursor.workspace);
+            sync_subagent_subscriptions();
             return;
         }
         push_notice("workspace not running: " + workspace_label(cursor.workspace));
     }
 
     bool handle_switcher(const ftxui::Event& event) {
-        // 51-D4.2: Ctrl+D is the switcher-only delete key.
+        const SwitcherSourcePolicy& policy = switcher_policy(model_.switcher.source);
+        // 51-D4.2: Ctrl+D is the switcher-only delete key; 58-E1 disables it for
+        // the Subagents source (a consumed no-op).
         if (event == ftxui::Event::CtrlD) {
+            if (!policy.ctrl_d_enabled) {
+                return true;
+            }
             return handle_switcher_delete(event);
         }
         // 51-D4.3: any other key disarms a pending delete (mirrors the Esc arm).
@@ -2775,7 +2935,8 @@ private:
             model_.switcher.disarm_delete();
             model_.dirty.markAggregate();
         }
-        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
+        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC ||
+            (policy.ctrl_t_closes && event == ftxui::Event::CtrlT)) {
             model_.switcher.close();
             model_.mode = UiMode::Conversation;
             catalog_visible_.store(false);
@@ -2790,11 +2951,13 @@ private:
             return true;
         }
         if (event == ftxui::Event::Tab) {
+            if (!policy.tab_expands) {
+                return true;
+            }
             model_.switcher.toggleExpand();
             return true;
         }
-        if (model_.switcher.source == SwitcherSource::History && event.is_character() &&
-            event.character() == "r") {
+        if (policy.r_refreshes && event.is_character() && event.character() == "r") {
             if (catalog_ != nullptr) {
                 catalog_->refreshNow();
             }
@@ -2802,12 +2965,28 @@ private:
         }
         if (event == ftxui::Event::Return) {
             const SwitcherCursor cursor = model_.switcher.cursor;
-            if (model_.switcher.source == SwitcherSource::History) {
-                select_history(cursor);
-            } else if (cursor.session.has_value()) {
-                model_.focusSessionIn(cursor.workspace, *cursor.session);
-            } else {
-                model_.focusWorkspace(cursor.workspace);
+            switch (policy.enter) {
+                case SwitcherEnter::Resume:
+                    select_history(cursor);
+                    break;
+                case SwitcherEnter::EnterChild:
+                    // 58-I8: the empty leaf is a consumed no-op; the picker stays
+                    // open.
+                    if (cursor.session.has_value()) {
+                        enter_subagent(*cursor.session);
+                        model_.switcher.close();
+                        model_.mode = UiMode::Conversation;
+                        catalog_visible_.store(false);
+                    }
+                    return true;
+                case SwitcherEnter::Focus:
+                    if (cursor.session.has_value()) {
+                        model_.focusSessionIn(cursor.workspace, *cursor.session);
+                    } else {
+                        model_.focusWorkspace(cursor.workspace);
+                    }
+                    sync_subagent_subscriptions();
+                    break;
             }
             model_.switcher.close();
             model_.mode = UiMode::Conversation;
@@ -2932,6 +3111,8 @@ private:
     void apply_session_deleted(const WorkspaceId& workspace, const SessionId& session,
                                const std::optional<SwitcherCursor>& next) {
         model_.eraseSession(workspace, session);
+        // 58-E43: an external `session.delete` for a viewed child pops the path.
+        reconcile_subagent_path();
         if (next.has_value()) {
             model_.switcher.cursor = *next;
         }
@@ -2992,6 +3173,9 @@ private:
 
     void apply_workspace_deleted(const WorkspaceId& workspace) {
         model_.eraseWorkspace(workspace);
+        // 58-E44: defensive; unreachable with a viewed child (its workspace is
+        // live, so `delete_highlighted_workspace` refuses it).
+        reconcile_subagent_path();
         std::erase_if(model_.switcher.workspaces,
                       [&workspace](const WorkspaceNode& node) { return node.id == workspace; });
         if (model_.switcher.workspaces.empty()) {
@@ -3069,6 +3253,15 @@ private:
                 create_session(workspace->id, std::string{});
             }
             return false;
+        }
+        // 58-E8/58-I4: while a child is viewed the composer is read-only as a
+        // dispatch guard — Esc pops one level, every other key is consumed (no
+        // submit, no completion, no draft mutation, no `agent.*` RPC).
+        if (!model_.subagent_path.empty()) {
+            if (event == ftxui::Event::Escape) {
+                return_subagent();
+            }
+            return true;
         }
         InputModel& input = state->input;
         if (event.is_character() && modal_tail_suppression_active()) {
@@ -3414,6 +3607,16 @@ private:
         if (model_.mode == UiMode::ModelPicker && model_.model_picker.visible) {
             return handle_model_picker(event);
         }
+        // 58-E6: Ctrl+C is suppressed while a child is viewed (it must never
+        // cancel the parent turn).
+        if (event == ftxui::Event::CtrlC && !model_.subagent_path.empty()) {
+            return true;
+        }
+        // 58-E7: Ctrl+T opens the Subagents picker at the current view level.
+        if (event == ftxui::Event::CtrlT) {
+            open_subagents();
+            return true;
+        }
         if (event == ftxui::Event::CtrlS || event == ftxui::Event::CtrlP) {
             openSwitcher();
             catalog_visible_.store(false);
@@ -3545,6 +3748,11 @@ private:
     int            agent_select_error_      = 0;
     std::map<WorkspaceId, SupervisorWorkspace> specs_;
     std::map<WorkspaceId, std::unique_ptr<SupervisorConnection>> connections_;
+    // 58-I22/A5: the children the view currently tracks, each mapped to the
+    // workspace it was materialized in (recorded at track time, so a drop after
+    // an eviction still resolves the right connection). Maintained only by
+    // `sync_subagent_subscriptions`.
+    std::map<SessionId, WorkspaceId> viewed_children_;
     std::map<WorkspaceId, std::string> pending_creates_;
     // 49 test seams: per-workspace `ensure_workspace_running` invocations and
     // per-method `submit_to` invocations, so the lazy path can be asserted
@@ -3852,6 +4060,9 @@ public:
         if (key == "ctrl-c") {
             return app_.handle_event(ftxui::Event::CtrlC);
         }
+        if (key == "ctrl-n") {
+            return app_.handle_event(ftxui::Event::CtrlN);
+        }
         if (key == "ctrl-d") {
             return app_.handle_event(ftxui::Event::CtrlD);
         }
@@ -3860,6 +4071,30 @@ public:
         }
         if (key == "ctrl-s") {
             return app_.handle_event(ftxui::Event::CtrlS);
+        }
+        if (key == "ctrl-t") {
+            return app_.handle_event(ftxui::Event::CtrlT);
+        }
+        if (key == "ctrl-o") {
+            return app_.handle_event(ftxui::Event::CtrlO);
+        }
+        if (key == "page-up") {
+            return app_.handle_event(ftxui::Event::PageUp);
+        }
+        if (key == "page-down") {
+            return app_.handle_event(ftxui::Event::PageDown);
+        }
+        if (key == "ctrl-home") {
+            return app_.handle_event(ftxui::Event::Special("\x1b[1;5H"));
+        }
+        if (key == "ctrl-end") {
+            return app_.handle_event(ftxui::Event::Special("\x1b[1;5F"));
+        }
+        if (key == "shift-up") {
+            return app_.handle_event(ftxui::Event::Special("\x1b[1;2A"));
+        }
+        if (key == "shift-down") {
+            return app_.handle_event(ftxui::Event::Special("\x1b[1;2B"));
         }
         if (key == "ctrl-p") {
             return app_.handle_event(ftxui::Event::CtrlP);
@@ -3904,6 +4139,50 @@ public:
         return spec->second.boot_id;
     }
     [[nodiscard]] bool worker_joinable() const override { return app_.ensure_worker_.joinable(); }
+
+    void feed_session_envelope(const WorkspaceId& workspace,
+                               const protocol::SessionEnvelope& envelope) override {
+        app_.adapter_.onSessionEnvelope(workspace, envelope);
+    }
+
+    void deliver_host_notice(const WorkspaceId& workspace,
+                             const protocol::HostNotice& notice) override {
+        if (notice.kind == protocol::HostNoticeKind::SessionClosed && notice.session.has_value()) {
+            if (SupervisorConnection* connection = app_.connection_for(workspace);
+                connection != nullptr) {
+                connection->untrack(*notice.session);
+            }
+        }
+        app_.adapter_.onHostNotice(workspace, notice);
+        if (notice.kind == protocol::HostNoticeKind::SessionClosed && notice.session.has_value()) {
+            app_.reconcile_subagent_path_for(*notice.session, "closed");
+        }
+    }
+
+    void deliver_subscribe_error(const SessionId& session, const std::string& detail) override {
+        app_.handle_subscribe_error(session, detail);
+    }
+
+    void apply_session_deleted(const WorkspaceId& workspace, const SessionId& session) override {
+        app_.apply_session_deleted(workspace, session, std::nullopt);
+    }
+
+    void select_history(const SwitcherCursor& cursor) override {
+        app_.select_history(cursor);
+    }
+
+    [[nodiscard]] std::size_t viewed_children_count() const override {
+        return app_.viewed_children_.size();
+    }
+
+    [[nodiscard]] std::optional<WorkspaceId> viewed_child_workspace(
+        const SessionId& id) const override {
+        const auto it = app_.viewed_children_.find(id);
+        if (it == app_.viewed_children_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
 
 private:
     SupervisorApp app_;

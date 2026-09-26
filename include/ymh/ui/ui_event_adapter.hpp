@@ -64,6 +64,11 @@ public:
     void onHostNotice(const WorkspaceId& workspace, const protocol::HostNotice& notice);
     void onWorkspaceEvent(const WorkspaceEvent& event);
 
+    // 58-A10/E46 (HIGH-1): drop a session's replay-dedup ids on pop/switch/
+    // delete/eviction; without it a re-entry drops every replayed event and
+    // renders blank (58-I10).
+    void forget_session(const SessionId& id);
+
     // Model-level clock; the ONLY place the flash advances (10 §5.2, F12, D16).
     void onTick(std::chrono::milliseconds delta);
 
@@ -89,8 +94,11 @@ private:
     std::map<SessionId, std::string>     startedMessages_;
     std::map<SessionId, MaintenanceState> maintenance_;
     std::function<AgentState(const SessionId&)> state_provider_;
-    std::set<std::string>                applied_event_ids_;
-    std::deque<std::string>              applied_event_order_;
+    // 58-A10/E46 (HIGH-1): the replay dedup is keyed PER SESSION so a popped
+    // child's ids can be cleared on pop (`forget_session`); `EventId` is a global
+    // UUIDv4, so per-session keying changes no cross-session behaviour.
+    std::map<SessionId, std::set<std::string>>    applied_event_ids_;
+    std::map<SessionId, std::deque<std::string>>  applied_event_order_;
 };
 
 } // namespace ymh::ui

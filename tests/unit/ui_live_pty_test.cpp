@@ -104,4 +104,58 @@ TEST(UiLivePty, StreamsAssistantReply) {
     EXPECT_TRUE(saw_reply) << child.plain();
 }
 
+// 58-P2 (58-D1/D2/D6): opt-in live navigation against real DeepSeek — delegate
+// a task, enter the running child, observe it finish, and return.
+TEST(UiLivePty, SubagentNavigationLive) {
+    if (!live_enabled()) {
+        GTEST_SKIP() << "opt-in: set YMH_LIVE_LLM=1 and DEEPSEEK_API_KEY to run";
+    }
+
+    test::ShortTempRoot root("ui_live_subagent");
+    const std::filesystem::path workspace = root.path() / "ws";
+    std::filesystem::create_directories(workspace);
+
+    std::map<std::string, std::string> env;
+    env["XDG_STATE_HOME"] = root.state_dir().string();
+    env["XDG_CONFIG_HOME"] = root.config_dir().string();
+    env["HOME"] = root.path().string();
+    env["TERM"] = "xterm-256color";
+
+    test::PtyChild child;
+    ASSERT_TRUE(child.spawn(YMH_TEST_BINARY, workspace, env));
+    child.wait_for("Type a message and press Enter", std::chrono::seconds{30});
+
+    const std::string nonce = make_nonce();
+    child.write("Use the subagent tool to delegate this task: reply with exactly the token " +
+                nonce + " and nothing else. Then answer done.\r");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{120};
+    bool saw_child = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        child.read_available();
+        const std::string plain = child.plain();
+        if (plain.find("Permission required") != std::string::npos) {
+            child.write("\r");
+        }
+        if (plain.find("subagents:") != std::string::npos &&
+            plain.find("✓") != std::string::npos) {
+            saw_child = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    }
+    ASSERT_TRUE(saw_child) << child.plain();
+
+    child.write("\x14");
+    child.wait_for("Enter enter · Esc close", std::chrono::seconds{15});
+    child.write("\x1b[B\r");
+    child.wait_for("Esc return", std::chrono::seconds{15});
+    EXPECT_NE(child.plain().find("↳ "), std::string::npos);
+
+    child.write("\x1b");
+    child.write("/exit\r");
+    child.terminate();
+    test::stop_hosts_for_root(workspace);
+}
+
 } // namespace

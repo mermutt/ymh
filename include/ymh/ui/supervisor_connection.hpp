@@ -88,6 +88,8 @@ struct SupervisorSink {
     std::function<void(const protocol::HostNotice&)>      on_notice;
     std::function<void(const protocol::PermissionRequest&)> on_permission;
     std::function<void(SupervisorLinkState, const std::string& detail)> on_state;
+    // 58-A6/E29: a per-session subscribe failed (UnknownSession/SubscriptionLimit).
+    std::function<void(const SessionId&, const std::string&)> on_subscribe_error;
 };
 
 // Outcome of one marshalled request.
@@ -162,6 +164,10 @@ private:
     [[nodiscard]] bool attempt_attach();
     void subscribe_tracked();
     void subscribe_one(const SessionId& session);
+    // 58-A6: record a created subscription only while the session is still
+    // tracked; otherwise release it (closes the pop-vs-in-flight-subscribe race).
+    void record_subscription(const SessionId& session,
+                             protocol::SubscriptionId subscription);
     void dispatch(const protocol::Notification& notification);
     void process_requests();
     void maybe_ping();
@@ -178,6 +184,9 @@ private:
     std::map<SessionId, protocol::EventCursor>       cursors_;
     std::vector<SessionId>                           tracked_;   // insertion order
     std::set<SessionId>                              subscribed_;  // on the live link
+    // 58-A6/E28: the daemon-assigned subscription id per session, so `untrack`
+    // can release it with `event.unsubscribe`.
+    std::map<SessionId, protocol::SubscriptionId>    subscriptions_;
     std::unique_ptr<protocol::HostConnection>        connection_;   // pump-owned
     SupervisorLinkState                              state_ = SupervisorLinkState::Connecting;
     std::string                                      state_detail_;

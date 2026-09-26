@@ -438,6 +438,44 @@ Element render_scroll_hint(const SessionUiState* active, const Theme& theme) {
     return paint(ftxui::text(label), ftxui::Color::Yellow, theme);
 }
 
+// 58-A8: the parent whose strip holds the viewed child's status.
+[[nodiscard]] const SessionUiState* view_parent(const UiModel& model) {
+    if (model.subagent_path.empty()) {
+        return nullptr;
+    }
+    if (model.subagent_path.size() == 1) {
+        const auto workspace = model.workspaces.find(model.activeWorkspaceId);
+        return workspace == model.workspaces.end()
+                   ? nullptr
+                   : model.session(workspace->second.activeSessionId());
+    }
+    return model.session(model.subagent_path[model.subagent_path.size() - 2]);
+}
+
+// 58-A8: the deepest viewed child's status, from its parent's strip.
+[[nodiscard]] std::optional<SubagentStatus> viewed_status(const UiModel& model) {
+    if (model.subagent_path.empty()) {
+        return std::nullopt;
+    }
+    const SessionId& child = model.subagent_path.back();
+    const SessionUiState* parent = view_parent(model);
+    if (parent == nullptr) {
+        return std::nullopt;
+    }
+    for (const SubagentView& agent : parent->subagents.agents) {
+        if (agent.id == child) {
+            return agent.status;
+        }
+    }
+    return std::nullopt;
+}
+
+// 58-A8: the status-line prefix (58-D4/D8). NOT policy data (MEDIUM-3).
+[[nodiscard]] std::string subagent_status_prefix(const SessionId& id, SubagentStatus status) {
+    return "subagent " + short_id(id) + " · " +
+           (status == SubagentStatus::Running ? "running" : "finished");
+}
+
 Element render_subagents(const SessionUiState* active, const Theme& theme) {
     if (active == nullptr || active->subagents.agents.empty()) {
         return ftxui::text("");
@@ -445,7 +483,8 @@ Element render_subagents(const SessionUiState* active, const Theme& theme) {
     Elements cells;
     cells.push_back(paint(ftxui::text("subagents:"), ftxui::Color::Magenta, theme));
     for (const SubagentView& agent : active->subagents.agents) {
-        std::string label = " [" + short_id(agent.id) + " " + state_glyph(agent.state) + "]";
+        std::string label =
+            " [" + short_id(agent.id) + " " + subagent_status_glyph(agent.status) + "]";
         if (!agent.summary.empty()) {
             std::string summary = agent.summary;
             if (summary.size() > 32) {
@@ -484,6 +523,12 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
 }
 
 Element render_input(const UiModel& model, const Theme& theme) {
+    if (!model.subagent_path.empty()) {
+        const std::string hint = "(viewing subagent " + short_id(model.subagent_path.back()) +
+                                 " — Ctrl+T children · Esc return)";
+        Element line = with_left_bar(ftxui::text(hint) | ftxui::dim, theme);
+        return paint_bg(std::move(line), theme.user_block_background, theme);
+    }
     const SessionUiState* active = nullptr;
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     if (workspace != model.workspaces.end()) {
@@ -657,11 +702,25 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     }
     constexpr int kSeparatorWidth = 3;   // " · "
 
+    std::string subagent_prefix;
+    if (!model.subagent_path.empty()) {
+        if (const auto status_of_child = viewed_status(model); status_of_child.has_value()) {
+            subagent_prefix =
+                subagent_status_prefix(model.subagent_path.back(), *status_of_child);
+        }
+    }
+
     std::string mode = status.plan_active ? "plan" : "build";
     if (ftxui::string_width(mode) > avail) {
         mode = ellipsize_text(mode, avail);
     }
     int used = ftxui::string_width(mode);
+    if (!subagent_prefix.empty()) {
+        if (ftxui::string_width(subagent_prefix) > avail) {
+            subagent_prefix = ellipsize_text(subagent_prefix, avail);
+        }
+        used += ftxui::string_width(subagent_prefix) + kSeparatorWidth;
+    }
 
     std::string model_name;
     if (!status.model.empty()) {
@@ -732,6 +791,9 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
             std::string(kReasoningSpinnerFrames[model.spinner.frame %
                                                 kReasoningSpinnerFrames.size()]) +
             " "));
+    }
+    if (!subagent_prefix.empty()) {
+        append_segment(ftxui::text(subagent_prefix));
     }
     append_segment(status.plan_active ? paint(ftxui::text(mode), ftxui::Color::Yellow, theme)
                                       : ftxui::text(mode));
@@ -957,14 +1019,15 @@ struct SwitcherRow {
 // is the row with kind == Footer. The window title row is a renderer prelude.
 std::vector<SwitcherRow> switcher_disarmed_rows(const UiModel& model) {
     const SwitcherOverlayModel& switcher = model.switcher;
-    const bool history = switcher.source == SwitcherSource::History;
+    const SwitcherSourcePolicy& policy = switcher_policy(switcher.source);
+    const bool history = policy.r_refreshes;   // the catalog-backed source
     std::vector<SwitcherRow> rows;
     if (switcher.workspaces.empty()) {
         SwitcherRow empty;
         if (history && !model.catalog.loaded) {
             empty.text = "loading stored sessions…";
         } else {
-            empty.text = history ? "(no stored sessions)" : "(no workspaces)";
+            empty.text = policy.empty_state;
         }
         rows.push_back(std::move(empty));
     }
@@ -1001,6 +1064,10 @@ std::vector<SwitcherRow> switcher_disarmed_rows(const UiModel& model) {
                 leaf.text = "    " + history_note_leaf(*workspace.note);
             } else if (workspace.sessions_hidden_by_focus) {
                 leaf.text = "    (current session hidden)";
+            } else if (policy.enter == SwitcherEnter::EnterChild) {
+                // 58-G4: the Subagents picker's synthetic node has no children
+                // exactly when the whole picker is empty.
+                leaf.text = "    " + std::string(policy.empty_state);
             } else if (history) {
                 leaf.text = "    (no stored sessions)";
             } else {
@@ -1039,16 +1106,14 @@ std::vector<SwitcherRow> switcher_disarmed_rows(const UiModel& model) {
     rows.push_back(std::move(separator));
     SwitcherRow footer;
     footer.kind = SwitcherRowKind::Footer;
-    if (history) {
-        std::string text = "stored sessions";
-        if (!model.catalog.complete) {
-            text += " · partial";
+    std::string footer_text(policy.footer);
+    if (history && !model.catalog.complete) {
+        constexpr std::string_view kStored = "stored sessions";
+        if (footer_text.rfind(kStored, 0) == 0) {
+            footer_text.insert(kStored.size(), " · partial");
         }
-        text += " · r refresh · Ctrl+D delete · Enter resume · Esc close";
-        footer.text = std::move(text);
-    } else {
-        footer.text = "j/k move · Tab expand · Ctrl+D delete · Enter focus · Esc close";
     }
+    footer.text = std::move(footer_text);
     rows.push_back(std::move(footer));
     return rows;
 }
@@ -1145,10 +1210,10 @@ bool is_armed_row(const SwitcherOverlayModel& switcher, const SwitcherRow& row) 
 
 Element render_switcher(const UiModel& model, const Theme& theme, int available_width) {
     const SwitcherOverlayModel& switcher = model.switcher;
-    const bool history = switcher.source == SwitcherSource::History;
+    const SwitcherSourcePolicy& policy = switcher_policy(switcher.source);
     const int w = switcher_content_width(model, available_width);
     Elements elements;
-    elements.push_back(ftxui::text(history ? "sessions" : "Switcher") | ftxui::bold);
+    elements.push_back(ftxui::text(std::string(policy.heading)) | ftxui::bold);
     elements.push_back(ftxui::separator());
     for (const SwitcherRow& row : switcher_disarmed_rows(model)) {
         if (is_armed_row(switcher, row)) {
@@ -1177,7 +1242,7 @@ Element render_switcher(const UiModel& model, const Theme& theme, int available_
         elements.push_back(std::move(element));
     }
     Element content = ftxui::vbox(std::move(elements)) | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, w);
-    return ftxui::window(ftxui::text(history ? "sessions" : "workspaces"), std::move(content)) |
+    return ftxui::window(ftxui::text(std::string(policy.window_title)), std::move(content)) |
            ftxui::clear_under | ftxui::center;
 }
 
@@ -1258,6 +1323,58 @@ Element render_header(const UiModel& model, const Theme& theme) {
     }
     return ftxui::hbox({paint(ftxui::text(title), ftxui::Color::Cyan, theme) | ftxui::bold,
                         ftxui::filler(), ftxui::text(session_title)});
+}
+
+// 58-D3/G1: the breadcrumb row under the header while a child is viewed. The
+// root is the active session's display title (never a hardcoded `main`).
+Element render_subagent_breadcrumb(const UiModel& model, const Theme& theme) {
+    const auto workspace = model.workspaces.find(model.activeWorkspaceId);
+    std::string root = "main";
+    if (workspace != model.workspaces.end()) {
+        const SessionId& active_id = workspace->second.activeSessionId();
+        if (!active_id.value.empty()) {
+            for (const SessionCell& cell : workspace->second.sessions) {
+                if (cell.id == active_id) {
+                    if (!is_display_placeholder_title(cell.title)) {
+                        root = cell.title;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    std::string text = "↳ " + root;
+    for (std::size_t index = 0; index < model.subagent_path.size(); ++index) {
+        const SessionId& id = model.subagent_path[index];
+        text += " › " + short_id(id);
+        const SessionUiState* parent = nullptr;
+        if (index == 0) {
+            if (workspace != model.workspaces.end()) {
+                parent = model.session(workspace->second.activeSessionId());
+            }
+        } else {
+            parent = model.session(model.subagent_path[index - 1]);
+        }
+        if (parent != nullptr) {
+            for (const SubagentView& agent : parent->subagents.agents) {
+                if (agent.id == id) {
+                    text += std::string(" ") + subagent_status_glyph(agent.status);
+                    break;
+                }
+            }
+        }
+    }
+    if (const SessionUiState* parent = view_parent(model); parent != nullptr) {
+        const SessionId& child = model.subagent_path.back();
+        for (const SubagentView& agent : parent->subagents.agents) {
+            if (agent.id == child && !agent.summary.empty()) {
+                text += " · " + agent.summary;
+                break;
+            }
+        }
+    }
+    return ftxui::hbox({paint(ftxui::text(text), ftxui::Color::Cyan, theme), ftxui::filler(),
+                        ftxui::text("Esc return")});
 }
 
 // 18 §5: the `/context` overlay. Chrome is exactly 10 rows in every view and
@@ -1514,6 +1631,20 @@ Element render_context_overlay(const UiModel& model, TerminalSize size, const Th
 
 } // namespace
 
+const char* subagent_status_glyph(SubagentStatus status) {
+    switch (status) {
+        case SubagentStatus::Running:
+            return ">";
+        case SubagentStatus::Completed:
+            return "✓";
+        case SubagentStatus::Failed:
+            return "✗";
+        case SubagentStatus::Cancelled:
+            return "-";
+    }
+    return "?";
+}
+
 ContextGridGeometry context_grid_geometry(int width, int height) noexcept {
     ContextGridGeometry geometry;
     const int           inner_width = std::max(width - kContextOverlayBorderCols, 0);
@@ -1565,14 +1696,22 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
         }
     }
     // 49-D1: the zero-workspace empty screen has a composer (draft + hints) but
-    // no conversation; `composer` is that state, `active` stays the transcript.
-    const SessionUiState* composer = active;
+    // no conversation; `composer` is that state, `pane` is the transcript.
+    // 58-E35: the transcript/strip/scroll-hint/composer/status all resolve from
+    // `viewedSession()`, falling back to the active session (also for the
+    // missing-state case) when it is nullptr.
+    const SessionUiState* viewed = model.viewedSession();
+    const SessionUiState* pane = viewed != nullptr ? viewed : active;
+    const SessionUiState* composer = pane;
     if (composer == nullptr && model.workspaces.empty()) {
         composer = &model.pendingComposer;
     }
 
     Elements rows;
     rows.push_back(render_header(model, theme));
+    if (!model.subagent_path.empty()) {
+        rows.push_back(render_subagent_breadcrumb(model, theme));
+    }
     rows.push_back(ftxui::separator());
     // 48-D7.3: the conversation pane sits inside the border and carries a
     // vscroll_indicator, so the tool line truncates to the content box, not the
@@ -1588,14 +1727,14 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     if (model.workspaces.empty()) {
         rows.push_back(ftxui::text("") | ftxui::flex);
     } else {
-        rows.push_back(render_conversation(active, context) | ftxui::flex);
+        rows.push_back(render_conversation(pane, context) | ftxui::flex);
     }
-    if (active != nullptr && !active->scroll.following) {
-        rows.push_back(render_scroll_hint(active, theme));
+    if (pane != nullptr && !pane->scroll.following) {
+        rows.push_back(render_scroll_hint(pane, theme));
     }
     rows.push_back(ftxui::separator());
-    if (active != nullptr && !active->subagents.agents.empty()) {
-        rows.push_back(render_subagents(active, theme));
+    if (pane != nullptr && !pane->subagents.agents.empty()) {
+        rows.push_back(render_subagents(pane, theme));
     }
     if (composer != nullptr && !composer->command_hints.empty()) {
         rows.push_back(render_command_hints(composer, theme));
@@ -1605,7 +1744,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     // `size.width - 2` columns available; the status fit math must use that
     // inner width or the right-aligned aggregate is clipped (25 review H3).
     const int status_width = size.width > 2 ? size.width - 2 : 1;
-    rows.push_back(render_status(model, active, theme, status_width));
+    rows.push_back(render_status(model, pane, theme, status_width));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
     if (model.exitConfirm.open) {

@@ -179,14 +179,16 @@ TEST(UiEventAdapter, HostNoticeSessionLifecycleCarriesSessionId) {
 
     const auto workspace = model.workspaces.find(kWorkspaceB);
     ASSERT_NE(workspace, model.workspaces.end());
+    // 58-E25: a SessionCreated notice materializes state WITHOUT a cell.
     std::size_t matches = 0;
     for (const SessionCell& cell : workspace->second.sessions) {
         if (cell.id == peer) {
             ++matches;
         }
     }
-    EXPECT_EQ(matches, 1u)
-        << "SessionCreated must insert exactly one cell for notice.session";
+    EXPECT_EQ(matches, 0u) << "SessionCreated must not insert a cell (58-E25)";
+    ASSERT_NE(model.session(peer), nullptr);
+    EXPECT_EQ(model.session(peer)->workspace, kWorkspaceB);
 
     protocol::HostNotice closed;
     closed.kind = protocol::HostNoticeKind::SessionClosed;
@@ -321,6 +323,77 @@ TEST(UiEventAdapter, SessionRenamedAdaptsToTitleChangeOnly) {
     ASSERT_NE(workspace, model.workspaces.end());
     ASSERT_FALSE(workspace->second.sessions.empty());
     EXPECT_EQ(workspace->second.sessions.front().title, "short-name");
+}
+
+// 58-U22 (58-E30): SubagentSpawned adapts to one UiEvent::SubagentSpawned.
+TEST(UiEventAdapter, UI58_U22_SubagentSpawnedAdapted) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    Event event;
+    event.id.value   = "spawn-1";
+    event.session_id = kSessionA;
+    event.timestamp  = std::chrono::system_clock::now();
+    event.type       = EventType::SubagentSpawned;
+    event.payload    = payload::SubagentSpawned{SessionId{"child-1"}, "task text"};
+
+    const std::vector<UiEvent> adapted = adapter.adapt(event);
+    ASSERT_EQ(adapted.size(), 1u);
+    const auto* spawned = std::get_if<SubagentSpawned>(&adapted[0].value);
+    ASSERT_NE(spawned, nullptr);
+    EXPECT_EQ(spawned->session, kSessionA);
+    EXPECT_EQ(spawned->subagent, SessionId{"child-1"});
+    EXPECT_EQ(spawned->task, "task text");
+}
+
+// 58-U23 (58-E30): fan-in carries the status derived from SubagentOutcome.
+TEST(UiEventAdapter, UI58_U23_SubagentFanInCarriesStatus) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    const auto fan_in = [&](payload::SubagentOutcome outcome) {
+        Event event;
+        event.id.value   = "fanin-" + std::to_string(static_cast<int>(outcome));
+        event.session_id = kSessionA;
+        event.timestamp  = std::chrono::system_clock::now();
+        event.type       = EventType::SubagentFanIn;
+        event.payload    = payload::SubagentFanIn{SessionId{"child-1"}, outcome, "summary", false};
+        const std::vector<UiEvent> adapted = adapter.adapt(event);
+        EXPECT_EQ(adapted.size(), 1u);
+        const auto* updated = std::get_if<SubagentUpdated>(&adapted[0].value);
+        EXPECT_NE(updated, nullptr);
+        return updated == nullptr ? SubagentStatus::Running : updated->status;
+    };
+
+    EXPECT_EQ(fan_in(payload::SubagentOutcome::Completed), SubagentStatus::Completed);
+    EXPECT_EQ(fan_in(payload::SubagentOutcome::Failed), SubagentStatus::Failed);
+    EXPECT_EQ(fan_in(payload::SubagentOutcome::Cancelled), SubagentStatus::Cancelled);
+}
+
+// 58-U24 (58-A10/E46, HIGH-1): forget_session clears a session's dedup only.
+TEST(UiEventAdapter, UI58_U24_ForgetSessionClearsDedup) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+    const Event a1 = user_event(kSessionA, "a-1", "one");
+    const Event a2 = user_event(kSessionA, "a-2", "two");
+    const Event b1 = user_event(kSessionB, "b-1", "bee");
+
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(a1));
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(a2));
+    adapter.onSessionEnvelope(kWorkspaceB, envelope(b1));
+    EXPECT_EQ(model.session(kSessionA)->conversation.entries.size(), 2u);
+
+    adapter.forget_session(kSessionA);
+    adapter.forget_session(kSessionA);   // absent id after the first call: no-op
+
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(a1));
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(a2));
+    EXPECT_EQ(model.session(kSessionA)->conversation.entries.size(), 4u)
+        << "forgotten ids must be applied again";
+
+    adapter.onSessionEnvelope(kWorkspaceB, envelope(b1));
+    EXPECT_EQ(model.session(kSessionB)->conversation.entries.size(), 1u)
+        << "another session's dedup is untouched";
 }
 
 } // namespace

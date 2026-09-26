@@ -626,7 +626,8 @@ TEST(UiRenderGolden, SubagentPanelRendered) {
     SessionUiState* state = model.session(kSession);
     ASSERT_NE(state, nullptr);
     state->subagents.agents.push_back(
-        SubagentView{SessionId{"sub-1"}, "exploring", AgentState::CallingTool});
+        SubagentView{SessionId{"sub-1"}, "exploring", AgentState::CallingTool,
+                     SubagentStatus::Completed});
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
@@ -634,6 +635,8 @@ TEST(UiRenderGolden, SubagentPanelRendered) {
     EXPECT_NE(rendered.find("subagents:"), std::string::npos);
     EXPECT_NE(rendered.find("sub-1"), std::string::npos);
     EXPECT_NE(rendered.find("exploring"), std::string::npos);
+    // 58-E31: the strip renders the SubagentStatus glyph, not the AgentState one.
+    EXPECT_NE(rendered.find("✓"), std::string::npos);
 }
 
 TEST(UiRenderGolden, CollapsedToolShowsOnlyHeaderNoBody) {
@@ -2724,6 +2727,148 @@ TEST(UiRenderGolden, SwitcherRowStyleAlignment) {
     const std::string workspace_sgr = trailing_sgr(workspace_rendered, cursor_workspace);
     EXPECT_NE(workspace_sgr.find("\x1b[36m"), std::string::npos) << workspace_sgr;
     EXPECT_NE(workspace_sgr.find("\x1b[1m"), std::string::npos) << workspace_sgr;
+}
+
+// ---- spec 58 (subagent navigation) -----------------------------------------
+
+const SessionId kChild58{"a1b2c3d4-1111-4111-8111-111111111111"};
+
+UiModel subagent_model(SubagentStatus status = SubagentStatus::Running) {
+    UiModel model = build_model();
+    SessionUiState* parent = model.session(kSession);
+    parent->subagents.agents.push_back(
+        SubagentView{kChild58, "profile parser", AgentState::Idle, status});
+    SessionUiState& child = model.ensureSubagentState(model.activeWorkspaceId, kChild58);
+    ConversationEntry entry;
+    entry.role = ConversationRole::User;
+    entry.text = "child-only-text";
+    child.conversation.entries.push_back(std::move(entry));
+    child.agent_state = AgentState::Thinking;
+    model.subagent_path = {kChild58};
+    return model;
+}
+
+// 58-G1 (58-I3): the breadcrumb row renders only with a non-empty path.
+TEST(UiRenderGolden, UI58_G1_SubagentBreadcrumbRendered) {
+    UiModel model = subagent_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("↳ "), std::string::npos);
+    EXPECT_NE(rendered.find("main"), std::string::npos);
+    EXPECT_NE(rendered.find("a1b2c3d4"), std::string::npos);
+    EXPECT_NE(rendered.find("Esc return"), std::string::npos);
+
+    const UiModel main_model = build_model();
+    const std::string main_rendered =
+        normalize(render_to_ansi(main_model, TerminalSize{90, 24}, Theme{false}));
+    EXPECT_EQ(main_rendered.find("Esc return"), std::string::npos);
+    EXPECT_EQ(main_rendered.find("↳ "), std::string::npos);
+}
+
+// 58-G2 (58-D3): the child's transcript replaces the main transcript.
+TEST(UiRenderGolden, UI58_G2_SubagentViewReplacesTranscript) {
+    const UiModel model = subagent_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("child-only-text"), std::string::npos);
+    EXPECT_EQ(rendered.find("hello there"), std::string::npos);
+}
+
+// 58-G3 (58-D1): the Subagents source renders the window frame, heading, footer.
+TEST(UiRenderGolden, UI58_G3_SubagentPickerRendered) {
+    UiModel model = subagent_model();
+    model.subagent_path.clear();
+    model.switcher.source = SwitcherSource::Subagents;
+    model.switcher.openSubagents(model);
+    model.mode = UiMode::Switcher;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("╭subagents"), std::string::npos);
+    EXPECT_NE(rendered.find("Enter enter · Esc close"), std::string::npos);
+    EXPECT_NE(rendered.find("profile parser"), std::string::npos);
+}
+
+// 58-G4 (58-A3.1): the empty picker renders the policy empty state.
+TEST(UiRenderGolden, UI58_G4_SubagentPickerEmptyState) {
+    UiModel model = build_model();
+    model.switcher.source = SwitcherSource::Subagents;
+    model.switcher.openSubagents(model);
+    model.mode = UiMode::Switcher;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("(no subagents)"), std::string::npos);
+}
+
+// 58-G5 (58-I6): the strip renders the four distinct status glyphs.
+TEST(UiRenderGolden, UI58_G5_SubagentStripRunningGlyph) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    state->subagents.agents.push_back(SubagentView{
+        SessionId{"run11111"}, "running", AgentState::Idle, SubagentStatus::Running});
+    state->subagents.agents.push_back(SubagentView{
+        SessionId{"don22222"}, "done", AgentState::Idle, SubagentStatus::Completed});
+    state->subagents.agents.push_back(SubagentView{
+        SessionId{"fai33333"}, "failed", AgentState::Error, SubagentStatus::Failed});
+    state->subagents.agents.push_back(SubagentView{
+        SessionId{"can44444"}, "cancelled", AgentState::Idle, SubagentStatus::Cancelled});
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("run11111 >"), std::string::npos);
+    EXPECT_NE(rendered.find("don22222 ✓"), std::string::npos);
+    EXPECT_NE(rendered.find("fai33333 ✗"), std::string::npos);
+    EXPECT_NE(rendered.find("can44444 -"), std::string::npos);
+}
+
+// 58-G6 (58-I24/E33/E35): the composer is read-only while a child is viewed.
+TEST(UiRenderGolden, UI58_G6_SubagentComposerReadOnly) {
+    const UiModel model = subagent_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("(viewing subagent a1b2c3d4"), std::string::npos);
+    EXPECT_NE(rendered.find("Ctrl+T children · Esc return)"), std::string::npos);
+}
+
+// 58-G7: the breadcrumb's width is measured in CELLS, never UTF-8 bytes.
+TEST(UiRenderGolden, UI58_G7_SubagentBreadcrumbCellWidth) {
+    const UiModel model = subagent_model();
+    const TerminalSize size{90, 24};
+    const std::string rendered = normalize(render_to_ansi(model, size, Theme{false}));
+    std::string breadcrumb;
+    for (const std::string& line : split_lines(rendered)) {
+        if (line.find("↳ ") != std::string::npos) {
+            breadcrumb = line;
+            break;
+        }
+    }
+    ASSERT_FALSE(breadcrumb.empty());
+    EXPECT_NE(breadcrumb.find("Esc return"), std::string::npos);
+    EXPECT_EQ(ftxui::string_width("↳"), 1);
+    EXPECT_LT(ftxui::string_width("↳"), std::string("↳").size());
+    EXPECT_LE(ftxui::string_width(breadcrumb), size.width);
+}
+
+// 58-G8 (58-E34): the status line carries the viewed child's status prefix.
+TEST(UiRenderGolden, UI58_G8_SubagentStatusLinePrefix) {
+    UiModel model = subagent_model(SubagentStatus::Running);
+    const std::string running =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(running);
+    EXPECT_NE(running.find("subagent a1b2c3d4 · running"), std::string::npos);
+    EXPECT_NE(running.find("0 active · 0 waiting"), std::string::npos);
+
+    model.session(kSession)->subagents.agents[0].status = SubagentStatus::Completed;
+    const std::string finished =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(finished);
+    EXPECT_NE(finished.find("subagent a1b2c3d4 · finished"), std::string::npos);
+    EXPECT_NE(finished.find("0 active · 0 waiting"), std::string::npos);
 }
 
 } // namespace

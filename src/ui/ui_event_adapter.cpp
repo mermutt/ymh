@@ -134,15 +134,25 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             events.push_back(UiEvent{ErrorOccurred{session, payload.message}});
             break;
         }
+        case EventType::SubagentSpawned: {
+            const auto payload = event.payload.get<payload::SubagentSpawned>();
+            events.push_back(
+                UiEvent{SubagentSpawned{session, payload.subagent, payload.task}});
+            break;
+        }
         case EventType::SubagentFanIn: {
             const auto payload = event.payload.get<payload::SubagentFanIn>();
             AgentState state = AgentState::Idle;
+            SubagentStatus status = SubagentStatus::Completed;
             if (payload.outcome == payload::SubagentOutcome::Failed) {
                 state = AgentState::Error;
+                status = SubagentStatus::Failed;
             } else if (payload.outcome == payload::SubagentOutcome::Cancelled) {
                 state = AgentState::Idle;
+                status = SubagentStatus::Cancelled;
             }
-            events.push_back(UiEvent{SubagentUpdated{session, payload.subagent, payload.summary, state}});
+            events.push_back(UiEvent{
+                SubagentUpdated{session, payload.subagent, payload.summary, state, status}});
             break;
         }
         case EventType::ContextCompaction: {
@@ -286,20 +296,27 @@ void UiEventAdapter::onSessionEnvelope(const WorkspaceId& workspace,
         return;
     }
     if (!envelope.event.id.value.empty()) {
-        if (applied_event_ids_.find(envelope.event.id.value) != applied_event_ids_.end()) {
+        auto& ids   = applied_event_ids_[envelope.session];
+        auto& order = applied_event_order_[envelope.session];
+        if (ids.find(envelope.event.id.value) != ids.end()) {
             return;
         }
-        applied_event_ids_.insert(envelope.event.id.value);
-        applied_event_order_.push_back(envelope.event.id.value);
-        if (applied_event_order_.size() > kMaxAppliedEventIds) {
-            applied_event_ids_.erase(applied_event_order_.front());
-            applied_event_order_.pop_front();
+        ids.insert(envelope.event.id.value);
+        order.push_back(envelope.event.id.value);
+        if (order.size() > kMaxAppliedEventIds) {
+            ids.erase(order.front());
+            order.pop_front();
         }
     }
     if (model_.sessions.find(envelope.session) == model_.sessions.end()) {
         model_.ensureSessionIn(workspace, envelope.session);
     }
     onEvent(envelope.event);
+}
+
+void UiEventAdapter::forget_session(const SessionId& id) {
+    applied_event_ids_.erase(id);
+    applied_event_order_.erase(id);
 }
 
 void UiEventAdapter::onPermissionRequest(const SessionId& session,
