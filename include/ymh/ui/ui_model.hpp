@@ -3,6 +3,7 @@
 // Pure presentation model (10-supervisor-tui.md §4). No FTXUI, no core object
 // pointers: `SessionUiState` holds a `SessionId` only (D1, §4.3).
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -121,28 +122,48 @@ struct ConversationModel {
     [[nodiscard]] std::size_t find_reasoning_message(const std::string& id) const;
 };
 
-// Per-session conversation viewport (10 §8.2 refinement). Supervisor-local,
+// Per-session conversation viewport (10 §8.2 refinement; 60-D2). Supervisor-local,
 // purely presentational: scrolling never gates agent work and never touches the
-// event log. `fraction` is the scroll position in [0,1] from the top; it is only
-// meaningful while `following` is false. `unseen` is raised when content arrives
-// while the view is scrolled up.
+// event log. `top` is the row-exact index of the first visible content row (0 =
+// first row); it is meaningful only while `following` is false, and
+// `observeGeometry()` clamps it to [0, max_top()]. `unseen` is raised when content
+// arrives while the view is scrolled up.
 struct ConversationScroll {
     static constexpr float kPageStep = 0.20f;
-    static constexpr float kLineStep = 0.04f;
 
-    float fraction  = 0.0f;
-    bool  following = true;
-    bool  unseen    = false;
+    int  top           = 0;
+    int  content_rows  = 0;
+    int  viewport_rows = 0;
+    bool following     = true;
+    bool unseen        = false;
 
-    [[nodiscard]] float position() const { return following ? 1.0f : fraction; }
+    [[nodiscard]] int max_top() const {
+        return std::max(0, content_rows - std::max(1, viewport_rows));
+    }
 
-    void pageUp();
-    void pageDown();
+    [[nodiscard]] int page_rows() const {
+        return std::max(1, static_cast<int>(static_cast<float>(content_rows) * kPageStep));
+    }
+
+    // Row index handed to the renderer's row-indexed focus (60-D2). `content` is
+    // the just-measured height so the upper clamp is never stale; `following`
+    // yields `content` (one past the last row) and the frame clamps to bottom.
+    [[nodiscard]] int focus_row(int content) const {
+        if (following) {
+            return content;
+        }
+        const int vp = std::max(1, viewport_rows);
+        return std::clamp(top + (vp - 1) / 2, 0, std::max(0, content - 1));
+    }
+
     void lineUp();
     void lineDown();
+    void pageUp();
+    void pageDown();
     void toTop();
     void toBottom();
     void onNewContent();
+    void observeGeometry(int content_rows, int viewport_rows);
 };
 
 struct ToolCallView {

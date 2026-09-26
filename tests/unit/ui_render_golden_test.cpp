@@ -2198,6 +2198,110 @@ ftxui::Screen render_screen(const UiModel& model, TerminalSize size, const Theme
     return screen;
 }
 
+ftxui::Screen render_screen(const UiModel& model, TerminalSize size, const Theme& theme,
+                            TranscriptMetrics* out) {
+    ftxui::Element element = build_ui(model, size, theme, out);
+    ftxui::Screen screen =
+        ftxui::Screen::Create(ftxui::Dimensions{size.width, size.height});
+    ftxui::Render(screen, element);
+    return screen;
+}
+
+int line_index_at(const std::string& row, std::size_t pos) {
+    int value = 0;
+    while (pos < row.size() && row[pos] >= '0' && row[pos] <= '9') {
+        value = value * 10 + (row[pos] - '0');
+        ++pos;
+    }
+    return value;
+}
+
+// The smallest `line-<k>` index visible on the screen; with the appended entries
+// one row each, this is the transcript's top visible content row.
+int first_visible_line(const ftxui::Screen& screen) {
+    int best = -1;
+    for (int y = 0; y < screen.dimy(); ++y) {
+        std::string row;
+        for (int x = 0; x < screen.dimx(); ++x) {
+            row += screen.PixelAt(x, y).character;
+        }
+        const std::size_t pos = row.find("line-");
+        if (pos == std::string::npos) {
+            continue;
+        }
+        const int value = line_index_at(row, pos + 5);
+        if (best < 0 || value < best) {
+            best = value;
+        }
+    }
+    return best;
+}
+
+// 60-U3 (60-I1): one `lineUp()` moves the first visible row by exactly one, and
+// `toTop`/`toBottom` land on the ends.
+TEST(UiRenderGolden, ShiftArrowScrollIsRowExact) {
+    UiModel model = build_model();
+    append_lines(model, 40);
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    TranscriptMetrics metrics;
+    (void)render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics);
+    ASSERT_GT(metrics.content_rows, 0);
+    ASSERT_GT(metrics.viewport_rows, 0);
+    state->scroll.observeGeometry(metrics.content_rows, metrics.viewport_rows);
+
+    const ftxui::Screen bottom =
+        render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics);
+    const int bottom_first = first_visible_line(bottom);
+    ASSERT_GE(bottom_first, 0);
+
+    // The frame callback re-clamps every frame (60-D13); the hint row that
+    // appears on the first scrolled frame changes the box height, so settle the
+    // same way the app does before measuring the step.
+    state->scroll.lineUp();
+    (void)render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics);
+    state->scroll.observeGeometry(metrics.content_rows, metrics.viewport_rows);
+    const ftxui::Screen up =
+        render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics);
+    const int up_first = first_visible_line(up);
+    ASSERT_GE(up_first, 0);
+    EXPECT_EQ(bottom_first - up_first, 1);
+    EXPECT_EQ(normalize(up.ToString()).find("line-39"), std::string::npos);
+
+    state->scroll.toTop();
+    const std::string top = normalize(
+        render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics).ToString());
+    EXPECT_NE(top.find("line-0"), std::string::npos);
+    EXPECT_EQ(top.find("line-39"), std::string::npos);
+
+    state->scroll.toBottom();
+    const std::string tail = normalize(
+        render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics).ToString());
+    EXPECT_NE(tail.find("line-39"), std::string::npos);
+}
+
+// 60-U4 (60-I8/I10): the metrics seam reports both heights and the Ctrl+End hint
+// appears exactly while scrolled.
+TEST(UiRenderGolden, ScrollMetricsAndHint) {
+    UiModel model = build_model();
+    append_lines(model, 40);
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    TranscriptMetrics metrics;
+    const std::string bottom = normalize(
+        render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics).ToString());
+    EXPECT_GT(metrics.content_rows, 0);
+    EXPECT_GT(metrics.viewport_rows, 0);
+    EXPECT_EQ(bottom.find("Ctrl+End"), std::string::npos);
+
+    state->scroll.toTop();
+    const std::string top = normalize(
+        render_screen(model, TerminalSize{72, 20}, Theme{false}, &metrics).ToString());
+    EXPECT_NE(top.find("Ctrl+End"), std::string::npos);
+}
+
 std::string element_ansi(ftxui::Element element, int width = 40) {
     ftxui::Screen screen = ftxui::Screen::Create(ftxui::Dimensions{width, 1});
     ftxui::Render(screen, element);

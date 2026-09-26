@@ -612,26 +612,106 @@ TEST(UiModel, ConversationScrollFollowAndUnseen) {
     ConversationScroll scroll;
     EXPECT_TRUE(scroll.following);
     EXPECT_FALSE(scroll.unseen);
-    EXPECT_FLOAT_EQ(scroll.position(), 1.0f);
 
-    scroll.pageUp();
+    scroll.observeGeometry(40, 20);
+    EXPECT_TRUE(scroll.following);
+    EXPECT_EQ(scroll.top, 20);
+    EXPECT_EQ(scroll.focus_row(40), 40);
+
+    scroll.lineUp();
     EXPECT_FALSE(scroll.following);
-    EXPECT_FLOAT_EQ(scroll.position(), 0.8f);
+    EXPECT_EQ(scroll.top, 19);
+    EXPECT_EQ(scroll.focus_row(40), 28);
     scroll.onNewContent();
     EXPECT_TRUE(scroll.unseen);
 
-    scroll.pageDown();
+    scroll.lineUp();
+    EXPECT_EQ(scroll.top, 18);
+
+    scroll.lineDown();
+    EXPECT_FALSE(scroll.following);
+    scroll.lineDown();
     EXPECT_TRUE(scroll.following);
     EXPECT_FALSE(scroll.unseen);
-    EXPECT_FLOAT_EQ(scroll.position(), 1.0f);
+    EXPECT_EQ(scroll.top, 20);
 
     scroll.toTop();
     EXPECT_FALSE(scroll.following);
-    EXPECT_FLOAT_EQ(scroll.position(), 0.0f);
-    scroll.lineUp();
-    EXPECT_FLOAT_EQ(scroll.position(), 0.0f);
+    EXPECT_EQ(scroll.top, 0);
+    EXPECT_EQ(scroll.focus_row(40), 9);
+    scroll.onNewContent();
+    EXPECT_TRUE(scroll.unseen);
+
     scroll.toBottom();
     EXPECT_TRUE(scroll.following);
+    EXPECT_EQ(scroll.top, 20);
+    EXPECT_FALSE(scroll.unseen);
+}
+
+TEST(UiModel, ConversationScrollPageStep) {
+    ConversationScroll scroll;
+    scroll.observeGeometry(40, 20);
+    ASSERT_EQ(scroll.page_rows(), 8);
+
+    scroll.pageUp();
+    EXPECT_FALSE(scroll.following);
+    EXPECT_EQ(scroll.top, 12);
+
+    scroll.pageDown();
+    EXPECT_TRUE(scroll.following);
+    EXPECT_EQ(scroll.top, 20);
+}
+
+TEST(UiModel, ScrollStreamingWhileScrolledRaisesUnseen) {
+    ConversationScroll scroll;
+    scroll.observeGeometry(40, 20);
+    scroll.lineUp();
+    ASSERT_FALSE(scroll.following);
+    const int before = scroll.top;
+
+    scroll.onNewContent();
+    EXPECT_EQ(scroll.top, before);
+    EXPECT_TRUE(scroll.unseen);
+    EXPECT_FALSE(scroll.following);
+
+    scroll.toBottom();
+    EXPECT_FALSE(scroll.unseen);
+}
+
+TEST(UiModel, ScrollReclampsOnResize) {
+    ConversationScroll scroll;
+    scroll.observeGeometry(100, 20);
+    for (int index = 0; index < 5; ++index) {
+        scroll.lineUp();
+    }
+    ASSERT_EQ(scroll.top, 75);
+
+    scroll.observeGeometry(100, 8);
+    EXPECT_EQ(scroll.top, 75);
+
+    scroll.observeGeometry(3, 20);
+    EXPECT_EQ(scroll.max_top(), 0);
+    EXPECT_EQ(scroll.top, 0);
+
+    scroll.observeGeometry(0, 20);
+    EXPECT_TRUE(scroll.following);
+    EXPECT_EQ(scroll.top, 0);
+}
+
+TEST(UiModel, ScrollReclampsOnFold) {
+    ConversationScroll scroll;
+    scroll.observeGeometry(300, 20);
+    for (int index = 0; index < 30; ++index) {
+        scroll.lineUp();
+    }
+    ASSERT_EQ(scroll.top, 250);
+
+    scroll.observeGeometry(200, 20);
+    EXPECT_EQ(scroll.max_top(), 180);
+    EXPECT_EQ(scroll.top, 180);
+
+    scroll.observeGeometry(300, 20);
+    EXPECT_EQ(scroll.top, 180);
 }
 
 TEST(UiModel, NewContentWhileScrolledRaisesUnseen) {

@@ -174,6 +174,17 @@ bool is_shift_down(const ftxui::Event& event) {
     return event.input() == "\x1b[1;2B";
 }
 
+// 60-D3: the xterm modifier encoding for Shift+PageUp/PageDown. FTXUI's parser
+// passes the whole CSI through as `Event::Special`, so these are distinguishable
+// from the unmodified `Event::PageUp`/`PageDown`.
+bool is_shift_page_up(const ftxui::Event& event) {
+    return event.input() == "\x1b[5;2~";
+}
+
+bool is_shift_page_down(const ftxui::Event& event) {
+    return event.input() == "\x1b[6;2~";
+}
+
 struct ExportRequest {
     std::string path;
     bool        edit = false;
@@ -3665,6 +3676,14 @@ private:
             scroll_by(false, false);
             return true;
         }
+        if (is_shift_page_up(event)) {
+            scroll_to_top();
+            return true;
+        }
+        if (is_shift_page_down(event)) {
+            scroll_to_bottom();
+            return true;
+        }
         return handle_input(event);
     }
 
@@ -3678,7 +3697,12 @@ private:
 
         auto renderer = ftxui::Renderer([this, &screen, theme] {
             const TerminalSize size{screen.dimx(), screen.dimy()};
-            return build_ui(model_, size, theme);
+            auto ui = build_ui(model_, size, theme, &scroll_metrics_);
+            if (SessionUiState* target = viewed()) {
+                target->scroll.observeGeometry(scroll_metrics_.content_rows,
+                                               scroll_metrics_.viewport_rows);
+            }
+            return ui;
         });
         auto component = ftxui::CatchEvent(
             renderer, [this](ftxui::Event event) { return handle_event(std::move(event)); });
@@ -3720,6 +3744,9 @@ private:
 
     SupervisorRunOptions options_;
     UiModel model_;
+    // 60-D10/D13: the viewed transcript's last-measured content/viewport rows,
+    // filled by `build_ui` and applied to `viewed()->scroll` in the same frame.
+    TranscriptMetrics scroll_metrics_;
     UiEventAdapter adapter_;
     // 48-D2 test seam: counts `cancelActive()` invocations so the Esc-Esc
     // integration test can assert exactly one cancel is submitted. Inert in
@@ -4095,6 +4122,12 @@ public:
         }
         if (key == "shift-down") {
             return app_.handle_event(ftxui::Event::Special("\x1b[1;2B"));
+        }
+        if (key == "shift-page-up") {
+            return app_.handle_event(ftxui::Event::Special("\x1b[5;2~"));
+        }
+        if (key == "shift-page-down") {
+            return app_.handle_event(ftxui::Event::Special("\x1b[6;2~"));
         }
         if (key == "ctrl-p") {
             return app_.handle_event(ftxui::Event::CtrlP);

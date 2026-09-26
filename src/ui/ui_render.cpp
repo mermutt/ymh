@@ -122,6 +122,65 @@ Element caret_anchor(Element element) {
     return std::make_shared<CaretAnchor>(std::move(element));
 }
 
+// 60-D2: the integer analogue of FTXUI's `focusPositionRelative`. Same
+// `focused.enabled = true`, same single-cell box, same default
+// `component_active` (false), so 48-D5.1's caret tie-break is unchanged; only
+// the box's y is an integer row instead of `int(min_y * y_)`.
+class RowFocus final : public ftxui::Node {
+public:
+    RowFocus(Element child, int row)
+        : ftxui::Node(Elements{std::move(child)}), row_(row) {}
+
+    void ComputeRequirement() override {
+        ftxui::Node::ComputeRequirement();
+        requirement_ = children_[0]->requirement();
+        requirement_.focused.enabled = true;
+        requirement_.focused.node = this;
+        requirement_.focused.box.x_min = 0;
+        requirement_.focused.box.x_max = 0;
+        requirement_.focused.box.y_min = row_;
+        requirement_.focused.box.y_max = row_;
+    }
+
+    void SetBox(ftxui::Box box) override {
+        ftxui::Node::SetBox(box);
+        children_[0]->SetBox(box);
+    }
+
+private:
+    int row_;
+};
+
+[[nodiscard]] ftxui::Decorator row_focus(int row) {
+    return [row](Element child) {
+        return std::make_shared<RowFocus>(std::move(child), row);
+    };
+}
+
+// 60-D10: reports the rendered transcript viewport height (`y_max - y_min + 1`,
+// the rendered row count, not FTXUI's internal `external_dimy`) during `SetBox`,
+// which runs after `build_ui` returns.
+class TranscriptViewportNode final : public ftxui::Node {
+public:
+    TranscriptViewportNode(Element child, TranscriptMetrics* out)
+        : ftxui::Node(Elements{std::move(child)}), out_(out) {}
+
+    void SetBox(ftxui::Box box) override {
+        ftxui::Node::SetBox(box);
+        if (out_ != nullptr) {
+            out_->viewport_rows = box.y_max - box.y_min + 1;
+        }
+        children_[0]->SetBox(box);
+    }
+
+private:
+    TranscriptMetrics* out_;
+};
+
+[[nodiscard]] Element wrap_viewport_metrics(Element child, TranscriptMetrics* out) {
+    return std::make_shared<TranscriptViewportNode>(std::move(child), out);
+}
+
 Element spans_to_element(const StyledLine& line, const Theme& theme) {
     Elements cells;
     cells.reserve(line.size());
@@ -403,7 +462,8 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
     return apply_presentation(ftxui::vbox(std::move(rows)), presentation, theme);
 }
 
-Element render_conversation(const SessionUiState* active, const RenderContext& context) {
+Element render_conversation(const SessionUiState* active, const RenderContext& context,
+                            TranscriptMetrics* out) {
     Elements rows;
     if (active == nullptr) {
         rows.push_back(ftxui::text("(no active session)") | ftxui::dim);
@@ -424,9 +484,15 @@ Element render_conversation(const SessionUiState* active, const RenderContext& c
         rows.push_back(ftxui::text("Type a message and press Enter. Ctrl+Q or /exit quits.") |
                        ftxui::dim);
     }
-    return ftxui::vbox(std::move(rows)) |
-           ftxui::focusPositionRelative(0.f, active->scroll.position()) | ftxui::yframe |
-           ftxui::vscroll_indicator;
+    Element content = ftxui::vbox(std::move(rows));
+    content->ComputeRequirement();
+    const int measured = std::max(1, content->requirement().min_y);
+    if (out != nullptr) {
+        out->content_rows = measured;
+    }
+    Element framed = std::move(content) | row_focus(active->scroll.focus_row(measured)) |
+                     ftxui::yframe | ftxui::vscroll_indicator;
+    return out != nullptr ? wrap_viewport_metrics(std::move(framed), out) : std::move(framed);
 }
 
 Element render_scroll_hint(const SessionUiState* active, const Theme& theme) {
@@ -1770,7 +1836,8 @@ LayoutMode calculate_layout(int width) {
     return LayoutMode::Wide;
 }
 
-Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
+Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
+                 TranscriptMetrics* out) {
     const SessionUiState* active = nullptr;
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     if (workspace != model.workspaces.end()) {
@@ -1811,7 +1878,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     if (model.workspaces.empty()) {
         rows.push_back(ftxui::text("") | ftxui::flex);
     } else {
-        rows.push_back(render_conversation(pane, context) | ftxui::flex);
+        rows.push_back(render_conversation(pane, context, out) | ftxui::flex);
     }
     if (pane != nullptr && !pane->scroll.following) {
         rows.push_back(render_scroll_hint(pane, theme));

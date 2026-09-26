@@ -500,53 +500,69 @@ std::string_view glyph_at(std::string_view text, std::size_t cursor) noexcept {
     return text.substr(cursor, glyph_len(text, cursor));
 }
 
+void ConversationScroll::observeGeometry(int content, int viewport) {
+    content_rows  = std::max(0, content);
+    viewport_rows = std::max(1, viewport);
+    if (content_rows == 0) {
+        following = true;
+        top       = 0;
+        unseen    = false;
+        return;
+    }
+    if (following) {
+        top = max_top();
+        return;
+    }
+    top = std::clamp(top, 0, max_top());
+}
+
 void ConversationScroll::pageUp() {
     if (following) {
         following = false;
-        fraction = 1.0f;
+        top       = max_top();
     }
-    fraction = std::max(0.0f, fraction - kPageStep);
+    top = std::max(0, top - page_rows());
 }
 
 void ConversationScroll::pageDown() {
     if (following) {
         return;
     }
-    fraction = std::min(1.0f, fraction + kPageStep);
-    if (fraction >= 1.0f) {
+    top = std::min(max_top(), top + page_rows());
+    if (top >= max_top()) {
         following = true;
-        unseen = false;
+        unseen    = false;
     }
 }
 
 void ConversationScroll::lineUp() {
     if (following) {
         following = false;
-        fraction = 1.0f;
+        top       = max_top();
     }
-    fraction = std::max(0.0f, fraction - kLineStep);
+    top = std::max(0, top - 1);
 }
 
 void ConversationScroll::lineDown() {
     if (following) {
         return;
     }
-    fraction = std::min(1.0f, fraction + kLineStep);
-    if (fraction >= 1.0f) {
+    top = std::min(max_top(), top + 1);
+    if (top >= max_top()) {
         following = true;
-        unseen = false;
+        unseen    = false;
     }
 }
 
 void ConversationScroll::toTop() {
     following = false;
-    fraction = 0.0f;
+    top       = 0;
 }
 
 void ConversationScroll::toBottom() {
     following = true;
-    fraction = 1.0f;
-    unseen = false;
+    top       = max_top();
+    unseen    = false;
 }
 
 void ConversationScroll::onNewContent() {

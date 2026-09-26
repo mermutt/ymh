@@ -39,9 +39,18 @@ struct ContextGridGeometry {
 [[nodiscard]] ContextSegmentKind context_cell_kind(const ContextSnapshot& snapshot,
                                                    int cells_total, int cell_index) noexcept;
 
+// 60-D10: pure measurement out-param filled during a build/render pass. The
+// renderers only report these; the application applies them to the viewed
+// `ConversationScroll` after `build_ui` returns (60-D13).
+struct TranscriptMetrics {
+    int content_rows  = 0;
+    int viewport_rows = 0;
+};
+
 [[nodiscard]] LayoutMode calculate_layout(int width);
 [[nodiscard]] ftxui::Element build_ui(const UiModel& model, TerminalSize size,
-                                      const Theme& theme);
+                                      const Theme& theme,
+                                      TranscriptMetrics* out = nullptr);
 [[nodiscard]] std::string render_to_ansi(const UiModel& model, TerminalSize size,
                                          const Theme& theme = {});
 
