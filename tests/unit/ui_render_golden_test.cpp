@@ -2335,6 +2335,94 @@ TEST(UiRenderGolden, CaretCursorHandlesCjkLeadingCell) {
     }
 }
 
+// 59-G1 (59-I2): a draft wider than the composer wraps onto multiple rows and
+// the tail stays visible. Pre-fix the composer was a single-line hbox, so the
+// tail was clipped off-screen and the user lost sight of what they typed.
+TEST(UiRenderGolden, LongComposerDraftWrapsAndStaysVisible) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string draft = "START";
+    while (draft.size() < 120) {
+        draft += 'x';
+    }
+    draft += "END_MARKER";
+    state->input.draft = draft;
+    state->input.cursor = draft.size();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("START"), std::string::npos);
+    EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
+}
+
+// 59-G2 (59-I3): the caret stays on the visual row holding the tail glyph.
+TEST(UiRenderGolden, LongComposerCaretSitsOnLastWrappedRow) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string draft = "START";
+    while (draft.size() < 120) {
+        draft += 'x';
+    }
+    draft += "END_MARKER";
+    state->input.draft = draft;
+    state->input.cursor = draft.size();
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{40, 24}, Theme{false});
+    int marker_row = -1;
+    for (int y = 0; y < screen.dimy(); ++y) {
+        std::string row;
+        for (int x = 0; x < screen.dimx(); ++x) {
+            row += screen.PixelAt(x, y).character;
+        }
+        if (row.find("END_MARKER") != std::string::npos) {
+            marker_row = y;
+        }
+    }
+    ASSERT_GE(marker_row, 0);
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+    EXPECT_EQ(screen.cursor().y, marker_row);
+}
+
+// 59-G3 (59-I4): growth is capped and the window still shows the tail/caret.
+TEST(UiRenderGolden, LongComposerDraftCapsHeightAndKeepsTailVisible) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string draft = "START";
+    while (draft.size() < 500) {
+        draft += 'x';
+    }
+    draft += "END_MARKER";
+    state->input.draft = draft;
+    state->input.cursor = draft.size();
+
+    const std::vector<std::string> lines =
+        split_lines(normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false})));
+    int status_row = -1;
+    int separator_row = -1;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (lines[index].find("0 active") != std::string::npos) {
+            status_row = static_cast<int>(index);
+        }
+        if (status_row < 0 && lines[index].find("├") != std::string::npos) {
+            separator_row = static_cast<int>(index);
+        }
+    }
+    ASSERT_GE(separator_row, 0);
+    ASSERT_GT(status_row, separator_row);
+    const int composer_rows = status_row - separator_row - 1;
+    EXPECT_GE(composer_rows, 1);
+    EXPECT_LE(composer_rows, 8);
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
+}
+
 TEST(UiRenderGolden, ArmedEscHintRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);

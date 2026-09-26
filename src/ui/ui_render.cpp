@@ -522,7 +522,12 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
     return ftxui::vbox(std::move(rows));
 }
 
-Element render_input(const UiModel& model, const Theme& theme) {
+// 59-D1: the composer wraps the draft across rows and grows up to
+// `kComposerMaxRows`; past the cap a window slides to keep the caret row
+// visible. The former single-line `hbox` clipped the tail off-screen.
+constexpr int kComposerMaxRows = 8;
+
+Element render_input(const UiModel& model, const Theme& theme, int terminal_width) {
     if (!model.subagent_path.empty()) {
         const std::string hint = "(viewing subagent " + short_id(model.subagent_path.back()) +
                                  " — Ctrl+T children · Esc return)";
@@ -551,16 +556,95 @@ Element render_input(const UiModel& model, const Theme& theme) {
     const std::string after =
         cursor < draft.size() ? draft.substr(cursor + glyph_len(draft, cursor))
                               : std::string{};
-    Elements cells;
-    cells.push_back(paint(ftxui::text("> "), ftxui::Color::Green, theme) | ftxui::bold);
-    cells.push_back(ftxui::text(before));
-    cells.push_back(caret_anchor(ftxui::text(at)));
-    cells.push_back(ftxui::text(after));
-    if (active != nullptr && active->esc_arm == EscArm::Armed) {
-        cells.push_back(ftxui::text("  - one more <Esc> to interrupt") | ftxui::dim);
+
+    // 59-D3/59-I6: wrap on glyph boundaries, measured in display cells. The
+    // composer's child box loses 2 cells to the left bar and 2 to the row
+    // prefix, so the draft gets `terminal_width - 6` cells.
+    const int text_width = std::max(1, terminal_width - 6);
+    std::vector<std::string> glyphs;
+    std::vector<int>         glyph_widths;
+    std::size_t              caret_glyph = 0;
+    for (const std::string* part : {&before, &at, &after}) {
+        if (part == &at) {
+            caret_glyph = glyphs.size();
+        }
+        for (std::size_t index = 0; index < part->size();) {
+            const std::size_t length = glyph_len(*part, index);
+            glyphs.push_back(part->substr(index, length));
+            glyph_widths.push_back(ftxui::string_width(glyphs.back()));
+            index += length;
+        }
     }
-    // 51-D2.3: the composer carries the same gutter + tint as the transcript.
-    Element line = with_left_bar(ftxui::hbox(std::move(cells)), theme);
+
+    std::vector<std::vector<std::size_t>> row_glyphs;
+    std::size_t                           caret_row = 0;
+    int                                   column    = 0;
+    for (std::size_t index = 0; index < glyphs.size(); ++index) {
+        if (column > 0 && column + glyph_widths[index] > text_width) {
+            row_glyphs.emplace_back();
+            column = 0;
+        }
+        if (row_glyphs.empty()) {
+            row_glyphs.emplace_back();
+        }
+        if (index == caret_glyph) {
+            caret_row = row_glyphs.size() - 1;
+        }
+        row_glyphs.back().push_back(index);
+        column += glyph_widths[index];
+    }
+    if (row_glyphs.empty()) {
+        row_glyphs.emplace_back();
+    }
+
+    // 59-I4: cap the height; slide the window so the caret row stays visible.
+    std::size_t first_row = 0;
+    if (row_glyphs.size() > static_cast<std::size_t>(kComposerMaxRows)) {
+        const std::size_t window = static_cast<std::size_t>(kComposerMaxRows);
+        first_row = caret_row > window - 1 ? caret_row - window + 1 : 0;
+        first_row = std::min(first_row, row_glyphs.size() - window);
+    }
+    const std::size_t last_row =
+        std::min(row_glyphs.size(), first_row + static_cast<std::size_t>(kComposerMaxRows));
+
+    // Re-split each visible row's glyphs into text runs around the caret anchor.
+    std::vector<Elements> visible_cells;
+    visible_cells.reserve(last_row - first_row);
+    for (std::size_t row = first_row; row < last_row; ++row) {
+        Elements cells;
+        cells.push_back(row == 0
+                            ? paint(ftxui::text("> "), ftxui::Color::Green, theme) | ftxui::bold
+                            : ftxui::text("  "));
+        std::string run;
+        for (const std::size_t index : row_glyphs[row]) {
+            if (index == caret_glyph) {
+                if (!run.empty()) {
+                    cells.push_back(ftxui::text(run));
+                    run.clear();
+                }
+                cells.push_back(caret_anchor(ftxui::text(glyphs[index])));
+            } else {
+                run += glyphs[index];
+            }
+        }
+        if (!run.empty()) {
+            cells.push_back(ftxui::text(run));
+        }
+        visible_cells.push_back(std::move(cells));
+    }
+    if (active != nullptr && active->esc_arm == EscArm::Armed) {
+        visible_cells.back().push_back(
+            ftxui::text("  - one more <Esc> to interrupt") | ftxui::dim);
+    }
+
+    Elements rendered;
+    rendered.reserve(visible_cells.size());
+    for (Elements& cells : visible_cells) {
+        rendered.push_back(ftxui::hbox(std::move(cells)));
+    }
+    // 51-D2.3: the composer carries the same gutter + tint as the transcript;
+    // 59-I7: the gutter spans every wrapped row.
+    Element line = with_left_bar(ftxui::vbox(std::move(rendered)), theme);
     return paint_bg(std::move(line), theme.user_block_background, theme);
 }
 
@@ -1739,7 +1823,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme) {
     if (composer != nullptr && !composer->command_hints.empty()) {
         rows.push_back(render_command_hints(composer, theme));
     }
-    rows.push_back(render_input(model, theme));
+    rows.push_back(render_input(model, theme, size.width));
     // The vbox below is wrapped in `ftxui::border`, so the row content has
     // `size.width - 2` columns available; the status fit math must use that
     // inner width or the right-aligned aggregate is clipped (25 review H3).
