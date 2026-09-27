@@ -387,15 +387,18 @@ guard; the MCP credential diagnostic procedure.
    glyph would otherwise push the caret onto its trailing cell. The pinned
    signature is `ftxui::Element caret_anchor(ftxui::Element)` (file-local).
 
-   **Caret shape is conditional (amended by 61-D2 Rev 2).** The single-focus-owner
+   **Caret shape is conditional (amended by 61-D2 Rev 3).** The single-focus-owner
    guarantee above is unchanged, but the cursor **shape** is no longer
-   unconditionally `Bar`: it is `Hidden` while the **focused** session animates
-   (its turn active or a reasoning block streaming) and `Bar` otherwise, with a
-   short grace window after a composer edit so typing/steering stays visible. The
-   idle-caret goldens (`§5.5`, `§13.2`: `CaretCursorLandsAtInputPosition`,
-   `CaretCursorHandlesCjkLeadingCell`, `UI51_D2_ComposerTintAndBarGolden`) assert
-   `Bar` in the idle case; focus ownership/tracking (`59-D4`) is preserved because
-   only the `cursor_shape` field changes, never which node owns focus.
+   unconditionally `Bar`: it is `Hidden` while the **rendered composer's** session
+   animates (its turn active or one of its own reasoning blocks streaming) and
+   `Bar` otherwise, with a short grace window after an edit to **that same**
+   session's composer so typing/steering stays visible. The edit grace is
+   per-session (`SessionUiState::composer_input_at`), so an edit in one workspace
+   cannot force `Bar` in another. The idle-caret goldens (`§5.5`, `§13.2`:
+   `CaretCursorLandsAtInputPosition`, `CaretCursorHandlesCjkLeadingCell`,
+   `UI51_D2_ComposerTintAndBarGolden`) assert `Bar` in the idle case; focus
+   ownership/tracking (`59-D4`) is preserved because only the `cursor_shape`
+   field changes, never which node owns focus.
 
    **Glyph alignment (Rev 2).** Rev 1 assumed `cursor` is always on a glyph
    boundary, but plain `ArrowLeft`/`ArrowRight` move it by one **byte**
