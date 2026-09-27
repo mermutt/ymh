@@ -579,20 +579,21 @@ TEST(AgentLoop, SecondContextOverflowFailsCompaction) {
     }
 }
 
-// 61-U5 (61-I5/I7): a productive turn stops at exactly `max_steps` (the pre-61
-// ceiling, no 10x multiplier) with a durable, actionable StepLimitExceeded, and
-// the loop itself returns to Idle so "send a message to continue" is true.
-TEST(AgentLoop, StepLimitStopsAtCeilingRecoverably) {
+// 61-U5 (61-I5/I6/I7, Rev 3): a segment that commits no successful tool call
+// stops at `max_steps` with the ceiling message. Distinct informative failures
+// are novel, so the no-progress guard does NOT trip; the ceiling is what stops
+// them. The turn is recoverable (`Idle`), so "send a message to continue" holds.
+TEST(AgentLoop, StepCeilingStopsANonProductiveSegment) {
     AgentConfig config;
     config.max_steps = 3;
 
     std::vector<FakeResponseStep> steps;
-    for (int index = 0; index < 40; ++index) {
-        steps.push_back(tool_step("read_file", {{"path", "a.txt"}}));
+    for (int index = 0; index < 6; ++index) {
+        steps.push_back(tool_step(
+            "read_file", {{"path", "missing_" + std::to_string(index) + ".txt"}}));
     }
     AgentEnv env("agent_ceiling", std::make_unique<FakeLLM>(script_of(std::move(steps))), config,
                  allow_all_permission_config(), {}, true);
-    env.workspace.write("a.txt", "x");
 
     auto agent_owner = env.createAgent();
     Agent& agent = *agent_owner;
@@ -610,14 +611,17 @@ TEST(AgentLoop, StepLimitStopsAtCeilingRecoverably) {
         if (record.event.type == EventType::TurnFailed) {
             const auto failed = record.event.payload.get<payload::TurnFailed>();
             EXPECT_EQ(failed.code, "StepLimitExceeded");
+            EXPECT_NE(failed.message.find("step limit"), std::string::npos);
             EXPECT_NE(failed.message.find("continue"), std::string::npos);
         }
     }
 }
 
-// 61-U7 (61-I9): an alternating A/B failing-call loop never trips the
+// 61-U7 (61-I9, Rev 3): an alternating A/B failing-call loop never trips the
 // consecutive-identical repeat reminder, so only the no-progress guard bounds
-// it. Three consecutive error-only steps stop the turn long before the ceiling.
+// it. Each action is novel once; the first repeat is step 3, so the third
+// non-progress step (the second full cycle) stops the turn at step 5 — long
+// before the ceiling. The message names no progress and is recoverable.
 TEST(AgentLoop, NoProgressGuardStopsAlternatingErrorLoop) {
     AgentConfig config;
     config.max_steps = 100;
@@ -639,7 +643,7 @@ TEST(AgentLoop, NoProgressGuardStopsAlternatingErrorLoop) {
     const EventRange events  = session.events();
     ASSERT_EQ(count_type(events, EventType::TurnFailed), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 0u);
-    EXPECT_EQ(count_type(events, EventType::StepStarted), 3u);
+    EXPECT_EQ(count_type(events, EventType::StepStarted), 5u);
     EXPECT_EQ(terminal_count(events), 1u);
     EXPECT_EQ(agent.state(), AgentState::Idle);
     for (const EventRecord& record : events) {
@@ -650,6 +654,106 @@ TEST(AgentLoop, NoProgressGuardStopsAlternatingErrorLoop) {
             EXPECT_NE(failed.message.find("continue"), std::string::npos);
         }
     }
+}
+
+// 61-U11 (61-I9, Rev 3; HIGH-1): a non-zero shell exit is an honest `Error`
+// outcome, so a model looping the same failing command is recognised as making
+// no progress and stops after `kNoProgressStreak` non-progress steps, not at the
+// 100-step ceiling. Pre-fix the shell reported `Ok`, so every step reset the
+// streak and the loop ran to the ceiling.
+TEST(AgentLoop, NoProgressGuardStopsRepeatedFailingShell) {
+    AgentConfig config;
+    config.max_steps = 100;
+
+    std::vector<FakeResponseStep> steps;
+    for (int index = 0; index < 12; ++index) {
+        steps.push_back(tool_step("shell", {{"command", "exit 1"}}));
+    }
+    AgentEnv env("agent_failing_shell", std::make_unique<FakeLLM>(script_of(std::move(steps))),
+                 config, allow_all_permission_config(), {}, true);
+
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
+    const EventRange events  = session.events();
+    ASSERT_EQ(count_type(events, EventType::TurnFailed), 1u);
+    EXPECT_EQ(count_type(events, EventType::StepStarted), 4u);
+    EXPECT_EQ(terminal_count(events), 1u);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::TurnFailed) {
+            const auto failed = record.event.payload.get<payload::TurnFailed>();
+            EXPECT_EQ(failed.code, "StepLimitExceeded");
+            EXPECT_NE(failed.message.find("no progress"), std::string::npos);
+        }
+    }
+}
+
+// 61-U12 (61-I9, Rev 3; MEDIUM-1): three distinct informative failures (probing
+// three absent paths) are novel actions and therefore progress; the guard must
+// NOT stop them. The turn ends naturally on the following text step. Pre-fix the
+// guard counted all-non-`Ok` steps, so it stopped after three.
+TEST(AgentLoop, DistinctNonOkStepsDoNotTripGuard) {
+    AgentConfig config;
+    config.max_steps = 100;
+
+    std::vector<FakeResponseStep> steps;
+    for (int index = 0; index < 3; ++index) {
+        steps.push_back(tool_step(
+            "read_file", {{"path", "absent_" + std::to_string(index) + ".txt"}}));
+    }
+    steps.push_back(text_step("done"));
+    AgentEnv env("agent_distinct_non_ok", std::make_unique<FakeLLM>(script_of(std::move(steps))),
+                 config, allow_all_permission_config(), {}, true);
+
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
+    const EventRange events  = session.events();
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 1u);
+    EXPECT_EQ(count_type(events, EventType::StepStarted), 4u);
+    EXPECT_EQ(terminal_count(events), 1u);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+}
+
+// 61-U13 (61-I5/I6, Rev 3; MEDIUM-2): a productive job longer than `max_steps`
+// auto-continues into a new segment with NO user message. Nine distinct
+// successful reads with a per-segment budget of 3 must run all nine steps and
+// end naturally. Pre-fix the ceiling stopped the turn at three.
+TEST(AgentLoop, ProductiveJobContinuesPastMaxSteps) {
+    AgentConfig config;
+    config.max_steps = 3;
+
+    std::vector<FakeResponseStep> steps;
+    for (int index = 0; index < 9; ++index) {
+        steps.push_back(tool_step("read_file", {{"path", "ok_" + std::to_string(index) + ".txt"}}));
+    }
+    steps.push_back(text_step("done"));
+    AgentEnv env("agent_continue", std::make_unique<FakeLLM>(script_of(std::move(steps))), config,
+                 allow_all_permission_config(), {}, true);
+    for (int index = 0; index < 9; ++index) {
+        env.workspace.write("ok_" + std::to_string(index) + ".txt", "x");
+    }
+
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
+    const EventRange events  = session.events();
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 1u);
+    EXPECT_EQ(count_type(events, EventType::StepStarted), 10u);
+    EXPECT_EQ(terminal_count(events), 1u);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
 }
 
 TEST(AgentLoop, AskPermissionIsResolvedThroughGate) {

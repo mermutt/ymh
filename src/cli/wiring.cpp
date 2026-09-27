@@ -239,6 +239,7 @@ AgentConfig to_agent_config(const Config& config) {
     agent.endpoint    = resolved.endpoint.name;
     agent.model_name  = resolved.model_name;
     agent.max_steps   = config.agent.max_steps;
+    agent.max_segments = config.agent.max_segments;
     agent.sandbox     = effective_sandbox_mode(config);
     agent.persist_prompt_text = config.session.persist_prompt_text;
     agent.system_prompt =

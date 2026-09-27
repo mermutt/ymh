@@ -119,7 +119,13 @@ struct AgentConfig {
     std::string              model_name;
     GenerationParameters     parameters;
     ModelProfile             profile;   // 47-D1/D2 (inert by default)
+    // 61-D3/D8 (Rev 3): `max_steps` is the per-SEGMENT step budget. A segment
+    // that commits at least one successful tool call auto-continues into a new
+    // segment (no user message); a segment with no success stops at the budget.
+    // `max_segments` caps the number of segments per turn; 0 means unlimited, so
+    // the default imposes no re-prompt on a legitimate long job.
     std::size_t              max_steps = 100;
+    std::size_t              max_segments = 0;
     std::size_t              max_inbox = 64;
     std::size_t              max_chunk_batch = 32;
     std::chrono::milliseconds chunk_flush_interval{100};

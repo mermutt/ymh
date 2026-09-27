@@ -73,7 +73,11 @@ struct CompactionSettings {
 
 struct AgentDefaults {
     std::string                model;   // may be empty; resolved with llm.model
+    // 61-D3/D8 (Rev 3): per-segment step budget; a segment with a successful
+    // tool call auto-continues. `max_segments` caps segments per turn (0 =
+    // unlimited).
     std::size_t                max_steps = 100;
+    std::size_t                max_segments = 0;
     std::optional<std::string> reasoning_effort;  // "low" | "medium" | "high" | "xhigh"
     std::string                system_prompt;     // empty => built-in default
     std::string                plan_section;      // empty => built-in default (25-D3)

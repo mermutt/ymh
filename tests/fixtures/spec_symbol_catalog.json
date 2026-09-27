@@ -987,6 +987,12 @@
       "section": "7.3"
     },
     {
+      "symbol": "config::agent.max_segments",
+      "category": "config_key",
+      "spec": "61-composer-caret-and-step-limit-errata.md",
+      "section": "1"
+    },
+    {
       "symbol": "config::agent.model",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
