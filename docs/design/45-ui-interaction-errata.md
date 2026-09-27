@@ -901,6 +901,12 @@ enum class ApiConnectivity : std::uint8_t { Unknown, Ok, Error };
    **last-outcome** definition, not a probe; a non-LLM `ErrorOccurred` may set
    `Error` until the next success, which is accepted and documented (45 §12
    `45-F8`). A real probe is out of scope (§1.4).
+
+   **`StepLimitReached` (61-D5) does not touch `api_state`.** It is a distinct
+   frontend-only `UiEvent`, not `ErrorOccurred`, so a recoverable step stop leaves
+   connectivity at its last outcome (typically `Ok` from the preceding
+   `AssistantMessageFinished`/`TokenUsageUpdated`); it never renders as `error:`
+   (61-I8). The "any `ErrorOccurred` → `Error`" rule above still holds unchanged.
 4. **Daemon link.** Rendered from `WorkspaceModel::daemonStatus`
    (`include/ymh/ui/ui_model.hpp:254`) with the workspace title.
 5. **Tools + MCP (statuses, MEDIUM fix).** `/status` triggers `context.show` for

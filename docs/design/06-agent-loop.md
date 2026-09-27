@@ -350,7 +350,8 @@ Two views of one machine:
         │                                │
         │                                ├── no tool calls ──► TurnEnded ──► Idle
         │                                ├── provider error ──► Error
-        │                                └── step limit ──────► Error
+        │                                └── step ceiling / no progress ──► Idle
+        │                                    (61-D3/D4/D6; recoverable, not Error)
         │
         ├── cancel ──► Cancelling ──► TurnCancelled ──► Idle
         └── WaitingForInput ──user input──► Thinking
@@ -364,7 +365,8 @@ Transitions are driven by durable/live loop events (A3):
 | `Thinking` | model returned tool calls | `CallingTool` | `AssistantMessage`, `ToolCall`(s) |
 | `Thinking` | model ended the turn | `Idle` | `AssistantMessage`, `StepEnded`, `TurnEnded` |
 | `Thinking` | provider terminal error | `Error` | `TurnFailed` (08 (k)) |
-| `Thinking` | step limit | `Error` | `TurnFailed{StepLimitExceeded}` |
+| `Thinking` | step ceiling (`max_steps`) | `Idle` | `TurnFailed{StepLimitExceeded}` (recoverable; **61-D3/D4**, supersedes the `Error` target) |
+| `Thinking` | no-progress guard (`kNoProgressStreak` error-only steps) | `Idle` | `TurnFailed{StepLimitExceeded}` (recoverable; **61-D6**) |
 | `CallingTool` | all results appended | `Thinking` | `ToolResult`(s), `StepEnded` |
 | `CallingTool` | policy says `Ask` | `WaitingForPermission` | (live `PermissionRequested`) |
 | `WaitingForPermission` | decision `Allow`/`AllowAlways` | `CallingTool` | `PermissionDecision` |
@@ -638,8 +640,9 @@ runTurn(turn, origin):
         result := toolRegistry.execute(call, ctx)    # §14
         append ToolResult{call, result}
     append StepEnded
-    if step >= maxSteps:
-        flushChunks(); append TurnFailed{turn, "StepLimitExceeded"}; emit live Error; return
+    if step >= maxSteps or noProgressStreak >= kNoProgressStreak:
+        flushChunks(); append TurnFailed{turn, "StepLimitExceeded"}
+        state := Idle; return          # 61-D3/D4/D6: recoverable, no live Error
 ```
 
 The agent **never** depends on provider-specific streaming formats (`§12`);
@@ -826,9 +829,16 @@ project to `ToolResult{outcome = Error}`; a cancelled turn's project to
 
 ### 5.8 Step limit and termination
 
-- `maxSteps` (config `[agent] max_steps`, default 100, `§37`) bounds the steps
-  per turn. Exceeding it is a **loop-policy failure**: flush, emit a live
-  `Error`, append `TurnFailed{turn, "StepLimitExceeded"}` (decision (g)).
+- `maxSteps` (config `[agent] max_steps`, default 100, `§37`) is the **per-turn
+  hard ceiling** — the pre-61 bound, not multiplied (**61-D3 Rev 2**). Reaching
+  it is a **recoverable loop-policy stop**: flush, append
+  `TurnFailed{turn, "StepLimitExceeded"}` with an actionable message, and return
+  to `Idle` — **no live `Error`** (**61-D4**; supersedes decision (g)'s
+  "loop-policy failure" and the former `Error` terminal).
+- Independently, the **no-progress guard** stops the turn at `Idle` with the same
+  `TurnFailed{StepLimitExceeded}` after `kNoProgressStreak` (3) consecutive steps
+  that commit no successful tool call (**61-D6**). This bounds an alternating
+  failing-call loop that the advisory repeat reminder never trips.
 - A turn also terminates when the model returns no tool calls (natural
   `TurnEnded`) or on cancel/failure as above.
 
@@ -1101,7 +1111,7 @@ These are component-local to the agent/loop layer and must be covered by tests
 | **A-F1** | Provider terminal failure | `StreamError`/`Failed` (`08 §2.2`) | flush; live `Error`; `TurnFailed{code,message}`; unmatched `tool_use` → `ToolResult{Error}` |
 | **A-F2** | Cancel mid-turn | `cancel()`/token fired | flush; `TurnCancelled`; queued follow-ups preserved (A9) |
 | **A-F3** | Lease lost mid-turn | `LeaseLost` on append (`02 §5.7`) | stop appending; degrade read-only; surface; no partial commit |
-| **A-F4** | Step limit exceeded | `step >= maxSteps` | flush; live `Error`; `TurnFailed{StepLimitExceeded}` |
+| **A-F4** | Step ceiling or no progress | `step >= max_steps` OR `noProgressStreak >= kNoProgressStreak` | flush; `TurnFailed{StepLimitExceeded}`; `Idle` (recoverable; **61-D3/D4/D6** supersede "live `Error`") |
 | **A-F5** | Tool execution fails | tool returns error/throws | `ToolResult{outcome = Error}`; turn continues |
 | **A-F6** | Permission denied | policy `Deny`/user deny | `PermissionDecision`; `ToolResult{Denied}`; turn continues |
 | **A-F7** | `ASK` on a background session | policy `Ask`, session not active | enter `WaitingForPermission`; record decision; surface via attention; never deadlock invisibly (F2) |
@@ -1331,8 +1341,10 @@ API-key gated.
   partially established session (`§4.2`).
 - **(f) Resume is `Idle` and starts no turn** (F10); an open turn at crash is
   projected to the last event and not auto-continued (`§4.3`, A15).
-- **(g) Step limit is a loop-policy failure:** `TurnFailed{turn,
-  "StepLimitExceeded"}` (`§5.8`).
+- **(g) Step limit is a recoverable loop-policy stop** (amended by **61-D3/D4/D6**):
+  `TurnFailed{turn, "StepLimitExceeded"}` with `Idle`, not `Error` (`§5.8`). The
+  ceiling is `max_steps` (unmultiplied, the pre-61 bound); a separate no-progress
+  guard stops after 3 consecutive error-only steps.
 - **(h) Compaction is best-effort.** It fails the turn only when the context
   cannot fit after a compaction attempt (`§5.3`, `A-F10`). A provider
   `ContextLengthExceeded` triggers exactly **one** compaction retry (§5.7); if

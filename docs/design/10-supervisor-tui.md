@@ -658,6 +658,7 @@ struct UiEvent {
         SubagentUpdated,       // coalesced fan-in (§20.25)
 
         ErrorOccurred,
+        StepLimitReached,      // 61-D5: recoverable step-ceiling/no-progress stop (frontend-only)
         TokenUsageUpdated,
         StatusChanged
     > value;
