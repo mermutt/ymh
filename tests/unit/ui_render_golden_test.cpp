@@ -2558,6 +2558,19 @@ TEST(UiRenderGolden, ComposerFillsScreenKeepsCaretVisible) {
     EXPECT_LT(screen.cursor().y, screen.dimy());
 }
 
+// 61-G2 (61-D2): while a turn is active the spinner drives a full-screen repaint
+// every frame; the hardware cursor must be hidden so it cannot flash around the
+// screen. When idle (the existing caret goldens) it stays a Bar on the composer.
+TEST(UiRenderGolden, CursorHiddenWhileTurnActive) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Hidden);
+}
+
 TEST(UiRenderGolden, ArmedEscHintRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);

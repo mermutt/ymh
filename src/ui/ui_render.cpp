@@ -95,7 +95,8 @@ Element with_left_bar(Element element, const Theme& theme) {
 // caret onto its trailing cell.
 class CaretAnchor final : public ftxui::Node {
 public:
-    explicit CaretAnchor(Element child) : ftxui::Node(Elements{std::move(child)}) {}
+    CaretAnchor(Element child, ftxui::Screen::Cursor::Shape shape)
+        : ftxui::Node(Elements{std::move(child)}), shape_(shape) {}
 
     void ComputeRequirement() override {
         ftxui::Node::ComputeRequirement();
@@ -103,7 +104,7 @@ public:
         requirement_.focused.enabled = true;
         requirement_.focused.node = this;
         requirement_.focused.component_active = true;
-        requirement_.focused.cursor_shape = ftxui::Screen::Cursor::Shape::Bar;
+        requirement_.focused.cursor_shape = shape_;
         requirement_.focused.box.x_min = 0;
         requirement_.focused.box.y_min = 0;
         requirement_.focused.box.x_max = requirement_.min_x - 1;
@@ -116,10 +117,13 @@ public:
         ftxui::Node::SetBox(anchor);
         children_[0]->SetBox(box);
     }
+
+private:
+    ftxui::Screen::Cursor::Shape shape_;
 };
 
-Element caret_anchor(Element element) {
-    return std::make_shared<CaretAnchor>(std::move(element));
+Element caret_anchor(Element element, ftxui::Screen::Cursor::Shape shape) {
+    return std::make_shared<CaretAnchor>(std::move(element), shape);
 }
 
 // 60-D2: the integer analogue of FTXUI's `focusPositionRelative`. Same
@@ -596,7 +600,7 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
 constexpr int kComposerMaxRows = 8;
 
 Element render_input(const UiModel& model, const Theme& theme, int terminal_width,
-                     int max_rows) {
+                     int max_rows, bool hide_caret) {
     if (!model.subagent_path.empty()) {
         const std::string hint = "(viewing subagent " + short_id(model.subagent_path.back()) +
                                  " — Ctrl+T children · Esc return)";
@@ -676,6 +680,12 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
     }
     const std::size_t last_row = std::min(row_glyphs.size(), first_row + window);
 
+    // 61-D2: while a turn animates, FTXUI repaints the whole screen each frame;
+    // a visible hardware cursor would traverse it. Hide it until the turn ends.
+    const ftxui::Screen::Cursor::Shape caret_shape =
+        hide_caret ? ftxui::Screen::Cursor::Shape::Hidden
+                   : ftxui::Screen::Cursor::Shape::Bar;
+
     // Re-split each visible row's glyphs into text runs around the caret anchor.
     std::vector<Elements> visible_cells;
     visible_cells.reserve(last_row - first_row);
@@ -691,7 +701,7 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
                     cells.push_back(ftxui::text(run));
                     run.clear();
                 }
-                cells.push_back(caret_anchor(ftxui::text(glyphs[index])));
+                cells.push_back(caret_anchor(ftxui::text(glyphs[index]), caret_shape));
             } else {
                 run += glyphs[index];
             }
@@ -1927,7 +1937,11 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     for (Element& element : below) {
         rows.push_back(std::move(element));
     }
-    rows.push_back(render_input(model, theme, size.width, composer_rows));
+    // 61-D2: mirrors the supervisor's `animation_active_` — the exact states in
+    // which the repaint timer forces a full-screen redraw every frame.
+    const bool animating = model.has_active_turn() || model.has_streaming_reasoning() ||
+                           model.aggregate.flash.isFlashing();
+    rows.push_back(render_input(model, theme, size.width, composer_rows, animating));
     rows.push_back(std::move(status));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
