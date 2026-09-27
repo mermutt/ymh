@@ -664,6 +664,10 @@ struct UiModel {
     std::string                           mcp_status;
     DirtySet                              dirty;
     std::deque<UiNotice>                  notices;
+    // 61-D2 (Rev 2): the instant of the last composer edit. The renderer keeps
+    // the caret a `Bar` for a short grace window after it, so typing/steering
+    // during an animating turn still shows the caret. UI-only; never persisted.
+    std::optional<std::chrono::steady_clock::time_point> composer_input_at;
 
     [[nodiscard]] WorkspaceModel*  activeWorkspace();
     [[nodiscard]] SessionUiState*  activeSession();

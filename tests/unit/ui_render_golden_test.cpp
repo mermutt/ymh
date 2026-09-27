@@ -2571,6 +2571,47 @@ TEST(UiRenderGolden, CursorHiddenWhileTurnActive) {
     EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Hidden);
 }
 
+// 61-G3 (61-I4, Rev 2): typing/steering during the focused turn's own spinner
+// must still show the caret. Pre-fix the caret was unconditionally Hidden while
+// animating, so the user typed blind.
+TEST(UiRenderGolden, CursorBarWhileEditingDuringTurn) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+    state->input.draft = "steer";
+    state->input.cursor = state->input.draft.size();
+    model.composer_input_at = std::chrono::steady_clock::now();
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+}
+
+// 61-G4 (61-I4, Rev 2): the animate predicate is scoped to the FOCUSED session.
+// A background session streaming reasoning must not hide the focused composer's
+// caret. Pre-fix `has_streaming_reasoning()` scanned every session.
+TEST(UiRenderGolden, CursorBarWhenOnlyBackgroundSessionAnimates) {
+    UiModel model = build_model();
+    const WorkspaceId other{"other-workspace"};
+    WorkspaceModel workspace;
+    workspace.id = other;
+    workspace.cwd = "/other";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(other, workspace);
+    const SessionId other_session{"other-session"};
+    SessionUiState& background = model.ensureSessionIn(other, other_session);
+    background.agent_state = AgentState::Thinking;
+    ConversationEntry reasoning;
+    reasoning.role = ConversationRole::Reasoning;
+    reasoning.text = "thinking";
+    reasoning.streaming = true;
+    background.conversation.entries.push_back(std::move(reasoning));
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+}
+
 TEST(UiRenderGolden, ArmedEscHintRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
