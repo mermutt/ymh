@@ -993,6 +993,12 @@
       "section": "1"
     },
     {
+      "symbol": "config::agent.max_turn_steps",
+      "category": "config_key",
+      "spec": "61-composer-caret-and-step-limit-errata.md",
+      "section": "1"
+    },
+    {
       "symbol": "config::agent.model",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",

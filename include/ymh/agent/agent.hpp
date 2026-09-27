@@ -122,10 +122,12 @@ struct AgentConfig {
     // 61-D3/D8 (Rev 3): `max_steps` is the per-SEGMENT step budget. A segment
     // that commits at least one successful tool call auto-continues into a new
     // segment (no user message); a segment with no success stops at the budget.
-    // `max_segments` caps the number of segments per turn; 0 means unlimited, so
-    // the default imposes no re-prompt on a legitimate long job.
+    // `max_segments` caps the number of segments per turn; 0 means unlimited.
+    // 61-D9 (Rev 4): `max_turn_steps` is the absolute per-turn ceiling that
+    // bounds a novel-`Ok` runaway regardless of progress; always finite.
     std::size_t              max_steps = 100;
     std::size_t              max_segments = 0;
+    std::size_t              max_turn_steps = 1000;
     std::size_t              max_inbox = 64;
     std::size_t              max_chunk_batch = 32;
     std::chrono::milliseconds chunk_flush_interval{100};

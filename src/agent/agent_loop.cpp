@@ -1081,7 +1081,11 @@ void AgentLoop::runTurn() {
     // clamped to >= 1. A segment that commits a successful tool call
     // auto-continues into a new segment with no user message; a segment with no
     // success stops at the budget. `max_segments == 0` means no cap on segments.
+    // 61-D9 (Rev 4): `max_turn_steps` is the ABSOLUTE per-turn ceiling, checked
+    // before any work each iteration, so a novel-`Ok` runaway (invisible to the
+    // no-progress guard) is bounded even when `max_segments == 0`.
     const std::size_t step_ceiling = std::max<std::size_t>(1, config_.max_steps);
+    const std::size_t turn_ceiling = std::max<std::size_t>(1, config_.max_turn_steps);
     const std::size_t segment_cap = config_.max_segments == 0
                                         ? std::numeric_limits<std::size_t>::max()
                                         : config_.max_segments;
@@ -1092,6 +1096,14 @@ void AgentLoop::runTurn() {
     std::unordered_set<std::string> seen_actions;
     std::unordered_set<std::string> seen_results;
     for (std::size_t stepNumber = 1;; ++stepNumber) {
+        if (stepNumber > turn_ceiling) {
+            appendTurnFailed(
+                turn, AgentErrorCode::StepLimitExceeded,
+                "turn step ceiling (" + std::to_string(turn_ceiling) +
+                    ") reached \u2014 task incomplete; send a message to continue",
+                /*recoverable=*/true);
+            return;
+        }
         const StepId step = session_.nextStepId();
         session_.append(payload::StepStarted{turn, step});
         if (services_.plan_mode != nullptr) {

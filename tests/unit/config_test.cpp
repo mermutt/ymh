@@ -104,6 +104,7 @@ TEST(Config, DefaultsMatchDeepSeek) {
     EXPECT_EQ(config.llm.model, "deepseek-flash");
     EXPECT_EQ(config.llm.api_key_env, "DEEPSEEK_API_KEY");
     EXPECT_EQ(config.agent.max_steps, 100u);
+    EXPECT_EQ(config.agent.max_turn_steps, 1000u);
     EXPECT_EQ(config.logging.level, "info");
     EXPECT_FALSE(config.logging.log_prompts);
     EXPECT_EQ(config.permissions.read, "allow");
@@ -161,6 +162,20 @@ TEST(Config, EnvironmentOverridesFiles) {
     EXPECT_EQ(config.llm.model, "env-model");
     EXPECT_EQ(config.agent.max_steps, 7u);
     EXPECT_EQ(config.logging.level, "debug");
+}
+
+// 61-D9 (Rev 4): the absolute per-turn ceiling parses from JSONC and the env.
+TEST(Config, MaxTurnStepsParsesFromFileAndEnv) {
+    test::TempWorkspace workspace("config_turn_steps");
+    workspace.write(".ymh/config.jsonc", "{ \"agent\": { \"max_turn_steps\": 250 } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_EQ(load_config(paths).agent.max_turn_steps, 250u);
+
+    ScopedEnv env_steps("YMH_AGENT_MAX_TURN_STEPS", "33");
+    EXPECT_EQ(load_config(paths).agent.max_turn_steps, 33u);
 }
 
 TEST(Config, UnknownKeyRejected) {
