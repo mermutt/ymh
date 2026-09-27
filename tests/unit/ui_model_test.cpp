@@ -729,6 +729,24 @@ TEST(UiModel, NewContentWhileScrolledRaisesUnseen) {
     EXPECT_FALSE(state->scroll.unseen);
 }
 
+// 61-U8 (61-I10): a step-ceiling Notice is conversation content, so it raises
+// `unseen` exactly like any other new output when the user has paged up. Pre-fix
+// `StepLimitReached` was outside the `conversation_event` set, so the Notice
+// landed below the fold with no "new output below" affordance.
+TEST(UiModel, StepLimitNoticeRaisesUnseenWhileScrolled) {
+    UiModel model = make_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->scroll.pageUp();
+    EXPECT_FALSE(state->scroll.following);
+
+    model.apply(UiEvent{StepLimitReached{kSession, "step limit (100) reached"}});
+
+    EXPECT_TRUE(state->scroll.unseen);
+    ASSERT_FALSE(state->conversation.entries.empty());
+    EXPECT_EQ(state->conversation.entries.back().role, ConversationRole::Notice);
+}
+
 TEST(UiModel, CommandRegistryDispatchesBuiltins) {
     UiModel model = make_model();
     const CommandRegistry registry = CommandRegistry::builtin();

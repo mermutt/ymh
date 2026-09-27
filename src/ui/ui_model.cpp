@@ -999,6 +999,7 @@ void UiModel::apply(const UiEvent& event) {
                    std::is_same_v<T, ToolOutput> ||
                    std::is_same_v<T, ToolFinished> ||
                    std::is_same_v<T, ErrorOccurred> ||
+                   std::is_same_v<T, StepLimitReached> ||
                    std::is_same_v<T, CompactionMarker> ||
                    std::is_same_v<T, CompactionOutcomeNotice> ||
                    std::is_same_v<T, ContextInjected>;
