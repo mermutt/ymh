@@ -48,6 +48,11 @@ protected:
     static WorkspaceRuntimeOptions options_for(const TempWorkspace& workspace) {
         WorkspaceRuntimeOptions options;
         options.config  = Config{};
+        // Spec 61: the code branch ships no endpoint/model/key-env defaults;
+        // provide all three so the runtime can build a provider.
+        options.config.llm.base_url    = "https://runtime.test/v1";
+        options.config.llm.model       = "runtime-test-model";
+        options.config.llm.api_key_env = "RUNTIME_TEST_API_KEY";
         options.root    = workspace.path();
         options.boot_id = BootId{"runtime-test-boot"};
         return options;

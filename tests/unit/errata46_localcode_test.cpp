@@ -10,6 +10,7 @@
 
 #include <sys/stat.h>
 
+#include "support/dev_llm_config.hpp"
 #include "support/test_env.hpp"
 #include "ymh/agent/agent.hpp"
 #include "ymh/cli/cli.hpp"

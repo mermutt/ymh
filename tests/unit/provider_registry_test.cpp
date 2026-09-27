@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "support/dev_llm_config.hpp"
 #include "ymh/llm/provider_registry.hpp"
 
 namespace {

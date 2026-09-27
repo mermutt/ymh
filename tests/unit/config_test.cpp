@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "support/dev_llm_config.hpp"
 #include "support/test_env.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/config/config.hpp"
@@ -97,12 +98,14 @@ bool same_config(const Config& a, const Config& b) {
            a.llm.retry.honor_retry_after == b.llm.retry.honor_retry_after;
 }
 
-TEST(Config, DefaultsMatchDeepSeek) {
+TEST(Config, DefaultsAreVendorFree) {
     const Config config;
     EXPECT_EQ(config.llm.provider, "openai-compatible");
-    EXPECT_EQ(config.llm.base_url, "https://api.deepseek.com/v1");
-    EXPECT_EQ(config.llm.model, "deepseek-flash");
-    EXPECT_EQ(config.llm.api_key_env, "DEEPSEEK_API_KEY");
+    // The code branch ships no endpoint/model/key-env defaults (spec 61); the
+    // dev pin lives in support/dev_llm_config.hpp.
+    EXPECT_TRUE(config.llm.base_url.empty());
+    EXPECT_TRUE(config.llm.model.empty());
+    EXPECT_TRUE(config.llm.api_key_env.empty());
     EXPECT_EQ(config.agent.max_steps, 100u);
     EXPECT_EQ(config.logging.level, "info");
     EXPECT_FALSE(config.logging.log_prompts);
@@ -110,13 +113,13 @@ TEST(Config, DefaultsMatchDeepSeek) {
     EXPECT_EQ(config.permissions.write, "ask");
 }
 
-TEST(Config, DefaultsMatchPinnedDeepSeekConfig) {
+TEST(Config, DevPinIsNotTheBuiltinDefault) {
     const LLMProviderConfig pinned = deepseek_config();
     const Config           config;
     EXPECT_EQ(config.llm.provider, pinned.provider);
-    EXPECT_EQ(config.llm.base_url, pinned.base_url);
-    EXPECT_EQ(config.llm.model, pinned.model);
-    EXPECT_EQ(config.llm.api_key_env, pinned.api_key_env);
+    EXPECT_NE(config.llm.base_url, pinned.base_url);
+    EXPECT_NE(config.llm.model, pinned.model);
+    EXPECT_NE(config.llm.api_key_env, pinned.api_key_env);
 }
 
 TEST(Config, WorkspaceOverridesGlobal) {

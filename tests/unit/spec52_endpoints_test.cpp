@@ -301,7 +301,7 @@ TEST(Config52, EntryShadowWholesale) {
     const Config config = load_layers(
         workspace, R"JSON({"llm":{"endpoints":{"e":{"base_url":"https://global.example/v1"}}}})JSON",
         R"JSON({"llm":{"endpoints":{"e":{}}}})JSON");
-    EXPECT_EQ(config.llm.endpoints.at("e").base_url, "https://api.deepseek.com/v1");
+    EXPECT_TRUE(config.llm.endpoints.at("e").base_url.empty());
 }
 
 TEST(Config52, EntryShadowCredentialRejected) {
@@ -367,7 +367,7 @@ TEST(Config52, MissingRequiredModelField) {
     const Config config =
         load_global(workspace, R"JSON({"llm":{"endpoints":{"e":{}}}})JSON");
     EXPECT_EQ(config.llm.endpoints.at("e").provider, "openai-compatible");
-    EXPECT_EQ(config.llm.endpoints.at("e").base_url, "https://api.deepseek.com/v1");
+    EXPECT_TRUE(config.llm.endpoints.at("e").base_url.empty());
     EXPECT_TRUE(config.llm.endpoints.at("e").api_key_env.empty());
 }
 

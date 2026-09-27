@@ -37,9 +37,13 @@ ModelSettings model_settings(const std::string& endpoint, const std::string& mod
 
 Config config_with_models() {
     Config config;
-    config.llm.endpoints["ds"]    = EndpointSettings{};
+    config.llm.endpoints["ds"] = EndpointSettings{};
+    // Spec 61: the code branch ships no endpoint/model defaults, so the helper
+    // pins an explicit address and an active model.
+    config.llm.endpoints["ds"].base_url = "https://test.example/v1";
     config.llm.models["balanced"] = model_settings("ds", "m-a");
     config.llm.models["fast"]     = model_settings("ds", "m-b");
+    config.llm.active_model       = "balanced";
     return config;
 }
 
@@ -68,6 +72,7 @@ SupervisorWorkspace spec_for(const WorkspaceId& id) {
 TEST(Errata53, UI53_U3_AttachAutoCreatesSession) {
     SupervisorRunOptions options;
     options.identity = test_identity();
+    options.config   = config_with_models();
     const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
 
     const WorkspaceId workspace{"ws-a"};

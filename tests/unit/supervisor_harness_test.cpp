@@ -1124,6 +1124,8 @@ TEST(SupervisorHarnessTest, UI45_D7_StatusUsesEffectiveModel) {
     options.registry = registry.get();
     options.identity = harness_identity();
     options.version  = "0.1.0";
+    // Spec 61: the code branch ships no built-in model; pin the effective one.
+    options.config.llm.model = "effective-model";
     std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
     harness->seed_active_workspace(workspace_model(WorkspaceId{"ws-status"}));
 
@@ -1132,7 +1134,7 @@ TEST(SupervisorHarnessTest, UI45_D7_StatusUsesEffectiveModel) {
         *harness, [](const std::string& text) { return text.rfind("ymh status", 0) == 0; });
     ASSERT_FALSE(notice.empty());
     EXPECT_NE(notice.find("version:  0.1.0"), std::string::npos);
-    EXPECT_NE(notice.find("model:    deepseek-flash"), std::string::npos)
+    EXPECT_NE(notice.find("model:    effective-model"), std::string::npos)
         << "agent.model is empty by default; effective_model must be used";
     EXPECT_NE(notice.find("(no session)"), std::string::npos);
 }
@@ -1547,6 +1549,9 @@ TEST(SupervisorHarnessTest, UI45_D10_ResumeFailureKeepsUsableFocus) {
     SupervisorRunOptions options;
     options.registry = registry.get();
     options.identity = harness_identity();
+    // Spec 61: the code branch ships no built-in model; the resolved model says
+    // the fallback path is exercised.
+    options.config.llm.model = "test-model";
     std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
 
     const WorkspaceId workspace{"ws-fail"};

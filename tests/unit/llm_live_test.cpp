@@ -5,6 +5,7 @@
 #include <string>
 #include <variant>
 
+#include "support/dev_llm_config.hpp"
 #include "ymh/llm/openai_adapter.hpp"
 
 namespace {
