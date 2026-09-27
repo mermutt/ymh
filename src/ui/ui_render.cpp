@@ -1946,28 +1946,21 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     for (Element& element : below) {
         rows.push_back(std::move(element));
     }
-    // 61-D2 (Rev 2): scoped to the FOCUSED session (the composer's own turn or
-    // streaming reasoning), so a background workspace animating cannot hide the
-    // caret here. A recent composer edit forces `Bar` for the grace window, so
-    // typing/steering during the focused turn's own spinner keeps a visible
-    // caret. Trade-off: a background animation still drives the repaint timer,
-    // so a visible caret may briefly traverse the screen; the pre-61 behavior was
-    // to hide it always, which made typing impossible to see.
+    // 61-D2 (Rev 3): scoped to the rendered composer's session (the composer's
+    // own turn or streaming reasoning), so a background workspace animating
+    // cannot hide the caret here. A recent edit to THAT session forces `Bar` for
+    // the grace window, so typing/steering during the focused turn's own spinner
+    // keeps a visible caret. Trade-off: a background animation still drives the
+    // repaint timer, so a visible caret may briefly traverse the screen; the
+    // pre-61 behavior was to hide it always, which made typing impossible to see.
+    // This residual is accepted and recorded in 61-F9.
     const bool composer_editing =
-        model.composer_input_at.has_value() &&
-        std::chrono::steady_clock::now() - *model.composer_input_at < kComposerCaretGrace;
-    bool composer_streaming = false;
-    if (composer != nullptr) {
-        for (const ConversationEntry& entry : composer->conversation.entries) {
-            if (entry.role == ConversationRole::Reasoning && entry.streaming) {
-                composer_streaming = true;
-                break;
-            }
-        }
-    }
+        composer != nullptr && composer->composer_input_at.has_value() &&
+        std::chrono::steady_clock::now() - *composer->composer_input_at < kComposerCaretGrace;
     const bool focused_animating =
         composer != nullptr &&
-        (is_active_state(composer->agent_state) || composer_streaming);
+        (is_active_state(composer->agent_state) ||
+         UiModel::session_has_streaming_reasoning(*composer));
     const bool animating = focused_animating && !composer_editing;
     rows.push_back(render_input(model, theme, size.width, composer_rows, animating));
     rows.push_back(std::move(status));

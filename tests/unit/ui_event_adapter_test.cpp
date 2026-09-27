@@ -409,7 +409,7 @@ TEST(UiEventAdapter, StepLimitExceededIsARecoverableNotice) {
     payload_failed.turn = 1;
     payload_failed.code = "StepLimitExceeded";
     payload_failed.message =
-        "step limit (1000) reached - task incomplete; send a message to continue";
+        "step limit (100) reached - task incomplete; send a message to continue";
     failed.payload = payload_failed;
     adapter.onSessionEnvelope(kWorkspaceA, envelope(failed));
 

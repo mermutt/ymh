@@ -2581,7 +2581,7 @@ TEST(UiRenderGolden, CursorBarWhileEditingDuringTurn) {
     state->agent_state = AgentState::Thinking;
     state->input.draft = "steer";
     state->input.cursor = state->input.draft.size();
-    model.composer_input_at = std::chrono::steady_clock::now();
+    state->composer_input_at = std::chrono::steady_clock::now();
 
     const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
     EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
@@ -2610,6 +2610,34 @@ TEST(UiRenderGolden, CursorBarWhenOnlyBackgroundSessionAnimates) {
 
     const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
     EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+}
+
+// 61-G5 (61-D2/I4, Rev 3; LOW-1): the composer-edit grace is scoped to the
+// edited session. An edit in workspace A must not force the caret `Bar` in a
+// different, animating workspace B. Pre-fix `composer_input_at` was
+// model-global, so switching to B kept `Bar` for the grace window.
+TEST(UiRenderGolden, CursorHiddenInOtherSessionAfterEditingFirst) {
+    UiModel model = build_model();
+    SessionUiState* first = model.session(kSession);
+    ASSERT_NE(first, nullptr);
+    first->agent_state = AgentState::Thinking;
+    first->composer_input_at = std::chrono::steady_clock::now();
+
+    const WorkspaceId other{"other-workspace"};
+    WorkspaceModel workspace;
+    workspace.id = other;
+    workspace.cwd = "/other";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(other, workspace);
+    const SessionId other_session{"other-session"};
+    SessionUiState& background = model.ensureSessionIn(other, other_session);
+    background.agent_state = AgentState::Thinking;
+    model.activeWorkspaceId = other;
+    model.focusSessionIn(other, other_session);
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Hidden);
 }
 
 TEST(UiRenderGolden, ArmedEscHintRendered) {

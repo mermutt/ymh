@@ -1750,6 +1750,15 @@ bool UiModel::has_active_turn() const {
     return is_active_state(state->second.agent_state);
 }
 
+bool UiModel::session_has_streaming_reasoning(const SessionUiState& state) {
+    for (const ConversationEntry& entry : state.conversation.entries) {
+        if (entry.role == ConversationRole::Reasoning && entry.streaming) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool UiModel::active_has_streaming_reasoning() const {
     const auto workspace = workspaces.find(activeWorkspaceId);
     if (workspace == workspaces.end()) {
@@ -1759,12 +1768,7 @@ bool UiModel::active_has_streaming_reasoning() const {
     if (state == sessions.end()) {
         return false;
     }
-    for (const ConversationEntry& entry : state->second.conversation.entries) {
-        if (entry.role == ConversationRole::Reasoning && entry.streaming) {
-            return true;
-        }
-    }
-    return false;
+    return session_has_streaming_reasoning(state->second);
 }
 
 bool UiModel::advance_spinner(std::chrono::milliseconds delta) {

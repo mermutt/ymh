@@ -3286,7 +3286,7 @@ private:
             event == ftxui::Event::ArrowRightCtrl || event == ftxui::Event::ArrowUp ||
             event == ftxui::Event::ArrowDown || event == ftxui::Event::CtrlU ||
             event == ftxui::Event::CtrlW) {
-            model_.composer_input_at = std::chrono::steady_clock::now();
+            state->composer_input_at = std::chrono::steady_clock::now();
         }
         // 48-D2.4: any other handled key disarms a pending interrupt.
         if (event != ftxui::Event::Escape && state->esc_arm == EscArm::Armed) {
