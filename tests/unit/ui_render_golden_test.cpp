@@ -2527,6 +2527,37 @@ TEST(UiRenderGolden, LongComposerDraftCapsHeightAndKeepsTailVisible) {
     EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
 }
 
+// 61-G1 (61-D1): a draft that needs the whole display must not push the
+// composer (and its caret) off-screen. The composer is capped by the height the
+// layout actually has left for it, and the transcript collapses to zero rather
+// than clipping the composer's tail.
+TEST(UiRenderGolden, ComposerFillsScreenKeepsCaretVisible) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string draft = "START";
+    while (draft.size() < 500) {
+        draft += 'x';
+    }
+    draft += "END_MARKER";
+    state->input.draft = draft;
+    state->input.cursor = draft.size();
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{40, 10}, Theme{false});
+    std::string rendered;
+    for (int y = 0; y < screen.dimy(); ++y) {
+        for (int x = 0; x < screen.dimx(); ++x) {
+            rendered += screen.PixelAt(x, y).character;
+        }
+        rendered += '\n';
+    }
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+    EXPECT_GE(screen.cursor().y, 0);
+    EXPECT_LT(screen.cursor().y, screen.dimy());
+}
+
 TEST(UiRenderGolden, ArmedEscHintRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);
