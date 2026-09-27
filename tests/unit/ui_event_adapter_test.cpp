@@ -396,4 +396,32 @@ TEST(UiEventAdapter, UI58_U24_ForgetSessionClearsDedup) {
         << "another session's dedup is untouched";
 }
 
+// 61-U6 (61-I7/I8): a StepLimitExceeded TurnFailed is a recoverable notice, not
+// the API-error surface, and returns the agent to Idle.
+TEST(UiEventAdapter, StepLimitExceededIsARecoverableNotice) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(user_event(kSessionA, "u-1", "go")));
+
+    Event failed = user_event(kSessionA, "limit-1", "");
+    failed.type = EventType::TurnFailed;
+    payload::TurnFailed payload_failed;
+    payload_failed.turn = 1;
+    payload_failed.code = "StepLimitExceeded";
+    payload_failed.message =
+        "step limit (1000) reached - task incomplete; send a message to continue";
+    failed.payload = payload_failed;
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(failed));
+
+    const SessionUiState* state = model.session(kSessionA);
+    ASSERT_NE(state, nullptr);
+    ASSERT_FALSE(state->conversation.entries.empty());
+    const ConversationEntry& last = state->conversation.entries.back();
+    EXPECT_EQ(last.role, ConversationRole::Notice);
+    EXPECT_EQ(last.text, payload_failed.message);
+    EXPECT_EQ(last.text.find("error:"), std::string::npos);
+    EXPECT_NE(state->status.api_state, ApiConnectivity::Error);
+    EXPECT_EQ(state->agent_state, AgentState::Idle);
+}
+
 } // namespace

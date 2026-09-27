@@ -193,6 +193,14 @@ struct ErrorOccurred {
     std::string message;
 };
 
+// 61-D5: a turn stopped at the step hard ceiling. Distinct from ErrorOccurred so
+// the model renders it as an actionable notice (not `error:`) and returns the
+// agent to Idle. Frontend-only; never serialized.
+struct StepLimitReached {
+    SessionId   session;
+    std::string message;
+};
+
 struct TokenUsageUpdated {
     SessionId session;
     Usage     usage;
@@ -253,6 +261,7 @@ struct UiEvent {
         SubagentSpawned,
         SubagentUpdated,
         ErrorOccurred,
+        StepLimitReached,
         TokenUsageUpdated,
         StatusChanged,
         CompactionMarker,

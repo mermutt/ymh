@@ -610,6 +610,8 @@ Presentation entry_presentation(const std::vector<ConversationEntry>& entries,
         case ConversationRole::System:
         case ConversationRole::Context:
             return Presentation::Chrome;
+        case ConversationRole::Notice:
+            return Presentation::FinalAnswer;
         case ConversationRole::Assistant:
             break;
     }
@@ -1223,6 +1225,15 @@ void UiModel::apply(const UiEvent& event) {
                 entry.role = ConversationRole::System;
                 entry.text = "error: " + e.message;
                 state.conversation.entries.push_back(std::move(entry));
+                dirty.mark(e.session, UiDirtyFlag::Conversation | UiDirtyFlag::Status |
+                                           UiDirtyFlag::Attention);
+            } else if constexpr (std::is_same_v<T, StepLimitReached>) {
+                // 61-D5: actionable, recoverable — never the API-error surface.
+                ConversationEntry entry;
+                entry.role = ConversationRole::Notice;
+                entry.text = e.message;
+                state.conversation.entries.push_back(std::move(entry));
+                state.status.note = e.message;
                 dirty.mark(e.session, UiDirtyFlag::Conversation | UiDirtyFlag::Status |
                                            UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, TokenUsageUpdated>) {

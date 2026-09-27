@@ -99,6 +99,9 @@ enum class ConversationRole : std::uint8_t {
     Tool,
     System,
     Context,
+    // 61-D5: an actionable, non-error notice (e.g. the step hard ceiling). Not
+    // dimmed like System, so a stopped-but-recoverable turn stands out.
+    Notice,
 };
 
 struct ConversationEntry {

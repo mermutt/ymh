@@ -44,6 +44,11 @@ std::string first_line(const std::string& text) {
     return text.substr(0, newline == std::string::npos ? text.size() : newline);
 }
 
+// 61-D3: a turn's step budget is segmented. A long but productive turn keeps
+// going without a user re-prompt; `kMaxStepSegments` bounds the continuation so
+// a runaway loop still terminates.
+constexpr std::size_t kMaxStepSegments = 10;
+
 bool has_valid_plan_argument(const nlohmann::json& arguments) {
     if (!arguments.is_object()) {
         return false;
@@ -1029,6 +1034,12 @@ void AgentLoop::runTurn() {
             ? services_.context_compactor->policy().is_enabled()
             : config_.compaction_threshold_tokens > 0;
 
+    // 61-D3: `stepNumber`/`step` stay monotonic across segments so
+    // `buildRequest`'s `turn_step` keeps meaning "steps in this turn"; the
+    // per-segment budget is tracked separately.
+    const std::size_t segment_size = std::max<std::size_t>(1, config_.max_steps);
+    std::size_t       segment = 1;
+    std::size_t       steps_this_segment = 0;
     for (std::size_t stepNumber = 1;; ++stepNumber) {
         const StepId step = session_.nextStepId();
         session_.append(payload::StepStarted{turn, step});
@@ -1276,9 +1287,20 @@ void AgentLoop::runTurn() {
             state_ = AgentState::Idle;
             return;
         }
-        if (stepNumber >= config_.max_steps) {
-            appendTurnFailed(turn, AgentErrorCode::StepLimitExceeded, "step limit exceeded");
-            return;
+        ++steps_this_segment;
+        if (steps_this_segment >= segment_size) {
+            if (segment >= kMaxStepSegments) {
+                // 61-D4: the hard ceiling is a recoverable, actionable stop — the
+                // durable TurnFailed records the incomplete turn and the UI
+                // renders it as a notice, not a crash.
+                appendTurnFailed(
+                    turn, AgentErrorCode::StepLimitExceeded,
+                    "step limit (" + std::to_string(segment_size * kMaxStepSegments) +
+                        ") reached \u2014 task incomplete; send a message to continue");
+                return;
+            }
+            ++segment;
+            steps_this_segment = 0;
         }
     }
 }

@@ -60,8 +60,12 @@ AgentState UiEventAdapter::project_state(const SessionId& session, const Event& 
         case EventType::TurnCancelled:
         case EventType::SessionEnded:
             return AgentState::Idle;
-        case EventType::TurnFailed:
-            return AgentState::Error;
+        case EventType::TurnFailed: {
+            // 61-D4: a step hard-ceiling stop is recoverable, not a crash.
+            const auto payload = event.payload.get<payload::TurnFailed>();
+            return payload.code == "StepLimitExceeded" ? AgentState::Idle
+                                                       : AgentState::Error;
+        }
         case EventType::AssistantAttempt:
             return old;
         default:
@@ -131,7 +135,11 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
         }
         case EventType::TurnFailed: {
             const auto payload = event.payload.get<payload::TurnFailed>();
-            events.push_back(UiEvent{ErrorOccurred{session, payload.message}});
+            if (payload.code == "StepLimitExceeded") {
+                events.push_back(UiEvent{StepLimitReached{session, payload.message}});
+            } else {
+                events.push_back(UiEvent{ErrorOccurred{session, payload.message}});
+            }
             break;
         }
         case EventType::SubagentSpawned: {

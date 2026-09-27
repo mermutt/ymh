@@ -440,6 +440,9 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
         case ConversationRole::System:
             rows.push_back(ftxui::paragraph(entry.text) | ftxui::dim);
             break;
+        case ConversationRole::Notice:
+            return paint(ftxui::text(entry.text) | ftxui::bold, ftxui::Color::Yellow,
+                         theme);
         case ConversationRole::Context: {
             const ContextForm form =
                 entry.context.has_value() ? entry.context->form : ContextForm::None;
