@@ -211,8 +211,10 @@ TEST(BuiltinTools, ShellCapturesOutputAndExitCode) {
 
     env.ring.clear();
     const ToolResult failed = run(registry, env, "shell", {{"command", "exit 7"}});
-    EXPECT_EQ(failed.outcome, payload::ToolOutcome::Ok);
+    EXPECT_EQ(failed.outcome, payload::ToolOutcome::Error);
     EXPECT_EQ(failed.output, "exit_code: 7");
+    ASSERT_TRUE(failed.error.has_value());
+    EXPECT_EQ(*failed.error, "exit_code: 7");
 }
 
 TEST(BuiltinTools, ShellTimeoutIsAnError) {
