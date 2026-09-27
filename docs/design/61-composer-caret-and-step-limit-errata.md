@@ -1,7 +1,7 @@
 # 61 — Composer/Caret and Step-Limit Resilience Errata
 
-Status: **Rev 4 — draft** (authored under the task's explicit diagnose-and-fix
-directive; pending independent verification; see `DESIGN_STATUS.md`). Rev 4 adds
+Status: **Rev 4 — verified** (Oracle re-gate PASS after 4 revisions; 0 open
+HIGH/MEDIUM; 3 LOWs swept; see `DESIGN_STATUS.md`). Rev 4 adds
 the missing hard bound after the Rev 3 Oracle re-gate returned **DO NOT APPROVE**
 on exactly one blocker:
 
@@ -198,6 +198,7 @@ F# tags per `00-architecture.md` §54.
 | 61-U18 | `AgentLoop.ToolChoiceRequiredOnlyOnFirstTurnStep` | 61-I5, Rev 4 MEDIUM-2a: with `profile.force_first_tool_call`, only the first provider call carries `tool_choice = "required"`; every later call (segment ≥ 2 included) omits it. |
 | 61-U19 | `AgentLoop.CompactionMidTurnDoesNotBreakContinuation` | 61-I6, Rev 4 MEDIUM-2b: a compaction fired in the second segment (step 4) does not break auto-continuation — 9 successful reads + text still end with `TurnEnded`, 10 `StepStarted`, one `ContextCompaction`, zero `TurnFailed`. |
 | 61-U20 | `Config.MaxTurnStepsParsesFromFileAndEnv` | 61-D9, Rev 4: `agent.max_turn_steps` parses from JSONC and `YMH_AGENT_MAX_TURN_STEPS`; the default is `1000` (`Config.DefaultsMatchDeepSeek`). |
+| 61-U21 | `AgentLoop.TurnCeilingClampsZeroToOne` | 61-I13, Rev 4 LOW-3: `max_turn_steps = 0` is accepted but clamped to `1` (`turn_ceiling = max(1, config_.max_turn_steps)`), so the ceiling can never be disabled; a novel-`Ok` script stops after exactly 1 `StepStarted` with one `TurnFailed{StepLimitExceeded}` and `Idle`. |
 
 ### Pre-fix evidence (honest)
 
@@ -225,13 +226,15 @@ Two classes of test:
   and `61-U15` (the per-session `SessionUiState::composer_input_at`). Their
   runtime behaviour is only exercised post-fix; the behavioural proof of the
   step-limit fix is `61-U5`/`61-U7`/`61-U11`/`61-U12`/`61-U13`/`61-U14`.
-- **Rev 4 (HIGH-1):** `61-U16` is behavioural and pre-fix-compilable against the
-  Rev 3 sources (the `max_turn_steps` field exists but the loop does not enforce
-  it): pre-fix it fails at runtime with `TurnFailed == 0` (the novel-`Ok` script
-  ran to exhaustion and ended with `TurnEnded`). `61-U17`/`61-U18`/`61-U19` pin
+- **Rev 4 (HIGH-1):** `61-U16` is behavioural; it cannot compile against the
+  Rev 3 sources because the `max_turn_steps` field did not exist there. The
+  substance was verified by mutation instead: with the field present but the
+  ceiling neutralised (set to `SIZE_MAX`), `61-U16` fails at runtime with
+  `TurnFailed == 0` (the novel-`Ok` script ran to exhaustion and ended with
+  `TurnEnded`). `61-U17`/`61-U18`/`61-U19` pin
   pre-existing behaviour that had no coverage (the segment cap, `turn_step`
   monotonicity, and compaction × continuation) and pass pre-fix; `61-U20` covers
-  the new config knob.
+  the new config knob, and `61-U21` covers the `0`-clamp on the ceiling.
 
 Pre-fix `61-U1` also fails (`END_MARKER` absent, caret off-screen) and `61-U2`
 fails (`cursor().shape == Bar`).

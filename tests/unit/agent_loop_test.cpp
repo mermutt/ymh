@@ -826,6 +826,44 @@ TEST(AgentLoop, TurnCeilingStopsNovelOkRunaway) {
     }
 }
 
+// 61-U21 (61-I13, Rev 4; LOW-3): `max_turn_steps = 0` is accepted but clamped
+// to 1, so the absolute ceiling can never be disabled. The clamp is
+// `turn_ceiling = std::max<std::size_t>(1, config_.max_turn_steps)`.
+TEST(AgentLoop, TurnCeilingClampsZeroToOne) {
+    AgentConfig config;
+    config.max_steps      = 100;
+    config.max_turn_steps = 0;
+
+    std::vector<FakeResponseStep> steps;
+    for (int index = 0; index < 5; ++index) {
+        steps.push_back(
+            tool_step("read_file", {{"path", "clamp_" + std::to_string(index) + ".txt"}}));
+    }
+    AgentEnv env("agent_turn_ceiling_zero", std::make_unique<FakeLLM>(script_of(std::move(steps))),
+                 config, allow_all_permission_config(), {}, true);
+    for (int index = 0; index < 5; ++index) {
+        env.workspace.write("clamp_" + std::to_string(index) + ".txt", "x");
+    }
+
+    auto agent_owner = env.createAgent();
+    Agent& agent = *agent_owner;
+    ASSERT_EQ(agent.send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(agent);
+    Session& session = *session_owner;
+    const EventRange events = session.events();
+    ASSERT_EQ(count_type(events, EventType::TurnFailed), 1u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 0u);
+    EXPECT_EQ(count_type(events, EventType::StepStarted), 1u);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::TurnFailed) {
+            const auto failed = record.event.payload.get<payload::TurnFailed>();
+            EXPECT_EQ(failed.code, "StepLimitExceeded");
+        }
+    }
+}
+
 // 61-U17 (61-I6, Rev 4; MEDIUM-1): a positive `max_segments` caps the number of
 // auto-continued segments and stops recoverably with the segment-budget message.
 TEST(AgentLoop, SegmentCapStopsProductiveJob) {
