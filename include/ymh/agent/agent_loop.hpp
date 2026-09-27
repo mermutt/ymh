@@ -176,7 +176,13 @@ private:
     // 52 review (3A): the mounted preset scope for this agent, resolved once
     // from the roster. Absent means the root prompt layer only.
     [[nodiscard]] const std::optional<std::string>& active_scope();
-    void                      appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message);
+    // 61-D4 (Rev 2): `recoverable` distinguishes a stop the user can resume from
+    // (the step ceiling / no-progress guard) from a genuine failure. A
+    // recoverable stop records the durable `TurnFailed` but leaves the loop in
+    // `Idle`, so "send a message to continue" is true at this layer, not merely a
+    // UI projection. Every other caller keeps the `Error` terminal (default).
+    void                      appendTurnFailed(TurnId turn, AgentErrorCode code,
+                                               std::string message, bool recoverable = false);
     CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn,
                                             CompactionTrigger trigger);
     CompactionOutcome         runCompactionNow(const std::vector<Message>& messages, TurnId turn);

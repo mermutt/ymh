@@ -44,10 +44,21 @@ std::string first_line(const std::string& text) {
     return text.substr(0, newline == std::string::npos ? text.size() : newline);
 }
 
-// 61-D3: a turn's step budget is segmented. A long but productive turn keeps
-// going without a user re-prompt; `kMaxStepSegments` bounds the continuation so
-// a runaway loop still terminates.
-constexpr std::size_t kMaxStepSegments = 10;
+// 61-D6 (Rev 2): a step that commits no successful tool call makes no progress.
+// `kNoProgressStreak` consecutive such steps stop the turn early. This catches
+// both a repeated identical failing call (which the advisory `RepeatToolReminder`
+// would only nudge) and an alternating A/B failing-call loop (which never trips
+// the reminder's consecutive-identical check at all).
+constexpr std::size_t kNoProgressStreak = 3;
+
+bool step_made_progress(const ToolScheduleOutcome& outcome) {
+    for (const payload::ToolResult& result : outcome.results) {
+        if (!result.id.empty() && result.outcome == payload::ToolOutcome::Ok) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool has_valid_plan_argument(const nlohmann::json& arguments) {
     if (!arguments.is_object()) {
@@ -509,13 +520,14 @@ void AgentLoop::materializeContexts(const PromptAssembly& assembly) {
     }
 }
 
-void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message) {
+void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message,
+                                 bool recoverable) {
     payload::TurnFailed failed;
     failed.turn    = turn;
     failed.code    = std::string{agent_error_code_name(code)};
     failed.message = std::move(message);
     session_.append(failed);
-    state_ = AgentState::Error;
+    state_ = recoverable ? AgentState::Idle : AgentState::Error;
     noteTerminal();
 }
 
@@ -1034,12 +1046,11 @@ void AgentLoop::runTurn() {
             ? services_.context_compactor->policy().is_enabled()
             : config_.compaction_threshold_tokens > 0;
 
-    // 61-D3: `stepNumber`/`step` stay monotonic across segments so
-    // `buildRequest`'s `turn_step` keeps meaning "steps in this turn"; the
-    // per-segment budget is tracked separately.
-    const std::size_t segment_size = std::max<std::size_t>(1, config_.max_steps);
-    std::size_t       segment = 1;
-    std::size_t       steps_this_segment = 0;
+    // 61-D3 (Rev 2): the per-turn hard ceiling is `max_steps` itself (default
+    // 100) — the pre-61 safety bound, unchanged. `max_steps = 0` is clamped to 1
+    // so the printed ceiling always matches the enforced one.
+    const std::size_t step_ceiling = std::max<std::size_t>(1, config_.max_steps);
+    std::size_t       no_progress_streak = 0;
     for (std::size_t stepNumber = 1;; ++stepNumber) {
         const StepId step = session_.nextStepId();
         session_.append(payload::StepStarted{turn, step});
@@ -1265,10 +1276,11 @@ void AgentLoop::runTurn() {
             appendContextInjected(message);
             return true;
         };
+        ToolScheduleOutcome scheduled;
         try {
-            (void)execute_tool_calls(*this, turn, step, response.tool_calls, turnToken,
-                                     std::move(accept))
-                .get();
+            scheduled = execute_tool_calls(*this, turn, step, response.tool_calls, turnToken,
+                                           std::move(accept))
+                            .get();
         } catch (const std::exception& error) {
             appendTurnFailed(turn, AgentErrorCode::Internal, error.what());
             return;
@@ -1287,20 +1299,23 @@ void AgentLoop::runTurn() {
             state_ = AgentState::Idle;
             return;
         }
-        ++steps_this_segment;
-        if (steps_this_segment >= segment_size) {
-            if (segment >= kMaxStepSegments) {
-                // 61-D4: the hard ceiling is a recoverable, actionable stop — the
-                // durable TurnFailed records the incomplete turn and the UI
-                // renders it as a notice, not a crash.
-                appendTurnFailed(
-                    turn, AgentErrorCode::StepLimitExceeded,
-                    "step limit (" + std::to_string(segment_size * kMaxStepSegments) +
-                        ") reached \u2014 task incomplete; send a message to continue");
-                return;
-            }
-            ++segment;
-            steps_this_segment = 0;
+        no_progress_streak = step_made_progress(scheduled) ? 0 : no_progress_streak + 1;
+        if (no_progress_streak >= kNoProgressStreak) {
+            appendTurnFailed(
+                turn, AgentErrorCode::StepLimitExceeded,
+                "no progress: " + std::to_string(kNoProgressStreak) +
+                    " consecutive steps produced no successful tool call \u2014 task incomplete; "
+                    "send a message to continue",
+                /*recoverable=*/true);
+            return;
+        }
+        if (stepNumber >= step_ceiling) {
+            appendTurnFailed(
+                turn, AgentErrorCode::StepLimitExceeded,
+                "step limit (" + std::to_string(step_ceiling) +
+                    ") reached \u2014 task incomplete; send a message to continue",
+                /*recoverable=*/true);
+            return;
         }
     }
 }
