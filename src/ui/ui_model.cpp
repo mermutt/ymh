@@ -610,6 +610,8 @@ Presentation entry_presentation(const std::vector<ConversationEntry>& entries,
         case ConversationRole::System:
         case ConversationRole::Context:
             return Presentation::Chrome;
+        case ConversationRole::Notice:
+            return Presentation::FinalAnswer;
         case ConversationRole::Assistant:
             break;
     }
@@ -997,6 +999,7 @@ void UiModel::apply(const UiEvent& event) {
                    std::is_same_v<T, ToolOutput> ||
                    std::is_same_v<T, ToolFinished> ||
                    std::is_same_v<T, ErrorOccurred> ||
+                   std::is_same_v<T, StepLimitReached> ||
                    std::is_same_v<T, CompactionMarker> ||
                    std::is_same_v<T, CompactionOutcomeNotice> ||
                    std::is_same_v<T, ContextInjected>;
@@ -1223,6 +1226,15 @@ void UiModel::apply(const UiEvent& event) {
                 entry.role = ConversationRole::System;
                 entry.text = "error: " + e.message;
                 state.conversation.entries.push_back(std::move(entry));
+                dirty.mark(e.session, UiDirtyFlag::Conversation | UiDirtyFlag::Status |
+                                           UiDirtyFlag::Attention);
+            } else if constexpr (std::is_same_v<T, StepLimitReached>) {
+                // 62-D5: actionable, recoverable — never the API-error surface.
+                ConversationEntry entry;
+                entry.role = ConversationRole::Notice;
+                entry.text = e.message;
+                state.conversation.entries.push_back(std::move(entry));
+                state.status.note = e.message;
                 dirty.mark(e.session, UiDirtyFlag::Conversation | UiDirtyFlag::Status |
                                            UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, TokenUsageUpdated>) {
@@ -1738,6 +1750,15 @@ bool UiModel::has_active_turn() const {
     return is_active_state(state->second.agent_state);
 }
 
+bool UiModel::session_has_streaming_reasoning(const SessionUiState& state) {
+    for (const ConversationEntry& entry : state.conversation.entries) {
+        if (entry.role == ConversationRole::Reasoning && entry.streaming) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool UiModel::active_has_streaming_reasoning() const {
     const auto workspace = workspaces.find(activeWorkspaceId);
     if (workspace == workspaces.end()) {
@@ -1747,12 +1768,7 @@ bool UiModel::active_has_streaming_reasoning() const {
     if (state == sessions.end()) {
         return false;
     }
-    for (const ConversationEntry& entry : state->second.conversation.entries) {
-        if (entry.role == ConversationRole::Reasoning && entry.streaming) {
-            return true;
-        }
-    }
-    return false;
+    return session_has_streaming_reasoning(state->second);
 }
 
 bool UiModel::advance_spinner(std::chrono::milliseconds delta) {

@@ -437,6 +437,10 @@ public:
         }
         output += "exit_code: " + std::to_string(process.exit_code);
         result.output = std::move(output);
+        if (process.exit_code != 0) {
+            result.outcome = payload::ToolOutcome::Error;
+            result.error = "exit_code: " + std::to_string(process.exit_code);
+        }
         return Task<ToolResult>(std::move(result));
     }
 

@@ -99,6 +99,9 @@ enum class ConversationRole : std::uint8_t {
     Tool,
     System,
     Context,
+    // 62-D5: an actionable, non-error notice (e.g. the step hard ceiling). Not
+    // dimmed like System, so a stopped-but-recoverable turn stands out.
+    Notice,
 };
 
 struct ConversationEntry {
@@ -321,6 +324,12 @@ struct SessionUiState {
     // never persisted and never written to the event log.
     EscArm esc_arm = EscArm::Disarmed;
     std::optional<std::chrono::steady_clock::time_point> esc_armed_at;
+
+    // 62-D2 (Rev 3): the instant of the last edit to THIS session's composer.
+    // Per-session (not model-global) so an edit in one workspace cannot force
+    // the caret `Bar` in another; it is the same scope the renderer arms the
+    // caret from (the rendered composer's session).
+    std::optional<std::chrono::steady_clock::time_point> composer_input_at;
 
     // 58-D7: true for a materialized viewed-child state. Such a state is never a
     // `SessionCell` and never appears in the Live switcher or `/sessions`.
@@ -738,6 +747,10 @@ struct UiModel {
     [[nodiscard]] bool has_active_turn() const;
     // 46-D9: the ACTIVE session has a streaming reasoning block.
     [[nodiscard]] bool active_has_streaming_reasoning() const;
+    // 62-D2 (Rev 3): true iff `state` holds a streaming Reasoning entry. Shared
+    // by the caret predicate (scoped to the rendered composer's session) and the
+    // spinner so the two cannot drift.
+    [[nodiscard]] static bool session_has_streaming_reasoning(const SessionUiState& state);
     // 46-D9: advances the shared frame clock while a turn is active OR the active
     // session streams reasoning; returns true when the frame changed.
     bool advance_spinner(std::chrono::milliseconds delta);

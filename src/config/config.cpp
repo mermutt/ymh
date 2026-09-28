@@ -394,12 +394,19 @@ void validate_approval_value(const std::string& value, const std::filesystem::pa
 
 void apply_agent(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "agent",
-                   {"model", "max_steps", "reasoning_effort", "system_prompt", "compaction",
-                    "compaction_threshold_tokens", "plan", "sandbox"},
+                   {"model", "max_steps", "max_segments", "max_turn_steps", "reasoning_effort",
+                    "system_prompt", "compaction", "compaction_threshold_tokens", "plan",
+                    "sandbox"},
                    source);
     config.agent.model = read_string(table, "model", "agent", config.agent.model, source);
     config.agent.max_steps = static_cast<std::size_t>(read_int64(
         table, "max_steps", "agent", static_cast<std::int64_t>(config.agent.max_steps), source));
+    config.agent.max_segments = static_cast<std::size_t>(read_int64(
+        table, "max_segments", "agent", static_cast<std::int64_t>(config.agent.max_segments),
+        source));
+    config.agent.max_turn_steps = static_cast<std::size_t>(read_int64(
+        table, "max_turn_steps", "agent", static_cast<std::int64_t>(config.agent.max_turn_steps),
+        source));
     config.agent.reasoning_effort = read_optional_string(table, "reasoning_effort", "agent", source);
     config.agent.system_prompt =
         read_string(table, "system_prompt", "agent", config.agent.system_prompt, source);
@@ -1419,7 +1426,9 @@ constexpr std::string_view kDefaultConfigJsonc =
   },
   "agent": {
     "model": "",                 // empty => use llm.default.model
-    "max_steps": 100             // max tool-calling steps per task
+    "max_steps": 100             // max tool-calling steps per auto-continuing segment
+    // optional: "max_segments": 0            // segments per turn; 0 => unlimited
+    // optional: "max_turn_steps": 1000       // absolute per-turn step ceiling (hard stop)
     // optional: "reasoning_effort": "low"   // "low" | "medium" | "high" | "xhigh"
     // optional: "system_prompt": ""         // empty => built-in default
   },
@@ -1830,6 +1839,12 @@ void apply_env_overrides(Config& config) {
     }
     if (const auto value = env_value("YMH_AGENT_MAX_STEPS")) {
         config.agent.max_steps = parse_size("YMH_AGENT_MAX_STEPS", *value);
+    }
+    if (const auto value = env_value("YMH_AGENT_MAX_SEGMENTS")) {
+        config.agent.max_segments = parse_size("YMH_AGENT_MAX_SEGMENTS", *value);
+    }
+    if (const auto value = env_value("YMH_AGENT_MAX_TURN_STEPS")) {
+        config.agent.max_turn_steps = parse_size("YMH_AGENT_MAX_TURN_STEPS", *value);
     }
     if (const auto value = env_value("YMH_AGENT_SYSTEM_PROMPT")) {
         config.agent.system_prompt = *value;

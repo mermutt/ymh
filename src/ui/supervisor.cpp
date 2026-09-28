@@ -3278,6 +3278,16 @@ private:
         if (event.is_character() && modal_tail_suppression_active()) {
             return true;
         }
+        // 62-D2 (Rev 2): a composer edit arms the caret-visibility grace window,
+        // so the caret stays visible while the focused turn animates.
+        if (event.is_character() || event == ftxui::Event::Backspace ||
+            event == ftxui::Event::Delete || event == ftxui::Event::ArrowLeft ||
+            event == ftxui::Event::ArrowRight || event == ftxui::Event::ArrowLeftCtrl ||
+            event == ftxui::Event::ArrowRightCtrl || event == ftxui::Event::ArrowUp ||
+            event == ftxui::Event::ArrowDown || event == ftxui::Event::CtrlU ||
+            event == ftxui::Event::CtrlW) {
+            state->composer_input_at = std::chrono::steady_clock::now();
+        }
         // 48-D2.4: any other handled key disarms a pending interrupt.
         if (event != ftxui::Event::Escape && state->esc_arm == EscArm::Armed) {
             state->esc_arm = EscArm::Disarmed;

@@ -95,7 +95,8 @@ Element with_left_bar(Element element, const Theme& theme) {
 // caret onto its trailing cell.
 class CaretAnchor final : public ftxui::Node {
 public:
-    explicit CaretAnchor(Element child) : ftxui::Node(Elements{std::move(child)}) {}
+    CaretAnchor(Element child, ftxui::Screen::Cursor::Shape shape)
+        : ftxui::Node(Elements{std::move(child)}), shape_(shape) {}
 
     void ComputeRequirement() override {
         ftxui::Node::ComputeRequirement();
@@ -103,7 +104,7 @@ public:
         requirement_.focused.enabled = true;
         requirement_.focused.node = this;
         requirement_.focused.component_active = true;
-        requirement_.focused.cursor_shape = ftxui::Screen::Cursor::Shape::Bar;
+        requirement_.focused.cursor_shape = shape_;
         requirement_.focused.box.x_min = 0;
         requirement_.focused.box.y_min = 0;
         requirement_.focused.box.x_max = requirement_.min_x - 1;
@@ -116,10 +117,13 @@ public:
         ftxui::Node::SetBox(anchor);
         children_[0]->SetBox(box);
     }
+
+private:
+    ftxui::Screen::Cursor::Shape shape_;
 };
 
-Element caret_anchor(Element element) {
-    return std::make_shared<CaretAnchor>(std::move(element));
+Element caret_anchor(Element element, ftxui::Screen::Cursor::Shape shape) {
+    return std::make_shared<CaretAnchor>(std::move(element), shape);
 }
 
 // 60-D2: the integer analogue of FTXUI's `focusPositionRelative`. Same
@@ -436,6 +440,9 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
         case ConversationRole::System:
             rows.push_back(ftxui::paragraph(entry.text) | ftxui::dim);
             break;
+        case ConversationRole::Notice:
+            return paint(ftxui::text(entry.text) | ftxui::bold, ftxui::Color::Yellow,
+                         theme);
         case ConversationRole::Context: {
             const ContextForm form =
                 entry.context.has_value() ? entry.context->form : ContextForm::None;
@@ -591,9 +598,18 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
 // 59-D1: the composer wraps the draft across rows and grows up to
 // `kComposerMaxRows`; past the cap a window slides to keep the caret row
 // visible. The former single-line `hbox` clipped the tail off-screen.
+// 62-D1: `max_rows` is the height the layout actually has left for the composer
+// (<= kComposerMaxRows); it keeps the composer on-screen on a short terminal.
 constexpr int kComposerMaxRows = 8;
 
-Element render_input(const UiModel& model, const Theme& theme, int terminal_width) {
+// 62-D2 (Rev 2): how long after the last composer edit the caret stays visible
+// while the focused session animates. Long enough to cover continuous typing
+// (well above the 50 ms repaint interval), short enough to hide the cursor again
+// once the user stops and the spinner repaints.
+constexpr std::chrono::milliseconds kComposerCaretGrace{700};
+
+Element render_input(const UiModel& model, const Theme& theme, int terminal_width,
+                     int max_rows, bool hide_caret) {
     if (!model.subagent_path.empty()) {
         const std::string hint = "(viewing subagent " + short_id(model.subagent_path.back()) +
                                  " — Ctrl+T children · Esc return)";
@@ -663,15 +679,21 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
         row_glyphs.emplace_back();
     }
 
-    // 59-I4: cap the height; slide the window so the caret row stays visible.
+    // 59-I4/62-I1: cap the height; slide the window so the caret row stays
+    // visible. `max_rows` is the on-screen budget, already <= kComposerMaxRows.
+    const std::size_t window = static_cast<std::size_t>(std::max(1, max_rows));
     std::size_t first_row = 0;
-    if (row_glyphs.size() > static_cast<std::size_t>(kComposerMaxRows)) {
-        const std::size_t window = static_cast<std::size_t>(kComposerMaxRows);
+    if (row_glyphs.size() > window) {
         first_row = caret_row > window - 1 ? caret_row - window + 1 : 0;
         first_row = std::min(first_row, row_glyphs.size() - window);
     }
-    const std::size_t last_row =
-        std::min(row_glyphs.size(), first_row + static_cast<std::size_t>(kComposerMaxRows));
+    const std::size_t last_row = std::min(row_glyphs.size(), first_row + window);
+
+    // 62-D2: while a turn animates, FTXUI repaints the whole screen each frame;
+    // a visible hardware cursor would traverse it. Hide it until the turn ends.
+    const ftxui::Screen::Cursor::Shape caret_shape =
+        hide_caret ? ftxui::Screen::Cursor::Shape::Hidden
+                   : ftxui::Screen::Cursor::Shape::Bar;
 
     // Re-split each visible row's glyphs into text runs around the caret anchor.
     std::vector<Elements> visible_cells;
@@ -688,7 +710,7 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
                     cells.push_back(ftxui::text(run));
                     run.clear();
                 }
-                cells.push_back(caret_anchor(ftxui::text(glyphs[index])));
+                cells.push_back(caret_anchor(ftxui::text(glyphs[index]), caret_shape));
             } else {
                 run += glyphs[index];
             }
@@ -1858,12 +1880,12 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
         composer = &model.pendingComposer;
     }
 
-    Elements rows;
-    rows.push_back(render_header(model, theme));
+    Elements above;
+    above.push_back(render_header(model, theme));
     if (!model.subagent_path.empty()) {
-        rows.push_back(render_subagent_breadcrumb(model, theme));
+        above.push_back(render_subagent_breadcrumb(model, theme));
     }
-    rows.push_back(ftxui::separator());
+    above.push_back(ftxui::separator());
     // 48-D7.3: the conversation pane sits inside the border and carries a
     // vscroll_indicator, so the tool line truncates to the content box, not the
     // terminal width.
@@ -1875,27 +1897,73 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
                                 .spinner_frame = model.spinner.frame};
     // 49-D2: with zero workspaces the transcript is empty (no `(no active
     // session)` placeholder); the prompt box and status bar remain.
-    if (model.workspaces.empty()) {
-        rows.push_back(ftxui::text("") | ftxui::flex);
-    } else {
-        rows.push_back(render_conversation(pane, context, out) | ftxui::flex);
-    }
+    Element transcript = model.workspaces.empty()
+                             ? (ftxui::text("") | ftxui::flex)
+                             : (render_conversation(pane, context, out) | ftxui::flex);
+
+    Elements below;
     if (pane != nullptr && !pane->scroll.following) {
-        rows.push_back(render_scroll_hint(pane, theme));
+        below.push_back(render_scroll_hint(pane, theme));
     }
-    rows.push_back(ftxui::separator());
+    below.push_back(ftxui::separator());
     if (pane != nullptr && !pane->subagents.agents.empty()) {
-        rows.push_back(render_subagents(pane, theme));
+        below.push_back(render_subagents(pane, theme));
     }
     if (composer != nullptr && !composer->command_hints.empty()) {
-        rows.push_back(render_command_hints(composer, theme));
+        below.push_back(render_command_hints(composer, theme));
     }
-    rows.push_back(render_input(model, theme, size.width));
     // The vbox below is wrapped in `ftxui::border`, so the row content has
     // `size.width - 2` columns available; the status fit math must use that
     // inner width or the right-aligned aggregate is clipped (25 review H3).
     const int status_width = size.width > 2 ? size.width - 2 : 1;
-    rows.push_back(render_status(model, pane, theme, status_width));
+    Element status = render_status(model, pane, theme, status_width);
+
+    // 62-D1: the composer may use only the height left after the fixed chrome;
+    // the transcript is the flex row that collapses to make room, so the
+    // composer (and its caret) can never be clipped off the bottom edge.
+    const auto min_rows = [](Element& element) {
+        element->ComputeRequirement();
+        return element->requirement().min_y;
+    };
+    const int inner_height = size.height > 2 ? size.height - 2 : 1;
+    int reserved = 0;
+    for (Element& element : above) {
+        reserved += min_rows(element);
+    }
+    for (Element& element : below) {
+        reserved += min_rows(element);
+    }
+    reserved += min_rows(status);
+    const int composer_rows =
+        std::min(kComposerMaxRows, std::max(1, inner_height - reserved));
+
+    Elements rows;
+    rows.reserve(above.size() + below.size() + 3);
+    for (Element& element : above) {
+        rows.push_back(std::move(element));
+    }
+    rows.push_back(std::move(transcript));
+    for (Element& element : below) {
+        rows.push_back(std::move(element));
+    }
+    // 62-D2 (Rev 3): scoped to the rendered composer's session (the composer's
+    // own turn or streaming reasoning), so a background workspace animating
+    // cannot hide the caret here. A recent edit to THAT session forces `Bar` for
+    // the grace window, so typing/steering during the focused turn's own spinner
+    // keeps a visible caret. Trade-off: a background animation still drives the
+    // repaint timer, so a visible caret may briefly traverse the screen; the
+    // pre-61 behavior was to hide it always, which made typing impossible to see.
+    // This residual is accepted and recorded in 62-F9.
+    const bool composer_editing =
+        composer != nullptr && composer->composer_input_at.has_value() &&
+        std::chrono::steady_clock::now() - *composer->composer_input_at < kComposerCaretGrace;
+    const bool focused_animating =
+        composer != nullptr &&
+        (is_active_state(composer->agent_state) ||
+         UiModel::session_has_streaming_reasoning(*composer));
+    const bool animating = focused_animating && !composer_editing;
+    rows.push_back(render_input(model, theme, size.width, composer_rows, animating));
+    rows.push_back(std::move(status));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
     if (model.exitConfirm.open) {

@@ -5,9 +5,11 @@
 #include <cstddef>
 #include <exception>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -42,6 +44,51 @@ std::string assembled_system_prompt(const LLMRequest& request) {
 std::string first_line(const std::string& text) {
     const std::size_t newline = text.find('\n');
     return text.substr(0, newline == std::string::npos ? text.size() : newline);
+}
+
+// 62-D6 (Rev 3): progress is novelty, not success. A step's *action signature*
+// digests the ordered tool calls (name + canonical arguments); its *result
+// signature* digests the ordered committed results (name + outcome + error +
+// output). Both exclude the per-call unique id. A step makes progress iff its
+// action signature is novel in the turn, OR it commits at least one successful
+// (`Ok`) result whose result signature is novel. A distinct informative failure
+// (a new path, a new command, a new error) is therefore progress and does not
+// trip the guard, while a repeated identical call — or a periodic A/B cycle —
+// eventually repeats and is counted as no progress. `kNoProgressStreak`
+// consecutive non-progress steps stop the turn.
+constexpr std::size_t kNoProgressStreak = 3;
+
+std::string action_signature(const std::vector<ToolCallAssembled>& calls) {
+    std::string material;
+    for (const ToolCallAssembled& call : calls) {
+        material += call.name;
+        material += '\x1f';
+        material += call.arguments.dump();
+        material += '\x1e';
+    }
+    return sha256_hex(material);
+}
+
+std::string result_signature(const ToolScheduleOutcome& outcome) {
+    std::string material;
+    for (const payload::ToolResult& result : outcome.results) {
+        material += result.name;
+        material += '\x1f';
+        material += std::string{tool_outcome_name(result.outcome)};
+        material += '\x1f';
+        material += result.error.value_or(std::string{});
+        material += '\x1f';
+        material += result.output;
+        material += '\x1e';
+    }
+    return sha256_hex(material);
+}
+
+bool step_had_success(const ToolScheduleOutcome& outcome) {
+    return std::any_of(outcome.results.begin(), outcome.results.end(),
+                       [](const payload::ToolResult& result) {
+                           return result.outcome == payload::ToolOutcome::Ok;
+                       });
 }
 
 bool has_valid_plan_argument(const nlohmann::json& arguments) {
@@ -504,13 +551,14 @@ void AgentLoop::materializeContexts(const PromptAssembly& assembly) {
     }
 }
 
-void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message) {
+void AgentLoop::appendTurnFailed(TurnId turn, AgentErrorCode code, std::string message,
+                                 bool recoverable) {
     payload::TurnFailed failed;
     failed.turn    = turn;
     failed.code    = std::string{agent_error_code_name(code)};
     failed.message = std::move(message);
     session_.append(failed);
-    state_ = AgentState::Error;
+    state_ = recoverable ? AgentState::Idle : AgentState::Error;
     noteTerminal();
 }
 
@@ -1029,7 +1077,33 @@ void AgentLoop::runTurn() {
             ? services_.context_compactor->policy().is_enabled()
             : config_.compaction_threshold_tokens > 0;
 
+    // 62-D3/D8 (Rev 3): `max_steps` is the per-SEGMENT budget (default 100),
+    // clamped to >= 1. A segment that commits a successful tool call
+    // auto-continues into a new segment with no user message; a segment with no
+    // success stops at the budget. `max_segments == 0` means no cap on segments.
+    // 62-D9 (Rev 4): `max_turn_steps` is the ABSOLUTE per-turn ceiling, checked
+    // before any work each iteration, so a novel-`Ok` runaway (invisible to the
+    // no-progress guard) is bounded even when `max_segments == 0`.
+    const std::size_t step_ceiling = std::max<std::size_t>(1, config_.max_steps);
+    const std::size_t turn_ceiling = std::max<std::size_t>(1, config_.max_turn_steps);
+    const std::size_t segment_cap = config_.max_segments == 0
+                                        ? std::numeric_limits<std::size_t>::max()
+                                        : config_.max_segments;
+    std::size_t       segment_step         = 0;
+    std::size_t       segments_completed   = 0;
+    std::size_t       no_progress_streak   = 0;
+    bool              segment_had_success  = false;
+    std::unordered_set<std::string> seen_actions;
+    std::unordered_set<std::string> seen_results;
     for (std::size_t stepNumber = 1;; ++stepNumber) {
+        if (stepNumber > turn_ceiling) {
+            appendTurnFailed(
+                turn, AgentErrorCode::StepLimitExceeded,
+                "turn step ceiling (" + std::to_string(turn_ceiling) +
+                    ") reached \u2014 task incomplete; send a message to continue",
+                /*recoverable=*/true);
+            return;
+        }
         const StepId step = session_.nextStepId();
         session_.append(payload::StepStarted{turn, step});
         if (services_.plan_mode != nullptr) {
@@ -1254,10 +1328,11 @@ void AgentLoop::runTurn() {
             appendContextInjected(message);
             return true;
         };
+        ToolScheduleOutcome scheduled;
         try {
-            (void)execute_tool_calls(*this, turn, step, response.tool_calls, turnToken,
-                                     std::move(accept))
-                .get();
+            scheduled = execute_tool_calls(*this, turn, step, response.tool_calls, turnToken,
+                                           std::move(accept))
+                            .get();
         } catch (const std::exception& error) {
             appendTurnFailed(turn, AgentErrorCode::Internal, error.what());
             return;
@@ -1276,9 +1351,45 @@ void AgentLoop::runTurn() {
             state_ = AgentState::Idle;
             return;
         }
-        if (stepNumber >= config_.max_steps) {
-            appendTurnFailed(turn, AgentErrorCode::StepLimitExceeded, "step limit exceeded");
+        ++segment_step;
+        const bool action_novel =
+            seen_actions.insert(action_signature(response.tool_calls)).second;
+        const bool result_novel =
+            seen_results.insert(result_signature(scheduled)).second;
+        const bool success = step_had_success(scheduled);
+        segment_had_success = segment_had_success || success;
+        const bool made_progress = action_novel || (success && result_novel);
+        no_progress_streak = made_progress ? 0 : no_progress_streak + 1;
+        if (no_progress_streak >= kNoProgressStreak) {
+            appendTurnFailed(
+                turn, AgentErrorCode::StepLimitExceeded,
+                "no progress: " + std::to_string(kNoProgressStreak) +
+                    " consecutive steps repeated the same action with no successful tool call "
+                    "\u2014 task incomplete; send a message to continue",
+                /*recoverable=*/true);
             return;
+        }
+        if (segment_step >= step_ceiling) {
+            if (!segment_had_success) {
+                appendTurnFailed(
+                    turn, AgentErrorCode::StepLimitExceeded,
+                    "step limit (" + std::to_string(step_ceiling) +
+                        ") reached with no successful tool call \u2014 task incomplete; "
+                        "send a message to continue",
+                    /*recoverable=*/true);
+                return;
+            }
+            ++segments_completed;
+            if (segments_completed >= segment_cap) {
+                appendTurnFailed(
+                    turn, AgentErrorCode::StepLimitExceeded,
+                    "step budget (" + std::to_string(segment_cap) +
+                        " segments) exhausted \u2014 task incomplete; send a message to continue",
+                    /*recoverable=*/true);
+                return;
+            }
+            segment_step        = 0;
+            segment_had_success = false;
         }
     }
 }
