@@ -596,6 +596,28 @@ bool is_waiting_state(AgentState state) noexcept {
            state == AgentState::Error;
 }
 
+namespace {
+
+// 65-D1: a session works when its own turn is active or one of its direct
+// subagents is still `Running`. `SubagentSpawned` sets Running before the child
+// is activated and `SubagentFanIn` flips it terminal only after the child's
+// whole activation settles, so a nested grandchild is covered by its parent's
+// Running status. The child's own `turn/ended` therefore never ends the
+// parent's derived work.
+bool session_working(const SessionUiState& state) {
+    if (is_active_state(state.agent_state)) {
+        return true;
+    }
+    for (const SubagentView& child : state.subagents.agents) {
+        if (child.status == SubagentStatus::Running) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 Presentation entry_presentation(const std::vector<ConversationEntry>& entries,
                                 std::size_t index, bool turn_active) noexcept {
     if (index >= entries.size()) {
@@ -1782,6 +1804,18 @@ bool UiModel::has_active_turn() const {
     return is_active_state(state->second.agent_state);
 }
 
+bool UiModel::active_session_working() const {
+    const auto workspace = workspaces.find(activeWorkspaceId);
+    if (workspace == workspaces.end()) {
+        return false;
+    }
+    const auto state = sessions.find(workspace->second.activeSessionId());
+    if (state == sessions.end()) {
+        return false;
+    }
+    return session_working(state->second);
+}
+
 bool UiModel::session_has_streaming_reasoning(const SessionUiState& state) {
     for (const ConversationEntry& entry : state.conversation.entries) {
         if (entry.role == ConversationRole::Reasoning && entry.streaming) {
@@ -1805,7 +1839,7 @@ bool UiModel::active_has_streaming_reasoning() const {
 
 bool UiModel::advance_spinner(std::chrono::steady_clock::time_point now) {
     return advance_spinner_clock(
-        spinner, now, has_active_turn() || active_has_streaming_reasoning());
+        spinner, now, active_session_working() || active_has_streaming_reasoning());
 }
 
 void UiModel::set_now_reader(ClockReader reader) {

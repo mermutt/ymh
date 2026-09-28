@@ -2078,7 +2078,7 @@ private:
         }
         animation_active_.store(model_.aggregate.flash.isFlashing() ||
                                 model_.has_streaming_reasoning() ||
-                                model_.has_active_turn());
+                                model_.active_session_working());
     }
 
     SessionUiState* active() {

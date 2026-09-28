@@ -1000,7 +1000,7 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
         }
         left_cells.push_back(std::move(element));
     };
-    if (model.has_active_turn()) {
+    if (model.active_session_working()) {
         left_cells.push_back(ftxui::text(
             std::string(kBottomActivityFrames[model.spinner.frame %
                                               kBottomActivityFrames.size()]) +

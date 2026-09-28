@@ -750,6 +750,12 @@ struct UiModel {
 
     // 46-D9: the ACTIVE session's turn is running (Thinking || CallingTool).
     [[nodiscard]] bool has_active_turn() const;
+    // 65-D1: the ACTIVE session's turn subtree is working: its own turn is
+    // active OR it has a direct subagent still `Running`. Drives the bottom
+    // indicator, the spinner clock and `animation_active_`. 65-D3 keeps
+    // `has_active_turn()` for the Esc-Esc interrupt so a running child alone
+    // never cancels the parent.
+    [[nodiscard]] bool active_session_working() const;
     // 46-D9: the ACTIVE session has a streaming reasoning block.
     [[nodiscard]] bool active_has_streaming_reasoning() const;
     // 62-D2 (Rev 3): true iff `state` holds a streaming Reasoning entry. Shared
