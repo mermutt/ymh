@@ -37,8 +37,8 @@ less than 1 ms apart produced `delta == 0`, which was then credited as a full
 `kFrameInterval` (50 ms). During a streaming burst (~200 events/s) the spinner
 accumulated up to ~10 s of animation time per real second and raced; when quiet
 only the timer fired and the pace was correct — the reported "stable for a
-second, then rushed". The earlier 63-D7 step-size change (120 ms → 100 ms) could
-not fix it: the defect was the per-drain credit, not the step.
+second, then rushed". A step-size change alone could not fix it: the defect was
+the per-drain credit, not the step.
 
 ### 1.2 The status text shifted (64-D2)
 
@@ -59,7 +59,7 @@ block; the user wants one blank row above and one below the draft.
 | ID | Decision | Amends / cites |
 |---|---|---|
 | 64-D1 | The animation frame is a pure function of the **exact elapsed wall-clock time** since the animation started: `frame = floor(elapsed / step)` with `step = 120 ms`. `ReasoningSpinnerState` accumulates exact `steady_clock::duration` deltas and keeps the sub-step remainder; a single tick gap longer than 250 ms credits at most the clamp (`kSpinnerMaxStall`). `UiModel::advance_spinner` / `advance_reasoning_spinner` take the current `steady_clock::time_point`; `UiEventAdapter::onTick` forwards it alongside the flash `delta`. Drain frequency is therefore irrelevant by construction. `SupervisorApp::drain()` no longer credits a non-positive delta with `kFrameInterval`. | Supersedes 63-D2's per-drain `delta` clock and RB-17's `advance_spinner(delta)`; 63-D1/D4/D6 and the 120 ms visual pace retained; the 250 ms clamp retained (the spinner half now lives in the model) |
-| 64-D2 | The status line always reserves the comet's 5-cell slot (4-cell frame + 1 space), emitting 5 blank cells when `has_active_turn()` is false, so the mode/model text starts at a constant column. The slot and its `" · "` separator (8 cells total) are subtracted from the fit budget up front, so the right-aligned aggregate is never clipped. Visibility is otherwise unchanged: no glyph when idle (63-D3). | Amends 63-D3/63-D5 and 46-D9.5–D9.7; 25-D1 segment order retained |
+| 64-D2 | The session-backed status line always reserves the comet's 5-cell slot (4-cell frame + 1 space), emitting 5 blank cells when `has_active_turn()` is false, so the mode/model text starts at a constant column. The slot and its `" · "` separator (8 cells total) are subtracted from the fit budget up front, so the right-aligned aggregate is never clipped. Visibility is otherwise unchanged: no glyph when idle (63-D3). The `active == nullptr` fallback lines (`no workspace attached` / `build · … · no session`, 53-D3) do **not** reserve the slot. Recorded trade-off: the permanent 8-cell reservation lowers the segment-fit threshold, so on terminals ≲78 columns the context-usage bar (priority 2 of 6) is dropped where it previously fit at ≲70; the user asked for stable alignment and the aggregate must not be clipped, so this content cost is accepted. | Amends 63-D3/63-D5 and 46-D9.5–D9.7; 25-D1 segment order retained |
 | 64-D3 | `render_input` renders exactly one blank row above and one below the wrapped draft, inside the `LeftBar` gutter and `user_block_background` tint. The draft area keeps its `kComposerMaxRows = 8` cap; the two padding rows are reserved out of the on-screen height budget (`kComposerPaddingRows = 2`). The wrap, slide window and caret rules (59-D1–D7, 62-D1/D2) are unchanged. | Amends 59-D1/59-I4; extends 51-D2.3/59-I7 |
 
 ## 3. Interface sketch
@@ -84,8 +84,11 @@ constexpr int kComposerPaddingRows = 2; // one row above + one below
 
 ## 4. Invariants
 
-- **64-I1** The frame advanced over a real interval `T` is `floor(T / 120 ms)`
-  regardless of how many times `advance_spinner` is called inside `T`.
+- **64-I1** Provided no single inter-call gap exceeds `kSpinnerMaxStall`
+  (250 ms), the frame advanced over a real interval `T` is `floor(T / 120 ms)`
+  regardless of how many times `advance_spinner` is called inside `T`. A gap
+  longer than the clamp credits at most `kSpinnerMaxStall`, so a suspended
+  process cannot jump the comet.
 - **64-I2** A non-positive tick gap (the same `now`) never advances the frame.
 - **64-I3** The status line's mode/model text starts at the same display column
   with and without an active turn; when idle the line contains no
@@ -105,8 +108,10 @@ constexpr int kComposerPaddingRows = 2; // one row above + one below
 ## 6. Tests
 
 - `UI64_D1_SpinnerPaceIsDrainFrequencyIndependent` (`tests/unit/errata46_ui_test.cpp`):
-  500 drains at 100 ms advance 0; 500 more at 120 ms advance exactly 1; 1000
-  sub-millisecond drains over 120 ms advance exactly 1, not 1000.
+  500 drains at 100 ms advance 0; the next call at 120 ms advances exactly 1
+  (the 100 ms remainder plus 20 ms); 1000 sub-millisecond drains over 120 ms
+  advance exactly 1, not 1000; a single 5 s gap credits the 250 ms clamp (2
+  steps), not `floor(5000/120) = 41`.
 - `UI64_D2_StatusTextColumnStable`: idle and active status lines place `build`
   at the same display column; the idle line carries the reserved 5-cell slot and
   no comet glyph.

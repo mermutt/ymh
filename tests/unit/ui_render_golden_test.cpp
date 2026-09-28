@@ -277,6 +277,11 @@ void seed_catalog_session(UiModel& model, const WorkspaceId& workspace,
     model.catalog.generation = 1;
 }
 
+// 64-D2: the idle status line reserves the 5-cell comet slot plus its " · "
+// separator (8 cells). Recorded trade-off: at this 72-column width the
+// context-usage bar no longer fits and is dropped (the pre-64 line showed
+// `⚡0 · [░░░░░░░░░░] —`); the reservation keeps the text column stable and the
+// right aggregate unclipped, which the user asked for.
 const char* kGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
 │ymh · /work                                                           │
 ├┬─────────────────────────────────────────────────────────────────────┤

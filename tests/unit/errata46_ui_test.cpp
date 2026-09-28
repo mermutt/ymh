@@ -387,6 +387,13 @@ TEST(Errata46D9, UI64_D1_SpinnerPaceIsDrainFrequencyIndependent) {
         burst.advance_spinner(t + std::chrono::microseconds{(120000 * i) / kN});
     }
     EXPECT_EQ(burst.spinner.frame, 1u) << "120 ms/120 ms step == 1, not N == 1000";
+
+    // 64-I1: a single gap longer than kSpinnerMaxStall credits the clamp only,
+    // so a suspended process cannot jump the comet.
+    UiModel stalled = model_with_active_session(AgentState::Thinking);
+    stalled.advance_spinner(t);
+    stalled.advance_spinner(t + std::chrono::seconds{5});
+    EXPECT_EQ(stalled.spinner.frame, 2u) << "5 s clamps to 250 ms == 2 steps";
 }
 
 // 64-D2: the status line reserves the comet's 5-cell slot even when idle, so
