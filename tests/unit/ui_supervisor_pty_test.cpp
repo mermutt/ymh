@@ -1736,9 +1736,14 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("zz-newer", 20s)) << child.text();
     // The focused (clean) session is hidden; History lists stored sessions
-    // updated_at desc, so one "j" lands on zz-newer.
+    // updated_at desc, so one "j" lands on zz-newer. Poll the raw frame until
+    // that row carries the inverted-SGR cursor highlight (the same signal the
+    // exit-prompt tests assert) so the Enter below is deterministic: a fixed
+    // delay races the UI under load and can confirm the workspace row instead.
+    const std::size_t select_mark = child.raw_size();
     child.write("j");
-    std::this_thread::sleep_for(300ms);
+    ASSERT_TRUE(child.wait_for_raw_since(select_mark, "\x1b[7m    [zz-newer", 10s))
+        << "the History cursor never landed on zz-newer: " << child.last_frame();
     child.write("\r");
 
     ASSERT_TRUE(child.wait_for_frame_contains("zznewermarker", 25s))
@@ -1747,7 +1752,13 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
         << "the selected session's stored model was not hydrated into the status bar: "
         << child.last_frame();
 
-    std::this_thread::sleep_for(700ms);
+    // The composer accepts input only once the History modal is gone. Confirm
+    // it is absent across a poll (which also outlasts the 25 ms RB-12
+    // modal-tail window that swallows printable input just after a modal
+    // closes) instead of sleeping a fixed 700 ms, then probe the resumed
+    // session's composer.
+    ASSERT_TRUE(child.wait_for_frame_absent("Enter resume", 10s))
+        << "the History overlay stayed open: " << child.last_frame();
     child.write("zzprobe");
     EXPECT_TRUE(child.wait_for("zzprobe", 10s))
         << "the composer dropped keystrokes after resume: " << child.text();
