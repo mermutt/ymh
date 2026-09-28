@@ -22,11 +22,14 @@
 #include "ymh/llm/fake_llm.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session.hpp"
+#include "ymh/ui/ui_event_adapter.hpp"
+#include "ymh/ui/ui_model.hpp"
 
 namespace {
 
 using namespace ymh;
 using namespace ymh::test;
+using namespace ymh::ui;
 
 FakeScript script_of(std::vector<FakeResponseStep> steps) {
     FakeScript script;
@@ -81,6 +84,27 @@ public:
 
 private:
     SubagentService* service_ = nullptr;
+};
+
+// 65-D4: models a rejected activation (the executor queue-full / unavailable
+// service case, 55-F13) so the abandoned-spawn settlement path is deterministic.
+class RejectingActivator final : public SessionActivator {
+public:
+    bool submit(const SessionId&) override { return false; }
+};
+
+// 65-D4: accepts the activation without running it, so a test can drive the
+// detached-worker path (`runBackgroundActivation`) after disposing the child.
+class ManualActivator final : public SessionActivator {
+public:
+    bool submit(const SessionId& child) override {
+        child_ = child;
+        return true;
+    }
+    [[nodiscard]] const SessionId& child() const noexcept { return child_; }
+
+private:
+    SessionId child_;
 };
 
 struct DelegationEnv {
@@ -202,6 +226,117 @@ TEST(Spec55Delegation, ContinuableLifecycleProducesOneNoticePerEpoch) {
     EXPECT_FALSE(sent.error.has_value());
     EXPECT_EQ(count_fanin(*parent_session, true), 2u);
     EXPECT_EQ(count_notices(*parent_session), 2u);
+}
+
+// 65-D4 (MEDIUM-1 regression): a rejected background activation disposes the
+// child, so the spawn path itself must emit the terminal fan-in. Otherwise the
+// parent's SubagentView stays Running forever (the indicator sticks on).
+// 65-D4: count the child's terminal fan-ins in a parent log.
+std::size_t terminal_fanin_count(const Session& parent, const SessionId& child) {
+    std::size_t count = 0;
+    for (const EventRecord& record : parent.events()) {
+        if (record.event.type != EventType::SubagentFanIn) {
+            continue;
+        }
+        if (record.event.payload.get<payload::SubagentFanIn>().subagent.value == child.value) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 65-D4: project a parent session's durable events into a fresh UiModel and
+// return the parent's state (used to assert the derived working predicate).
+SessionUiState* project_parent_session(AgentEnv& env, const std::shared_ptr<AgentLoop>& parent,
+                                       UiModel& model) {
+    model.activeWorkspaceId = WorkspaceId{"ws"};
+    WorkspaceModel workspace;
+    workspace.id  = WorkspaceId{"ws"};
+    workspace.cwd = "/ws";
+    model.workspaces.emplace(model.activeWorkspaceId, std::move(workspace));
+    model.focusSessionIn(model.activeWorkspaceId, parent->session());
+    UiEventAdapter adapter(model);
+    for (const EventRecord& record : env.sessionOf(*parent)->events()) {
+        adapter.onEvent(record.event);
+    }
+    return model.session(parent->session());
+}
+
+TEST(Spec65Settlement, UI65_D4_RejectedBackgroundActivationSettlesChildView) {
+    AgentEnv env("spec65", std::make_unique<FakeLLM>(FakeScript{}));
+    RejectingActivator activator;
+    StubRouteCatalog route_catalog;
+    ModelSelectionController model_selection{
+        [](const SessionId&, payload::SessionModelChanged) {},
+        [](const std::string&) -> std::optional<ModelSelection> { return std::nullopt; }};
+    JobRegistry jobs;
+    JobWakeupPolicy wakeup{jobs, env.bus, JobWakeupConfig{}, env.registry};
+    SubagentService service(env.registry, env.sessions, nullptr, jobs, wakeup, model_selection,
+                            route_catalog, env.runtime, activator, env.bus);
+    const std::shared_ptr<AgentLoop> parent = env.createAgent();
+
+    SubagentService::StartRequest request;
+    request.parent            = parent->session();
+    request.label             = "task";
+    request.prompt            = "do it";
+    request.run_in_background = true;
+
+    const StartResult started = service.startContinuable(request).get();
+    ASSERT_TRUE(started.error.has_value());
+    EXPECT_EQ(started.error->code, AgentErrorCode::InboxFull);
+    ASSERT_FALSE(started.child.value.empty());
+
+    const std::shared_ptr<Session> parent_session = env.sessionOf(*parent);
+    EXPECT_EQ(terminal_fanin_count(*parent_session, started.child), 1u)
+        << "every SubagentSpawned needs a terminal SubagentFanIn";
+
+    UiModel model;
+    const SessionUiState* state = project_parent_session(env, parent, model);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->subagents.agents.size(), 1u);
+    EXPECT_NE(state->subagents.agents[0].status, SubagentStatus::Running);
+    EXPECT_FALSE(model.active_session_working());
+}
+
+TEST(Spec65Settlement, UI65_D4_AbandonedAsyncActivationSettlesChildView) {
+    AgentEnv env("spec65-async", std::make_unique<FakeLLM>(FakeScript{}));
+    ManualActivator activator;
+    StubRouteCatalog route_catalog;
+    ModelSelectionController model_selection{
+        [](const SessionId&, payload::SessionModelChanged) {},
+        [](const std::string&) -> std::optional<ModelSelection> { return std::nullopt; }};
+    JobRegistry jobs;
+    JobWakeupPolicy wakeup{jobs, env.bus, JobWakeupConfig{}, env.registry};
+    SubagentService service(env.registry, env.sessions, nullptr, jobs, wakeup, model_selection,
+                            route_catalog, env.runtime, activator, env.bus);
+    const std::shared_ptr<AgentLoop> parent = env.createAgent();
+
+    SubagentService::StartRequest request;
+    request.parent            = parent->session();
+    request.label             = "task";
+    request.prompt            = "do it";
+    request.run_in_background = true;
+
+    const StartResult started = service.startContinuable(request).get();
+    ASSERT_FALSE(started.error.has_value());
+    ASSERT_EQ(activator.child().value, started.child.value);
+
+    const std::shared_ptr<AgentLoop> child = env.registry.findShared(started.child);
+    ASSERT_NE(child, nullptr);
+    env.registry.dispose(child->id());
+
+    EXPECT_FALSE(service.runBackgroundActivation(started.child));
+
+    const std::shared_ptr<Session> parent_session = env.sessionOf(*parent);
+    EXPECT_EQ(terminal_fanin_count(*parent_session, started.child), 1u)
+        << "the detached worker's failed activation must still settle the epoch";
+
+    UiModel model;
+    const SessionUiState* state = project_parent_session(env, parent, model);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->subagents.agents.size(), 1u);
+    EXPECT_NE(state->subagents.agents[0].status, SubagentStatus::Running);
+    EXPECT_FALSE(model.active_session_working());
 }
 
 TEST(Spec55Delegation, ReplayDeliversOneNoticePerUnreportedBackgroundFanIn) {
