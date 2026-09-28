@@ -1,6 +1,10 @@
 # 59 — Composer Wrapping Errata: Multi-Row Draft, Bounded Growth, Caret Tracking
 
-Status: **draft** (design-first gate; see `DESIGN_STATUS.md`).
+Status: **draft (Rev 2)** (design-first gate; see `DESIGN_STATUS.md`). Rev 2 adds
+59-D7: plain `ArrowUp`/`ArrowDown` first move the caret across the wrapped draft
+rows and only fall through to history on the first/last visual row. This amends
+45-D1.2, `10` §9.2, `48` §5 and `00` §20.26; the rendering contract (59-D1–D6) is
+unchanged.
 
 This errata fixes the user-visible defect *"when I typed a long prompt it did
 not wrap to the next line but just disappeared from screen."* The composer
@@ -23,6 +27,7 @@ here rather than fixed as a pure defect.
 | 59-D4 | The caret remains the **single** focus owner (48-D5.1, `00` F6). `CaretAnchor` is placed on the wrapped row/column that holds the caret glyph, so `screen.cursor()` tracks it. | Preserves 48-D5.1 |
 | 59-D5 | The 58-E33 read-only subagent path is unchanged: with a non-empty `subagent_path`, `render_input` returns the hint row and no draft/caret. | Preserves 58-E33 |
 | 59-D6 | `render_input` takes the composer's available width (`size.width`) as a parameter; `build_ui` computes it. `render_input` is in the anonymous namespace (`src/ui/ui_render.cpp:28-1632`) with one caller (`:1742`). | New signature; internal |
+| 59-D7 | Plain `ArrowUp`/`ArrowDown` first move the caret **one visual row** within the wrapped draft whenever an adjacent visual row exists, preserving the display-cell column where it fits and clamping to the target row's end; on the first row (`Up`) / last row (`Down`) they fall through to the existing `history_up`/`history_down` (45-D1.2). The draft is unchanged by the caret move and history is untouched. `Shift+Arrow*` (60) and the command-list branch (45-D2) keep their precedence; no new key is added. The slide window (59-D1/62-D1) follows the new caret row. | New; amends 45-D1.2, `10` §9.2, `48` §5, `00` §20.26; cites 59-D1/D3/D4, 62-D1/D2, 48-D5.1 |
 
 ## 2. Interface sketch
 
@@ -41,6 +46,23 @@ Element render_input(const UiModel& model, const Theme& theme, int width);
 text width is `width - 4` (the `LeftBar` reserves two columns, `ui_render.cpp:55-66`)
 `- 2` (the `> `/`  ` prefix), clamped to `>= 1`.
 
+```cpp
+// include/ymh/ui/ui_render.hpp — 59-D7
+// The single glyph-aware wrap (59-D3) is shared by `render_input` and the
+// vertical-caret mover, so the row/column mapping cannot drift (59-F7).
+// `text_width` is the draft's cell budget (`width - 6`, 59-D3/59-D6).
+[[nodiscard]] bool composer_move_cursor_vertical(std::string_view draft,
+                                                 std::size_t& cursor, int direction,
+                                                 int text_width);
+```
+
+`direction < 0` is `ArrowUp`, `direction > 0` is `ArrowDown`. The function is
+pure (no I/O, no model mutation beyond the `cursor` out-param) and total: it
+returns `false` — leaving `cursor` untouched — exactly when the caret is already
+on the first (`Up`) or last (`Down`) visual row, which is the signal for the
+caller to fall through to history. The `cursor` is glyph-aligned (`glyph_floor`,
+48-D5.1) before use.
+
 ## 3. Invariants
 
 | ID | Invariant |
@@ -52,6 +74,7 @@ text width is `width - 4` (the `LeftBar` reserves two columns, `ui_render.cpp:55
 | 59-I5 | For a draft that fits one row, the rendered row is identical to the pre-59 single-line `hbox` (existing caret goldens and `ConversationSnapshot` unchanged). |
 | 59-I6 | All width math is in display cells (`ftxui::string_width`), never UTF-8 bytes. |
 | 59-I7 | The `with_left_bar` gutter and `user_block_background` tint span every rendered composer row (51-D2.3). |
+| 59-I8 | Plain `ArrowUp`/`ArrowDown` with the caret **not** on the first/last visual row move the caret to the adjacent visual row: the display-cell column is preserved where the target row has a glyph boundary at or before it and clamped to the target row's last boundary otherwise; the draft is unchanged and history is not touched. On the first (`Up`) / last (`Down`) visual row the key recalls history instead (45-D1.2). The command-list branch (45-D2) still wins when a list is active. |
 
 ## 4. Failure modes
 
@@ -65,6 +88,8 @@ F# tags per `00-architecture.md` §54.
 | 59-F4 | Terminal narrower than the chrome → non-positive text width → loop or zero-size element. | Clamp text width to `>= 1`; always emit at least one row. |
 | 59-F5 | A wide (CJK) glyph straddles the row boundary and overflows. | Whole-glyph wrap on cell width (59-D3/59-I6). |
 | 59-F6 | (F11/58-E33) The read-only subagent hint leaks the draft/caret. | Early return before wrapping (59-D5/59-I1). |
+| 59-F7 | (F6) Vertical caret motion desyncs from the rendered caret row (a second wrap mapping drifts from `render_input`'s). | One shared glyph wrap feeds both `render_input` and `composer_move_cursor_vertical` (59-D7); `screen.cursor()` remains the sole focus owner (59-D4). |
+| 59-F8 | (F6) A caret move is mistaken for a history recall (or vice versa) and silently replaces the draft. | The caret move never edits the draft; `history_up`/`history_down` run only when `composer_move_cursor_vertical` returns false (59-I8). Tests 59-U7/59-U8/59-U9 pin both halves. |
 
 ## 5. dsh mapping
 
@@ -72,6 +97,7 @@ F# tags per `00-architecture.md` §54.
 |---|---|---|
 | Multi-line composer that grows with the draft | **mirrored** (59-D1) | dsh's composer grows; here growth is capped at `kComposerMaxRows` for transcript space. |
 | Composer internal scroll past the cap | **mirrored** (59-D1) | Sliding window keyed on the caret row; no new keys. |
+| `ArrowUp`/`ArrowDown` navigate a multi-line draft's rows before history | **mirrored** (59-D7) | dsh's composer is multi-line, so the arrows belong to the caret while an adjacent row exists; history is the first/last-row fall-through (45-D1.2 amendment). |
 | Word-boundary wrap | **not mirrored** | Deliberate scope decision: the composer wraps on cell boundaries like a shell prompt; a wrap-point policy change would be a separate decision (compare `markdown_renderer.cpp:264` word-wrap for prose). |
 
 ## 6. Test plan
@@ -83,9 +109,20 @@ F# tags per `00-architecture.md` §54.
 | 59-U3 | existing `CaretCursorLandsAtInputPosition`, `CaretCursorHandlesCjkLeadingCell`, `ConversationSnapshot` | 59-I5: short-draft rendering unchanged. |
 | 59-U4 | existing `UI58_G6_*` read-only composer test | 59-I1: subagent hint unchanged. |
 | 59-U5 | `UiRenderGolden.LongComposerDraftWrapsAndStaysVisible` (height) | 59-I4: composer rows `<= kComposerMaxRows`. |
+| 59-U6 | `UiRenderGolden.ComposerVerticalCaretMovesWithinWrappedRows` | 59-I8: `composer_move_cursor_vertical` moves across rows, preserves/clamps the column, and returns `false` on the first/last row. |
+| 59-U7 | `SupervisorHarnessTest.UI59_D7_UpOnLaterRowMovesCaretNotHistory` | 59-I8: a plain Up on a later visual row moves the caret; draft/history untouched. |
+| 59-U8 | `SupervisorHarnessTest.UI59_D7_UpOnFirstRowRecallsHistory` | 59-I8/45-D1.2: a plain Up on the first visual row recalls history. |
+| 59-U9 | `SupervisorHarnessTest.UI59_D7_DownOnLastRowRecallsHistory` | 59-I8/45-D1.2: a plain Down on the last visual row recalls history-next. |
+| 59-U10 | `UiRenderGolden.ComposerVerticalCaretKeepsRowVisibleWhenWindowSlides` | 59-D7/59-I4: after a caret move up from a draft taller than `kComposerMaxRows`, the window follows the caret and `screen.cursor()` stays on a visible composer row. |
 
 Pre-fix evidence: 59-U1 and 59-U2 fail on HEAD — the composer renders
 `│ >STARTxxxx…│` with `END_MARKER` clipped (`marker_row == -1`).
+
+Rev 2 pre-fix evidence: 59-U7/59-U8/59-U9 fail on the pre-59-D7 handler — a plain
+`Up`/`Down` always recalls history, so a later-row `Up` replaces the draft with
+the recalled prompt instead of moving the caret, and a first-row `Up` is
+indistinguishable from the later-row case. 59-U6/59-U10 cannot be built pre-fix
+(`composer_move_cursor_vertical` does not exist).
 
 ## 7. Supersedes / amendments
 
@@ -96,8 +133,18 @@ Pre-fix evidence: 59-U1 and 59-U2 fail on HEAD — the composer renders
 - **Preserves 58-E33** (`58-subagent-navigation-errata.md:1539-1542`): the
   read-only subagent composer hint and its dispatch guard
   (`src/ui/supervisor.cpp:3257-3265`) are unchanged.
-- **No amendment to 45** input handling: 45-I20/45-D9 (composer Tab/agent
-  cycling) operate on `InputModel` and are independent of composer height.
+- **Amends 45-D1.2 / 45-I2** (`45-ui-interaction-errata.md:219-233`, `:1649`):
+  the inactive-list branch of plain `ArrowUp`/`ArrowDown` gains a caret step
+  (`composer_move_cursor_vertical`, 59-D7) *before* history recall. History
+  storage and the command-list precedence are unchanged; history remains the
+  fall-through on the first/last visual row.
+- **Amends `10-supervisor-tui.md` §9.2** (`:1059-1061`): the input-editor
+  binding becomes `Up`/`Down` = caret rows, else history.
+- **Amends `48-ui-and-config-errata.md` §5** (`:474`): the `ArrowUp`/`ArrowDown`
+  row now cites "45-D1 (as amended by 59-D7)".
+- **Amends `00-architecture.md` §20.26** (`:3513`): the keybinding table reads
+  `Up/Down` = caret rows, else history.
 - No existing invariant pins the composer to exactly one row; this spec
   introduces that layout contract and keeps one-row output for short drafts
-  (59-I5).
+  (59-I5). For a one-row draft 59-D7 is a no-op: both arrows fall straight
+  through to history (59-I5 + 59-I8 agree).

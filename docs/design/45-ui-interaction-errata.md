@@ -175,7 +175,7 @@ unmodeled-session repair path.
 
 | ID | Decision | Amends |
 |---|---|---|
-| 45-D1 | History holds prompts + commands; Arrow precedence: command list first, history otherwise | 10, 17 |
+| 45-D1 | History holds prompts + commands; Arrow precedence: command list first, then caret rows (59-D7), history otherwise | 10, 17, 59 |
 | 45-D2 | `/` list; ArrowUp/Down navigate; Tab completes the selected; `CompletionCycle` retired | 10, 17, 25 |
 | 45-D3 | Live ⊆ History: a Live session leaf requires catalog membership | 10, 22 |
 | 45-D4 | Focused session excluded from both sources; **no node suppression** — explicit placeholders (22 §4.3/§4.4 retained) | 10, 22 |
@@ -221,12 +221,19 @@ the list cannot be navigated.
 ```text
 ArrowUp / ArrowDown:
     if command_list_active(state)        -> move_hint_selection(state, -1/+1); return true
+    else if composer_move_cursor_vertical(input.draft, input.cursor, -1/+1, text_width)
+                                         -> return true          # 59-D7
     else                                 -> history_up()/history_down(); refresh_hints(state)
 ```
 
    `command_list_active(state)` is `!state.command_hints.empty() &&
    !state.hints_dismissed` (45-D5). Moving the selection wraps modulo the list
    size; it never mutates `input.draft` and never touches history.
+   `composer_move_cursor_vertical` (59-D7) is the middle step: for a draft that
+   wraps to more than one visual row it moves the caret to the adjacent row and
+   returns true; it returns false only when the caret is on the first (`Up`) or
+   last (`Down`) visual row, which is exactly when history is recalled. For a
+   one-row draft it is a no-op, so the pre-59 behavior is preserved (59-I5).
 3. **History recall rebuilds hints.** When the list is inactive, history recall
    keeps calling `refresh_hints` (as today, `:2021`, `:2028`) so recalling a
    command repopulates its list; recall does **not** clear `hints_dismissed`
@@ -1646,7 +1653,7 @@ Numbered `45-I#`; testable and cited.
 | ID | Invariant |
 |---|---|
 | 45-I1 | History contains both prompts and commands, in submission order, de-duplicated only against the immediately previous entry (`src/ui/supervisor.cpp:386`, `:1963`; `src/ui/ui_model.cpp:192-203`). |
-| 45-I2 | When the command list is active, ArrowUp/ArrowDown move `command_hint_selected` and never mutate `input.draft` or history; otherwise they recall history (45-D1). |
+| 45-I2 | When the command list is active, ArrowUp/ArrowDown move `command_hint_selected` and never mutate `input.draft` or history; otherwise they first move the caret across the wrapped draft's visual rows (59-D7) and recall history only on the first/last visual row (45-D1). |
 | 45-I3 | Tab never navigates the command list. With the list active (or a bare `/prefix` with matches) Tab completes the selected/first command with a trailing space (45-D2). |
 | 45-I4 | `CompletionCycle` and `InputModel::completion` do not exist after 45-D2. |
 | 45-I5 | A session leaf renders in the Live source iff the workspace is renderable (22 SW1), the session id is in the latest catalog snapshot, and it is not the focused session (45-D3, 45-D4). |

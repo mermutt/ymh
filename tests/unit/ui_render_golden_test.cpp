@@ -2527,6 +2527,93 @@ TEST(UiRenderGolden, LongComposerDraftCapsHeightAndKeepsTailVisible) {
     EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
 }
 
+// 59-D7 (59-I8): the shared wrap helper drives vertical caret motion; verify the
+// row/column mapping, the column clamp, and the first/last-row fall-through
+// signal directly. The draft is never edited.
+TEST(UiRenderGolden, ComposerVerticalCaretMovesWithinWrappedRows) {
+    const std::string draft(40, 'a');  // two visual rows at text width 34
+    std::size_t       cursor = draft.size();
+
+    EXPECT_TRUE(composer_move_cursor_vertical(draft, cursor, -1, 34));
+    EXPECT_EQ(cursor, 6u) << "up keeps column 6 on the row above";
+
+    EXPECT_FALSE(composer_move_cursor_vertical(draft, cursor, -1, 34));
+    EXPECT_EQ(cursor, 6u) << "no row above the first; cursor untouched";
+
+    EXPECT_TRUE(composer_move_cursor_vertical(draft, cursor, 1, 34));
+    EXPECT_EQ(cursor, 40u) << "down returns to the end of the last row";
+
+    EXPECT_FALSE(composer_move_cursor_vertical(draft, cursor, 1, 34));
+    EXPECT_EQ(cursor, 40u) << "no row below the last; cursor untouched";
+
+    // A short second row clamps to its end: "abcde" at width 3 -> "abc"/"de".
+    std::string clamped = "abcde";
+    std::size_t at      = 2;
+    EXPECT_TRUE(composer_move_cursor_vertical(clamped, at, 1, 3));
+    EXPECT_EQ(at, 5u) << "the caret clamps to the shorter row's end";
+    EXPECT_EQ(clamped, "abcde") << "the draft must never be edited";
+
+    std::string one = "short";
+    std::size_t pos = 3;
+    EXPECT_FALSE(composer_move_cursor_vertical(one, pos, -1, 34));
+    EXPECT_FALSE(composer_move_cursor_vertical(one, pos, 1, 34));
+    EXPECT_EQ(pos, 3u) << "a one-row draft is a no-op in both directions";
+
+    std::string empty;
+    std::size_t zero = 0;
+    EXPECT_FALSE(composer_move_cursor_vertical(empty, zero, -1, 34));
+    EXPECT_FALSE(composer_move_cursor_vertical(empty, zero, 1, 34));
+    EXPECT_EQ(zero, 0u);
+}
+
+// 59-D7/59-I4: after a caret move up from a draft taller than kComposerMaxRows,
+// the rendered window follows the caret to the first row and the caret stays on
+// a visible composer row.
+TEST(UiRenderGolden, ComposerVerticalCaretKeepsRowVisibleWhenWindowSlides) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string draft = "HSTART";
+    draft.resize(300, 'x');
+    state->input.draft  = draft;
+    state->input.cursor = draft.size();
+
+    const std::string before =
+        normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false}));
+    EXPECT_EQ(before.find("HSTART"), std::string::npos)
+        << "the first draft row is off-window while the caret is on the last row";
+
+    for (int step = 0; step < 20; ++step) {
+        if (!composer_move_cursor_vertical(state->input.draft, state->input.cursor, -1, 34)) {
+            break;
+        }
+    }
+    ASSERT_LT(state->input.cursor, 34u) << "the caret reached the first visual row";
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{40, 24}, Theme{false});
+    const std::string after =
+        normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false}));
+    SCOPED_TRACE(after);
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+    EXPECT_NE(after.find("HSTART"), std::string::npos)
+        << "the window slid to the caret's first row";
+
+    const std::vector<std::string> lines = split_lines(after);
+    int status_row = -1;
+    int separator_row = -1;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (lines[index].find("0 active") != std::string::npos) {
+            status_row = static_cast<int>(index);
+        }
+        if (status_row < 0 && lines[index].find("├") != std::string::npos) {
+            separator_row = static_cast<int>(index);
+        }
+    }
+    ASSERT_GE(separator_row, 0);
+    EXPECT_GT(screen.cursor().y, separator_row);
+    EXPECT_LT(screen.cursor().y, status_row);
+}
+
 // 61-G1 (62-D1): a draft that needs the whole display must not push the
 // composer (and its caret) off-screen. The composer is capped by the height the
 // layout actually has left for it, and the transcript collapses to zero rather

@@ -3510,7 +3510,7 @@ Shift+Enter     newline
 Ctrl+C          cancel generation
 Ctrl+D          exit / EOF
 Ctrl+L          redraw
-Up/Down         history
+Up/Down         caret rows within the draft, else history (59-D7)
 PageUp/PageDown scroll
 Ctrl+R          search history
 Tab             completion

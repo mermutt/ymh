@@ -679,9 +679,12 @@ TEST(SupervisorHarnessTest, UI45_D1_HistoryHoldsPromptsAndCommands) {
     EXPECT_EQ(fixture.state()->input.draft, "/help");
 }
 
-// 45-D1.2 (45-I2): the active list takes precedence over history recall.
+// 45-D1.2 (45-I2) / 59-D7 (59-I8): the active list takes precedence over
+// history recall; with the list dismissed and the caret on the FIRST (only)
+// visual row, plain Up falls through to history.
 TEST(SupervisorHarnessTest, UI45_D1_ArrowPrecedenceListVsHistory) {
     ComposerFixture fixture("ymh45d1prec");
+    fixture.harness->set_terminal_width(40);
     fixture.type("hi");
     ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
     fixture.type("/");
@@ -697,8 +700,79 @@ TEST(SupervisorHarnessTest, UI45_D1_ArrowPrecedenceListVsHistory) {
     ASSERT_EQ(fixture.state()->input.history.size(), 1u);
 
     ASSERT_TRUE(fixture.harness->dispatch_key("escape"));
+    // `/` is a single visual row at this width, so the caret is on the first row
+    // and 59-D7 must fall through to history.
+    ASSERT_LT(state->input.draft.size(), 34u);
     ASSERT_TRUE(fixture.harness->dispatch_key("up"));
     EXPECT_EQ(fixture.state()->input.draft, "hi");
+}
+
+// 59-D7 (59-I8): a plain Up with the caret on a LATER visual row moves the caret
+// up one row (keeping its column) and must not recall history. Pre-fix Up always
+// recalled history.
+TEST(SupervisorHarnessTest, UI59_D7_UpOnLaterRowMovesCaretNotHistory) {
+    ComposerFixture fixture("ymh59d7uprow");
+    fixture.harness->set_terminal_width(40);
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+
+    fixture.type("previous prompt");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+
+    // 40 glyphs wrap to two visual rows at width 40 (draft budget 34).
+    const std::string long_draft(40, 'a');
+    fixture.type(long_draft);
+    ASSERT_EQ(state->input.draft, long_draft);
+    ASSERT_EQ(state->input.cursor, long_draft.size());
+
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(state->input.draft, long_draft) << "Up on a later row must not recall history";
+    EXPECT_EQ(state->input.cursor, 6u) << "the caret keeps its column on the row above";
+    ASSERT_EQ(state->input.history.size(), 1u);
+    EXPECT_EQ(state->input.history_pos, 1u) << "history cursor untouched";
+}
+
+// 59-D7 (59-I8): a plain Up with the caret on the FIRST visual row falls through
+// to history recall.
+TEST(SupervisorHarnessTest, UI59_D7_UpOnFirstRowRecallsHistory) {
+    ComposerFixture fixture("ymh59d7upfirst");
+    fixture.harness->set_terminal_width(40);
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+
+    fixture.type("previous prompt");
+    ASSERT_TRUE(fixture.harness->dispatch_key("enter"));
+
+    // A wrapped draft whose caret is deliberately on the first visual row.
+    state->input.draft  = std::string(40, 'a');
+    state->input.cursor = 3;
+    ASSERT_TRUE(fixture.harness->dispatch_key("up"));
+    EXPECT_EQ(state->input.draft, "previous prompt")
+        << "Up on the first visual row must recall history";
+}
+
+// 59-D7 (59-I8): a plain Down with the caret on the LAST visual row falls
+// through to history-next (the saved draft).
+TEST(SupervisorHarnessTest, UI59_D7_DownOnLastRowRecallsHistory) {
+    ComposerFixture fixture("ymh59d7downlast");
+    fixture.harness->set_terminal_width(40);
+    SessionUiState* state = fixture.harness->mutable_model().session(fixture.session);
+    ASSERT_NE(state, nullptr);
+
+    state->input.push_history("first");
+    state->input.push_history("second");
+    state->input.draft = "typed draft";
+    ASSERT_TRUE(state->input.history_up());  // -> "second", saves "typed draft"
+    ASSERT_EQ(state->input.draft, "second");
+    ASSERT_EQ(state->input.history_pos, 1u);
+
+    // A wrapped draft whose caret is on the last visual row.
+    state->input.draft  = std::string(40, 'a');
+    state->input.cursor = 40;
+    ASSERT_TRUE(fixture.harness->dispatch_key("down"));
+    EXPECT_EQ(state->input.draft, "typed draft")
+        << "Down on the last visual row must recall the saved draft";
+    EXPECT_EQ(state->input.history_pos, 2u);
 }
 
 // 45-D2.2 (45-I2): ArrowUp/ArrowDown move the highlight and wrap; never edit.

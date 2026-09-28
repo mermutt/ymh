@@ -1057,7 +1057,9 @@ Ctrl+C          cancel the active session only; when the switcher is open,
 ```
 
 Input-editor bindings (`§25`): `Enter` send, `Shift+Enter` newline, `Ctrl+D`
-exit/EOF, `Ctrl+L` redraw, `Up`/`Down` history, `PageUp`/`PageDown` scroll,
+exit/EOF, `Ctrl+L` redraw, `Up`/`Down` move the caret across the wrapped draft's
+visual rows and recall history only on the first/last row (59-D7),
+`PageUp`/`PageDown` scroll,
 `Ctrl+R` history search, `Tab` completion, `Esc` cancel popup. Slash commands
 are detected by a leading `/` and delegated to `CommandRegistry` (`§26`);
 `InputView` never hard-codes them.
