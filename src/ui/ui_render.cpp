@@ -361,6 +361,13 @@ constexpr std::array<const char*, 8> kReasoningSpinnerFrames = {
     "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧",
 };
 
+// 63-D1/63-D6: the bottom status indicator is a pendulum comet (head `●`, tail
+// `•`) sweeping right then left, distinct from the transcript's reasoning
+// spinner; it reuses `model.spinner.frame` (63-D2) and shows only while active.
+constexpr std::array<const char*, 8> kBottomActivityFrames = {
+    "●···", "•●··", "·•●·", "··•●", "···●", "··●•", "·●•·", "●•··",
+};
+
 const char* reasoning_sign(const ConversationEntry& entry, std::size_t frame) {
     if (!entry.streaming) {
         return "•";
@@ -976,8 +983,8 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     };
     if (model.has_active_turn()) {
         left_cells.push_back(ftxui::text(
-            std::string(kReasoningSpinnerFrames[model.spinner.frame %
-                                                kReasoningSpinnerFrames.size()]) +
+            std::string(kBottomActivityFrames[model.spinner.frame %
+                                              kBottomActivityFrames.size()]) +
             " "));
     }
     if (!subagent_prefix.empty()) {
