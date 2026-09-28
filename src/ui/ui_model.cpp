@@ -1748,6 +1748,9 @@ bool advance_spinner_clock(ReasoningSpinnerState& spinner,
     }
     auto delta = now - *spinner.last_tick;
     spinner.last_tick = now;
+    if (delta <= std::chrono::steady_clock::duration::zero()) {
+        return false;
+    }
     if (delta > kSpinnerMaxStall) {
         delta = kSpinnerMaxStall;
     }

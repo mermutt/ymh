@@ -653,7 +653,7 @@ GlyphWrap wrap_glyphs(const std::vector<int>& widths, int text_width) {
 }
 
 Element render_input(const UiModel& model, const Theme& theme, int terminal_width,
-                     int max_rows, bool hide_caret) {
+                     int max_rows, bool hide_caret, bool pad) {
     if (!model.subagent_path.empty()) {
         const std::string hint = "(viewing subagent " + short_id(model.subagent_path.back()) +
                                  " — Ctrl+T children · Esc return)";
@@ -753,14 +753,20 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
     }
 
     Elements rendered;
-    rendered.reserve(visible_cells.size() + 2);
+    rendered.reserve(visible_cells.size() +
+                     static_cast<std::size_t>(pad ? kComposerPaddingRows : 0));
     // 64-D3: one blank row above and one below the draft, inside the composer
-    // block so the gutter and tint span the padding too.
-    rendered.push_back(ftxui::hbox({ftxui::text(" ")}));
+    // block so the gutter and tint span the padding too. `pad` is false only on
+    // a terminal too short to keep the status bar on-screen (64-D3/L3).
+    if (pad) {
+        rendered.push_back(ftxui::hbox({ftxui::text(" ")}));
+    }
     for (Elements& cells : visible_cells) {
         rendered.push_back(ftxui::hbox(std::move(cells)));
     }
-    rendered.push_back(ftxui::hbox({ftxui::text(" ")}));
+    if (pad) {
+        rendered.push_back(ftxui::hbox({ftxui::text(" ")}));
+    }
     // 51-D2.3: the composer carries the same gutter + tint as the transcript;
     // 59-I7: the gutter spans every wrapped row.
     Element line = with_left_bar(ftxui::vbox(std::move(rendered)), theme);
@@ -2043,9 +2049,11 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
         reserved += min_rows(element);
     }
     reserved += min_rows(status);
+    const int composer_space = std::max(0, inner_height - reserved);
+    const bool composer_pad = composer_space >= kComposerPaddingRows + 1;
     const int composer_rows = std::min(
         kComposerMaxRows,
-        std::max(1, inner_height - reserved - kComposerPaddingRows));
+        std::max(1, composer_space - (composer_pad ? kComposerPaddingRows : 0)));
 
     Elements rows;
     rows.reserve(above.size() + below.size() + 3);
@@ -2072,7 +2080,8 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
         (is_active_state(composer->agent_state) ||
          UiModel::session_has_streaming_reasoning(*composer));
     const bool animating = focused_animating && !composer_editing;
-    rows.push_back(render_input(model, theme, size.width, composer_rows, animating));
+    rows.push_back(
+        render_input(model, theme, size.width, composer_rows, animating, composer_pad));
     rows.push_back(std::move(status));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
