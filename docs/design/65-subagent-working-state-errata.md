@@ -1,7 +1,9 @@
 # 65 — Subagent Working-State Errata: The Activity Indicator Follows the Turn Subtree
 
-Status: **implemented; MEDIUM-1 fixed; independent re-gate pending** (see
-`DESIGN_STATUS.md`). This
+Status: **verified** — Oracle re-gate APPROVED (0 HIGH / 0 MEDIUM); the gate's
+LOW prescriptions are applied (atomic epoch claim in `settle_epoch`, notice
+wording, corrected citations, 65-S4). See
+`DESIGN_STATUS.md`. This
 errata is written design-first and implemented in the same change set as its code,
 at the user's request; the owning specs 46 (verified) and 63 (implemented) are
 unchanged in intent. It fixes one defect: during a task that delegates to a
