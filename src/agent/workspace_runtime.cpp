@@ -187,7 +187,9 @@ public:
         if (service_ == nullptr) {
             return false;
         }
-        std::thread([this, child] { static_cast<void>(service_->activateChild(child)); }).detach();
+        std::thread([this, child] {
+            static_cast<void>(service_->runBackgroundActivation(child));
+        }).detach();
         return true;
     }
 

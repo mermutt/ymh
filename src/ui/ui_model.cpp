@@ -598,12 +598,12 @@ bool is_waiting_state(AgentState state) noexcept {
 
 namespace {
 
-// 65-D1: a session works when its own turn is active or one of its direct
+// 65-D1: a session works when its own turn is active or one of its **direct**
 // subagents is still `Running`. `SubagentSpawned` sets Running before the child
-// is activated and `SubagentFanIn` flips it terminal only after the child's
-// whole activation settles, so a nested grandchild is covered by its parent's
-// Running status. The child's own `turn/ended` therefore never ends the
-// parent's derived work.
+// is activated and `SubagentFanIn` flips it terminal only after that direct
+// child's activation settles, so the child's own `turn/ended` never ends the
+// parent's derived work. The scope is direct children only: a background
+// grandchild is not covered once its own parent has settled (65-F5).
 bool session_working(const SessionUiState& state) {
     if (is_active_state(state.agent_state)) {
         return true;

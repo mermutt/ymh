@@ -109,6 +109,12 @@ public:
     // delivers the stored background prompt and runs the child activation.
     [[nodiscard]] bool activateChild(const SessionId& child);
 
+    // 65-D4: the detached-worker activation entry. Identical to `activateChild`
+    // except that a failed activation settles the abandoned epoch, so the
+    // parent's `SubagentView` never dangles `Running` when the caller (which
+    // already returned from `submit`) cannot observe the failure.
+    [[nodiscard]] bool runBackgroundActivation(const SessionId& child);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

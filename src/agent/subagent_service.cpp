@@ -128,7 +128,8 @@ std::string settlement_correlation(const SessionId& child, std::size_t ordinal) 
 
 std::string render_notice(const SessionId& child, const std::string& closing) {
     return "Background subagent " + child.value +
-           " finished and will do no further work unless you send it more.\nIts closing message:\n" +
+           " is no longer running and will do no further work unless you send it more.\nIts "
+           "closing message:\n" +
            (closing.empty() ? std::string{"(no output)"} : closing);
 }
 
@@ -461,6 +462,56 @@ struct SubagentService::Impl {
         });
     }
 
+    // 65-D4: a spawned child that is abandoned before it can settle must still
+    // get its terminal `SubagentFanIn`. `AgentLoop::dispose` clears the settle
+    // callbacks without invoking them (agent_loop.cpp), so a rejected background
+    // activation (55-F13) would otherwise leave the parent's `SubagentView`
+    // `Running` forever — the mirror of the 65-D1 dangling view. Emit the fan-in
+    // (and settle the epoch/job) before disposing the child.
+    void settle_rejected_background(const SessionId& parent, const SessionId& child) {
+        (void)settle_epoch(parent, child, payload::SubagentOutcome::Cancelled,
+                           "executor queue full", true);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            pending_prompts.erase(child.value);
+        }
+        if (const std::shared_ptr<AgentLoop> created = registry.findShared(child)) {
+            registry.dispose(created->id());
+        }
+    }
+
+    // 65-D4: the foreground await can fail (timeout / disposed child, 55-F21).
+    // That path also abandons the child, so emit the terminal fan-in and roll the
+    // child back rather than leaving a `Running` view with no counterpart.
+    void settle_failed_await(const SessionId& parent, const SessionId& child,
+                             const std::shared_ptr<AgentLoop>& agent) {
+        (void)settle_epoch(parent, child, payload::SubagentOutcome::Cancelled,
+                           "subagent did not settle", false);
+        if (agent != nullptr) {
+            registry.dispose(agent->id());
+        }
+    }
+
+    // 65-D4: the live `ThreadedActivator` runs the activation on a detached
+    // worker after `submit` already returned true, so a worker that finds the
+    // child disposed has no caller to settle the epoch. Settle it here; the
+    // `settle_epoch` epoch claim makes a racing real settlement a no-op.
+    void settle_abandoned_activation(const SessionId& child) {
+        SessionId parent;
+        bool      notice_expected = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto                  it = epochs.find(child.value);
+            if (it == epochs.end() || !it->second.open) {
+                return;
+            }
+            parent          = it->second.parent;
+            notice_expected = it->second.notice_expected;
+        }
+        (void)settle_epoch(parent, child, payload::SubagentOutcome::Cancelled,
+                           "activation unavailable", notice_expected);
+    }
+
     std::expected<SettlementResult, AgentError> settle_epoch(const SessionId& parent,
                                                              const SessionId& child,
                                                              payload::SubagentOutcome outcome,
@@ -476,6 +527,23 @@ struct SubagentService::Impl {
             return std::unexpected(AgentError{AgentErrorCode::UnknownSession, error.what()});
         }
 
+        // 65-I7: claim the epoch before appending, so a second settle (e.g. the
+        // detached-worker backstop racing a real settlement) cannot append a
+        // second terminal `SubagentFanIn`. An absent epoch still settles: the
+        // public `settle` entry point may have no activation epoch.
+        std::optional<JobId> job;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto                  it = epochs.find(child.value);
+            if (it != epochs.end()) {
+                if (!it->second.open) {
+                    return result;
+                }
+                job             = it->second.job;
+                it->second.open = false;
+            }
+        }
+
         payload::SubagentFanIn fan_in;
         fan_in.subagent        = child;
         fan_in.outcome         = outcome;
@@ -483,15 +551,6 @@ struct SubagentService::Impl {
         fan_in.notice_expected = notice_expected;
         parent_session->append(fan_in);
 
-        std::optional<JobId> job;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            const auto                  it = epochs.find(child.value);
-            if (it != epochs.end()) {
-                job        = it->second.job;
-                it->second.open = false;
-            }
-        }
         if (job.has_value()) {
             JobOutcome job_outcome;
             job_outcome.status = job_status_for(outcome);
@@ -620,10 +679,7 @@ Task<StartResult> SubagentService::startOneShot(StartRequest request) {
             impl_->pending_prompts[child->value] = user_prompt(request.prompt);
         }
         if (!impl_->activator.submit(*child)) {
-            const std::shared_ptr<AgentLoop> created = impl_->registry.findShared(*child);
-            if (created != nullptr) {
-                impl_->registry.dispose(created->id());
-            }
+            impl_->settle_rejected_background(request.parent, *child);
             result.error = AgentError{AgentErrorCode::InboxFull, "executor queue full"};
             return Task<StartResult>(std::move(result));
         }
@@ -639,6 +695,7 @@ Task<StartResult> SubagentService::startOneShot(StartRequest request) {
 
     const std::shared_ptr<AgentLoop> agent = impl_->registry.findShared(*child);
     if (agent == nullptr || !wait_for_settlement(agent, user_prompt(request.prompt))) {
+        impl_->settle_failed_await(request.parent, *child, agent);
         result.error = AgentError{AgentErrorCode::Cancelled, "subagent did not settle"};
         return Task<StartResult>(std::move(result));
     }
@@ -685,10 +742,7 @@ Task<StartResult> SubagentService::startContinuable(StartRequest request) {
             impl_->pending_prompts[child->value] = user_prompt(request.prompt);
         }
         if (!impl_->activator.submit(*child)) {
-            const std::shared_ptr<AgentLoop> created = impl_->registry.findShared(*child);
-            if (created != nullptr) {
-                impl_->registry.dispose(created->id());
-            }
+            impl_->settle_rejected_background(request.parent, *child);
             result.error = AgentError{AgentErrorCode::InboxFull, "executor queue full"};
             return Task<StartResult>(std::move(result));
         }
@@ -698,6 +752,7 @@ Task<StartResult> SubagentService::startContinuable(StartRequest request) {
     impl_->open_epoch(*child, request.parent, false, true, request.label);
     const std::shared_ptr<AgentLoop> agent = impl_->registry.findShared(*child);
     if (agent == nullptr || !wait_for_settlement(agent, user_prompt(request.prompt))) {
+        impl_->settle_failed_await(request.parent, *child, agent);
         result.error = AgentError{AgentErrorCode::Cancelled, "subagent did not settle"};
         return Task<StartResult>(std::move(result));
     }
@@ -734,6 +789,14 @@ bool SubagentService::activateChild(const SessionId& child) {
     }
     agent->send(std::move(message));
     return true;
+}
+
+bool SubagentService::runBackgroundActivation(const SessionId& child) {
+    if (activateChild(child)) {
+        return true;
+    }
+    impl_->settle_abandoned_activation(child);
+    return false;
 }
 
 Task<SendResult> SubagentService::sendMessage(const SessionId& sender, const SessionId& target,
