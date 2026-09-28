@@ -1722,20 +1722,49 @@ bool UiModel::has_streaming_reasoning() const {
     return false;
 }
 
-bool UiModel::advance_reasoning_spinner(std::chrono::milliseconds delta) {
-    constexpr std::chrono::milliseconds kFrameStep{120};
-    if (!has_streaming_reasoning()) {
-        spinner.elapsed = std::chrono::milliseconds::zero();
+namespace {
+
+// 64-D1: the animation frame step and the maximum credit a single stall may
+// contribute. 120 ms keeps the shipped visual pace; the clamp bounds a
+// suspended process so the comet cannot jump far ahead.
+constexpr std::chrono::milliseconds kSpinnerFrameStep{120};
+constexpr std::chrono::steady_clock::duration kSpinnerMaxStall =
+    std::chrono::milliseconds{250};
+
+// 64-D1: the single frame-advance mechanism shared by both indicators. The
+// frame is a pure function of the exact elapsed wall-clock time, so the number
+// of calls (drain frequency) cannot change the pace: N sub-millisecond calls
+// over T ms advance the frame by T/step, not by N.
+bool advance_spinner_clock(ReasoningSpinnerState& spinner,
+                           std::chrono::steady_clock::time_point now, bool animating) {
+    if (!animating) {
+        spinner.elapsed = std::chrono::steady_clock::duration::zero();
+        spinner.last_tick.reset();
         return false;
     }
-    spinner.elapsed += delta;
-    bool changed = false;
-    while (spinner.elapsed >= kFrameStep) {
-        spinner.elapsed -= kFrameStep;
-        ++spinner.frame;
-        changed = true;
+    if (!spinner.last_tick.has_value()) {
+        spinner.last_tick = now;
+        return false;
     }
-    return changed;
+    auto delta = now - *spinner.last_tick;
+    spinner.last_tick = now;
+    if (delta > kSpinnerMaxStall) {
+        delta = kSpinnerMaxStall;
+    }
+    spinner.elapsed += delta;
+    const auto steps = static_cast<std::uint32_t>(spinner.elapsed / kSpinnerFrameStep);
+    if (steps == 0) {
+        return false;
+    }
+    spinner.elapsed -= steps * kSpinnerFrameStep;
+    spinner.frame += steps;
+    return true;
+}
+
+} // namespace
+
+bool UiModel::advance_reasoning_spinner(std::chrono::steady_clock::time_point now) {
+    return advance_spinner_clock(spinner, now, has_streaming_reasoning());
 }
 
 bool UiModel::has_active_turn() const {
@@ -1771,20 +1800,9 @@ bool UiModel::active_has_streaming_reasoning() const {
     return session_has_streaming_reasoning(state->second);
 }
 
-bool UiModel::advance_spinner(std::chrono::milliseconds delta) {
-    constexpr std::chrono::milliseconds kFrameStep{120};
-    if (!has_active_turn() && !active_has_streaming_reasoning()) {
-        spinner.elapsed = std::chrono::milliseconds::zero();
-        return false;
-    }
-    spinner.elapsed += delta;
-    bool changed = false;
-    while (spinner.elapsed >= kFrameStep) {
-        spinner.elapsed -= kFrameStep;
-        ++spinner.frame;
-        changed = true;
-    }
-    return changed;
+bool UiModel::advance_spinner(std::chrono::steady_clock::time_point now) {
+    return advance_spinner_clock(
+        spinner, now, has_active_turn() || active_has_streaming_reasoning());
 }
 
 void UiModel::set_now_reader(ClockReader reader) {

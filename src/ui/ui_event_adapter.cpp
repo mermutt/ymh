@@ -424,10 +424,11 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
     }
 }
 
-void UiEventAdapter::onTick(std::chrono::milliseconds delta) {
+void UiEventAdapter::onTick(std::chrono::steady_clock::time_point now,
+                            std::chrono::milliseconds delta) {
     const FlashPhase before = model_.aggregate.flash.phase;
     model_.aggregate.flash.tick(delta);
-    const bool spinner_changed = model_.advance_spinner(delta);
+    const bool spinner_changed = model_.advance_spinner(now);
     if (model_.aggregate.flash.phase != before || spinner_changed) {
         model_.dirty.markAggregate();
     }

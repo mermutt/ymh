@@ -2050,13 +2050,11 @@ private:
         const auto now = std::chrono::steady_clock::now();
         std::chrono::milliseconds delta =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick_);
-        if (delta <= std::chrono::milliseconds::zero()) {
-            delta = kFrameInterval;
-        } else if (delta > kMaxFrameDelta) {
+        if (delta > kMaxFrameDelta) {
             delta = kMaxFrameDelta;
         }
         last_tick_ = now;
-        adapter_.onTick(delta);
+        adapter_.onTick(now, delta);
         tick_presence();
         for (auto& [id, session] : model_.sessions) {
             if (session.esc_arm != EscArm::Armed) {

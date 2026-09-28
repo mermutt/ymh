@@ -628,12 +628,15 @@ struct SessionCatalogModel {
     std::int64_t                  nowMs = 0;
 };
 
-// RB-17: the reasoning spinner clock. `frame` is advanced only while a
-// reasoning block streams; the renderer maps it modulo its frame table, so the
-// model stays free of presentation constants.
+// RB-17 / 64-D1: the animation spinner clock. The frame is a pure function of
+// the total wall-clock time elapsed since the animation started, accumulated
+// from exact monotonic durations, so the number of `advance_spinner` calls
+// (drain frequency) can never change the pace. `elapsed` holds the sub-step
+// remainder; `last_tick` anchors the next exact delta.
 struct ReasoningSpinnerState {
     std::uint32_t             frame = 0;
-    std::chrono::milliseconds elapsed{};
+    std::chrono::steady_clock::duration elapsed{};
+    std::optional<std::chrono::steady_clock::time_point> last_tick;
 };
 
 struct UiModel {
@@ -738,10 +741,12 @@ struct UiModel {
     // RB-17: true iff any session holds a streaming Reasoning entry. The spinner
     // clock and the supervisor's repaint timer must tick only in this state.
     [[nodiscard]] bool has_streaming_reasoning() const;
-    // Advances the spinner clock by `delta` while reasoning streams; returns true
-    // iff the frame changed. With no streaming reasoning the clock is reset and
-    // the frame is left untouched, so an idle TUI never animates.
-    bool advance_reasoning_spinner(std::chrono::milliseconds delta);
+    // RB-17 / 64-D1: advances the spinner clock to `now` while reasoning
+    // streams; returns true iff the frame changed. The frame derives from the
+    // exact elapsed time, so call count is irrelevant. With no streaming
+    // reasoning the clock is reset and the frame is left untouched, so an idle
+    // TUI never animates.
+    bool advance_reasoning_spinner(std::chrono::steady_clock::time_point now);
 
     // 46-D9: the ACTIVE session's turn is running (Thinking || CallingTool).
     [[nodiscard]] bool has_active_turn() const;
@@ -751,9 +756,10 @@ struct UiModel {
     // by the caret predicate (scoped to the rendered composer's session) and the
     // spinner so the two cannot drift.
     [[nodiscard]] static bool session_has_streaming_reasoning(const SessionUiState& state);
-    // 46-D9: advances the shared frame clock while a turn is active OR the active
-    // session streams reasoning; returns true when the frame changed.
-    bool advance_spinner(std::chrono::milliseconds delta);
+    // 46-D9 / 64-D1: advances the shared frame clock to `now` while a turn is
+    // active OR the active session streams reasoning; returns true when the
+    // frame changed. Drain frequency cannot change the pace (64-D1).
+    bool advance_spinner(std::chrono::steady_clock::time_point now);
 
     // 25-D6: injects the TPS clock; defaults to `std::chrono::steady_clock::now`.
     void set_now_reader(ClockReader reader);

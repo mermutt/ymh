@@ -70,7 +70,9 @@ public:
     void forget_session(const SessionId& id);
 
     // Model-level clock; the ONLY place the flash advances (10 §5.2, F12, D16).
-    void onTick(std::chrono::milliseconds delta);
+    // 64-D1: `now` drives the spinner's absolute-time frame; `delta` drives the
+    // flash phase.
+    void onTick(std::chrono::steady_clock::time_point now, std::chrono::milliseconds delta);
 
     // Pure: reads caches, returns the events to apply; never mutates (10 §5.2).
     [[nodiscard]] std::vector<UiEvent> adapt(const Event& event) const;
