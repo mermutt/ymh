@@ -788,4 +788,16 @@ TEST(Errata58, UI58_U20_SelectHistoryRefusesSubagent) {
     EXPECT_EQ(fixture.harness->submitted_count("session.resume"), 0u);
 }
 
+// 65-D3: a running child alone must not arm or fire the parent's Esc-Esc
+// interrupt while the parent's own turn is idle.
+TEST(Errata58, UI65_D3_RunningChildDoesNotArmParentInterrupt) {
+    SubagentFixture fixture("ymh_65_d3");
+    fixture.seed_child(kS1, kChild, "task", SubagentStatus::Running);
+    fixture.model().session(kS1)->agent_state = AgentState::Idle;
+
+    EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
+    EXPECT_EQ(fixture.model().session(kS1)->esc_arm, EscArm::Disarmed);
+    EXPECT_EQ(fixture.harness->cancel_count(), 0u);
+}
+
 } // namespace

@@ -517,6 +517,68 @@ TEST(Errata46D9, UI63_D1_BottomStaticWhenIdle) {
     }
 }
 
+// ── 65-D1 (subagent working state) ──────────────────────────────────────────
+
+SubagentView running_child(const SessionId& id) {
+    return SubagentView{id, "task", AgentState::Idle, SubagentStatus::Running};
+}
+
+TEST(Errata65D1, UI65_D1_RunningSubagentKeepsIndicatorActive) {
+    UiModel model = model_with_active_session(AgentState::Idle);
+    SessionUiState* session = model.session(SessionId{"s"});
+    ASSERT_NE(session, nullptr);
+    session->subagents.agents.push_back(running_child(SessionId{"child"}));
+
+    EXPECT_TRUE(model.active_session_working());
+    EXPECT_FALSE(model.has_active_turn());
+
+    const std::string line =
+        status_line(normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false})));
+    bool comet = false;
+    for (const char* frame : kBottomFrames) {
+        comet = comet || line.find(frame) != std::string::npos;
+    }
+    EXPECT_TRUE(comet) << line;
+    const auto t = std::chrono::steady_clock::time_point{};
+    EXPECT_FALSE(model.advance_spinner(t));
+    EXPECT_TRUE(model.advance_spinner(t + 500ms));
+}
+
+TEST(Errata65D1, UI65_D1_SettledSubagentEndsDerivedWork) {
+    UiModel model = model_with_active_session(AgentState::Idle);
+    SessionUiState* session = model.session(SessionId{"s"});
+    ASSERT_NE(session, nullptr);
+    session->subagents.agents.push_back(
+        SubagentView{SessionId{"child"}, "task", AgentState::Idle, SubagentStatus::Completed});
+
+    EXPECT_FALSE(model.active_session_working());
+
+    const std::string line =
+        status_line(normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false})));
+    for (const char* frame : kBottomFrames) {
+        EXPECT_EQ(line.find(frame), std::string::npos) << frame;
+    }
+    EXPECT_FALSE(model.advance_spinner(std::chrono::steady_clock::time_point{} + 500ms));
+}
+
+TEST(Errata65D1, UI65_D1_OwnTurnStillDrivesIndicator) {
+    UiModel model = model_with_active_session(AgentState::Thinking);
+    EXPECT_TRUE(model.active_session_working());
+    EXPECT_TRUE(model.has_active_turn());
+}
+
+TEST(Errata65D1, UI65_D1_TerminalStatusesEndDerivedWork) {
+    for (const SubagentStatus status :
+         {SubagentStatus::Completed, SubagentStatus::Failed, SubagentStatus::Cancelled}) {
+        UiModel model = model_with_active_session(AgentState::Idle);
+        SessionUiState* session = model.session(SessionId{"s"});
+        ASSERT_NE(session, nullptr);
+        session->subagents.agents.push_back(
+            SubagentView{SessionId{"child"}, "task", AgentState::Idle, status});
+        EXPECT_FALSE(model.active_session_working()) << static_cast<int>(status);
+    }
+}
+
 // ── 46-D11 ──────────────────────────────────────────────────────────────────
 
 UiModel hydration_model() {

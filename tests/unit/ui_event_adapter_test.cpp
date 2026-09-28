@@ -424,4 +424,32 @@ TEST(UiEventAdapter, StepLimitExceededIsARecoverableNotice) {
     EXPECT_EQ(state->agent_state, AgentState::Idle);
 }
 
+// 65-D2 (per-session isolation): a child session's turn/ended must not idle the
+// active parent, and the parent must keep reporting a working turn.
+TEST(UiEventAdapter, UI65_D2_ChildTurnEndedDoesNotIdleParent) {
+    UiModel model = make_model();
+    UiEventAdapter adapter(model);
+
+    const auto turn = [](const SessionId& session, const std::string& id, EventType type) {
+        Event event;
+        event.id.value   = id;
+        event.session_id = session;
+        event.timestamp  = std::chrono::system_clock::now();
+        event.type       = type;
+        event.payload    = payload::TurnStarted{1, payload::TurnOrigin::User};
+        return event;
+    };
+
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(turn(kSessionA, "p-start", EventType::TurnStarted)));
+    ASSERT_TRUE(model.has_active_turn());
+    ASSERT_TRUE(model.active_session_working());
+
+    adapter.onSessionEnvelope(kWorkspaceA, envelope(turn(kSessionB, "c-end", EventType::TurnEnded)));
+
+    EXPECT_EQ(model.session(kSessionA)->agent_state, AgentState::Thinking);
+    EXPECT_TRUE(model.has_active_turn());
+    EXPECT_TRUE(model.active_session_working());
+    EXPECT_EQ(model.session(kSessionB)->agent_state, AgentState::Idle);
+}
+
 } // namespace
