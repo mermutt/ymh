@@ -1,6 +1,22 @@
 # 59 — Composer Wrapping Errata: Multi-Row Draft, Bounded Growth, Caret Tracking
 
-Status: **draft (Rev 2)** (design-first gate; see `DESIGN_STATUS.md`). Rev 2 adds
+Status: **verified (Rev 2)** (design-first gate; see `DESIGN_STATUS.md`).
+Independent gate (gate-59, 2026-09-28) against the shipped code on `main`:
+**PASS — 0 HIGH / 0 MEDIUM / 4 LOW**. The LOW residuals are documentation
+drift, not behavioural mismatches: (L1) §2's text-width arithmetic is
+self-inconsistent (`width = size.width - 2` vs 59-D6's `size.width`) and its
+stated `width - 4 - 2` yields `size.width - 8` where the shipped
+`kComposerTextInset = 6` yields `size.width - 6` (`ui_render.hpp:60`,
+`ui_render.cpp:689`, caller `:2084`); (L2) 59-I2's unqualified "no draft glyph
+is dropped by clipping" reads against the 59-I4 caret window (head rows scroll
+off — see 59-U10's `HSTART` assertion); (L3) 59-U5 names
+`LongComposerDraftWrapsAndStaysVisible (height)` while the height test is
+`LongComposerDraftCapsHeightAndKeepsTailVisible`; (L4) the §1 present-tense
+pre-fix description and several `file:line` citations are stale
+(`render_input` is at `:655` not `:525-565`, its caller at `:2084` not `:1742`,
+`glyph_len` at `ui_model.hpp:229` not `:205`, the 58-E33 guard at
+`supervisor.cpp:3266-3275` not `:3257-3265`), and the §2 `render_input`
+signature sketch is superseded by 62-D1/64-D3. Rev 2 adds
 59-D7: plain `ArrowUp`/`ArrowDown` first move the caret across the wrapped draft
 rows and only fall through to history on the first/last visual row. This amends
 45-D1.2, `10` §9.2, `48` §5 and `00` §20.26; the rendering contract (59-D1–D6) is
