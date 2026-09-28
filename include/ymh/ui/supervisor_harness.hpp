@@ -143,6 +143,9 @@ public:
                                         const PermissionRequestId& request,
                                         std::string tool, std::string summary) = 0;
     virtual bool dispatch_key(const std::string& key) = 0;
+    // 59-D7 test seam: pins the terminal width the composer wraps against so
+    // vertical-caret tests do not depend on the harness default.
+    virtual void set_terminal_width(int width) = 0;
     [[nodiscard]] virtual std::optional<
         std::pair<payload::PermissionDecisionKind, GrantScope>>
     last_dialog_resolution() const = 0;

@@ -608,6 +608,39 @@ constexpr int kComposerMaxRows = 8;
 // once the user stops and the spinner repaints.
 constexpr std::chrono::milliseconds kComposerCaretGrace{700};
 
+// 59-D3/59-D7: the single glyph-aware wrap. `widths` holds each glyph's
+// display-cell width in draft order; the result maps glyph indices to visual
+// rows and records each glyph's row and start column. `render_input` (59-D1)
+// and `composer_move_cursor_vertical` (59-D7) share it so the caret row cannot
+// drift between render and key handling (59-F7).
+struct GlyphWrap {
+    std::vector<std::vector<std::size_t>> row_glyphs;
+    std::vector<int>                      glyph_row;
+    std::vector<int>                      glyph_column;
+};
+
+GlyphWrap wrap_glyphs(const std::vector<int>& widths, int text_width) {
+    GlyphWrap wrap;
+    int       column = 0;
+    for (std::size_t index = 0; index < widths.size(); ++index) {
+        if (column > 0 && column + widths[index] > text_width) {
+            wrap.row_glyphs.emplace_back();
+            column = 0;
+        }
+        if (wrap.row_glyphs.empty()) {
+            wrap.row_glyphs.emplace_back();
+        }
+        wrap.glyph_row.push_back(static_cast<int>(wrap.row_glyphs.size()) - 1);
+        wrap.glyph_column.push_back(column);
+        wrap.row_glyphs.back().push_back(index);
+        column += widths[index];
+    }
+    if (wrap.row_glyphs.empty()) {
+        wrap.row_glyphs.emplace_back();
+    }
+    return wrap;
+}
+
 Element render_input(const UiModel& model, const Theme& theme, int terminal_width,
                      int max_rows, bool hide_caret) {
     if (!model.subagent_path.empty()) {
@@ -641,8 +674,8 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
 
     // 59-D3/59-I6: wrap on glyph boundaries, measured in display cells. The
     // composer's child box loses 2 cells to the left bar and 2 to the row
-    // prefix, so the draft gets `terminal_width - 6` cells.
-    const int text_width = std::max(1, terminal_width - 6);
+    // prefix, so the draft gets `terminal_width - kComposerTextInset` cells.
+    const int text_width = std::max(1, terminal_width - kComposerTextInset);
     std::vector<std::string> glyphs;
     std::vector<int>         glyph_widths;
     std::size_t              caret_glyph = 0;
@@ -658,26 +691,9 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
         }
     }
 
-    std::vector<std::vector<std::size_t>> row_glyphs;
-    std::size_t                           caret_row = 0;
-    int                                   column    = 0;
-    for (std::size_t index = 0; index < glyphs.size(); ++index) {
-        if (column > 0 && column + glyph_widths[index] > text_width) {
-            row_glyphs.emplace_back();
-            column = 0;
-        }
-        if (row_glyphs.empty()) {
-            row_glyphs.emplace_back();
-        }
-        if (index == caret_glyph) {
-            caret_row = row_glyphs.size() - 1;
-        }
-        row_glyphs.back().push_back(index);
-        column += glyph_widths[index];
-    }
-    if (row_glyphs.empty()) {
-        row_glyphs.emplace_back();
-    }
+    const GlyphWrap                              wrap       = wrap_glyphs(glyph_widths, text_width);
+    const std::vector<std::vector<std::size_t>>& row_glyphs = wrap.row_glyphs;
+    const std::size_t caret_row = static_cast<std::size_t>(wrap.glyph_row[caret_glyph]);
 
     // 59-I4/62-I1: cap the height; slide the window so the caret row stays
     // visible. `max_rows` is the on-screen budget, already <= kComposerMaxRows.
@@ -1802,6 +1818,74 @@ Element render_context_overlay(const UiModel& model, TerminalSize size, const Th
 }
 
 } // namespace
+
+bool composer_move_cursor_vertical(std::string_view draft, std::size_t& cursor,
+                                   int direction, int text_width) {
+    if (direction == 0) {
+        return false;
+    }
+    const int         width   = std::max(1, text_width);
+    const std::size_t aligned = glyph_floor(draft, cursor);
+
+    std::vector<std::size_t> starts;
+    std::vector<int>         widths;
+    for (std::size_t index = 0; index < draft.size();) {
+        const std::size_t length = glyph_len(draft, index);
+        starts.push_back(index);
+        widths.push_back(ftxui::string_width(std::string(draft.substr(index, length))));
+        index += length;
+    }
+    const GlyphWrap   wrap        = wrap_glyphs(widths, width);
+    const std::size_t glyph_count = starts.size();
+
+    std::size_t caret = 0;
+    while (caret < glyph_count && starts[caret] < aligned) {
+        ++caret;
+    }
+
+    // Caret boundary positions (59-D7): boundary i < n sits before glyph i;
+    // boundary n is the renderer's phantom cell after the last glyph (59-D1),
+    // which starts a fresh row when the final row is full.
+    std::vector<int> boundary_row(glyph_count + 1, 0);
+    std::vector<int> boundary_column(glyph_count + 1, 0);
+    for (std::size_t index = 0; index < glyph_count; ++index) {
+        boundary_row[index]    = wrap.glyph_row[index];
+        boundary_column[index] = wrap.glyph_column[index];
+    }
+    if (glyph_count > 0) {
+        const int last_row   = wrap.glyph_row[glyph_count - 1];
+        const int end_column = wrap.glyph_column[glyph_count - 1] + widths[glyph_count - 1];
+        if (end_column < width) {
+            boundary_row[glyph_count]    = last_row;
+            boundary_column[glyph_count] = end_column;
+        } else {
+            boundary_row[glyph_count]    = last_row + 1;
+            boundary_column[glyph_count] = 0;
+        }
+    }
+
+    const int target_row = boundary_row[caret] + direction;
+    if (target_row < 0 || target_row > boundary_row[glyph_count]) {
+        return false;
+    }
+
+    // Boundaries are ordered by row then column; the last one at or before the
+    // current column clamps to the target row's end when that row is shorter.
+    std::size_t target = caret;
+    bool        found  = false;
+    for (std::size_t index = 0; index <= glyph_count; ++index) {
+        if (boundary_row[index] == target_row &&
+            boundary_column[index] <= boundary_column[caret]) {
+            target = index;
+            found  = true;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    cursor = target < glyph_count ? starts[target] : draft.size();
+    return true;
+}
 
 const char* subagent_status_glyph(SubagentStatus status) {
     switch (status) {

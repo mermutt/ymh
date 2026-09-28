@@ -3422,6 +3422,13 @@ private:
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
+            // 59-D7: a later visual row claims the arrow; the first row falls
+            // through to history.
+            const int text_width = std::max(1, composer_terminal_width_ - kComposerTextInset);
+            if (composer_move_cursor_vertical(input.draft, input.cursor, -1, text_width)) {
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
             if (input.history_up()) {
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
@@ -3431,6 +3438,12 @@ private:
         if (event == ftxui::Event::ArrowDown) {
             if (command_list_active(*state)) {
                 move_hint_selection(*state, 1);
+                model_.dirty.mark(state->id, UiDirtyFlag::Input);
+                return true;
+            }
+            // 59-D7: the last visual row falls through to history.
+            const int text_width = std::max(1, composer_terminal_width_ - kComposerTextInset);
+            if (composer_move_cursor_vertical(input.draft, input.cursor, 1, text_width)) {
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
@@ -3707,6 +3720,7 @@ private:
 
         auto renderer = ftxui::Renderer([this, &screen, theme] {
             const TerminalSize size{screen.dimx(), screen.dimy()};
+            composer_terminal_width_ = size.width;
             auto ui = build_ui(model_, size, theme, &scroll_metrics_);
             if (SessionUiState* target = viewed()) {
                 target->scroll.observeGeometry(scroll_metrics_.content_rows,
@@ -3808,6 +3822,10 @@ private:
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
+    // 59-D7: the terminal width of the last render, used to wrap the composer
+    // draft for vertical caret motion. The renderer refreshes it every frame; the
+    // default keeps key handling sane before the first frame (and in tests).
+    int composer_terminal_width_ = 80;
     // 46-D13 test seam: overrides the terminal hand-off around the prompt
     // editor. Production leaves it null and uses `screen_->WithRestoredIO`.
     std::function<void(const std::function<void()>&)> with_restored_io_;
@@ -4055,6 +4073,10 @@ public:
         app_.model_.dialog.summary = std::move(summary);
         app_.model_.dialog.selected = 0;
         app_.model_.mode = UiMode::Dialog;
+    }
+
+    void set_terminal_width(int width) override {
+        app_.composer_terminal_width_ = width;
     }
 
     bool dispatch_key(const std::string& key) override {

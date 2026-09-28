@@ -54,6 +54,22 @@ struct TranscriptMetrics {
 [[nodiscard]] std::string render_to_ansi(const UiModel& model, TerminalSize size,
                                          const Theme& theme = {});
 
+// 59-D3/59-D6: the cells the composer's wrapped draft loses to the outer
+// padding, the left bar and the `> `/`  ` row prefix. The draft's cell budget
+// is `terminal_width - kComposerTextInset` (clamped to >= 1).
+inline constexpr int kComposerTextInset = 6;
+
+// 59-D7: plain `ArrowUp`/`ArrowDown` move the caret one visual row inside the
+// wrapped draft (59-D1/59-D3) whenever an adjacent row exists, preserving the
+// display-cell column where it fits and clamping to the target row's end. The
+// glyph-aligned `cursor` is updated in place and `true` is returned. When the
+// caret is already on the first row (`direction < 0`) or the last row
+// (`direction > 0`) nothing is changed and `false` is returned, so the caller
+// falls through to history recall (45-D1.2). The draft is never mutated.
+[[nodiscard]] bool composer_move_cursor_vertical(std::string_view draft,
+                                                 std::size_t& cursor, int direction,
+                                                 int text_width);
+
 // 58-A8/58-I6: the four distinct subagent edge glyphs (`>`/`✓`/`✗`/`-`).
 [[nodiscard]] const char* subagent_status_glyph(SubagentStatus status);
 
