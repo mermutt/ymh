@@ -609,6 +609,10 @@ Element render_command_hints(const SessionUiState* active, const Theme& theme) {
 // (<= kComposerMaxRows); it keeps the composer on-screen on a short terminal.
 constexpr int kComposerMaxRows = 8;
 
+// 64-D3: one blank row above and one below the draft (render_input); reserved
+// out of the on-screen height budget so the composer cannot push the status off.
+constexpr int kComposerPaddingRows = 2;
+
 // 62-D2 (Rev 2): how long after the last composer edit the caret stays visible
 // while the focused session animates. Long enough to cover continuous typing
 // (well above the 50 ms repaint interval), short enough to hide the cursor again
@@ -749,10 +753,14 @@ Element render_input(const UiModel& model, const Theme& theme, int terminal_widt
     }
 
     Elements rendered;
-    rendered.reserve(visible_cells.size());
+    rendered.reserve(visible_cells.size() + 2);
+    // 64-D3: one blank row above and one below the draft, inside the composer
+    // block so the gutter and tint span the padding too.
+    rendered.push_back(ftxui::hbox({ftxui::text(" ")}));
     for (Elements& cells : visible_cells) {
         rendered.push_back(ftxui::hbox(std::move(cells)));
     }
+    rendered.push_back(ftxui::hbox({ftxui::text(" ")}));
     // 51-D2.3: the composer carries the same gutter + tint as the transcript;
     // 59-I7: the gutter spans every wrapped row.
     Element line = with_left_bar(ftxui::vbox(std::move(rendered)), theme);
@@ -2035,8 +2043,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
         reserved += min_rows(element);
     }
     reserved += min_rows(status);
-    const int composer_rows =
-        std::min(kComposerMaxRows, std::max(1, inner_height - reserved));
+    const int composer_rows = std::min(
+        kComposerMaxRows,
+        std::max(1, inner_height - reserved - kComposerPaddingRows));
 
     Elements rows;
     rows.reserve(above.size() + below.size() + 3);
