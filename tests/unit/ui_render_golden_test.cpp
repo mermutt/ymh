@@ -2585,6 +2585,62 @@ TEST(UiRenderGolden, UI64_D3_ComposerHasOneBlankRowAboveAndBelow) {
     EXPECT_FALSE(is_blank_padding(draft_row + 2)) << "only one blank row below";
 }
 
+// 64-I4: the padding rows are dropped when the height budget cannot hold them
+// (composer_space >= kComposerPaddingRows + 1), so a very short terminal keeps
+// the status bar on-screen instead of always reserving the two blank rows.
+TEST(UiRenderGolden, UI64_D3_ComposerPaddingGuardedOnShortTerminal) {
+    const auto render = [](int height) {
+        UiModel model = build_model();
+        SessionUiState* state = model.session(kSession);
+        state->input.draft = "hello";
+        state->input.cursor = 5;
+        return render_screen(model, TerminalSize{60, height}, Theme{false});
+    };
+    const auto draft_row = [](const ftxui::Screen& screen) {
+        for (int y = 0; y < screen.dimy(); ++y) {
+            std::string row;
+            for (int x = 0; x < screen.dimx(); ++x) {
+                row += screen.PixelAt(x, y).character;
+            }
+            if (row.find("> hello") != std::string::npos) {
+                return y;
+            }
+        }
+        return -1;
+    };
+    const auto is_blank_padding = [](const ftxui::Screen& screen, int y) {
+        if (y < 0 || y >= screen.dimy()) {
+            return false;
+        }
+        for (int x = 2; x < screen.dimx() - 1; ++x) {
+            const std::string cell = screen.PixelAt(x, y).character;
+            if (!cell.empty() && cell != " ") {
+                return false;
+            }
+        }
+        const std::string left_border = screen.PixelAt(0, y).character;
+        const std::string gutter = screen.PixelAt(1, y).character;
+        return !left_border.empty() && left_border != " " && !gutter.empty() &&
+               gutter != " ";
+    };
+
+    const ftxui::Screen below_guard = render(8);
+    const int below_row = draft_row(below_guard);
+    ASSERT_GT(below_row, 0);
+    EXPECT_FALSE(is_blank_padding(below_guard, below_row - 1))
+        << "height 8 is below the guard: no padding above the draft";
+    EXPECT_FALSE(is_blank_padding(below_guard, below_row + 1))
+        << "height 8 is below the guard: no padding below the draft";
+
+    const ftxui::Screen at_guard = render(9);
+    const int at_row = draft_row(at_guard);
+    ASSERT_GT(at_row, 0);
+    EXPECT_TRUE(is_blank_padding(at_guard, at_row - 1))
+        << "height 9 admits the padding: one blank row above the draft";
+    EXPECT_TRUE(is_blank_padding(at_guard, at_row + 1))
+        << "height 9 admits the padding: one blank row below the draft";
+}
+
 // 59-D7 (59-I8): the shared wrap helper drives vertical caret motion; verify the
 // row/column mapping, the column clamp, and the first/last-row fall-through
 // signal directly. The draft is never edited.

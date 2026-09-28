@@ -1,6 +1,7 @@
 # 64 — UI Polish Errata: Animation Pace, Status Slot, Composer Padding
 
-Status: **implemented; pending independent gate** (see `DESIGN_STATUS.md`). This
+Status: **verified** (independent re-check after the Oracle review fixes; see
+`DESIGN_STATUS.md`). This
 errata is written design-first and implemented in the same change set as its
 code, at the user's request; the owning specs 46 (verified) and 63 (implemented)
 are unchanged in intent. It fixes three independent UI defects:
@@ -59,8 +60,8 @@ block; the user wants one blank row above and one below the draft.
 | ID | Decision | Amends / cites |
 |---|---|---|
 | 64-D1 | The animation frame is a pure function of the **exact elapsed wall-clock time** since the animation started: `frame = floor(elapsed / step)` with `step = 120 ms`. `ReasoningSpinnerState` accumulates exact `steady_clock::duration` deltas and keeps the sub-step remainder; a single tick gap longer than 250 ms credits at most the clamp (`kSpinnerMaxStall`). `UiModel::advance_spinner` / `advance_reasoning_spinner` take the current `steady_clock::time_point`; `UiEventAdapter::onTick` forwards it alongside the flash `delta`. Drain frequency is therefore irrelevant by construction. `SupervisorApp::drain()` no longer credits a non-positive delta with `kFrameInterval`. | Supersedes 63-D2's per-drain `delta` clock and RB-17's `advance_spinner(delta)`; 63-D1/D4/D6 and the 120 ms visual pace retained; the 250 ms clamp retained (the spinner half now lives in the model) |
-| 64-D2 | The session-backed status line always reserves the comet's 5-cell slot (4-cell frame + 1 space), emitting 5 blank cells when `has_active_turn()` is false, so the mode/model text starts at a constant column. The slot and its `" · "` separator (8 cells total) are subtracted from the fit budget up front, so the right-aligned aggregate is never clipped. Visibility is otherwise unchanged: no glyph when idle (63-D3). The `active == nullptr` fallback lines (`no workspace attached` / `build · … · no session`, 53-D3) do **not** reserve the slot. Recorded trade-off: the permanent 8-cell reservation lowers the segment-fit threshold, so on terminals ≲78 columns the context-usage bar (priority 2 of 6) is dropped where it previously fit at ≲70; the user asked for stable alignment and the aggregate must not be clipped, so this content cost is accepted. | Amends 63-D3/63-D5 and 46-D9.5–D9.7; 25-D1 segment order retained |
-| 64-D3 | `render_input` renders exactly one blank row above and one below the wrapped draft, inside the `LeftBar` gutter and `user_block_background` tint. The draft area keeps its `kComposerMaxRows = 8` cap; the two padding rows are reserved out of the on-screen height budget (`kComposerPaddingRows = 2`). The wrap, slide window and caret rules (59-D1–D7, 62-D1/D2) are unchanged. | Amends 59-D1/59-I4; extends 51-D2.3/59-I7 |
+| 64-D2 | The session-backed status line always reserves the comet's 5-cell slot (4-cell frame + 1 space), emitting 5 blank cells when `active_session_working()` is false, so the mode/model text starts at a constant column. The slot and its `" · "` separator (8 cells total) are subtracted from the fit budget up front, so the right-aligned aggregate is never clipped. Visibility is otherwise unchanged: no glyph when not working (63-D3 as amended by 65-D1; `has_active_turn()` is retained for the Esc-Esc interrupt only). The `active == nullptr` fallback lines (`no workspace attached` / `build · … · no session`, 53-D3) do **not** reserve the slot. Recorded trade-off: the permanent 8-cell reservation lowers the segment-fit threshold, so on terminals ≲78 columns the context-usage bar (priority 2 of 6) is dropped where it previously fit at ≲70; the user asked for stable alignment and the aggregate must not be clipped, so this content cost is accepted. | Amends 63-D3/63-D5 and 46-D9.5–D9.7; 25-D1 segment order retained |
+| 64-D3 | `render_input` renders exactly one blank row above and one below the wrapped draft, inside the `LeftBar` gutter and `user_block_background` tint. The draft area keeps its `kComposerMaxRows = 8` cap; the two padding rows are reserved out of the on-screen height budget (`kComposerPaddingRows = 2`). The padding is dropped when the budget cannot hold it: the rows render only while `composer_space >= kComposerPaddingRows + 1` (`src/ui/ui_render.cpp:2053`, gating the rows at `:761-769`), so on a very short terminal the composer shrinks to its draft rows instead of pushing the status bar off-screen. The wrap, slide window and caret rules (59-D1–D7, 62-D1/D2) are unchanged. | Amends 59-D1/59-I4; extends 51-D2.3/59-I7 |
 
 ## 3. Interface sketch
 
@@ -91,10 +92,13 @@ constexpr int kComposerPaddingRows = 2; // one row above + one below
   process cannot jump the comet.
 - **64-I2** A non-positive tick gap (the same `now`) never advances the frame.
 - **64-I3** The status line's mode/model text starts at the same display column
-  with and without an active turn; when idle the line contains no
+  with and without a working session; when not working the line contains no
   `kBottomActivityFrames` entry.
-- **64-I4** The composer renders exactly one blank row above and one below the
-  draft; the draft area is 1..8 rows.
+- **64-I4** While the height budget admits the padding (`composer_space >=
+  kComposerPaddingRows + 1`, `src/ui/ui_render.cpp:2053`), the composer renders
+  exactly one blank row above and one below the draft; below that threshold the
+  padding rows are dropped (the composer shrinks to its draft rows) rather than
+  pushing the status bar off-screen. The draft area is 1..8 rows.
 - **64-I5** The transcript thinking indicator and the caret rules are unchanged.
 
 ## 5. Failure modes
@@ -118,6 +122,11 @@ constexpr int kComposerPaddingRows = 2; // one row above + one below
 - `UI64_D3_ComposerHasOneBlankRowAboveAndBelow`
   (`tests/unit/ui_render_golden_test.cpp`): the rows immediately above and below
   the draft are blank (gutter bars only) and the rows two away are not.
+- `UI64_D3_ComposerPaddingGuardedOnShortTerminal`
+  (`tests/unit/ui_render_golden_test.cpp`): at `TerminalSize{60,8}` (below the
+  guard threshold `composer_space >= kComposerPaddingRows + 1`) the draft row is
+  adjacent to the separator above and the status bar below with no blank padding
+  row; at `{60,9}` exactly one blank row sits above and one below.
 - Amended: `UI46_D9_SpinnerAdvancesOnTick` and
   `UiRenderGolden.ReasoningSpinnerOnlyAdvancesWhileStreaming` (absolute-time
   API); `UiRenderGolden.ConversationSnapshot`, `StatusPlanModeGolden`,
@@ -125,4 +134,5 @@ constexpr int kComposerPaddingRows = 2; // one row above + one below
   `LongComposerDraftCapsHeightAndKeepsTailVisible` (new geometry).
 
 **Owning specs amended:** `46` §11 (46-D9), `59` (59-D1/59-I4),
-`63` (63-D2/63-D3/63-D5).
+`63` (63-D2/63-D3/63-D5), `65` (65-D1's `active_session_working()` predicate
+supersedes the `has_active_turn()` references in §1.2 and 64-D2).
