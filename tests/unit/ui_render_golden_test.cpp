@@ -291,11 +291,11 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 │                                                                      │
 │                                                                      │
 │                                                                      │
-│                                                                      │
-│                                                                      │
 ├┬─────────────────────────────────────────────────────────────────────┤
+││                                                                     │
 ││ >                                                                   │
-│build · test-model · ↑12 ↓3 ⚡0 · [░░░░░░░░░░] —  0 active · 0 waiting│
+││                                                                     │
+│      · build · test-model · ↑12 ↓3 ⚡0           0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
 TEST(UiRenderGolden, ConversationSnapshot) {
@@ -542,11 +542,11 @@ TEST(UiRenderGolden, StatusPlanModeGolden) {
     state->status.plan_active = true;
     std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
-    EXPECT_NE(rendered.find("│plan · test-model"), std::string::npos);
+    EXPECT_NE(rendered.find("      · plan · test-model"), std::string::npos);
 
     state->status.plan_active = false;
     rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
-    EXPECT_NE(rendered.find("│build · test-model"), std::string::npos);
+    EXPECT_NE(rendered.find("      · build · test-model"), std::string::npos);
 }
 
 TEST(UiRenderGolden, ContextBarGeometryAndUnknownWindow) {
@@ -593,8 +593,10 @@ TEST(UiRenderGolden, StatusNarrowDegradationDropsTpsBeforeNoteAndNotice) {
     state->status.note                  = "note";
     model.pushNotice("notice");
 
+    // 64-D2: the always-reserved 5-cell activity slot plus its " · " separator
+    // consume 8 cells, so the degradation boundary moves from 91 to 99 columns.
     const std::string rendered =
-        normalize(render_to_ansi(model, TerminalSize{91, 24}, Theme{false}));
+        normalize(render_to_ansi(model, TerminalSize{99, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("↑12 ↓3 ⚡0"), std::string::npos);
     EXPECT_NE(rendered.find("[█████░░░░░] 50.0%"), std::string::npos);
@@ -744,8 +746,9 @@ TEST(UiRenderGolden, ReasoningSpinnerOnlyAdvancesWhileStreaming) {
     SessionUiState* state = model.session(kSession);
     ASSERT_NE(state, nullptr);
 
+    const auto t = std::chrono::steady_clock::time_point{};
     EXPECT_FALSE(model.has_streaming_reasoning());
-    EXPECT_FALSE(model.advance_reasoning_spinner(std::chrono::milliseconds{1000}));
+    EXPECT_FALSE(model.advance_reasoning_spinner(t));
     EXPECT_EQ(model.spinner.frame, 0u);
 
     state->conversation.entries.clear();
@@ -753,12 +756,13 @@ TEST(UiRenderGolden, ReasoningSpinnerOnlyAdvancesWhileStreaming) {
     state->conversation.by_reasoning_message.clear();
     model.apply(UiEvent{AssistantTextDelta{kSession, "a1", "partial", true}});
     ASSERT_TRUE(model.has_streaming_reasoning());
-    EXPECT_TRUE(model.advance_reasoning_spinner(std::chrono::milliseconds{120}));
+    EXPECT_FALSE(model.advance_reasoning_spinner(t));
+    EXPECT_TRUE(model.advance_reasoning_spinner(t + std::chrono::milliseconds{120}));
     EXPECT_EQ(model.spinner.frame, 1u);
 
     model.apply(UiEvent{AssistantMessageFinished{kSession, "a1", "done", std::nullopt}});
     EXPECT_FALSE(model.has_streaming_reasoning());
-    EXPECT_FALSE(model.advance_reasoning_spinner(std::chrono::milliseconds{1000}));
+    EXPECT_FALSE(model.advance_reasoning_spinner(t + std::chrono::milliseconds{1000}));
     EXPECT_EQ(model.spinner.frame, 1u);
 }
 
@@ -2519,13 +2523,61 @@ TEST(UiRenderGolden, LongComposerDraftCapsHeightAndKeepsTailVisible) {
     ASSERT_GE(separator_row, 0);
     ASSERT_GT(status_row, separator_row);
     const int composer_rows = status_row - separator_row - 1;
-    EXPECT_GE(composer_rows, 1);
-    EXPECT_LE(composer_rows, 8);
+    // 64-D3: one blank row above and one below the draft, so the total is the
+    // draft area (1..8 rows) plus the 2 padding rows.
+    EXPECT_GE(composer_rows, 3);
+    EXPECT_LE(composer_rows - 2, 8);
+    EXPECT_LE(composer_rows, 10);
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{40, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
+}
+
+// 64-D3: the composer renders exactly one blank row above and one below the
+// draft, inside the tinted gutter block, so the prompt text is never flush
+// against the separator above or the status bar below.
+TEST(UiRenderGolden, UI64_D3_ComposerHasOneBlankRowAboveAndBelow) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->input.draft = "hello";
+    state->input.cursor = 5;
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{60, 14}, Theme{false});
+    const auto row_text = [&](int y) {
+        std::string row;
+        for (int x = 0; x < screen.dimx(); ++x) {
+            row += screen.PixelAt(x, y).character;
+        }
+        return row;
+    };
+    int draft_row = -1;
+    for (int y = 0; y < screen.dimy(); ++y) {
+        if (row_text(y).find("> hello") != std::string::npos) {
+            draft_row = y;
+        }
+    }
+    ASSERT_GT(draft_row, 0);
+    ASSERT_LT(draft_row, screen.dimy() - 2);
+
+    const auto is_blank_padding = [&](int y) {
+        for (int x = 2; x < screen.dimx() - 1; ++x) {
+            const std::string cell = screen.PixelAt(x, y).character;
+            if (!cell.empty() && cell != " ") {
+                return false;
+            }
+        }
+        const std::string left_border = screen.PixelAt(0, y).character;
+        const std::string gutter = screen.PixelAt(1, y).character;
+        return !left_border.empty() && left_border != " " && !gutter.empty() &&
+               gutter != " ";
+    };
+    EXPECT_TRUE(is_blank_padding(draft_row - 1));
+    EXPECT_TRUE(is_blank_padding(draft_row + 1));
+    EXPECT_FALSE(is_blank_padding(draft_row - 2)) << "only one blank row above";
+    EXPECT_FALSE(is_blank_padding(draft_row + 2)) << "only one blank row below";
 }
 
 // 59-D7 (59-I8): the shared wrap helper drives vertical caret motion; verify the

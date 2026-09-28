@@ -8,6 +8,8 @@
 
 #include <unistd.h>
 
+#include <ftxui/screen/string.hpp>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -346,15 +348,80 @@ TEST(Errata46D9, UI46_D9_SpinnerOffOnWaitingForPermission) {
 TEST(Errata46D9, UI46_D9_SpinnerAdvancesOnTick) {
     UiModel model = model_with_active_session(AgentState::Thinking);
     const std::uint32_t before = model.spinner.frame;
+    const auto t = std::chrono::steady_clock::time_point{};
 
-    EXPECT_TRUE(model.advance_spinner(120ms));
+    EXPECT_FALSE(model.advance_spinner(t));
+    EXPECT_TRUE(model.advance_spinner(t + 120ms));
     EXPECT_EQ(model.spinner.frame, before + 1);
-    EXPECT_FALSE(model.advance_spinner(60ms));
+    EXPECT_FALSE(model.advance_spinner(t + 180ms));
     EXPECT_EQ(model.spinner.frame, before + 1);
 
     UiModel idle = model_with_active_session(AgentState::Idle);
-    EXPECT_FALSE(idle.advance_spinner(500ms));
+    EXPECT_FALSE(idle.advance_spinner(t + 500ms));
     EXPECT_EQ(idle.spinner.frame, 0u);
+}
+
+// 64-D1: the frame derives from elapsed wall-clock time, so a burst of drains
+// inside one interval cannot race the animation. Pre-fix a sub-millisecond
+// drain credited a full 50 ms frame interval, so N drains advanced the frame by
+// ~N; here N sub-millisecond drains over T ms must advance by T/step.
+TEST(Errata46D9, UI64_D1_SpinnerPaceIsDrainFrequencyIndependent) {
+    UiModel model = model_with_active_session(AgentState::Thinking);
+    const auto t = std::chrono::steady_clock::time_point{};
+    model.advance_spinner(t);
+
+    for (int i = 0; i < 500; ++i) {
+        model.advance_spinner(t + 100ms);
+    }
+    EXPECT_EQ(model.spinner.frame, 0u) << "100 ms is below one 120 ms step";
+
+    for (int i = 0; i < 500; ++i) {
+        model.advance_spinner(t + 120ms);
+    }
+    EXPECT_EQ(model.spinner.frame, 1u) << "one step, not 500";
+
+    UiModel burst = model_with_active_session(AgentState::Thinking);
+    burst.advance_spinner(t);
+    constexpr int kN = 1000;
+    for (int i = 1; i <= kN; ++i) {
+        burst.advance_spinner(t + std::chrono::microseconds{(120000 * i) / kN});
+    }
+    EXPECT_EQ(burst.spinner.frame, 1u) << "120 ms/120 ms step == 1, not N == 1000";
+}
+
+// 64-D2: the status line reserves the comet's 5-cell slot even when idle, so
+// the mode/model text starts at the same column with and without an active
+// turn. Pre-fix the idle line began at the border and shifted right by 8 cells
+// (5-cell frame slot + " · " separator) the moment the comet appeared.
+TEST(Errata46D9, UI64_D2_StatusTextColumnStable) {
+    const auto render = [](AgentState state) {
+        UiModel model = model_with_active_session(state);
+        return status_line(
+            normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false})));
+    };
+    const std::string idle = render(AgentState::Idle);
+    const std::string active = render(AgentState::Thinking);
+    SCOPED_TRACE(idle + "\n" + active);
+
+    const auto column_of = [](const std::string& line, const std::string& needle) {
+        const std::size_t at = line.find(needle);
+        if (at == std::string::npos) {
+            return static_cast<std::size_t>(-1);
+        }
+        return static_cast<std::size_t>(ftxui::string_width(line.substr(0, at)));
+    };
+    const std::size_t idle_column = column_of(idle, "build");
+    const std::size_t active_column = column_of(active, "build");
+    ASSERT_NE(idle_column, static_cast<std::size_t>(-1));
+    ASSERT_NE(active_column, static_cast<std::size_t>(-1));
+    EXPECT_EQ(idle_column, active_column);
+
+    EXPECT_NE(idle.find("      · build"), std::string::npos)
+        << "the idle line carries the reserved 5-cell slot";
+    EXPECT_NE(active.find(std::string(kBottomFrames[0]) + "  · build"), std::string::npos);
+    for (const char* frame : kBottomFrames) {
+        EXPECT_EQ(idle.find(frame), std::string::npos) << frame;
+    }
 }
 
 TEST(Errata46D9, UI46_D9_SpinnerBeforeModeSegment) {
@@ -402,7 +469,7 @@ TEST(Errata46D9, UI46_D9_SpinnerOnlyActiveSession) {
     EXPECT_TRUE(model.has_streaming_reasoning());
     EXPECT_FALSE(model.active_has_streaming_reasoning());
     const std::uint32_t before = model.spinner.frame;
-    EXPECT_FALSE(model.advance_spinner(500ms));
+    EXPECT_FALSE(model.advance_spinner(std::chrono::steady_clock::time_point{} + 500ms));
     EXPECT_EQ(model.spinner.frame, before);
 
     const std::string rendered =
@@ -433,7 +500,7 @@ TEST(Errata46D9, UI63_D1_BottomFramesAdvanceWhileActive) {
 
 TEST(Errata46D9, UI63_D1_BottomStaticWhenIdle) {
     UiModel model = model_with_active_session(AgentState::Idle);
-    EXPECT_FALSE(model.advance_spinner(500ms));
+    EXPECT_FALSE(model.advance_spinner(std::chrono::steady_clock::time_point{} + 500ms));
     EXPECT_EQ(model.spinner.frame, 0u);
 
     const std::string line =
@@ -744,3 +811,4 @@ TEST(Errata46D13, UI46_D13_HintsRefreshedAfterEdit) {
 }
 
 } // namespace
+
