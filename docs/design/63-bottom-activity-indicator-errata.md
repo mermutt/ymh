@@ -1,6 +1,11 @@
 # 63 — Bottom Activity Indicator Errata: Pendulum-Comet Status Sweep
 
-Status: **implemented; pending independent gate** (see `DESIGN_STATUS.md`). This
+Status: **verified** — independent gate PASS (0 HIGH / 0 MEDIUM / 3 LOW; see
+`DESIGN_STATUS.md`). Two later specs supersede/amend parts of this errata and
+carry the supersession entries: `64-ui-polish-errata.md` 64-D1 replaces 63-D2's
+per-drain clock with an exact-elapsed-time pace, and
+`65-subagent-working-state-errata.md` 65-D1 replaces 63-D3/63-I1/63-I2/63-F2's
+`has_active_turn()` predicate with `active_session_working()`. This
 errata is written design-first but implemented in the same change set as its code
 (the user requested a single atomic UI change; the owning spec 46 is already
 `verified`). It adds 63-D1: the **bottom** status indicator becomes a pendulum
