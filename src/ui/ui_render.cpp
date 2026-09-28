@@ -891,11 +891,16 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     }
 
     const StatusModel& status = active->status;
+    constexpr int kSeparatorWidth = 3;    // " · "
+    constexpr int kActivitySlotWidth = 5; // 4-cell frame + 1 space (64-D2)
     int avail = width - ftxui::string_width(right) - 1;
+    // 64-D2: the activity slot and its separator always precede the first left
+    // segment, so reserve them before fitting the rest; otherwise the line
+    // overflows and the right aggregate is clipped.
+    avail -= kActivitySlotWidth + kSeparatorWidth;
     if (avail < 1) {
         avail = 1;
     }
-    constexpr int kSeparatorWidth = 3;   // " · "
 
     std::string subagent_prefix;
     if (!model.subagent_path.empty()) {
@@ -986,6 +991,11 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
             std::string(kBottomActivityFrames[model.spinner.frame %
                                               kBottomActivityFrames.size()]) +
             " "));
+    } else {
+        // 64-D2: reserve the comet's 5-cell slot (4-cell frame + 1 space) even
+        // while idle, so the rest of the status line sits at a constant column
+        // and never shifts when the animation appears.
+        left_cells.push_back(ftxui::text("     "));
     }
     if (!subagent_prefix.empty()) {
         append_segment(ftxui::text(subagent_prefix));
