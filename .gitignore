@@ -6,6 +6,10 @@ compile_commands.json
 *.a
 *.so
 
+# Stray in-tree binary: the default build outputs to build/, but guard against
+# an accidental `ymh` executable landing at the repo root.
+/ymh
+
 # Editor / IDE
 .vscode/
 .idea/
