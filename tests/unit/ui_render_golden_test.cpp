@@ -2527,6 +2527,119 @@ TEST(UiRenderGolden, LongComposerDraftCapsHeightAndKeepsTailVisible) {
     EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
 }
 
+// 61-G1 (62-D1): a draft that needs the whole display must not push the
+// composer (and its caret) off-screen. The composer is capped by the height the
+// layout actually has left for it, and the transcript collapses to zero rather
+// than clipping the composer's tail.
+TEST(UiRenderGolden, ComposerFillsScreenKeepsCaretVisible) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    std::string draft = "START";
+    while (draft.size() < 500) {
+        draft += 'x';
+    }
+    draft += "END_MARKER";
+    state->input.draft = draft;
+    state->input.cursor = draft.size();
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{40, 10}, Theme{false});
+    std::string rendered;
+    for (int y = 0; y < screen.dimy(); ++y) {
+        for (int x = 0; x < screen.dimx(); ++x) {
+            rendered += screen.PixelAt(x, y).character;
+        }
+        rendered += '\n';
+    }
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("END_MARKER"), std::string::npos);
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+    EXPECT_GE(screen.cursor().y, 0);
+    EXPECT_LT(screen.cursor().y, screen.dimy());
+}
+
+// 61-G2 (62-D2): while a turn is active the spinner drives a full-screen repaint
+// every frame; the hardware cursor must be hidden so it cannot flash around the
+// screen. When idle (the existing caret goldens) it stays a Bar on the composer.
+TEST(UiRenderGolden, CursorHiddenWhileTurnActive) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Hidden);
+}
+
+// 61-G3 (62-I4, Rev 2): typing/steering during the focused turn's own spinner
+// must still show the caret. Pre-fix the caret was unconditionally Hidden while
+// animating, so the user typed blind.
+TEST(UiRenderGolden, CursorBarWhileEditingDuringTurn) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    state->agent_state = AgentState::Thinking;
+    state->input.draft = "steer";
+    state->input.cursor = state->input.draft.size();
+    state->composer_input_at = std::chrono::steady_clock::now();
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+}
+
+// 61-G4 (62-I4, Rev 2): the animate predicate is scoped to the FOCUSED session.
+// A background session streaming reasoning must not hide the focused composer's
+// caret. Pre-fix `has_streaming_reasoning()` scanned every session.
+TEST(UiRenderGolden, CursorBarWhenOnlyBackgroundSessionAnimates) {
+    UiModel model = build_model();
+    const WorkspaceId other{"other-workspace"};
+    WorkspaceModel workspace;
+    workspace.id = other;
+    workspace.cwd = "/other";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(other, workspace);
+    const SessionId other_session{"other-session"};
+    SessionUiState& background = model.ensureSessionIn(other, other_session);
+    background.agent_state = AgentState::Thinking;
+    ConversationEntry reasoning;
+    reasoning.role = ConversationRole::Reasoning;
+    reasoning.text = "thinking";
+    reasoning.streaming = true;
+    background.conversation.entries.push_back(std::move(reasoning));
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Bar);
+}
+
+// 61-G5 (62-D2/I4, Rev 3; LOW-1): the composer-edit grace is scoped to the
+// edited session. An edit in workspace A must not force the caret `Bar` in a
+// different, animating workspace B. Pre-fix `composer_input_at` was
+// model-global, so switching to B kept `Bar` for the grace window.
+TEST(UiRenderGolden, CursorHiddenInOtherSessionAfterEditingFirst) {
+    UiModel model = build_model();
+    SessionUiState* first = model.session(kSession);
+    ASSERT_NE(first, nullptr);
+    first->agent_state = AgentState::Thinking;
+    first->composer_input_at = std::chrono::steady_clock::now();
+
+    const WorkspaceId other{"other-workspace"};
+    WorkspaceModel workspace;
+    workspace.id = other;
+    workspace.cwd = "/other";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live = true;
+    model.workspaces.emplace(other, workspace);
+    const SessionId other_session{"other-session"};
+    SessionUiState& background = model.ensureSessionIn(other, other_session);
+    background.agent_state = AgentState::Thinking;
+    model.activeWorkspaceId = other;
+    model.focusSessionIn(other, other_session);
+
+    const ftxui::Screen screen = render_screen(model, TerminalSize{72, 20}, Theme{false});
+    EXPECT_EQ(screen.cursor().shape, ftxui::Screen::Cursor::Hidden);
+}
+
 TEST(UiRenderGolden, ArmedEscHintRendered) {
     UiModel model = build_model();
     SessionUiState* state = model.session(kSession);

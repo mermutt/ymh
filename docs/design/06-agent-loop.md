@@ -350,7 +350,9 @@ Two views of one machine:
         │                                │
         │                                ├── no tool calls ──► TurnEnded ──► Idle
         │                                ├── provider error ──► Error
-        │                                └── step limit ──────► Error
+        │                                └── segment budget / no progress ──► Idle
+        │                                    (62-D3/D4/D6/D8; recoverable, not Error;
+        │                                     a productive segment auto-continues)
         │
         ├── cancel ──► Cancelling ──► TurnCancelled ──► Idle
         └── WaitingForInput ──user input──► Thinking
@@ -364,7 +366,10 @@ Transitions are driven by durable/live loop events (A3):
 | `Thinking` | model returned tool calls | `CallingTool` | `AssistantMessage`, `ToolCall`(s) |
 | `Thinking` | model ended the turn | `Idle` | `AssistantMessage`, `StepEnded`, `TurnEnded` |
 | `Thinking` | provider terminal error | `Error` | `TurnFailed` (08 (k)) |
-| `Thinking` | step limit | `Error` | `TurnFailed{StepLimitExceeded}` |
+| `Thinking` | segment budget (`max_steps`) reached, ≥1 successful tool call in the segment | `Thinking` | (no durable event; auto-continues into a new segment — **62-D8**) |
+| `Thinking` | segment budget (`max_steps`) reached, no successful tool call | `Idle` | `TurnFailed{StepLimitExceeded}` (recoverable; **62-D3/D4/D8**, supersedes the `Error` target) |
+| `Thinking` | no-progress guard (`kNoProgressStreak` non-progress steps) | `Idle` | `TurnFailed{StepLimitExceeded}` (recoverable; **62-D6/D8**) |
+| `Thinking` | absolute per-turn ceiling (`max_turn_steps`) exceeded | `Idle` | `TurnFailed{StepLimitExceeded}` (recoverable; **62-D9**) |
 | `CallingTool` | all results appended | `Thinking` | `ToolResult`(s), `StepEnded` |
 | `CallingTool` | policy says `Ask` | `WaitingForPermission` | (live `PermissionRequested`) |
 | `WaitingForPermission` | decision `Allow`/`AllowAlways` | `CallingTool` | `PermissionDecision` |
@@ -588,6 +593,9 @@ Pinned per-turn algorithm (normative):
 runTurn(turn, origin):
   append TurnStarted{turn, origin}
   loop:
+    if stepNumber > maxTurnSteps:        # 62-D9: absolute per-turn ceiling
+        flushChunks(); append TurnFailed{turn, "StepLimitExceeded"}
+        state := Idle; return            # recoverable; bounds a novel-Ok runaway
     step := nextStep
     append StepStarted{turn, step}
 
@@ -638,8 +646,14 @@ runTurn(turn, origin):
         result := toolRegistry.execute(call, ctx)    # §14
         append ToolResult{call, result}
     append StepEnded
-    if step >= maxSteps:
-        flushChunks(); append TurnFailed{turn, "StepLimitExceeded"}; emit live Error; return
+    if noProgressStreak >= kNoProgressStreak:
+        flushChunks(); append TurnFailed{turn, "StepLimitExceeded"}
+        state := Idle; return          # 62-D6/D8: repeated/identical non-progress
+    if segmentStep >= maxSteps:
+        if segment had a successful tool call:
+            segmentStep := 0; continue # 62-D8: auto-continue, no user message
+        flushChunks(); append TurnFailed{turn, "StepLimitExceeded"}
+        state := Idle; return          # 62-D3/D4/D8: recoverable, no live Error
 ```
 
 The agent **never** depends on provider-specific streaming formats (`§12`);
@@ -824,11 +838,39 @@ project to `ToolResult{outcome = Error}`; a cancelled turn's project to
   `§5.3`).
 - `Cancelled` is never mapped to `TurnFailed` (§3.5, A10).
 
-### 5.8 Step limit and termination
+### 5.8 Step budget, progress and termination
 
-- `maxSteps` (config `[agent] max_steps`, default 100, `§37`) bounds the steps
-  per turn. Exceeding it is a **loop-policy failure**: flush, emit a live
-  `Error`, append `TurnFailed{turn, "StepLimitExceeded"}` (decision (g)).
+- `maxSteps` (config `[agent] max_steps`, default 100, `§37`) is the **per-segment
+  step budget** (**62-D3/D8 Rev 3**). When a segment reaches it and the segment
+  committed **at least one successful (`Ok`) tool call**, the loop **auto-continues
+  into a new segment** with no user message: `segmentStep` resets to 0 while
+  `turn_step`/`StepId` stay monotonic (so `force_first_tool_call` cannot
+  re-trigger). When a segment reaches it with **no** successful tool call, the
+  turn stops as a **recoverable loop-policy stop**: flush, append
+  `TurnFailed{turn, "StepLimitExceeded"}` with an actionable message, and return
+  to `Idle` — **no live `Error`** (**62-D4**; supersedes decision (g)'s
+  "loop-policy failure" and the former `Error` terminal). `[agent] max_segments`
+  (default 0 = unlimited) optionally caps the number of segments per turn; a
+  positive cap is itself a recoverable stop.
+- Independently, the **no-progress guard** stops the turn at `Idle` with the same
+  `TurnFailed{StepLimitExceeded}` after `kNoProgressStreak` (3) consecutive
+  **non-progress** steps (**62-D6**). A step makes progress iff its *action
+  signature* (tool names + canonical arguments) is novel in the turn, or it
+  commits a successful call whose *result signature* (name + outcome + error +
+  output) is novel. Distinct informative failures (a new path, a new command, a
+  new error) are therefore progress and do not trip the guard, while a repeated
+  identical call — or a periodic A/B cycle — repeats its signature and is
+  counted as no progress. This bounds an alternating failing-call loop that the
+  advisory repeat reminder never trips, and it also bounds a repeated failing
+  `shell` loop because a non-zero exit is an honest `Error` outcome (**62-D7**).
+- **Independently of progress**, an **absolute per-turn ceiling**
+  `max_turn_steps` (config `[agent] max_turn_steps`, default 1000, **62-D9
+  Rev 4**) bounds the total number of steps in a turn: before each step the loop
+  stops at `Idle` with the same recoverable `TurnFailed{StepLimitExceeded}`
+  (message names the turn step ceiling) when `stepNumber > max_turn_steps`. This
+  is the hard bound the progress guard alone cannot provide — a novel-`Ok`
+  runaway (a distinct *successful* action every step) is invisible to the guard,
+  and `max_segments = 0` does not bound it.
 - A turn also terminates when the model returns no tool calls (natural
   `TurnEnded`) or on cancel/failure as above.
 
@@ -1101,7 +1143,7 @@ These are component-local to the agent/loop layer and must be covered by tests
 | **A-F1** | Provider terminal failure | `StreamError`/`Failed` (`08 §2.2`) | flush; live `Error`; `TurnFailed{code,message}`; unmatched `tool_use` → `ToolResult{Error}` |
 | **A-F2** | Cancel mid-turn | `cancel()`/token fired | flush; `TurnCancelled`; queued follow-ups preserved (A9) |
 | **A-F3** | Lease lost mid-turn | `LeaseLost` on append (`02 §5.7`) | stop appending; degrade read-only; surface; no partial commit |
-| **A-F4** | Step limit exceeded | `step >= maxSteps` | flush; live `Error`; `TurnFailed{StepLimitExceeded}` |
+| **A-F4** | Step budget, no progress, or the absolute ceiling | segment has no successful call at `max_steps` OR `noProgressStreak >= kNoProgressStreak` OR `stepNumber > max_turn_steps` | flush; `TurnFailed{StepLimitExceeded}`; `Idle` (recoverable; **62-D3/D4/D6/D8/D9** supersede "live `Error`"). A segment with a successful call auto-continues; the absolute ceiling bounds every turn. |
 | **A-F5** | Tool execution fails | tool returns error/throws | `ToolResult{outcome = Error}`; turn continues |
 | **A-F6** | Permission denied | policy `Deny`/user deny | `PermissionDecision`; `ToolResult{Denied}`; turn continues |
 | **A-F7** | `ASK` on a background session | policy `Ask`, session not active | enter `WaitingForPermission`; record decision; surface via attention; never deadlock invisibly (F2) |
@@ -1331,8 +1373,17 @@ API-key gated.
   partially established session (`§4.2`).
 - **(f) Resume is `Idle` and starts no turn** (F10); an open turn at crash is
   projected to the last event and not auto-continued (`§4.3`, A15).
-- **(g) Step limit is a loop-policy failure:** `TurnFailed{turn,
-  "StepLimitExceeded"}` (`§5.8`).
+- **(g) Step limit is a progress-gated recoverable loop-policy stop** (amended by
+  **62-D3/D4/D6/D7/D8/D9**): `max_steps` is the per-segment budget; a segment with
+  a successful tool call auto-continues with no user message (resolving the
+  "long productive job must be re-prompted" defect), while a segment with no
+  success stops with `TurnFailed{turn, "StepLimitExceeded"}` and `Idle`, not
+  `Error` (`§5.8`). A separate no-progress guard stops after 3 consecutive
+  repeated/identical non-progress steps; a non-zero shell exit is an honest
+  `Error` outcome so a failing-shell loop is counted as no progress. An
+  **absolute per-turn ceiling** `max_turn_steps` (default 1000, **62-D9**) bounds
+  every turn regardless of progress, so a novel-`Ok` runaway that the guard
+  cannot see is still hard-stopped.
 - **(h) Compaction is best-effort.** It fails the turn only when the context
   cannot fit after a compaction attempt (`§5.3`, `A-F10`). A provider
   `ContextLengthExceeded` triggers exactly **one** compaction retry (§5.7); if

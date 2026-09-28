@@ -41,12 +41,27 @@ public:
         std::filesystem::create_directories(g_root / "home", error);
 
         // The global config layer is required (21-D12); a minimal valid file
-        // with built-in defaults keeps children that resolve the default path
-        // working without falling back to the developer's real config.
+        // keeps children that resolve the default path working without falling
+        // back to the developer's real config.
         std::ofstream config_file(g_root / "config" / "ymh" / "config.jsonc",
                                   std::ios::binary);
         config_file << "{}\n";
         config_file.close();
+
+        // Vendor-free provider for spawned daemons (spec 61 §3): the code
+        // branch ships no built-in endpoint/model, so a daemon started from an
+        // empty config fails `has_provider()` and exits StartupRejected. A
+        // process-wide FakeLLM script keeps every spawned child (supervisor ->
+        // daemon, HostHarness, PTY) provider-satisfied with no vendor default.
+        // Live runs (YMH_LIVE_LLM) opt out and use the real provider.
+        const char* live = std::getenv("YMH_LIVE_LLM");
+        if (live == nullptr || *live == '\0') {
+            const std::filesystem::path script = g_root / "fake_llm.json";
+            std::ofstream script_file(script, std::ios::binary);
+            script_file << R"([{"text": "ok"}])";
+            script_file.close();
+            ::setenv("YMH_FAKE_LLM_SCRIPT", script.c_str(), 1);
+        }
 
         ::setenv("XDG_STATE_HOME", (g_root / "state").c_str(), 1);
         ::setenv("XDG_CONFIG_HOME", (g_root / "config").c_str(), 1);

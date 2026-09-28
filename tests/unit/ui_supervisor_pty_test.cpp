@@ -1768,6 +1768,17 @@ TEST(UiSupervisorPty, UI53_P3_EagerDaemonAtStart) {
     ::setenv("XDG_STATE_HOME", state.c_str(), 1);
     ::setenv("HOME", root.path().c_str(), 1);
     ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    // Spec 61 §5: the code branch has no built-in model, so the first-frame
+    // status assertion pins the dev endpoint/model explicitly.
+    root.write(".config/ymh/config.jsonc", R"JSON({
+      "llm": {
+        "default": {
+          "base_url": "https://api.deepseek.com/v1",
+          "model": "deepseek-flash",
+          "api_key_env": "DEEPSEEK_API_KEY"
+        }
+      }
+    })JSON");
 
     const std::filesystem::path workspace = root.path() / "eager-ws";
     std::filesystem::create_directories(workspace);

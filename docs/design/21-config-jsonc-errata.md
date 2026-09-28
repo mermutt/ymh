@@ -381,6 +381,8 @@ The complete key set is enumerated from the `reject_unknown` allow-lists and the
 | `ui` | `side_panel` | string | `"auto"` | `config.cpp:106-107` |
 | `agent` | `model` | string | `""` | `config.cpp:161-162` |
 | `agent` | `max_steps` | int64→size_t | `100` | `config.cpp:163-165` |
+| `agent` | `max_segments` | int64→size_t | `0` | `config.cpp:404-406` (0 = unlimited) |
+| `agent` | `max_turn_steps` | int64→size_t | `1000` | `config.cpp:407-409` (0 clamps to 1, 62-I13) |
 | `agent` | `reasoning_effort` | optional string | absent | `config.cpp:166-167` |
 | `agent` | `system_prompt` | string | `""` | `config.cpp:168-169` |
 | `agent` | `compaction_threshold_tokens` | int64→size_t | `0` | `config.cpp:170-172` |
@@ -1165,7 +1167,9 @@ intended values. Retained.
 ```jsonc
 "agent": {
   "model": "",                       // string; empty => use llm.default.model
-  "max_steps": 100,                  // integer >= 0
+  "max_steps": 100,                  // integer >= 0; per-segment step budget
+  "max_segments": 0,                 // integer >= 0; 0 => unlimited (62-D8)
+  "max_turn_steps": 1000,            // integer >= 0; absolute per-turn ceiling (0 clamps to 1, 62-D9/I13)
   // "reasoning_effort": "low",      // optional: "low" | "medium" | "high"
   // "system_prompt": "",            // optional: empty => built-in default
   "compaction_threshold_tokens": 0,  // legacy alias, integer >= 0

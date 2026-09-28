@@ -18,6 +18,38 @@ A spec is `verified` only after independent review (Oracle / review team), with
 no open HIGH/MEDIUM findings and pinned interface sketches. Loop:
 **write → review → fix → re-check → mark verified → code.**
 
+## Branch split: `main` (code) / `dev` (docs, tests)
+
+The repository ships as two branches that share one empty root commit (`E`) and
+own **disjoint path sets**, so a plain `git merge` reconstitutes the full tree
+with no flags and no conflicts:
+
+| Branch | Owns |
+|---|---|
+| `main` | `.github/ cmake/ CMakeLists.txt .gitignore include/ presets/ src/` — code only (the external/office checkout) |
+| `dev` | `docs/ tests/ README.md HANDOFF.md AGENTS.md` |
+
+**Invariant B3**: no tracked file in `main` matches `(?i)deepseek`. `main` ships
+no endpoint/model/credential-env defaults: `deepseek_config()` is deleted,
+first-run scaffold emits commented-out placeholders, `resolve_model` stays total
+with an empty model id, and the fail-fast is `ProviderRegistry::create` rejecting
+an empty `base_url`/`api_key_env` before any network I/O.
+
+**Workflow**: start from the merged tree, which is the only one with the full
+suite (`YMH_BUILD_TESTS` auto-disables when `tests/CMakeLists.txt` is absent):
+
+```sh
+git checkout -b tmp main
+git merge dev          # ancestry-clean; no --allow-unrelated-histories
+```
+
+Develop on `tmp`. When ready, split the change set: code → commit to `main`
+(re-check `git grep -i deepseek main` is empty); docs/tests → commit to `dev`;
+re-verify by merging `dev` into a fresh `tmp` off `main`. Never commit
+`docs/ tests/ README.md HANDOFF.md AGENTS.md` to `main`, nor code dirs to `dev`.
+Spec numbering continues on `dev`; a spec that changes code is committed to
+`main` in the same change set. See `docs/design/61-main-dev-branch-split.md`.
+
 ## Current state (Milestone 1 MVP implemented)
 
 - The design is **verified**: `docs/design/00-architecture.md` + component specs

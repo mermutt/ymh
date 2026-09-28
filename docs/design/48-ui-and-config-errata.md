@@ -387,6 +387,19 @@ guard; the MCP credential diagnostic procedure.
    glyph would otherwise push the caret onto its trailing cell. The pinned
    signature is `ftxui::Element caret_anchor(ftxui::Element)` (file-local).
 
+   **Caret shape is conditional (amended by 62-D2 Rev 3).** The single-focus-owner
+   guarantee above is unchanged, but the cursor **shape** is no longer
+   unconditionally `Bar`: it is `Hidden` while the **rendered composer's** session
+   animates (its turn active or one of its own reasoning blocks streaming) and
+   `Bar` otherwise, with a short grace window after an edit to **that same**
+   session's composer so typing/steering stays visible. The edit grace is
+   per-session (`SessionUiState::composer_input_at`), so an edit in one workspace
+   cannot force `Bar` in another. The idle-caret goldens (`§5.5`, `§13.2`:
+   `CaretCursorLandsAtInputPosition`, `CaretCursorHandlesCjkLeadingCell`,
+   `UI51_D2_ComposerTintAndBarGolden`) assert `Bar` in the idle case; focus
+   ownership/tracking (`59-D4`) is preserved because only the `cursor_shape`
+   field changes, never which node owns focus.
+
    **Glyph alignment (Rev 2).** Rev 1 assumed `cursor` is always on a glyph
    boundary, but plain `ArrowLeft`/`ArrowRight` move it by one **byte**
    (`--input.cursor` / `++input.cursor`, `src/ui/supervisor.cpp:2577-2588`), so
@@ -499,6 +512,7 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
    | **UserAuthored** | `ConversationRole::User` | foreground `Color::White`, `ftxui::bold`, left bar retained, background `RGB(40,42,54)` retained |
    | **Intermediate** | `Reasoning`, `Tool`, and `Assistant` entries that are **streaming** or followed by a `Tool`/`Reasoning` entry before the next `User` entry | `ftxui::dim` on the whole entry (header and body) |
    | **FinalAnswer** | every other `Assistant` entry | no dim, no bold — the terminal default (normal) |
+   | **FinalAnswer** | `Notice` (**62-D5**: the recoverable step-ceiling notice) | no dim; the renderer adds bold/yellow at the entry site, so it is not mistaken for the dim `System`/`Context` chrome |
    | **Chrome** | `System`, `Context` | `dim` (unchanged) |
 
 2. **Classifier (Rev 2 — streaming folded into the signature).**
@@ -514,6 +528,8 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
        `Tool` or `Reasoning` entry is seen, → `Intermediate`; else →
        `FinalAnswer`.
    - `System`/`Context` → `Chrome`.
+   - `Notice` → `FinalAnswer` (**62-D5**; the notice's own bold/yellow styling is
+     applied by `render_entry`, not by the presentation level).
 
    `turn_active` is the per-session turn predicate:
    `is_active_state(session.agent_state)` (`src/ui/ui_model.cpp:326-328`) — for

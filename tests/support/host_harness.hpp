@@ -107,10 +107,10 @@ public:
         for (const auto& [key, value] : options_.env) {
             child.env[key] = value;
         }
+        // Inherit the process-wide FakeLLM script (spec 61 §3): the sanitized
+        // code ships no built-in provider, so an unset script makes
+        // `ymh --host` exit StartupRejected. Callers may override it in `env`.
         child.env_remove = {"YMH_LIVE_LLM"};
-        if (options_.env.find("YMH_FAKE_LLM_SCRIPT") == options_.env.end()) {
-            child.env_remove.emplace_back("YMH_FAKE_LLM_SCRIPT");
-        }
 
         process_.start(std::move(child));
         stopped_ = false;
