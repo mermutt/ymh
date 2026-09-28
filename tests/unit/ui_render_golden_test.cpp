@@ -2165,7 +2165,8 @@ TEST(UiRenderGolden, UI46_G6_StatusSpinner) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = line_with(rendered, "0 active");
     SCOPED_TRACE(rendered);
-    EXPECT_EQ(line.find("│⠋  · build"), 0u);
+    // 63-D1: the bottom indicator is the pendulum comet, not the braille spinner.
+    EXPECT_EQ(line.find("│●···  · build"), 0u);
 }
 
 UiModel tool_line_model(const std::string& name, const std::string& arguments) {

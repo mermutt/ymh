@@ -41,6 +41,11 @@ constexpr std::array<const char*, 8> kFrames = {
     "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧",
 };
 
+// 63-D1/63-D6: the bottom status indicator's pendulum-comet table.
+constexpr std::array<const char*, 8> kBottomFrames = {
+    "●···", "•●··", "·•●·", "··•●", "···●", "··●•", "·●•·", "●•··",
+};
+
 std::string strip_ansi(const std::string& input) {
     std::string output;
     output.reserve(input.size());
@@ -309,7 +314,7 @@ TEST(Errata46D9, UI46_D9_SpinnerOnWhileTurnActive) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = status_line(rendered);
     SCOPED_TRACE(rendered);
-    EXPECT_NE(line.find(kFrames[0]), std::string::npos);
+    EXPECT_NE(line.find(kBottomFrames[0]), std::string::npos);
 }
 
 TEST(Errata46D9, UI46_D9_SpinnerOffOnIdle) {
@@ -320,7 +325,7 @@ TEST(Errata46D9, UI46_D9_SpinnerOffOnIdle) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = status_line(rendered);
     SCOPED_TRACE(rendered);
-    for (const char* frame : kFrames) {
+    for (const char* frame : kBottomFrames) {
         EXPECT_EQ(line.find(frame), std::string::npos) << frame;
     }
 }
@@ -333,7 +338,7 @@ TEST(Errata46D9, UI46_D9_SpinnerOffOnWaitingForPermission) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = status_line(rendered);
     SCOPED_TRACE(rendered);
-    for (const char* frame : kFrames) {
+    for (const char* frame : kBottomFrames) {
         EXPECT_EQ(line.find(frame), std::string::npos) << frame;
     }
 }
@@ -360,10 +365,10 @@ TEST(Errata46D9, UI46_D9_SpinnerBeforeModeSegment) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = status_line(rendered);
     SCOPED_TRACE(rendered);
-    EXPECT_EQ(line.find("│⠋  · build"), 0u);
+    EXPECT_EQ(line.find("│" + std::string(kBottomFrames[0]) + "  · build"), 0u);
 }
 
-TEST(Errata46D9, UI46_D9_SpinnerSharesFrameTable) {
+TEST(Errata46D9, UI63_D1_BottomAndThinkingFramesDiffer) {
     UiModel model = model_with_active_session(AgentState::Thinking);
     model.spinner.frame = 3;
     ConversationEntry reasoning;
@@ -377,8 +382,9 @@ TEST(Errata46D9, UI46_D9_SpinnerSharesFrameTable) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = status_line(rendered);
     SCOPED_TRACE(rendered);
-    EXPECT_NE(line.find("⠸  · build"), std::string::npos);
-    EXPECT_NE(rendered.find("⠸ Thinking"), std::string::npos);
+    EXPECT_NE(line.find(std::string(kBottomFrames[3]) + "  · build"), std::string::npos);
+    EXPECT_EQ(line.find(kFrames[3]), std::string::npos);
+    EXPECT_NE(rendered.find(std::string(kFrames[3]) + " Thinking"), std::string::npos);
 }
 
 TEST(Errata46D9, UI46_D9_SpinnerOnlyActiveSession) {
@@ -403,7 +409,36 @@ TEST(Errata46D9, UI46_D9_SpinnerOnlyActiveSession) {
         normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     const std::string line = status_line(rendered);
     SCOPED_TRACE(rendered);
-    for (const char* frame : kFrames) {
+    for (const char* frame : kBottomFrames) {
+        EXPECT_EQ(line.find(frame), std::string::npos) << frame;
+    }
+}
+
+// 63-D1/63-D2: the comet advances across frames while the turn is active and is
+// static (absent) when idle.
+TEST(Errata46D9, UI63_D1_BottomFramesAdvanceWhileActive) {
+    UiModel model = model_with_active_session(AgentState::Thinking);
+    model.spinner.frame = 0;
+    const std::string first =
+        status_line(normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false})));
+    EXPECT_NE(first.find(kBottomFrames[0]), std::string::npos);
+
+    model.spinner.frame = 1;
+    const std::string second =
+        status_line(normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false})));
+    EXPECT_NE(second.find(kBottomFrames[1]), std::string::npos);
+    EXPECT_EQ(second.find(kBottomFrames[0]), std::string::npos);
+    EXPECT_NE(first, second);
+}
+
+TEST(Errata46D9, UI63_D1_BottomStaticWhenIdle) {
+    UiModel model = model_with_active_session(AgentState::Idle);
+    EXPECT_FALSE(model.advance_spinner(500ms));
+    EXPECT_EQ(model.spinner.frame, 0u);
+
+    const std::string line =
+        status_line(normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false})));
+    for (const char* frame : kBottomFrames) {
         EXPECT_EQ(line.find(frame), std::string::npos) << frame;
     }
 }
