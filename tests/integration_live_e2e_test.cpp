@@ -27,6 +27,7 @@
 
 #include "support/host_harness.hpp"
 #include "support/pty_child.hpp"
+#include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/registry/registry.hpp"
@@ -60,8 +61,6 @@ bool live_enabled() {
     return flag != nullptr && std::string{flag} == "1" && key != nullptr && *key != '\0';
 }
 
-void set_env(const char* key, const std::string& value) { ::setenv(key, value.c_str(), 1); }
-
 RegistryConfig registry_config_for(const std::filesystem::path& state_dir) {
     RegistryConfig config;
     config.db_path         = state_dir / "ymh" / "registry.db";
@@ -84,10 +83,10 @@ public:
     explicit LiveWorkspace(const std::string& prefix) : root_(prefix) {
         root_.write("note.txt", std::string{"The secret word is "} + kSecret + ".\n");
         root_.write(".ymh/config.jsonc", kLiveConfig);
-        set_env("XDG_STATE_HOME", root_.state_dir().string());
-        set_env("HOME", root_.path().string());
-        set_env("XDG_CONFIG_HOME", root_.config_dir().string());
-        set_env("XDG_CACHE_HOME", (root_.path() / ".cache").string());
+        state_env_.emplace("XDG_STATE_HOME", root_.state_dir().string());
+        home_env_.emplace("HOME", root_.path().string());
+        config_env_.emplace("XDG_CONFIG_HOME", root_.config_dir().string());
+        cache_env_.emplace("XDG_CACHE_HOME", (root_.path() / ".cache").string());
         id_ = register_workspace(registry_config_for(root_.state_dir()), root_.path(), "live-e2e");
     }
 
@@ -111,6 +110,11 @@ public:
 private:
     ShortTempRoot root_;
     WorkspaceId   id_;
+
+    std::optional<ScopedEnvVar> state_env_;
+    std::optional<ScopedEnvVar> home_env_;
+    std::optional<ScopedEnvVar> config_env_;
+    std::optional<ScopedEnvVar> cache_env_;
 };
 
 // Waits for the supervisor to auto-create the first session, sends the prompt,

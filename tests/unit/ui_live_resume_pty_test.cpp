@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "support/pty_child.hpp"
+#include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -62,9 +63,9 @@ TEST(UiLiveResumePty, ResumesStoredSessionAndAnswersFollowUp) {
     const std::filesystem::path workspace = root.path() / "ws";
     std::filesystem::create_directories(workspace);
 
-    ::setenv("XDG_STATE_HOME", root.state_dir().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", root.config_dir().c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", root.state_dir().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", root.config_dir().string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
 
     RegistryConfig registry_config;
     registry_config.db_path         = root.state_dir() / "ymh" / "registry.db";

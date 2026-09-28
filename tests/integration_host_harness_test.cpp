@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "support/host_harness.hpp"
+#include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
 #include "ymh/cli/cli.hpp"
 #include "ymh/core/event.hpp"
@@ -280,9 +281,11 @@ TEST_F(HostIntegration, RunRoutesThroughLiveDaemon) {
     harness.start();
     ASSERT_TRUE(harness.wait_ready()) << harness.read_log();
 
-    ::setenv("XDG_STATE_HOME", (root.path() / ".state").string().c_str(), 1);
-    ::setenv("HOME", root.path().string().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ymh::test::ScopedEnvVar state_env("XDG_STATE_HOME",
+                                            (root.path() / ".state").string());
+    const ymh::test::ScopedEnvVar home_env("HOME", root.path().string());
+    const ymh::test::ScopedEnvVar config_env("XDG_CONFIG_HOME",
+                                             (root.path() / ".config").string());
 
     std::ostringstream out;
     std::ostringstream err;

@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "support/host_harness.hpp"
+#include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
 #include "ymh/cli/cli.hpp"
 #include "ymh/core/event.hpp"
@@ -82,10 +83,6 @@ constexpr const char* kFakeToolScript = R"([
 constexpr const char* kAllowAllConfig =
     "{\n  \"permissions\": {\n    \"read\": \"allow\",\n    \"write\": \"allow\",\n"
     "    \"shell\": \"allow\"\n  }\n}\n";
-
-void set_env(const char* key, const std::string& value) {
-    ::setenv(key, value.c_str(), 1);
-}
 
 class ScopedStdinDevNull {
 public:
@@ -608,10 +605,10 @@ protected:
     }
 
     void configure_workspace(const ShortTempRoot& root) {
-        set_env("XDG_STATE_HOME", (root.path() / ".state").string());
-        set_env("HOME", root.path().string());
-        set_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
-        set_env("XDG_CACHE_HOME", (root.path() / ".cache").string());
+        state_env_.emplace("XDG_STATE_HOME", (root.path() / ".state").string());
+        home_env_.emplace("HOME", root.path().string());
+        config_env_.emplace("XDG_CONFIG_HOME", (root.path() / ".config").string());
+        cache_env_.emplace("XDG_CACHE_HOME", (root.path() / ".cache").string());
         // M4: every daemon spawned by this fixture needs a required global
         // config (21-D12), including `TwoSpawnsExactlyOneDaemon`, which starts
         // no harness. Write it here so it is ordering-independent.
@@ -633,6 +630,11 @@ protected:
     }
 
     std::filesystem::path binary_;
+
+    std::optional<ScopedEnvVar> state_env_;
+    std::optional<ScopedEnvVar> home_env_;
+    std::optional<ScopedEnvVar> config_env_;
+    std::optional<ScopedEnvVar> cache_env_;
 };
 
 TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {

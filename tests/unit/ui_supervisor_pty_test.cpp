@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "support/host_harness.hpp"
+#include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
 #include "ymh/agent/message.hpp"
 #include "ymh/core/event.hpp"
@@ -447,9 +448,9 @@ private:
 TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     ShortTempRoot root("ymh_pty");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace_a = root.path() / "alpha";
     const std::filesystem::path workspace_b = root.path() / "beta";
@@ -519,9 +520,9 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
 TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
     ShortTempRoot root("ymh_pty_help");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "help-ws";
     std::filesystem::create_directories(workspace);
@@ -589,9 +590,9 @@ TEST(UiSupervisorPty, HelpListAndHistoryRecall) {
 TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
     ShortTempRoot root("ymh_pty_exit");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "exit-ws";
     std::filesystem::create_directories(workspace);
@@ -669,9 +670,9 @@ TEST(UiSupervisorPty, ExitPromptCancelKeepsDaemonThenConfirmTearsDown) {
 TEST(UiSupervisorPty, ExitPromptArrowKeysMoveHighlight) {
     ShortTempRoot root("ymh_pty_exit_arrows");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "exit-arrows-ws";
     std::filesystem::create_directories(workspace);
@@ -738,9 +739,9 @@ TEST(UiSupervisorPty, ExitPromptArrowKeysMoveHighlight) {
 TEST(UiSupervisorPty, ModalKeystrokesDoNotReachComposer) {
     ShortTempRoot root("ymh_pty_modal_focus");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "modal-ws";
     std::filesystem::create_directories(workspace);
@@ -798,9 +799,9 @@ TEST(UiSupervisorPty, ModalKeystrokesDoNotReachComposer) {
 TEST(UiSupervisorPty, LastExitPromptsWhenDaemonOwnerSnapshotLagsRegistry) {
     ShortTempRoot root("ymh_pty_ghost_owner");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "ghost-ws";
     std::filesystem::create_directories(workspace);
@@ -914,9 +915,9 @@ TEST(UiSupervisorPty, SkillsTabCompletionAndListing) {
     ShortTempRoot root("ymh_pty_skills");
     const std::filesystem::path state = root.state_dir();
     const std::filesystem::path config = root.path() / "config";
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     write_skill_file(config / "ymh" / "skills", "git-commit", "Write a conventional commit.");
     const std::filesystem::path workspace = root.path() / "skills-ws";
@@ -973,9 +974,9 @@ TEST(UiSupervisorPty, SkillsEmptyState) {
     ShortTempRoot root("ymh_pty_skills_empty");
     const std::filesystem::path state = root.state_dir();
     const std::filesystem::path config = root.path() / "config";
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     std::filesystem::create_directories(config / "ymh" / "skills");
     const std::filesystem::path workspace = root.path() / "empty-ws";
@@ -1023,9 +1024,9 @@ void write_compaction_window(const std::filesystem::path& workspace, std::int64_
 TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
     ShortTempRoot root("ymh_pty_context");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "context-ws";
     std::filesystem::create_directories(workspace);
@@ -1071,9 +1072,9 @@ TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
 TEST(UiSupervisorPty, ContextOverlayShowsNote) {
     ShortTempRoot root("ymh_pty_context_note");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "context-note-ws";
     std::filesystem::create_directories(workspace);
@@ -1112,9 +1113,9 @@ TEST(UiSupervisorPty, ContextOverlayShowsNote) {
 TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
     ShortTempRoot root("ymh_pty_context_refresh");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "context-refresh-ws";
     std::filesystem::create_directories(workspace);
@@ -1158,9 +1159,9 @@ TEST(UiSupervisorPty, ContextRefreshKeyKeepsOverlay) {
 TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
     ShortTempRoot root("ymh_pty_config");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "config-ws";
     std::filesystem::create_directories(workspace);
@@ -1325,9 +1326,9 @@ bool wait_for_host(const std::string& workspace_id, std::chrono::milliseconds ti
 TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
     ShortTempRoot root("ymh_pty_p4");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -1376,9 +1377,9 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
 TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
     ShortTempRoot root("ymh_pty_live_hide");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     std::filesystem::create_directories(alpha);
@@ -1424,9 +1425,9 @@ TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
 TEST(UiSupervisorPty, SwLive_ShowsOtherWorkspaceLiveSession) {
     ShortTempRoot root("ymh_pty_live_peer");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -1479,9 +1480,9 @@ TEST(UiSupervisorPty, SwLive_ShowsOtherWorkspaceLiveSession) {
 TEST(UiSupervisorPty, SwP1_SessionsSelectionSpawnsAndResumes) {
     ShortTempRoot root("ymh_pty_p1");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -1528,9 +1529,9 @@ TEST(UiSupervisorPty, SwP1_SessionsSelectionSpawnsAndResumes) {
 TEST(UiSupervisorPty, SwP2_ResumeFlagResumesStoredSession) {
     ShortTempRoot root("ymh_pty_p2");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -1570,9 +1571,9 @@ TEST(UiSupervisorPty, SwP2_ResumeFlagResumesStoredSession) {
 TEST(UiSupervisorPty, SL_I4_ResumeFlagResolvesHiddenUnpromptedRoot) {
     ShortTempRoot root("ymh_pty_sli4");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -1610,9 +1611,9 @@ TEST(UiSupervisorPty, SL_I4_ResumeFlagResolvesHiddenUnpromptedRoot) {
 TEST(UiSupervisorPty, SwP2_UnknownResumeIdExitsOne) {
     ShortTempRoot root("ymh_pty_p2bad");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     std::filesystem::create_directories(alpha);
@@ -1643,9 +1644,9 @@ TEST(UiSupervisorPty, SwP2_UnknownResumeIdExitsOne) {
 TEST(UiSupervisorPty, UX_I2_TabThenEnterExecutesHighlightedCommand) {
     ShortTempRoot root("ymh_pty_ux_i2");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "palette-ws";
     std::filesystem::create_directories(workspace);
@@ -1689,9 +1690,9 @@ TEST(UiSupervisorPty, UX_I2_TabThenEnterExecutesHighlightedCommand) {
 TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates) {
     ShortTempRoot root("ymh_pty_p5");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     std::filesystem::create_directories(alpha);
@@ -1765,9 +1766,9 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
 TEST(UiSupervisorPty, UI53_P3_EagerDaemonAtStart) {
     ShortTempRoot root("ymh_pty_53p3");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
     // Spec 61 §5: the code branch has no built-in model, so the first-frame
     // status assertion pins the dev endpoint/model explicitly.
     root.write(".config/ymh/config.jsonc", R"JSON({
@@ -1815,9 +1816,9 @@ TEST(UiSupervisorPty, UI53_P3_EagerDaemonAtStart) {
 TEST(UiSupervisorPty, UI53_P4_EagerSessionThenPrompt) {
     ShortTempRoot root("ymh_pty_53p4");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "eager-ws";
     std::filesystem::create_directories(workspace);
@@ -1859,9 +1860,9 @@ TEST(UiSupervisorPty, UI53_P4_EagerSessionThenPrompt) {
 TEST(UiSupervisorPty, UI53_P1_EagerCwdThenCtrlSShowsSwitcher) {
     ShortTempRoot root("ymh_pty_53p1");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -1919,9 +1920,9 @@ TEST(UiSupervisorPty, UI53_P1_EagerCwdThenCtrlSShowsSwitcher) {
 TEST(UiSupervisorPty, UI53_P2_ModelPickerSwitch) {
     ShortTempRoot root("ymh_pty_53p2");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     root.write(".config/ymh/config.jsonc", R"JSON({
       "llm": {
@@ -1974,9 +1975,9 @@ TEST(UiSupervisorPty, UI53_P2_ModelPickerSwitch) {
 TEST(UiSupervisorPty, UI49_P2_TwoWorkspacesWithSessionsShowsSwitcher) {
     ShortTempRoot root("ymh_pty_49p2");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path alpha = root.path() / "alpha";
     const std::filesystem::path beta  = root.path() / "beta";
@@ -2045,9 +2046,9 @@ TEST(UiSupervisorPty, UI49_P2_TwoWorkspacesWithSessionsShowsSwitcher) {
 TEST(UiSupervisorPty, UI58_P1_SubagentNavigationPty) {
     ShortTempRoot root("ymh_pty_58p1");
     const std::filesystem::path state = root.state_dir();
-    ::setenv("XDG_STATE_HOME", state.c_str(), 1);
-    ::setenv("HOME", root.path().c_str(), 1);
-    ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
 
     const std::filesystem::path workspace = root.path() / "subagent-ws";
     std::filesystem::create_directories(workspace);

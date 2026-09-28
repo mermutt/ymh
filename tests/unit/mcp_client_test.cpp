@@ -17,6 +17,7 @@
 #include "ymh/mcp/mcp_tool.hpp"
 #include "ymh/mcp/mcp_transport.hpp"
 #include "support/manual_clock.hpp"
+#include "support/scoped_env.hpp"
 #include "support/test_env.hpp"
 
 namespace {
@@ -555,7 +556,7 @@ TEST(McpToolTest, OversizedResultIsClampedAndFlagged) {
 }
 
 TEST(McpEnvTest, ResolvesReferencesAndRejectsMissing) {
-    ::setenv("YMH_MCP_TEST_VAR", "secret", 1);
+    const ymh::test::ScopedEnvVar test_var("YMH_MCP_TEST_VAR", "secret");
     const std::vector<std::pair<std::string, std::string>> resolved =
         ymh::resolve_mcp_env({"KEY=${YMH_MCP_TEST_VAR}", "PLAIN=x"});
     ASSERT_EQ(resolved.size(), 2u);
@@ -567,7 +568,7 @@ TEST(McpEnvTest, ResolvesReferencesAndRejectsMissing) {
 }
 
 TEST(McpEnvTest, DollarDollarBraceIsLiteralEscape) {
-    ::setenv("YMH_MCP_TEST_VAR", "secret", 1);
+    const ymh::test::ScopedEnvVar test_var("YMH_MCP_TEST_VAR", "secret");
     const std::vector<std::pair<std::string, std::string>> resolved =
         ymh::resolve_mcp_env({"A=$${YMH_MCP_TEST_VAR}", "B=$$", "C=$${", "D=x$${y}"});
     ASSERT_EQ(resolved.size(), 4u);
