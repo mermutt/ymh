@@ -1,19 +1,29 @@
 # 25 — UI/UX Errata: Status Line, Command Palette, Exit, Skills, Plan Mode, and Localcode Import
 
 ```
-Status: draft (Rev 8) — NOT verified. No implementation until the re-gate passes
-        with zero open HIGH/MEDIUM findings. Rev 5 is intended to be
-        verification-complete (0 HIGH, 0 MEDIUM open); only the gate may declare
-        it verified. Rev 6 is a traceability-only amendment that aligns the
-        pinned interfaces and lock discipline with the shipped, verified
-        implementation; it changes no decision, invariant, or 25-D2 semantics.
-        Rev 7 added a third, final window source to 25-D7 (the provider's
-        advertised `max_context_tokens`). Rev 8 WITHDRAWS that fallback: the
-        advertisement was untruthful (spec 08's truthful-advertisement pin), it
-        was display-only (never reached the compactor), and no truthful
-        model-aware source exists today — on a default install the bar is inert
-        and the percentage renders `—`, which is the honest default.
-Revision: Rev 8 (WITHDRAW the Rev 7 context-bar provider-window fallback:
+Status: verified (Rev 9) — post-gate re-gate PASS: 0 HIGH / 0 MEDIUM open
+        (2 MEDIUM + 4 LOW found in the Rev 6–8 amendments and closed by Rev 9).
+        Rev 5 was the gate-complete revision (0 HIGH, 0 MEDIUM open). Rev 6 is a
+        traceability-only amendment that aligns the pinned interfaces and lock
+        discipline with the shipped implementation; it changes no decision,
+        invariant, or 25-D2 semantics. Rev 7 added a third, final window source
+        to 25-D7 (the provider's advertised `max_context_tokens`). Rev 8
+        WITHDRAWS that fallback: the advertisement was untruthful (spec 08's
+        truthful-advertisement pin), it was display-only (never reached the
+        compactor), and no truthful auto-discovered model-aware source exists
+        today — on a default install the bar is inert and the percentage renders
+        `—`, which is the honest default. Rev 9 re-gated Rev 6–8 against the
+        shipped `main` code and fixes the traceability drift it found: the F3
+        data races are CLOSED (by `27-session-locking-errata.md`), `erase()`
+        takes `commit_mutex_`, and the post-gate `file:line` anchors are
+        corrected.
+Revision: Rev 9 (post-gate re-gate fixes: §14.1 F3 marked CLOSED by spec 27;
+        §N12's "`erase` takes `mutex_` alone" corrected to `commit_mutex_` →
+        `mutex_` (27-D3/§4.4); the Rev-6 lock-discipline and Rev-8 window-source
+        `file:line` anchors corrected against `main`; the re-entrancy
+        subscriber enumeration refreshed; the Rev-8 row's
+        `src/cli/wiring.cpp:191-212` anchor corrected to `:289-311`. No decision,
+        invariant, failure mode, or 25-D2 semantic changes). Rev 8 (WITHDRAW the Rev 7 context-bar provider-window fallback:
         `openai_compatible_capabilities()` no longer advertises
         `max_context_tokens`, and `HostRuntime::showContext` no longer
         substitutes the provider capability; the 25-D7 window comes only from
@@ -561,24 +571,31 @@ session's own `appendMutex_`:
   `active()` cannot self-deadlock.
 - `append_` is invoked **after** releasing `mutex_` (but still under
   `commit_mutex_`), because `Session::append` → `EventBus::publishCommitted` runs
-  committed handlers **synchronously** (`src/session/session.cpp:580`;
-  `src/core/event_bus.cpp:262-267`), and `active()`'s cold-memo fold calls
-  `Session::events()`, which copies the durable log under `Session::appendMutex_`
-  (`src/session/session.cpp:537-540`).
+  committed handlers **synchronously** (`src/session/session.cpp:637-640`;
+  `Session::appendEventLocked` calls `publishCommitted` at
+  `src/session/session.cpp:668`; `src/core/event_bus.cpp:262-267`), and
+  `active()`'s cold-memo fold calls `Session::events()`, which copies the durable
+  log under `Session::appendMutex_` (`src/session/session.cpp:615-618`).
 
 **Pinned lock order: `commit_mutex_ → mutex_` and `commit_mutex_ → appendMutex_`,
 and never `mutex_` together with `appendMutex_`.** Every multi-lock path acquires
 `commit_mutex_` first (`set()`, `commit_()`); `active()` and `commit_locked_` each
 release `mutex_` before touching the session, and `set()` releases `mutex_` before
 `commit_locked_`. `apply_pending_at_step_start` and `flush_pending_at_turn_end`
-release `mutex_` before calling `commit_`/`active`. `request_exit` and `erase` take
-`mutex_` alone. A multi-lock path that violates this order risks a deadlock
-against a concurrent `set()`/`commit_`.
+release `mutex_` before calling `commit_`/`active`. `request_exit` takes `mutex_`
+alone. **`erase` takes `commit_mutex_` then `mutex_`** (Rev 9; `27-D3`/`27 §4.4`
+supersedes the Rev-6 "`erase` takes `mutex_` alone"): taking `commit_mutex_` first
+means an in-flight `commit_locked_` cannot record `memo_[id]` after the erase and
+resurrect a deleted session's entry (`src/agent/plan_mode_controller.cpp:127-136`).
+A multi-lock path that violates this order risks a deadlock against a concurrent
+`set()`/`commit_`.
 
-**Load-bearing re-entrancy invariant (Rev 6, F2).** `set()` holds `commit_mutex_`
+**Load-bearing re-entrancy invariant (Rev 6, F2; subscriber set refreshed Rev 9).**
+`set()` holds `commit_mutex_`
 across `append_` → `Session::appendEventLocked` → `bus_->publishCommitted`, which
 invokes handlers synchronously **while `appendMutex_` is held**
-(`src/session/session.cpp:582`; `src/core/event_bus.cpp:262-267`), and also across
+(`src/session/session.cpp:642-670`; `publishCommitted` at `:668`;
+`src/core/event_bus.cpp:262-267`), and also across
 the cold-memo `active()` → `Session::events()` → `appendMutex_`. This is
 deadlock-free **only because** no committed handler, global live subscriber, or
 injected `ProjectionFn` re-enters the controller or calls
@@ -587,11 +604,18 @@ injected `ProjectionFn` re-enters the controller or calls
 caller already holds the non-recursive `commit_mutex_`) or an **`appendMutex_` →
 `commit_mutex_` inversion** (a handler calling `active()` with a cold memo while a
 concurrent `set()` holds `commit_mutex_` and waits on `appendMutex_`). On the
-shipped paths the only production committed subscriber
-(`HostRuntime::handleCommittedRecord`) merely forwards to the transport, and the
-two global live subscribers (MCP status; headless print) never touch the
-controller, so the invariant currently holds. See the F2 hardening candidate
-(debug assert / regression test) and the F3 follow-up in §14.1.
+shipped paths no committed handler and no global live subscriber touches the
+controller: the committed subscriber (`HostRuntime::handleCommittedRecord`,
+`src/host/host_runtime.cpp:425`) merely forwards to the transport, and the global
+live subscribers — the host's MCP-status/`AssistantChunk` forwarder
+(`src/host/host_runtime.cpp:365`), the headless printer
+(`src/cli/headless.cpp:234`), the goal-round driver (`src/goal/round_driver.cpp:70`,
+which only enqueues onto the io thread) and the job-wakeup policy
+(`src/jobs/job_wakeup.cpp:83`) — do not call `Session::events()`/`append()` or the
+controller inline (the only `PlanModeController` callers are
+`src/agent/agent_loop.cpp` and `src/agent/workspace_runtime.cpp`). See the F2
+hardening candidate (debug assert / regression test); the F3 follow-up in §14.1 is
+now closed by `27-session-locking-errata.md`.
 
 **Memoization (N10/M-1 Rev 5).** `active(session)` folds the log **at most once
 per session**:
@@ -1155,28 +1179,32 @@ approved `exit_plan_mode` review). The command registry's `/help` row is exactly
 - `StatusModel` gains `std::uint64_t context_used_tokens = 0` and
   `std::uint64_t context_window_tokens = 0`.
 - **Source**: the supervisor reuses the existing `context.show` RPC
-  (`protocol::method::kContextShow`, `include/ymh/transport/protocol.hpp:509`),
+  (`protocol::method::kContextShow`, `include/ymh/transport/protocol.hpp:542`),
   whose reply already carries `ContextSnapshot::used_tokens` and
   `ContextBudget::window_tokens`. The supervisor issues the call (a) on session
   attach and (b) after each `AssistantMessageFinished`, and copies
   `snapshot.used_tokens` / `snapshot.budget.window_tokens` into the active
   session's `StatusModel` (then marks Status dirty, §3.7). This is read-only and
   adds no daemon or wire surface. It does **not** open the `/context` overlay
-  (`model_.context` stays untouched); the existing overlay path at
-  `src/ui/supervisor.cpp:2031-2059` is unchanged.
+  (`model_.context` stays untouched); the existing overlay path (`open_context`,
+  `src/ui/supervisor.cpp:3517`) is unchanged.
 - **Window source precedence (Rev 8; Rev 7's provider fallback withdrawn).**
   The effective window, highest first:
   1. the `context.show` reply's `ContextBudget::window_tokens` when non-zero;
   2. `config.agent.compaction.context_window_tokens` when non-zero;
   3. unknown (`0`) — the bar is all-empty and the percentage is `—`.
-  Step 1 is the `context.show` snapshot; step 2 is the supervisor fallback
-  (`snapshot.budget.window_tokens` else
+  Step 1 is the `context.show` snapshot; the daemon builds that budget from its
+  compaction policy (`src/host/host_runtime.cpp:606-612`), which itself resolves
+  `[llm.models.<name>].context_window` (else the configured compaction window)
+  through `resolve_model` (`src/cli/wiring.cpp:296`). Step 2 is the supervisor
+  fallback (`snapshot.budget.window_tokens` else
   `config.agent.compaction.context_window_tokens`,
-  `src/ui/supervisor.cpp:2076-2080`). There is **no** provider-capability step:
+  `src/ui/supervisor.cpp:3503-3507`). There is **no** provider-capability step:
   Rev 7 added one (the advertised `ProviderCapabilities::max_context_tokens`)
   and Rev 8 withdrew it, because the advertisement was untruthful (spec 08's
-  truthful-advertisement pin) and no truthful model-aware window source exists
-  today. On a default install both steps are `0`, so the bar is inert and the
+  truthful-advertisement pin) and no truthful *auto-discovered* model-aware
+  window source exists today. On a default install (no named model, no
+  `context_window_tokens`) every step is `0`, so the bar is inert and the
   percentage renders `—`; that is the honest default.
 - If the snapshot has not loaded, `context_used_tokens = status.input_tokens`
   (the last request's prompt size is a sound proxy for context consumed).
@@ -1196,9 +1224,9 @@ approved `exit_plan_mode` review). The command registry's `/help` row is exactly
   - Colour: filled `paint(text, Color::Green)` normally; `Color::Yellow` when the
     percentage ≥ 80 %, `Color::Red` when ≥ 95 %; empty
     `paint(text, Color::GrayDark)` (the FreeSpace colour,
-    `src/ui/ui_render.cpp:653-654`). `paint` honours `theme.color`; with colour
+    `src/ui/ui_render.cpp:1632-1633`). `paint` honours `theme.color`; with colour
     off the glyphs still distinguish consumed vs total.
-  - Percent: reuse `format_percent(used, window)` (`src/ui/ui_render.cpp:722-729`),
+  - Percent: reuse `format_percent(used, window)` (`src/ui/ui_render.cpp:1702`),
     which returns `"—"` when the window is unknown. The context segment is
     `"[" + bar + "] " + percent`.
 
@@ -1228,12 +1256,12 @@ struct PlanModeChanged {
 };
 
 // src/ui/ui_render.cpp — INTERNAL (not exported; L1)
-// `render_status` stays file-local to src/ui/ui_render.cpp:357 and is declared in
+// `render_status` stays file-local to src/ui/ui_render.cpp:861 and is declared in
 // NO header. It gains the `int width` parameter and is called only from
-// `build_ui` (src/ui/ui_render.cpp:942), which receives `TerminalSize`. Tests
+// `build_ui` (src/ui/ui_render.cpp:2034), which receives `TerminalSize`. Tests
 // drive the status line through the already-exported `render_to_ansi`
-// (include/ymh/ui/ui_render.hpp:42-43), exactly as every existing golden does
-// (tests/unit/ui_render_golden_test.cpp:180,334). Do NOT add a `render_status`
+// (include/ymh/ui/ui_render.hpp:54), exactly as the context-bar goldens do
+// (tests/unit/ui_render_golden_test.cpp:514-574). Do NOT add a `render_status`
 // declaration to the header.
 static ftxui::Element render_status(const UiModel& model,
                                     const SessionUiState* active,
@@ -2272,14 +2300,15 @@ correction.
 | Q20 | A forced review offers no persistent decision: the dialog shows only `Allow once`/`Deny` (default `Deny`), and a `force_ask` decision is never recorded as a grant. The user is not offered an "Always allow" that the policy would ignore; a raw client sending `scope=Always` still gets the decision for that one review. | 25-D4, UX44/UX46, NEW-3 Rev 5 |
 | Q21 | The plan projection memo is keyed by `SessionId` and invalidated by the controller's own commits (the controller is the sole `plan/mode` writer), **not** by the session's last `Sequence`; the first `active()` per session folds, and a step that appends no `plan/mode` never folds. The memo is process-local and never read as truth. | 25-D2, UX12, N10/M-1 Rev 5 |
 
-### 14.1 Known gaps / follow-ups (recorded; out of scope for Rev 6)
+### 14.1 Known gaps / follow-ups
 
-These are **not** part of the Rev 6 traceability amendment and no code was changed
-for them. They are recorded so they are not lost.
+The row below was **not** part of the Rev 6 traceability amendment. It was
+subsequently **closed** by `27-session-locking-errata.md` (27-D1/27-D3/27-D9) and
+is retained as history; Rev 9 re-verified the closure against `main`.
 
-| ID | Gap | Why deferred |
+| ID | Status | Detail |
 |---|---|---|
-| F3 | **Pre-existing plan-mode data races — the same data-race/lock-ordering class as the H1/H2 findings closed by `commit_mutex_`, but not covered by it.** (a) `PlanModeController::erase()` (`src/agent/plan_mode_controller.cpp:127-132`) takes only `mutex_`, so a `deleteSession` can interleave with an in-flight `commit_locked_` (`:139-149`) and resurrect a memo entry for the deleted id (benign leak: the projection is re-folded from the durable log if the id ever reappears, and `erase` is only called on session teardown). (b) `Session::ownEvents()`/`deriveMessages()` read `log_` **without** `appendMutex_` while `events()` locks it (`src/session/session.cpp:542-555`). | Not introduced by `1393902e6`; fixing it requires its own review — in particular a decision on whether `erase()` must take `commit_mutex_` (which would add a `commit_mutex_ → mutex_` acquisition from the `deleteSession` side and must be checked against the N12 order). |
+| F3 | **CLOSED — fixed by `27-session-locking-errata.md`, re-verified against `main` at Rev 9.** | The two sub-defects Rev 6 recorded are no longer open. (a) `PlanModeController::erase()` now takes `commit_mutex_` **then** `mutex_` (`src/agent/plan_mode_controller.cpp:127-136`), so an in-flight `commit_locked_` (`:143-153`) cannot record `memo_[id]` after the erase and resurrect a deleted session's entry. (b) `Session::ownEvents()`/`deriveMessages()` now lock `appendMutex_` (`src/session/session.cpp:620-635`), exactly as `events()` does (`:615-618`). The Rev-6 text ("takes only `mutex_`", "read `log_` without `appendMutex_`", cites `:127-132`/`:139-149`/`session.cpp:542-555`) was accurate when written but is superseded by the shipped fix; `25` §N12's "`erase` takes `mutex_` alone" is likewise superseded (27 §4.4). |
 
 ---
 
@@ -2295,3 +2324,4 @@ for them. They are recorded so they are not lost.
 | Rev 6 | 2026-09-19 | **F1 traceability amendment — the spec catches up with the shipped, verified implementation. This is NOT a design change: no decision, invariant, failure mode, or 25-D2 semantic changes.** (1) **Pinned signature corrected.** §3.3's `PlanModeController::set` was pinned as `PlanModeSetResult set(const SessionId& session, bool turn_open, bool active);` but the shipped, verified interface (`include/ymh/agent/plan_mode_controller.hpp:42`) is `PlanModeSetResult set(const Session& session, bool turn_open, bool active);`. The `Session&` (not just its id) is load-bearing: it lets the logged-state read, the comparison, and the append all run under `commit_mutex_`, so a cold memo on a resumed/forked session is folded from the durable log before the comparison and a concurrent `commit_` cannot invalidate the projection in between. A future implementer following the old pin would pass only an id and silently reintroduce the H1 TOCTOU. (2) **N12 lock discipline completed.** §3.3 now documents `commit_mutex_` (introduced by the earlier M8 fix and used by the H1 atomicity fix) and pins the order `commit_mutex_ → mutex_` and `commit_mutex_ → appendMutex_`, never `mutex_` together with `appendMutex_`; plus the load-bearing re-entrancy invariant — no committed handler, global live subscriber, or `ProjectionFn` may re-enter the controller or call `Session::events()`/`append()`, else a recursive `commit_mutex_` self-deadlock or an `appendMutex_ → commit_mutex_` inversion. (3) **F3 recorded, not fixed.** The pre-existing `erase()` interleave and the unlocked `ownEvents()`/`deriveMessages()` `log_` reads are recorded as follow-up **F3** in §14.1. Closes verification finding F1 (`/tmp/opencode/verify-harden.md`); F2/F3 remain hardening candidates. |
 | Rev 7 | 2026-09-19 | **Context bar works by default — provider-window fallback (25-D7).** Follow-up: on a default install the context bar rendered `[░░░░░░░░░░] —` because the `context.show` `ContextBudget::window_tokens` and `config.agent.compaction.context_window_tokens` both default to `0`. 25-D7's precedence now has a third, final source: the provider's advertised `ProviderCapabilities::max_context_tokens`. It is applied **daemon-side** in `HostRuntime::showContext` (`src/host/host_runtime.cpp`), which already owns the provider (`WorkspaceRuntime::provider()`) and builds the `ContextBudget` the `context.show` reply carries — so the supervisor's existing D7 path and the wire protocol are unchanged (candidate seam (a); no new field). The built-in OpenAI-compatible adapter now advertises the v1 DeepSeek window from `openai_compatible_capabilities()` (`src/llm/provider_registry.cpp`), otherwise the fallback would be inert because the shipped adapters never populated `max_context_tokens`. A configured non-zero `agent.compaction.context_window_tokens` still wins over the provider default. Because the `context.show` reply is shared, the `/context` overlay now also shows the fallback window when the configured window is `0`; the "budget unknown" note remains reachable when every source is unknown (unit-tested). No other 25-D decision changes. |
 | Rev 8 | 2026-09-19 | **WITHDRAW the Rev 7 context-bar provider-window fallback.** The Rev 7 fallback advertised `max_context_tokens = 128'000` for **every** OpenAI-compatible provider (`openai_compatible_capabilities()`) while the same provider's `models()` returned `ModelInfo{model, model, 0}` (unknown) — a violation of spec 08's truthful-advertisement pin, and untruthful for any non-128k model. It was also display-only: the fallback never reached the compactor (`src/cli/wiring.cpp:191-212` builds the policy independently; default `policy.enabled=false`), so a default install showed a live 128k window and a rising percentage while compaction was disabled — the UI asserting a budget the agent does not use. Rev 8 removes the hardcode from `openai_compatible_capabilities()` and the daemon-side substitution in `HostRuntime::showContext`; 25-D7's window now comes only from the `context.show` snapshot or `config.agent.compaction.context_window_tokens`, and with both `0` the bar stays inert (`—`). **Follow-up (future spec-08 change):** a correct default needs a truthful per-model window the provider reports via `ModelInfo::max_context_tokens`; this hardcode was not it. The Rev 7 row above is retained as history. |
+| Rev 9 | 2026-09-28 | **Post-gate re-gate of Rev 6–8 against the shipped `main` code — traceability fixes only; no decision, invariant, failure mode, or 25-D2 semantic changes.** The re-gate found 0 HIGH, 2 MEDIUM and 4 LOW, all closed here. **M1 — `25` §N12 still pinned "`request_exit` and `erase` take `mutex_` alone", but shipped `erase()` takes `commit_mutex_` then `mutex_`** (`src/agent/plan_mode_controller.cpp:127-136`); corrected, with `27-D3`/`27 §4.4` cited as the supersession. **M2 — §14.1 row F3 was recorded as an open data race ("takes only `mutex_`"; `ownEvents()`/`deriveMessages()` read `log_` without `appendMutex_`), but both are fixed on `main`** (`erase` at `:127-136`; `ownEvents`/`deriveMessages` at `src/session/session.cpp:620-635`) and `27-session-locking-errata.md` explicitly closes F3 and asks this spec to point at it; the row is rewritten as CLOSED. **LOWs:** (1) the Rev-6 lock-discipline `file:line` anchors (`session.cpp:580/582/537-540`) and the Rev-8 window-source anchor (`supervisor.cpp:2076-2080`) do not resolve on `main` (the Sep-26 code import shifted every line); corrected to `session.cpp:615-618/637-640/642-670`, `supervisor.cpp:3503-3507`, and the §3.8/§3.9 render anchors (`protocol.hpp:542`, `supervisor.cpp:3517`, `ui_render.cpp:861/1632-1633/1702/2034`, `ui_render.hpp:54`). (2) the Rev-8 row's `src/cli/wiring.cpp:191-212` is the MCP mapping; the policy builder is `to_compaction_policy` at `:289-311` (recorded here; the Rev-8 row is left as history). (3) the re-entrancy subscriber enumeration ("two global live subscribers") is stale — refreshed to the shipped set (host live forwarder, headless, goal-round, job-wakeup), all verified not to touch the controller. (4) the DESIGN_STATUS row's implementation hash `dfadfa6d2` is not an ancestor of `main` after the code import; corrected to the shipped `main` state. Verified against `main` (`git show main:…`): `set(const Session&, …)` at `include/ymh/agent/plan_mode_controller.hpp:42`; `openai_compatible_capabilities()` no longer sets `max_context_tokens`; `HostRuntime::showContext` has no provider substitution; default install leaves the window `0` (`fill_default_model` → `context_window = std::nullopt`). |
