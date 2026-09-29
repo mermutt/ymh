@@ -1,13 +1,17 @@
 # 35 — Live-Notification Errata: The `event.live` Wire Notification (spec-05 amendment)
 
 ```
-Status: written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Status: verified (Rev 3) · verified: 2026-09-28 · reviewer: gate-35 independent
+        re-gate (did not write the spec) (tracked in DESIGN_STATUS.md)
 Revision: Rev 1 — initial authoring. Pins the unpinned wire notification
           `event.live` (`LiveNotification` / `kEventLive` / `onLiveEvent` /
           `LiveEventForwarder`) that Wave 2 (commit `d979ec007`) added to carry
           the live-only `AssistantChunk` delta from the daemon to a remote
           supervisor. Closes NEW-M1 of the Wave-2 fix-pass re-check
           (`/tmp/opencode/review-wave2-recheck.md` §7).
+          Rev 3 — independent re-gate against `main@11a5db10f`: MEDIUM-1 (the
+          four `05` amendments) confirmed landed; citations re-derived; the
+          required §8 tests implemented on `dev`.
 Component: 35 (errata) — amends `05-transport.md` §5.1 :574-577 and §7.7
            :997-1004 **by reference**; it does not edit `05` in place. It
            reconciles with `11-m2-errata.md` (the frozen M2 interfaces),
@@ -130,7 +134,7 @@ and the two `05` sentences that currently contradict it.
   in-process `ymh run` is Wave-2 re-check OPEN-MEDIUM M3, tracked separately.
 - **The assembler/replay contract** — `34`.
 - **`McpServerStatusChanged` forwarding** — it is handled inline by
-  `HostRuntime::startForwarding` (`host_runtime.cpp:305-311`) and is **not**
+  `HostRuntime::startForwarding` (`host_runtime.cpp:363-368`) and is **not**
   carried by `event.live` today (§3.10). Whether MCP status should also use the
   live channel is not pinned here.
 - **Per-subscription live delivery** — `event.live` is per-session (§3.4); a
@@ -142,25 +146,29 @@ and the two `05` sentences that currently contradict it.
 
 ### 2.1 The shipped surface (types, constants, call sites)
 
+All `file:line` anchors in this section were re-derived against the shipped
+code branch `main@11a5db10f` on 2026-09-28 for the Rev 3 re-gate (the Rev 1
+anchors predate the intervening `main` commits and had drifted).
+
 | Fact | Location |
 |---|---|
-| `struct LiveNotification { SessionEnvelope envelope; };` | `include/ymh/transport/protocol.hpp:345-347` |
-| codec declarations | `include/ymh/transport/protocol.hpp:450-451` |
+| `struct LiveNotification { SessionEnvelope envelope; };` | `include/ymh/transport/protocol.hpp:351-353` |
+| codec declarations | `include/ymh/transport/protocol.hpp:461-462` |
 | `to_json` / `from_json` — exactly `{"envelope": <SessionEnvelope>}` | `src/transport/protocol.cpp:339-345` |
-| `inline constexpr std::string_view kEventLive = "event.live";` | `include/ymh/transport/protocol.hpp:549` |
-| notification namespace (`kEventStream`, `kEventLive`, `kEventUnsubscribed`, `kPermissionRequest`, `kHostEvent`) | `include/ymh/transport/protocol.hpp:547-553` |
+| `inline constexpr std::string_view kEventLive = "event.live";` | `include/ymh/transport/protocol.hpp:568` |
+| notification namespace (`kEventStream`, `kEventLive`, `kEventUnsubscribed`, `kPermissionRequest`, `kHostEvent`) | `include/ymh/transport/protocol.hpp:566-572` |
 | `ProtocolServer::onLiveEvent(const Event&)` declaration | `include/ymh/transport/protocol_server.hpp:69` |
-| `ProtocolServer::onLiveEvent` fan-out body | `src/transport/protocol_server.cpp:801-823` |
+| `ProtocolServer::onLiveEvent` fan-out body | `src/transport/protocol_server.cpp:818-835` |
 | `HostRuntime::LiveEventForwarder = std::function<void(const Event&)>` | `include/ymh/host/host_runtime.hpp:85` |
-| the immutable `live_forwarder_` member, written once in the ctor | `include/ymh/host/host_runtime.hpp:242`; `src/host/host_runtime.cpp:242-269` |
-| the live branch in `HostRuntime::startForwarding` | `src/host/host_runtime.cpp:305-320` (branch `:312-319`) |
-| the single-threaded test fallback `server_->onLiveEvent(event)` | `src/host/host_runtime.cpp:318` |
-| daemon wiring: `forwardLiveEvent` → `transport_->post` → `protocol_->onLiveEvent` | `src/host/workspace_host.cpp:544-547`, `:771-779` |
-| supervisor dispatch of `kEventLive` → `sink_.on_envelope` | `src/ui/supervisor_connection.cpp:338-348` |
-| CLI daemon path: `kEventLive` → `handle_live_notification` | `src/cli/cli.cpp:617-620`; `src/cli/cli.cpp:109-116`; declaration `include/ymh/cli/stream_receiver.hpp:41-42` |
+| the immutable `live_forwarder_` member, written once in the ctor | `include/ymh/host/host_runtime.hpp:252`; `src/host/host_runtime.cpp:302-328` |
+| the live branch in `HostRuntime::startForwarding` | `src/host/host_runtime.cpp:371-378` |
+| the single-threaded test fallback `server_->onLiveEvent(event)` | `src/host/host_runtime.cpp:378` |
+| daemon wiring: `forwardLiveEvent` → `transport_->post` → `protocol_->onLiveEvent` | `src/host/workspace_host.cpp:584-587`, `:811-817` |
+| supervisor dispatch of `kEventLive` → `sink_.on_envelope` | `src/ui/supervisor_connection.cpp:406-415` |
+| CLI daemon path: `kEventLive` → `handle_live_notification` | `src/cli/cli.cpp:618-620`; `src/cli/cli.cpp:92-99`; declaration `include/ymh/cli/stream_receiver.hpp:41-42` |
 
 `SessionEnvelope` is the same wire DTO as `event.stream`
-(`protocol.hpp:225-232`; `05` §5.2 :579-603): `{session, event}`, no `Sequence`
+(`protocol.hpp:231-237`; `05` §5.2 :579-603): `{session, event}`, no `Sequence`
 (T5, `05` :1229-1230). The decode is the tolerant `29-D5` codec
 (`protocol.cpp:266-280`): an unknown event `type` sets `event_skipped = true`
 and leaves `event` default-constructed; a known type with a malformed payload
@@ -168,39 +176,39 @@ still throws.
 
 ### 2.2 The shipped fan-out and payload
 
-`ProtocolServer::onLiveEvent` (`protocol_server.cpp:801-823`) iterates every
+`ProtocolServer::onLiveEvent` (`protocol_server.cpp:818-835`) iterates every
 connection, skips dropped connections and connections that have not finished
 `host.hello`, and sends the notification if **any** of that connection's
-subscriptions has `session == event.session_id` (`std::any_of`, `:808-815`).
+subscriptions has `session == event.session_id` (`std::any_of`, `:823-830`).
 The payload is `to_json_value(LiveNotification{SessionEnvelope{session, event,
-false}})` (`:816-818`). Two consequences follow directly from the code:
+false}})` (`:832-834`). Two consequences follow directly from the code:
 
 - **Per (connection, session), not per subscription.** The predicate is a
   boolean over the connection's subscriptions, so a connection holding two
   subscriptions to the same session receives **one** `event.live` per published
   live event (whereas `onEventCommitted` sends one `event.stream` **per
-  subscription**, `:782-799`).
+  subscription**, `:799-817`).
 - **No `SubscriptionId`, no `replay`, no `cursor`.** The payload is exactly
   `{envelope}` — the notification carries strictly less than `event.stream`.
 
-`HostRuntime::startForwarding` (`host_runtime.cpp:294-323`) subscribes a live
+`HostRuntime::startForwarding` (`host_runtime.cpp:353-380`) subscribes a live
 bus handler and forwards **only** `EventType::AssistantChunk` through the live
-channel (`:312-319`); `McpServerStatusChanged` is consumed inline (`:305-311`).
+channel (`:371-378`); `McpServerStatusChanged` is consumed inline (`:363-368`).
 When no `live_forwarder_` was injected (the unit-test bridge), it calls
-`server_->onLiveEvent` directly (`:318`). In the daemon, the forwarder is
+`server_->onLiveEvent` directly (`:378`). In the daemon, the forwarder is
 `WorkspaceHost::Impl::forwardLiveEvent`, which posts to the transport io thread
-only while `transport_->running()` (`workspace_host.cpp:771-779`).
+only while `transport_->running()` (`workspace_host.cpp:811-817`).
 
-### 2.3 The contradiction with verified `05`
+### 2.3 The pre-Rev-2 contradiction with verified `05` (historical)
 
-`05-transport.md:574-577` currently reads:
+Before Rev 2, `05-transport.md:574-577` read:
 
 > Live events (§8.1) are **not** durable and therefore are **not** carried as
 > `Event` frames. The only live signals on the wire are the transport-level
 > notifications this spec defines (`event.stream`, `permission.request`,
 > `host.event`), none of which is a `UiEvent`.
 
-`05-transport.md:997-1004` currently reads:
+and `05-transport.md:997-1004` catalogued only:
 
 ```text
 client -> server   event.subscribe    params: { session, from? }   result: { subscription, cursor }
@@ -209,11 +217,14 @@ server -> client   event.stream       notification { subscription, replay, envel
 server -> client   event.unsubscribed notification { subscription, reason }
 ```
 
-Both predate the Wave-2 live channel. `event.live` is neither listed in §5.1's
+Both predate the Wave-2 live channel. `event.live` was neither listed in §5.1's
 "only live signals" nor in §7.7's catalog, and §5.1's literal claim ("not carried
 as `Event` frames") is imprecise: `event.live` **does** carry a core `Event`
 value inside a `SessionEnvelope`; what it is not carried on is the **durable
-`event.stream` subscription**. §4 pins the required corrections.
+`event.stream` subscription**. **Rev 2 landed all four corrections in `05`**
+(§5.1's sentence, the §7.7 catalog row, the `LiveNotification` DTO, and the §7.7
+semantics bullet); §4.1–§4.2 below retain the verbatim *before* text as the
+change record, and the *after* text is now the shipped `05`.
 
 ---
 
@@ -259,7 +270,7 @@ strictly less than `event.stream` (`{envelope}` only), so a receiver cannot
 mistake it for a resumable position; it makes "no cursor / no replay / no
 subscription identity" explicit in the type system and on the wire; and it
 mirrors the bus's own live/durable split (`Session::emit` vs
-`Session::append`, `session.cpp:653-661` vs `:632-650`) and the naming family
+`Session::append`, `session.cpp:740` vs `:637`) and the naming family
 `event.stream` / `event.live` / `event.unsubscribed` (`05` §7.1 :748-752,
 `namespace.verb`).
 
@@ -274,7 +285,7 @@ this one.
 ### 3.2 Wire name, framing, direction (35-D2)
 
 - **Method name:** `"event.live"` (`notify::kEventLive`,
-  `protocol.hpp:549`). It conforms to the `namespace.verb` rule (`05` §7.1
+  `protocol.hpp:568`). It conforms to the `namespace.verb` rule (`05` §7.1
   :750-752); the `event.` namespace is the subscription subsystem's.
 - **Framing:** a JSON-RPC 2.0 **notification** — `{"jsonrpc":"2.0",
   "method":"event.live","params":{...}}`, no `id` (`json_rpc.cpp:116-120`;
@@ -282,17 +293,17 @@ this one.
   framing as every other message (`05` §3); it adds no framing rule.
 - **Direction:** **server → client only** (daemon → supervisor/automation). It
   is not a request and has no response. `event.live` is **not** in the request
-  catalog `kMethodCatalog` (`protocol.cpp:633-645`, 34 entries), so a client
+  catalog `kMethodCatalog` (`protocol.cpp:635-652`, 38 entries), so a client
   request naming it is `MethodNotFound` (T-F5, `05` :1335). A client must not
   send it; the daemon never expects it.
 - **Profile:** delivered to both `Interactive` and `Automation` connections.
   `onLiveEvent` gates only on `hello_done` and subscription (`protocol_server.cpp
-  :803-815`), unlike `host.event`, which skips non-`Interactive` clients
-  (`onSessionCreated`, `:825-834`).
+  :820-830`), unlike `host.event`, which skips non-`Interactive` clients
+  (`onSessionCreated`, `:842-853`).
 
 ### 3.3 Payload shape (35-D3)
 
-Exactly the shipped `LiveNotification` (`protocol.hpp:345-347`), JSON key set
+Exactly the shipped `LiveNotification` (`protocol.hpp:351-353`), JSON key set
 `{envelope}` (`protocol.cpp:339-345`):
 
 ```cpp
@@ -336,8 +347,8 @@ Rules:
 - Decode uses the tolerant `SessionEnvelope` codec (`protocol.cpp:266-280`): a
   known `type` decodes (malformed payload still throws — the durable decode stays
   loud); an unknown `type` yields `event_skipped = true` and the receiver skips
-  the envelope. Both the supervisor (`supervisor_connection.cpp:341-343`) and the
-  CLI (`cli.cpp:112-114`) implement that skip.
+  the envelope. Both the supervisor (`supervisor_connection.cpp:408-409`) and the
+  CLI (`cli.cpp:95-97`) implement that skip.
 
 ### 3.4 Audience predicate (35-D4)
 
@@ -354,7 +365,7 @@ It is **not** gated by `SubscriptionId`, by `replay` phase, by the
 subscription's `from` kind, by profile, or by whether the subscription is
 mid-replay. A connection with `N` subscriptions to `S` receives **one**
 notification, not `N` (the `std::any_of` boolean,
-`protocol_server.cpp:808-815`). A connection with **no** subscription to `S`
+`protocol_server.cpp:823-830`). A connection with **no** subscription to `S`
 receives nothing — live delivery begins only after `event.subscribe` completes,
 and prior live events are never delivered retroactively (§3.7).
 
@@ -369,8 +380,8 @@ observers.
   connection's single outbound queue in iteration order; the queue is FIFO.
 - **Across `event.live` and `event.stream` for a session:** the relative wire
   order follows the producer's bus-publish order. Both the live handler
-  (`bus().subscribe`, `host_runtime.cpp:305`) and the committed handler
-  (`bus().subscribeCommitted`, `:321`) are invoked **synchronously** on the
+  (`bus().subscribe`, `host_runtime.cpp:371`) and the committed handler
+  (`bus().subscribeCommitted`, `:379`) are invoked **synchronously** on the
   publishing thread (`event_bus.cpp:199-238`, `:240-288`), and both post to the
   transport io thread through the same FIFO `post` (`transport_server.cpp
   :193-200`, `asio::post` under `post_mutex_`). So if the producer publishes
@@ -379,9 +390,9 @@ observers.
 - **The load-bearing instance of that rule.** For an attempt, the live
   `assistant/chunk` deltas precede the durable `assistant/message` (or
   `assistant/attempt`) that settles the attempt: `coalescer.flush()` emits the
-  chunks live (`agent_loop.cpp:899`; `chunk_coalescer.cpp:52-68`, emit at `:63`)
+  chunks live (`agent_loop.cpp:1237`; `chunk_coalescer.cpp:52-68`, emit at `:63`)
   **before** `session_.append(assistant)` commits the settlement
-  (`agent_loop.cpp:905-920`, append at `:912`). A consumer may therefore append
+  (`agent_loop.cpp:1247-1262`, append at `:1252`). A consumer may therefore append
   deltas and then settle on the durable message.
 - **Cross-session interleaving is unconstrained** (T6, `05` :1232-1234); global
   cross-session ordering is not guaranteed.
@@ -398,8 +409,8 @@ observers.
 
 - `event.live` carries **no cursor** and a receiver **MUST NOT** advance its
   per-session resume cursor from it. The shipped supervisor obeys this: the
-  `kEventLive` branch (`supervisor_connection.cpp:338-348`) does not touch
-  `cursors_`, unlike the `kEventStream` branch (`:313-336`, which stores
+  `kEventLive` branch (`supervisor_connection.cpp:406-415`) does not touch
+  `cursors_`, unlike the `kEventStream` branch (`:373-401`, which stores
   `stream.cursor`).
 - Live events are **not** part of the durable subscription and are **never**
   replayed. `event.subscribe{from: beginning}` and `from: cursor(c)` stream
@@ -437,9 +448,9 @@ reconnects and resumes durable events via cursor (live deltas lost, §3.7).
   `05` §4.1).
 - **Forward compatibility.** A receiver that does not know `event.live` ignores
   the method: `SupervisorConnection::dispatch` is a chain of `if`s with no
-  `else` (`supervisor_connection.cpp:312-362`), and the CLI loop explicitly
-  `continue`s on an unrecognised method (`cli.cpp:621-622`). `parse_message`
-  accepts any method string as a `Notification` (`json_rpc.cpp:155-177`). So a
+  `else` (`supervisor_connection.cpp:373-415`), and the CLI loop explicitly
+  `continue`s on an unrecognised method (`cli.cpp:622-623`). `parse_message`
+  accepts any method string as a `Notification` (`json_rpc.cpp:155-178`). So a
   new daemon emitting `event.live` cannot break an old supervisor's connection;
   the old supervisor simply renders without live deltas and settles on the
   durable `assistant/message`.
@@ -451,7 +462,7 @@ reconnects and resumes durable events via cursor (live deltas lost, §3.7).
 ### 3.10 Producer scope today (35-D10)
 
 The only live event the daemon forwards today is `AssistantChunk`
-(`host_runtime.cpp:312-319`). `McpServerStatusChanged` is handled inline and is
+(`host_runtime.cpp:371-378`). `McpServerStatusChanged` is handled inline and is
 **not** sent as `event.live`. The notification shape is generic enough to carry
 any future live-only event, but this errata pins only the shipped producer;
 a consumer must skip unknown event types (§3.9) rather than assume
@@ -461,19 +472,20 @@ a consumer must skip unknown event types (§3.9) rather than assume
 
 ## 4. Required `05` amendments (35-D11)
 
-These are the only normative edits this errata requests to `05`. They are stated
-here **by reference**; this errata does not edit `05` in place.
+These are the only normative edits this errata requested to `05`. **Rev 2 landed
+all four in the shipped `05`**; they are reproduced here as the change record
+(before → after), and the "after" text is now normative in `05`.
 
 ### 4.1 `05` §5.1 :574-577 — the live-signal enumeration
 
-**Current (verbatim):**
+**Before (Rev 1 verbatim):**
 
 > Live events (§8.1) are **not** durable and therefore are **not** carried as
 > `Event` frames. The only live signals on the wire are the transport-level
 > notifications this spec defines (`event.stream`, `permission.request`,
 > `host.event`), none of which is a `UiEvent`.
 
-**Required (replacement):**
+**After (landed in Rev 2 at `05` :574-581):**
 
 > Live events (§8.1) are **not** durable and are therefore **not** carried on the
 > durable `event.stream` subscription: they have no cursor, no replay, and no
@@ -491,7 +503,7 @@ unique payload. The `event.unsubscribed` omission is also closed here (§4.3).
 
 ### 4.2 `05` §7.7 :997-1004 — the notification catalog
 
-**Current (verbatim):**
+**Before (Rev 1 verbatim):**
 
 ```text
 client -> server   event.subscribe    params: { session, from? }   result: { subscription, cursor }
@@ -500,13 +512,13 @@ server -> client   event.stream       notification { subscription, replay, envel
 server -> client   event.unsubscribed notification { subscription, reason }
 ```
 
-**Required (add one line to the catalog):**
+**After (catalog row added at `05` :1008):**
 
 ```text
 server -> client   event.live         notification { envelope }
 ```
 
-**Required (add the DTO to the §7.7 code block, after `StreamNotification`):**
+**After (DTO added to the §7.7 code block at `05` :1040-1044):**
 
 ```cpp
 // 29-D4/29-I7: a live-only session event. No subscription, no replay, no
@@ -518,7 +530,7 @@ struct LiveNotification {
 };
 ```
 
-**Required (one semantics bullet in the §7.7 list):**
+**After (semantics bullet added at `05` :1076-1080):**
 
 > `event.live` (35-D2–35-D10) carries a live-only event (today
 > `assistant/chunk`) that is never committed, so it is not replayed and carries
@@ -595,7 +607,7 @@ LOW, recorded here because the same sentence is being amended.
 |---|---|---|---|
 | **35-F1** | A second live notification name is invented (e.g. `event.delta`) | Two encoders disagree; a receiver silently drops one channel | 35-I1 + the §8 golden-name test |
 | **35-F2** | A `cursor`/`subscription` key is added to `LiveNotification` | A receiver resumes from a non-durable position; T8/T21 violated | 35-I2/35-I5 + the §8 key-set test |
-| **35-F3** | A consumer advances its cursor from `event.live` | Reconnect resumes from a position that does not exist → `CursorInvalid` or a gap/dup | 35-I5; the shipped supervisor already obeys (`supervisor_connection.cpp:338-348`) |
+| **35-F3** | A consumer advances its cursor from `event.live` | Reconnect resumes from a position that does not exist → `CursorInvalid` or a gap/dup | 35-I5; the shipped supervisor already obeys (`supervisor_connection.cpp:406-415`) |
 | **35-F4** | A consumer expects live deltas to be replayed | `from=beginning` produces no deltas; text appears missing until settlement | 35-I6; the durable `assistant/message` is the recovery path (34 §6.1) |
 | **35-F5** | A producer publishes a live event after committing its settlement record | The consumer sees settlement before deltas; ordering expectation breaks | 35-I7's honest limit (§3.5); a new producer needs its own errata |
 | **35-F6** | The daemon emits `event.live` to an unsubscribed connection | Live deltas leak to a client that never asked for the session | 35-I4 + the §8 fan-out test |
@@ -606,31 +618,36 @@ LOW, recorded here because the same sentence is being amended.
 ## 8. Test plan additions (extending `05` §13 and the Wave-2 tests)
 
 The tree already has: the end-to-end live assertion in
-`tests/integration_host_harness_test.cpp:245-263` (a live-only `AssistantChunk`
-reaches `sink.on_envelope`), the committed-path ordering/drop test in
-`tests/unit/host_runtime_test.cpp:1029-1043`, and the CLI live-delta suppression
-test `StreamReceiver.LiveChunkSuppressesDurableDuplicateText`
-(`tests/unit/headless_test.cpp`). **Missing (required here):**
+`tests/integration_host_harness_test.cpp:244-263` (a live-only `AssistantChunk`
+reaches `sink.on_envelope`), the committed-path ordering/drop test
+`HostRuntimeTest.SingleForwarderPreservesOrderAndDropsLiveEvents`
+(`tests/unit/host_runtime_test.cpp:1340-1353`), and the CLI live-delta
+suppression test `StreamReceiver.LiveChunkSuppressesDurableDuplicateText`
+(`tests/unit/headless_test.cpp:453`). The remaining required additions were
+implemented by the Rev 3 re-gate (all on `dev`):
 
-1. **Wire-name golden.** Encode a `LiveNotification` and assert
-   `json["method"] == "event.live"`, `params` has exactly the key `envelope`, and
-   `envelope` has exactly `session` and `event` — and no `subscription`/`replay`/
-   `cursor` (35-I1/35-I2).
-2. **Round-trip.** `to_json` → `from_json` preserves `session` and `event`; an
-   unknown `type` decodes to `event_skipped == true` (35-I2/35-I8).
-3. **Audience predicate.** A subscribed connection receives `event.live`; an
-   unsubscribed connection and a pre-`hello` connection receive nothing; a
-   connection with two subscriptions to the same session receives exactly one
-   (35-I4).
-4. **No cursor.** Assert the emitted notification has no `cursor` key and that a
-   supervisor receiving it does not change `cursors_` (35-I5).
-5. **Ordering.** Publish a live chunk then commit a settlement record; assert the
-   `event.live` frame precedes the `event.stream` frame on the connection
-   (35-I7).
-6. **Profile.** An `Automation` connection subscribed to the session receives
-   `event.live` (35-D4).
-7. **Forward-compat.** A receiver that does not handle `event.live` keeps its
-   connection and still processes `event.stream` (35-I8).
+1. **Wire-name golden** — `TransportProtocol.LiveNotificationWireNameAndKeySet`
+   (`tests/unit/transport_protocol_test.cpp`): method `"event.live"`, `params`
+   exactly `{envelope}`, `envelope` exactly `{session,event}`, and no
+   `subscription`/`replay`/`cursor` (35-I1/35-I2).
+2. **Round-trip** — `TransportProtocol.LiveNotificationRoundTripsAndSkipsUnknownType`:
+   `to_json` → `from_json` preserves `session`/`event`; an unknown `type` decodes
+   to `event_skipped == true` (35-I2/35-I8).
+3. **Audience predicate + profile** —
+   `TransportServer.LiveEventAudienceIsPerSubscribedSession`
+   (`tests/unit/transport_server_test.cpp`): a subscribed `Interactive` and a
+   subscribed `Automation` connection each receive exactly one `event.live`; an
+   unsubscribed and a pre-`hello` connection receive none; the payload carries no
+   `cursor`/`subscription`/`replay` (35-I4/35-D4).
+4. **No cursor** — `SupervisorConnection.DispatchesLiveEventsWithoutAdvancingCursor`
+   (`tests/unit/supervisor_connection_test.cpp:428`): the `kEventLive` branch does
+   not mutate `cursors_` (35-I5).
+5. **Ordering** — covered by the existing
+   `HostRuntimeTest.SingleForwarderPreservesOrderAndDropsLiveEvents` (35-I7).
+6. **Forward-compat** — pinned by inspection, not a unit test: `dispatch` is an
+   if-chain with no `else` and the CLI `continue`s on an unrecognised method
+   (§3.9); a unit test cannot instantiate an "old" receiver, so the property
+   rests on the shipped fall-through (35-I8).
 
 These extend the `05` §13.2 integration list and the Wave-2 live test; they do
 not replace them.
@@ -681,6 +698,21 @@ that no wire message can be both resumable and live-only.
   block below is Rev 1's assessment and is retained as the historical record —
   the denial it cites no longer holds. Independently re-gated PASS (0 HIGH /
   0 MEDIUM / 6 LOW).
+- **Rev 3 (2026-09-28).** Independent re-gate against the shipped code branch
+  `main@11a5db10f` (the DESIGN_STATUS row had been left at the pre-fix state
+  "gated FAIL 0H/1M/3L — MEDIUM-1 fixed, re-gate pending"). Verified MEDIUM-1:
+  all four `05` amendments are present in the shipped `05` (§5.1 :574-581, the
+  §7.7 catalog row :1008, the `LiveNotification` DTO :1040-1044, the semantics
+  bullet :1076-1080). Verified the code surface: `onLiveEvent` fan-out
+  (`protocol_server.cpp:818-835`), the `AssistantChunk`-only live branch
+  (`host_runtime.cpp:371-378`), the daemon wiring (`workspace_host.cpp:811-817`),
+  the no-cursor supervisor branch (`supervisor_connection.cpp:406-415`), and the
+  CLI path (`cli.cpp:92-99`, :618-620). Closed the open LOWs: re-derived every
+  `file:line` anchor against `main@11a5db10f` (they had drifted), corrected the
+  method-catalog count (34 → 38), turned §2.3 into the labelled pre-Rev-2
+  historical record, and implemented the required §8 tests
+  (`LiveNotificationWireNameAndKeySet`, `LiveNotificationRoundTripsAndSkipsUnknownType`,
+  `LiveEventAudienceIsPerSubscribedSession`). No HIGH/MEDIUM open.
 
 ---
 
@@ -700,17 +732,23 @@ that no wire message can be both resumable and live-only.
   reservation).
 - `docs/design/11-m2-errata.md` §7 (frozen M2 interfaces).
 - `/tmp/opencode/review-wave2-recheck.md` §7 NEW-M1 (the finding this closes).
-- Working tree: `include/ymh/transport/protocol.hpp` :225-232, :345-347, :450-451,
-  :547-553; `src/transport/protocol.cpp` :262-280, :339-345, :633-662;
-  `include/ymh/transport/protocol_server.hpp` :69; `src/transport/protocol_server.cpp`
-  :557-627, :768-776, :782-799, :801-823, :825-834; `src/transport/json_rpc.cpp`
-  :116-120, :155-177; `src/transport/transport_server.cpp` :193-200;
-  `include/ymh/host/host_runtime.hpp` :85, :242; `src/host/host_runtime.cpp`
-  :242-269, :294-323; `src/host/workspace_host.cpp` :544-547, :761-779;
-  `src/ui/supervisor_connection.cpp` :312-362; `src/cli/cli.cpp` :109-116,
-  :604-630; `include/ymh/cli/stream_receiver.hpp` :41-42; `src/core/event_bus.cpp`
-  :199-238, :240-288; `src/session/session.cpp` :632-661;
-  `src/agent/chunk_coalescer.cpp` :52-68; `src/agent/agent_loop.cpp` :899-920;
-  `tests/integration_host_harness_test.cpp` :245-263;
-  `tests/unit/host_runtime_test.cpp` :1029-1043; `tests/unit/headless_test.cpp`
-  (`StreamReceiver.LiveChunkSuppressesDurableDuplicateText`).
+- Shipped code (`main@11a5db10f`; re-derived for the Rev 3 re-gate):
+  `include/ymh/transport/protocol.hpp` :231-237, :351-353, :461-462, :566-572,
+  :568; `src/transport/protocol.cpp` :262-280, :339-345, :635-652;
+  `include/ymh/transport/protocol_server.hpp` :69;
+  `src/transport/protocol_server.cpp` :799-817, :818-835, :842-853;
+  `src/transport/json_rpc.cpp` :116-120, :155-178;
+  `src/transport/transport_server.cpp` :193-200;
+  `include/ymh/host/host_runtime.hpp` :85, :252; `src/host/host_runtime.cpp`
+  :302-328, :353-380; `src/host/workspace_host.cpp` :584-587, :811-817;
+  `src/ui/supervisor_connection.cpp` :373-415; `src/cli/cli.cpp` :92-99, :618-623;
+  `include/ymh/cli/stream_receiver.hpp` :41-42; `src/core/event_bus.cpp`
+  :199-238, :240-288; `src/session/session.cpp` :637, :740;
+  `src/agent/chunk_coalescer.cpp` :52-68; `src/agent/agent_loop.cpp` :1237-1262.
+- Tests (`dev`): `tests/integration_host_harness_test.cpp` :244-263;
+  `tests/unit/host_runtime_test.cpp` :1340-1353; `tests/unit/headless_test.cpp`
+  :453 (`StreamReceiver.LiveChunkSuppressesDurableDuplicateText`);
+  `tests/unit/supervisor_connection_test.cpp` :428;
+  `tests/unit/transport_protocol_test.cpp` (`LiveNotificationWireNameAndKeySet`,
+  `LiveNotificationRoundTripsAndSkipsUnknownType`);
+  `tests/unit/transport_server_test.cpp` (`LiveEventAudienceIsPerSubscribedSession`).

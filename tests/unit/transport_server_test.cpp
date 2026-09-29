@@ -1372,4 +1372,63 @@ TEST(TransportServer, UI45_D9_AgentSelectProfileDenied) {
               protocol::code_value(protocol::AppCode::MethodNotAllowedForProfile));
 }
 
+// 35 §8 item 3/6: event.live is delivered once per subscribed session to both
+// Interactive and Automation connections, and never to a pre-hello or
+// unsubscribed connection (35-I4). The payload carries no cursor, subscription
+// or replay key (35-I2).
+TEST(TransportServer, LiveEventAudienceIsPerSubscribedSession) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+
+    protocol::StreamFrom from;
+    from.kind = protocol::StreamFrom::Kind::Now;
+
+    Peer* interactive = harness.open();
+    harness.hello(*interactive, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*interactive);
+    harness.send(*interactive, Harness::request(2, protocol::method::kEventSubscribe,
+                                                Harness::subscribe_params(session, from)));
+    harness.drain(*interactive);
+
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation, kInstanceB, 2,
+                  protocol::ClientRole::Automation);
+    harness.drain(*automation);
+    harness.send(*automation, Harness::request(3, protocol::method::kEventSubscribe,
+                                               Harness::subscribe_params(session, from)));
+    harness.drain(*automation);
+
+    Peer* unsubscribed = harness.open();
+    harness.hello(*unsubscribed, protocol::ServerProfile::Interactive,
+                  "cccccccc-cccc-4ccc-8ccc-cccccccccccc", 4);
+    harness.drain(*unsubscribed);
+
+    Peer* prehello = harness.open();
+
+    Event live;
+    live.id.value   = "live-1";
+    live.session_id = session;
+    live.timestamp  = std::chrono::system_clock::now();
+    live.type       = EventType::AssistantChunk;
+    live.payload    = nlohmann::json{
+        {"message", "m1"}, {"index", 0}, {"text", "hi"}, {"kind", "Text"}};
+    harness.server->onLiveEvent(live);
+
+    const auto interactive_frames = harness.drain(*interactive);
+    ASSERT_EQ(interactive_frames.size(), 1u);
+    EXPECT_EQ(interactive_frames[0].at("method").get<std::string>(), "event.live");
+    EXPECT_EQ(interactive_frames[0].at("params").at("envelope").at("session").get<std::string>(),
+              "s1");
+    EXPECT_FALSE(interactive_frames[0].at("params").contains("cursor"));
+    EXPECT_FALSE(interactive_frames[0].at("params").contains("subscription"));
+    EXPECT_FALSE(interactive_frames[0].at("params").contains("replay"));
+
+    const auto automation_frames = harness.drain(*automation);
+    ASSERT_EQ(automation_frames.size(), 1u);
+    EXPECT_EQ(automation_frames[0].at("method").get<std::string>(), "event.live");
+
+    EXPECT_TRUE(harness.drain(*unsubscribed).empty());
+    EXPECT_TRUE(harness.drain(*prehello).empty());
+}
+
 } // namespace

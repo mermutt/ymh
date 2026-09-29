@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "ymh/transport/json_rpc.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace {
@@ -345,6 +346,69 @@ TEST(TransportProtocol, OwnershipViewRoundTrips) {
     EXPECT_EQ(parsed.live_automation, 1u);
     EXPECT_EQ(parsed.other_fresh_owners, 2u);
     EXPECT_TRUE(parsed.shutting_down);
+}
+
+// 35 §8 item 1: the event.live wire name and its exact key set are pinned —
+// `params` has only `envelope`, `envelope` has only `session`/`event`, and no
+// `subscription`/`replay`/`cursor` is ever emitted (35-I1/35-I2).
+TEST(TransportProtocol, LiveNotificationWireNameAndKeySet) {
+    EXPECT_EQ(protocol::notify::kEventLive, "event.live");
+
+    protocol::LiveNotification live;
+    live.envelope.session          = SessionId{"s1"};
+    live.envelope.event.id.value   = "e1";
+    live.envelope.event.session_id = SessionId{"s1"};
+    live.envelope.event.timestamp  = std::chrono::system_clock::now();
+    live.envelope.event.type       = EventType::AssistantChunk;
+    live.envelope.event.payload    = nlohmann::json{
+        {"message", "m1"}, {"index", 0}, {"text", "hi"}, {"kind", "Text"}};
+
+    nlohmann::json body;
+    protocol::to_json(body, live);
+    ASSERT_EQ(body.size(), 1u);
+    EXPECT_TRUE(body.contains("envelope"));
+    const nlohmann::json& envelope = body.at("envelope");
+    ASSERT_EQ(envelope.size(), 2u);
+    EXPECT_TRUE(envelope.contains("session"));
+    EXPECT_TRUE(envelope.contains("event"));
+    EXPECT_FALSE(body.contains("subscription"));
+    EXPECT_FALSE(body.contains("replay"));
+    EXPECT_FALSE(body.contains("cursor"));
+
+    const nlohmann::json wire = protocol::encode(
+        protocol::Notification{std::string{protocol::notify::kEventLive}, body});
+    EXPECT_EQ(wire.at("jsonrpc").get<std::string>(), "2.0");
+    EXPECT_EQ(wire.at("method").get<std::string>(), "event.live");
+    EXPECT_FALSE(wire.contains("id"));
+    EXPECT_EQ(wire.at("params").at("envelope").at("session").get<std::string>(), "s1");
+}
+
+// 35 §8 item 2: a LiveNotification round-trips `session` and `event`, and an
+// unknown nested event `type` decodes to `event_skipped` (29-D5 / 35-I8).
+TEST(TransportProtocol, LiveNotificationRoundTripsAndSkipsUnknownType) {
+    protocol::LiveNotification live;
+    live.envelope.session          = SessionId{"s1"};
+    live.envelope.event.id.value   = "e1";
+    live.envelope.event.session_id = SessionId{"s1"};
+    live.envelope.event.timestamp  = std::chrono::system_clock::now();
+    live.envelope.event.type       = EventType::AssistantChunk;
+    live.envelope.event.payload    = nlohmann::json{
+        {"message", "m1"}, {"index", 0}, {"text", "hi"}, {"kind", "Text"}};
+
+    nlohmann::json body;
+    protocol::to_json(body, live);
+    protocol::LiveNotification back;
+    protocol::from_json(body, back);
+    EXPECT_EQ(back.envelope.session.value, live.envelope.session.value);
+    EXPECT_EQ(back.envelope.event.id.value, live.envelope.event.id.value);
+    EXPECT_EQ(back.envelope.event.type, EventType::AssistantChunk);
+    EXPECT_FALSE(back.envelope.event_skipped);
+
+    nlohmann::json unknown = body;
+    unknown["envelope"]["event"]["type"] = "future/unknown";
+    protocol::LiveNotification skipped;
+    protocol::from_json(unknown, skipped);
+    EXPECT_TRUE(skipped.envelope.event_skipped);
 }
 
 } // namespace
