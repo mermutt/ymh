@@ -861,6 +861,26 @@ TEST(UiRenderGolden, SlashCommandSelectionUsesThemeAccent) {
     EXPECT_FALSE(accent_precedes(second, "/help"));
 }
 
+TEST(UiRenderGolden, HeaderTruncatesLongSessionTitle) {
+    UiModel model = build_model();
+    const std::string long_title(118, 'x');
+    model.setCellTitle(WorkspaceId{"workspace"}, kSession, long_title);
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    const std::size_t first = rendered.find('\n');
+    const std::size_t second = rendered.find('\n', first + 1);
+    const std::string header = rendered.substr(first + 1, second - first - 1);
+    SCOPED_TRACE(header);
+    // 67-D1: the right slot is ellipsized to the cells left of the workspace
+    // title, so the header never exceeds the terminal width and the left slot
+    // stays visible.
+    EXPECT_NE(header.find("ymh · /work"), std::string::npos);
+    EXPECT_NE(header.find("…"), std::string::npos);
+    EXPECT_EQ(header.find(long_title), std::string::npos);
+    EXPECT_NE(header.find("│"), std::string::npos);
+    EXPECT_LE(ftxui::string_width(header), 72);
+}
+
 TEST(UiRenderGolden, HeaderShowsSessionTitleRightAligned) {
     UiModel model = build_model();
     model.setCellTitle(WorkspaceId{"workspace"}, kSession, "golden-title");
@@ -915,6 +935,36 @@ TEST(UiRenderGolden, SwitcherShowsShortIdForPlaceholderTitle) {
     SCOPED_TRACE(rendered);
     EXPECT_EQ(rendered.find("tui"), std::string::npos);
     EXPECT_NE(rendered.find("[cafebabe "), std::string::npos);
+}
+
+TEST(UiRenderGolden, SwitcherShowsRenamedSessionTitle) {
+    UiModel model = build_model();
+    model.workspaces[model.activeWorkspaceId].title = "alpha";
+    const SessionId other{"renamed-session-id"};
+    model.ensureSessionIn(model.activeWorkspaceId, other);
+    model.setCellTitle(model.activeWorkspaceId, other, "renamed-title");
+    // 67-I2: `/sessions` reads the persisted header, so the renamed title is
+    // what the catalog carries and what the switcher renders.
+    WorkspaceHistory history;
+    history.id            = model.activeWorkspaceId;
+    history.title         = "alpha";
+    history.canonicalPath = "/work";
+    SessionHistoryEntry entry;
+    entry.id        = other;
+    entry.title     = "renamed-title";
+    entry.kind      = "root";
+    entry.model     = "m";
+    entry.updatedAt = 1;
+    history.sessions.push_back(std::move(entry));
+    model.catalog.workspaces.push_back(std::move(history));
+    model.catalog.loaded     = true;
+    model.catalog.generation = 1;
+    model.openSwitcher();
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("renamed-title"), std::string::npos);
 }
 
 TEST(UiRenderGolden, BottomLineCountsOnlyNoSessionList) {
