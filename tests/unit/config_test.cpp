@@ -75,7 +75,8 @@ std::filesystem::path write_global(const test::TempWorkspace& workspace) {
 
 bool same_config(const Config& a, const Config& b) {
     return a.ui.theme == b.ui.theme && a.ui.show_activity == b.ui.show_activity &&
-           a.ui.side_panel == b.ui.side_panel && a.agent.model == b.agent.model &&
+           a.ui.side_panel == b.ui.side_panel && a.ui.color == b.ui.color &&
+           a.agent.model == b.agent.model &&
            a.agent.max_steps == b.agent.max_steps &&
            a.agent.reasoning_effort == b.agent.reasoning_effort &&
            a.agent.system_prompt == b.agent.system_prompt && a.workspace.root == b.workspace.root &&

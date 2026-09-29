@@ -1779,6 +1779,12 @@
       "section": "10.2.1"
     },
     {
+      "symbol": "config::ui.color",
+      "category": "config_key",
+      "spec": "68-terminal-color-capability-errata.md",
+      "section": "8"
+    },
+    {
       "symbol": "config::ui.show_activity",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",
