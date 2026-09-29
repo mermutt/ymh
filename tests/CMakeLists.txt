@@ -38,6 +38,7 @@ add_executable(ymh_tests
     unit/errata53_ui_test.cpp
     unit/errata57_ui_test.cpp
     unit/errata58_ui_test.cpp
+    unit/errata60_ui_test.cpp
     unit/errata66_ui_test.cpp
     unit/errata67_ui_test.cpp
     unit/errata68_ui_test.cpp
