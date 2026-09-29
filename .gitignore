@@ -18,6 +18,9 @@ compile_commands.json
 # Agent scratch
 .sisyphus/
 
+# Python bytecode (the dev-side design_status_drift tripwire)
+__pycache__/
+
 # ymh per-workspace state (sessions.db, sessions.lock, host.sock, host.log)
 .ymh/
 build-tsan/
