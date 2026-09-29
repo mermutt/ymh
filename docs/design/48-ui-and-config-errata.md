@@ -1,10 +1,26 @@
 # 48 — TUI & Input Errata: the Esc-Esc Interrupt, Word-Wise Cursor Movement, a Visible Glyph-Safe Caret, the Text-Hierarchy Styling Policy, Rich Tool Lines, and Reasoning Spacing
 
 ```
-Status: **draft (Rev 8)** — gate findings resolved; implemented and green. This
-        spec amends the owning specs (10, 45, 46); it introduces no new component
-        and no new subsystem. Like 45 and 46, every "current state" claim is
-        reproducible from the shipped tree (HEAD `bbf96aeaa`).
+Status: **verified (Rev 9)** — independent gate `gate-48` (2026-09-28) against
+        the shipped code on `main` (`11a5db10f`): **PASS — 0 open HIGH / 0 open
+        MEDIUM**. Every decision (48-D2/D4/D5/D6/D7/D8) and every invariant
+        (48-I1–I20) holds in the shipped tree; the gate's findings are
+        documentation drift only, all closed in §16. This spec amends the owning
+        specs (10, 45, 46); it introduces no new component and no new subsystem.
+        The original "current state" claims were pinned to the pre-split merged
+        tree (`bbf96aeaa`, now reachable only from `origin/master`); §16
+        re-anchors them to `main` and records where later verified specs
+        (51/59/62/64) amended the *surface sketches* while leaving the decisions
+        and invariants intact.
+
+        **Rev 9 (gate-48 closure).** No code defect was found; the changes are
+        doc-only. See §16 for the drift table. Summary: §9's `render_input`
+        sketch and §6.2.5's `user_bar = Color::Green` are superseded by
+        59-D1/62-D1/64-D3 and 51-D2.1 respectively; §5.2's `caret_anchor`
+        signature is superseded by 62-D2; the §7.2.5 truncated suffix is a
+        `Color::GrayLight` span, not `dim`; the §6.2.2 classifier is invoked per
+        entry (not precomputed); and the "current state" `file:line` citations
+        are re-anchored.
 
         **Rev 8 (gate resolution).** An adversarial gate returned 4 HIGH / 11
         MEDIUM / 9 LOW. Rev 8 resolves every HIGH and the MEDIUMs that touch the
@@ -166,8 +182,11 @@ guard; the MCP credential diagnostic procedure.
    - otherwise (no active turn) returns true **without** arming and **without**
      a hint (Esc remains a harmless no-op, so the user cannot arm a cancel that
      does nothing).
-   The exact hint string is **`- one more <Esc> to interrupt`**, rendered dim
-   immediately after the composer caret (48-D5) while `esc_armed`.
+   The hint text is **`- one more <Esc> to interrupt`**, rendered dim
+   immediately after the composer caret (48-D5) while `esc_armed`. The shipped
+   element is `"  - one more <Esc> to interrupt"` — the two leading spaces are
+   layout padding before the text (Rev 9; §16 F9), so 48-I2 is about the text,
+   not the padding.
 
 3. **Second Esc (interrupt).** A second Esc while `esc_armed` calls the **same**
    `cancelActive()` path as Ctrl+C, clears the arm, clears the hint, and returns
@@ -204,8 +223,9 @@ guard; the MCP credential diagnostic procedure.
 - **48-I1.** Esc-Esc cancels **only** the active session's turn, via
   `cancelActive()`; it never quits, never switches session, never touches
   another workspace.
-- **48-I2.** The hint string is exactly `- one more <Esc> to interrupt` and is
-  visible iff `esc_armed`.
+- **48-I2.** The hint text is `- one more <Esc> to interrupt` (shipped element:
+  two leading layout spaces + the text, Rev 9/§16 F9) and is visible iff
+  `esc_armed`.
 - **48-I3.** `esc_armed` is cleared by any handled key other than the arming
   Esc, by a modal, by a session switch, and by the timeout; it is per-session
   and never persisted.
@@ -386,6 +406,10 @@ guard; the MCP credential diagnostic procedure.
    cursor position from `box_.x_max/y_max` (`node.cpp:151-155`); a wide (CJK)
    glyph would otherwise push the caret onto its trailing cell. The pinned
    signature is `ftxui::Element caret_anchor(ftxui::Element)` (file-local).
+   **Rev 9:** 62-D2 later extended it to
+   `caret_anchor(ftxui::Element, ftxui::Screen::Cursor::Shape)` so the anchor
+   can also carry the conditional `Bar`/`Hidden` shape; the single-focus-owner
+   contract and the leading-cell pin are unchanged (§16 F3).
 
    **Caret shape is conditional (amended by 62-D2 Rev 3).** The single-focus-owner
    guarantee above is unchanged, but the cursor **shape** is no longer
@@ -495,7 +519,8 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
     (`sign + " Thinking"`) plus `"  ctrl+o to expand"` dim; body only when
     `expand_all_folds` (`:228-243`).
   - **Tool**: `render_tool_entry` — Yellow header; a `notice:` row exists
-    (`:193-195`) but is unreachable for a tool entry (no tool result carries a
+    (shipped: keyed off `ToolCallView::notice`, `src/ui/ui_render.cpp:329-331`;
+    Rev 9 re-anchor, §16 F8) but is unreachable for a tool entry (no tool result carries a
     `ContextForm::Notice`; see 48-I15); (only when expanded) `"args: " +
     arguments` dim and the output (`:176-212`).
   - **System/Context**: `dim` (`:284`, `:293`).
@@ -539,7 +564,13 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
    final assistant classified as `FinalAnswer` (normal), contradicting the dim
    rule; Rev 2 passes the predicate explicitly and uses it.** The scan is O(n)
    amortized if the caller passes a precomputed `std::vector<Presentation>`; the
-   renderer computes it once per `render_conversation` call.
+   renderer computes it once per `render_conversation` call. **Rev 9
+   correction:** the shipped renderer does **not** precompute a
+   `std::vector<Presentation>`; it calls `entry_presentation(entries, index,
+   turn_active)` once per entry inside the loop
+   (`src/ui/ui_render.cpp:487-493`), so the worst case is O(n²) rather than the
+   O(n) the precomputed-vector route would give. This is a performance note
+   only; the classification is identical and 48-I11/I12 hold (§16 F5).
 
 3. **Where the style is applied.** A single `apply_presentation(Element, Presentation, theme)`
    helper wraps the entry element, so the policy is in one place and the
@@ -558,9 +589,12 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
    contradiction is removed.
 
 5. **User brightening.** Add `bold` + `Color::White` to the user block. The
-   left bar is painted `Color::Green` (currently the `LeftBar` node draws `│`
-   with no color, `src/ui/ui_render.cpp:65-72`); the bar becomes a second visual
-   cue. The background is retained (RB-01).
+   left bar is painted from the theme (`Theme::user_bar`; at Rev 8 that was
+   `Color::Green`, currently the `LeftBar` node draws `│` with no hard-coded
+   color, `src/ui/ui_render.cpp:86`); the bar becomes a second visual cue. The
+   background is retained (RB-01). **Rev 9:** 51-D2.1 later re-pinned
+   `Theme::user_bar` to the opencode blue `RGB(92,156,245)`; the seam is
+   unchanged, only the token value moved (§16 F2).
 
 6. **Theme seam.** The three colors (`user_foreground`, `intermediate_dim` is a
    decorator not a color, `bar`) live in `Theme` (`include/ymh/ui/theme.hpp:7-19`)
@@ -692,7 +726,8 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
 
    **Width is the content box, not the terminal.** Rev 1 passed
    `context.width`, which `render_supervisor` sets to the full terminal width
-   (`RenderContext{size.width, …}`, `src/ui/ui_render.cpp:1202-1203`). The
+   (`RenderContext{.width = size.width, …}` designated initializer,
+   `src/ui/ui_render.cpp:2007-2010`; Rev 9 re-anchor, §16 F6). The
    conversation pane sits inside a `border` and carries a `vscroll_indicator`
    (`src/ui/ui_render.cpp:312-329`), so its content box is narrower. Rev 2 adds
    `RenderContext::content_width` and sets it at the call site to
@@ -705,17 +740,24 @@ untouched. The suite must keep the 45-D1 and 46-D6 assertions green.
    expanded view shows the full `args:` line and the output/diff (`:193-210`).
    Rev 7 claimed the expanded view "keeps the notice"; that is withdrawn
    (gate HIGH-4): no runtime producer emits a `ContextForm::Notice` on a tool
-   result (`src/jobs/job_wakeup.cpp:32,41`;
-   `src/agent/repeat_tool_reminder.cpp:67`), so the renderer's `notice:` row
-   (`src/ui/ui_render.cpp:193-195`) is a **defensive, unreachable-in-production**
-   path (OQ-48-8). The one-line header is always shown, expanded or not; when
+   result (`src/jobs/job_wakeup.cpp:35,47`;
+   `src/agent/repeat_tool_reminder.cpp:67`; `src/agent/subagent_service.cpp:919`
+   are message notices), so the renderer's `notice:` row
+   (`src/ui/ui_render.cpp:329-331`, keyed off `ToolCallView::notice`) is a
+   **defensive, unreachable-in-production** path (OQ-48-8). The mechanism is
+   `call.notice = e.context.form == ContextForm::Notice ? … : nullopt`
+   (`src/ui/ui_model.cpp:1146-1148`); no production `payload::ToolResult` sets a
+   `Notice` context (the golden `ToolNoticeSuffixRendered` sets one by hand).
+   Rev 9 re-anchor, §16 F10. The one-line header is always shown, expanded or not; when
    expanded the header is not truncated (the user is inspecting it).
 
 5. **Outcome affordance (optional, pinned shape).** A failed tool entry prefixes
-   the marker with `✗` (`Color::Red`) and a truncated-output entry appends a dim
-   `" [truncated]"`; these are display-only and derive from
-   `ToolCallView::outcome` / `::truncated` (`include/ymh/ui/ui_model.hpp:140-141`).
-   Not required by the user; recorded so the renderer has a single owner.
+   the marker with `✗` (`Color::Red`) and a truncated-output entry appends a
+   `Color::GrayLight` `" [truncated]"` span (Rev 9: the shipped suffix is a
+   GrayLight span, not a `dim` decorator, `src/ui/ui_render.cpp:328`; §16 F4);
+   these are display-only and derive from `ToolCallView::outcome` /
+   `::truncated` (`include/ymh/ui/ui_model.hpp:177-178`). Not required by the
+   user; recorded so the renderer has a single owner.
 
 ### 7.3 Invariants
 
@@ -889,6 +931,11 @@ enum class Presentation : std::uint8_t {
 namespace ymh::ui {
 
 // 48-D5.1: the composer with a real caret. `input` is read-only.
+// Rev 9: SUPERSEDED by 59-D1 (multi-row wrap), 62-D1 (bounded height /
+// caret window) and 64-D3 (padding rows). Shipped signature:
+//   render_input(const UiModel&, const Theme&, int terminal_width,
+//                int max_rows, bool hide_caret, bool pad)
+// (src/ui/ui_render.hpp:60). The 2-arg sketch above is retained for history.
 [[nodiscard]] ftxui::Element render_input(const UiModel& model,
                                           const Theme& theme);
 
@@ -944,6 +991,8 @@ struct Theme {
     ftxui::Color  completion_selected = ftxui::Color::CyanLight;
     // 48-D6.6
     ftxui::Color  user_foreground = ftxui::Color::White;        // NEW
+    // Rev 9: 51-D2.1 re-pinned this to the opencode blue RGB(92,156,245);
+    // the seam is unchanged (§16 F2).
     ftxui::Color  user_bar        = ftxui::Color::Green;        // NEW
     ftxui::Color  tool_name       = ftxui::Color::CyanLight;    // NEW
     ftxui::Color  tool_args       = ftxui::Color::GrayLight;    // NEW
@@ -1081,11 +1130,14 @@ implementation plan, not this spec.
   `entry_presentation`. **Interpretation chosen: tool/reasoning-followed.**
 - **OQ-48-8 (collapsed tool entry and the `notice:` row).** 48-I15 pins a
   collapsed tool entry to exactly one row; `render_tool_entry` nonetheless has a
-  `notice:` row (`src/ui/ui_render.cpp:193-195`) that would add a second row if a
-  tool result ever carried a `ContextForm::Notice`. No producer exists today
-  (Notices are message-only: `src/jobs/job_wakeup.cpp:32,41`;
-  `src/agent/repeat_tool_reminder.cpp:67`). If a future tool emits one, revisit
-  48-I15 and the collapsed renderer. **Recorded, not solved.**
+  `notice:` row (`src/ui/ui_render.cpp:329-331`, keyed off
+  `ToolCallView::notice`, populated at `src/ui/ui_model.cpp:1146-1148`) that
+  would add a second row if a tool result ever carried a `ContextForm::Notice`.
+  No producer exists today (Notices are message-only:
+  `src/jobs/job_wakeup.cpp:35,47`; `src/agent/repeat_tool_reminder.cpp:67`;
+  `src/agent/subagent_service.cpp:919`). If a future tool emits one, revisit
+  48-I15 and the collapsed renderer. **Recorded, not solved** (Rev 9
+  re-anchor, §16 F10).
 
 ---
 
@@ -1154,3 +1206,91 @@ implementation plan, not this spec.
     `truncate_spans`, `summarize_tool_arguments`, the rich tool line and its
     content-box truncation, and the reasoning blank-line separator. An
     independent re-gate is still required before the spec is marked `verified`.
+
+---
+
+## 16. Independent gate `gate-48` (Rev 9) — findings and closure
+
+**Verdict: PASS — 0 open HIGH / 0 open MEDIUM / 0 open LOW.** The gate was run
+against the shipped code on `main` (`11a5db10f`), read via `git show main:<path>`.
+Every decision (48-D2/D4/D5/D6/D7/D8) and every invariant (48-I1–I20) was
+checked against the shipped tree. No production-code defect was found: all
+findings are documentation drift introduced by *later verified specs* that
+amended the surface, and each is closed below (doc-only). Because no code
+changed, the shipped behaviour is unchanged and the invariants still hold.
+
+### 16.1 What was verified (positive)
+
+- **48-D2** — `handle_input`'s Escape path (`src/ui/supervisor.cpp:3298-3321`):
+  visible list → 45-D5 dismissal first; otherwise arm iff
+  `model_.has_active_turn()`; second Esc calls the same `cancelActive()`
+  (`:505-514`). Disarm on any other handled key (`:3290-3294`), on modal open
+  (`disarm_esc`, 5 call sites), on session switch
+  (`src/ui/ui_model.cpp:1398-1407`), and on the 3 s tick / turn end
+  (`src/ui/supervisor.cpp:2059-2070`). Hint text and the `EscArm` state match.
+- **48-D4** — `InputModel::word_left_boundary`/`word_right_boundary`
+  (`src/ui/ui_model.cpp:401-436`) with the pinned `WordClass` model
+  (`:132-148`); wired to `ArrowLeftCtrl`/`ArrowRightCtrl`
+  (`src/ui/supervisor.cpp:3396-3403`).
+- **48-D5** — `glyph_floor`/`glyph_len`/`glyph_at` (`src/ui/ui_model.cpp:465-501`),
+  `cursor_left`/`cursor_right` (`:438-463`) used by the plain arrows
+  (`src/ui/supervisor.cpp:3407-3415`); `caret_anchor` sets
+  `component_active` and pins the leading cell (`src/ui/ui_render.cpp:100-128`);
+  `render_input` slices at `glyph_floor(draft, cursor)` and appends the armed
+  hint (`:668-753`).
+- **48-D6** — `Presentation` + `entry_presentation` (`src/ui/ui_model.cpp:621-655`)
+  match the classifier exactly, including the streaming-tail rule and
+  `Notice → FinalAnswer`; `apply_presentation`
+  (`src/ui/ui_render.cpp:2117-2131`) dims Intermediate/Chrome, bolds+whites
+  UserAuthored, leaves FinalAnswer normal; `Notice` is bold/yellow at the entry
+  site (`:450-452`).
+- **48-D7** — the single `summarize_tool_arguments` symbol with the pinned key
+  order and whitespace collapse (`src/ui/ui_render.cpp:2188-2232`); the adapter
+  stores raw `arguments.dump()` (`src/ui/ui_event_adapter.cpp:113`) and reuses
+  the symbol for permission summaries (`:337,:359`); `truncate_spans` is
+  span-aware, glyph-safe, `ftxui::string_width`-measured
+  (`src/ui/ui_render.cpp:2134-2186`); `content_width = width - 3` and the
+  designated initializer (`:2007-2010`); collapsed tool entry is one row.
+- **48-D8** — one blank row after every `Reasoning` entry
+  (`src/ui/ui_render.cpp:494-496`).
+- **Tests** (on `dev`): `UI48_D2_*`, `UI48_D4_D5_WordAndGlyphMotion`,
+  `InputWordBoundaries`, `InputGlyphMotionAndSnap`, `EntryPresentationTable`,
+  `CaretCursorLandsAtInputPosition`, `CaretCursorHandlesCjkLeadingCell`,
+  `ApplyPresentationBoldDimAndMonochrome`, `ReasoningBlankLineSeparator`,
+  `TruncateSpans*`, `SummarizeToolArgumentsPrefersKeys`,
+  `ToolLineRichFormat`, `ToolLineTruncatesAtContentBoxColumn`,
+  `CollapsedToolRendersExactlyOneRow` are present.
+
+### 16.2 Findings (all closed in Rev 9)
+
+| # | Sev | Finding | Counter-example (shipped) | Closure |
+|---|---|---|---|---|
+| F1 | MEDIUM | §9 pinned `render_input(const UiModel&, const Theme&)`. | `main:src/ui/ui_render.cpp:655` is 6-arg (`terminal_width`, `max_rows`, `hide_caret`, `pad`); superseded by 59-D1/62-D1/64-D3. | §9 sketch marked superseded with the shipped signature. |
+| F2 | MEDIUM | §6.2.5/§9 pinned `Theme::user_bar = Color::Green`. | `main:include/ymh/ui/theme.hpp:26` is `RGB(92,156,245)`; superseded by 51-D2.1. | §6.2.5 + §9 marked superseded; seam unchanged. |
+| F3 | LOW | §5.2 pinned `caret_anchor(ftxui::Element)` and unconditional `focusCursorBar`. | `main:src/ui/ui_render.cpp:125` takes a `Cursor::Shape`; shape is `Bar`/`Hidden` (62-D2, `:721-723`). | §5.2 note added. |
+| F4 | LOW | §7.2.5 said the truncated suffix is `dim`. | `main:src/ui/ui_render.cpp:328` is a `Color::GrayLight` span (no `dim`). | §7.2.5 corrected. |
+| F5 | LOW | §6.2.2 said the renderer "computes it once per `render_conversation` call". | `main:src/ui/ui_render.cpp:487-493` calls `entry_presentation` per entry (O(n²) worst case, not precomputed). | §6.2.2 corrected (perf note only). |
+| F6 | LOW | §16-less drift: "current state" `file:line` citations pinned to `bbf96aeaa`, which is not on `main` (only `origin/master`). | e.g. §3.1's `:2495-2504` vs shipped `:3298`; §5.1's `:385-400` vs shipped `:655`. | Citations re-anchored inline; §16 records the re-anchor. |
+| F7 | LOW | §7.2.4/§7.3/OQ-48-8 cited `job_wakeup.cpp:32,41` as the Notice producers. | Shipped producers are `job_wakeup.cpp:35,47`, `repeat_tool_reminder.cpp:67`, `subagent_service.cpp:919`; the tool-notice mechanism is `ui_model.cpp:1146`. | Citations re-anchored. |
+| F8 | LOW | §6.1's `render_tool_entry` `notice:` row was cited at `:193-195`. | Shipped is `src/ui/ui_render.cpp:329-331`, keyed off `ToolCallView::notice`. | Re-anchored. |
+| F9 | LOW | 48-I2/§3.2.2 said the hint string is "exactly" `- one more <Esc> to interrupt`. | Shipped element is `"  - one more <Esc> to interrupt"` (`src/ui/ui_render.cpp:752`) — two leading layout spaces. | Qualified as text vs padding. |
+| F10 | LOW | `DESIGN_STATUS.md` said "Rev 7" while the spec header said "Rev 8". | `docs/design/DESIGN_STATUS.md:72` vs this file's Status line. | Synced to Rev 9 `verified`. |
+
+### 16.3 Not verified / limitations
+
+- The gate was **static**: `main` (source) and `dev` (docs/tests) are disjoint
+  checkouts, so the merged tree could not be built or the suite executed in this
+  run. Test *existence* and assertions were read on `dev`; the spec's "suite is
+  green" claim was not independently re-executed here.
+- `bbf96aeaa` is reachable only from `origin/master`; the spec's original
+  line-number provenance could not be reproduced from `main`. This is recorded
+  as F6 (LOW), not treated as a decision failure — the decisions were verified
+  against the current shipped tree instead.
+- `48-I15`'s "unreachable-in-production" claim depends on no production
+  `payload::ToolResult` setting `context.form == Notice`. This was verified by
+  grepping every `ContextForm::Notice` assignment in `src` (`job_wakeup`,
+  `repeat_tool_reminder`, `subagent_service` — all message notices) and the
+  single `ToolCallView::notice` writer (`ui_model.cpp:1146`). The golden
+  `ToolNoticeSuffixRendered` sets a tool-result Notice by hand, so the row is
+  renderer-testable but has no production producer today; OQ-48-8 remains the
+  correct disposition.
