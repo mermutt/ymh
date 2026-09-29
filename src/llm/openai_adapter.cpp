@@ -699,6 +699,18 @@ struct CurlWriteContext {
     int                 status = 0;
     bool                capture_body = false;
     bool                aborted = false;
+    // 08-D17: the idle guard is scoped to the pre-first-byte window. Once the
+    // response body has started, a byte gap is provider generation latency
+    // (reasoning / tool-argument assembly), not a hung transport; only
+    // `total_timeout` bounds the established stream. When the total deadline is
+    // disabled (0), the idle guard remains the only bound and so also applies
+    // mid-stream (08-D17 note), measured from the last byte.
+    bool                                 received_any = false;
+    bool                                 idle_aborted = false;
+    bool                                 guard_mid_stream = false;
+    std::chrono::steady_clock::time_point started{};
+    std::chrono::steady_clock::time_point last_byte{};
+    std::chrono::milliseconds             idle_timeout{0};
 };
 
 std::once_flag g_curl_init;
@@ -710,6 +722,10 @@ void ensure_curl_initialized() {
 std::size_t curl_write_callback(char* data, std::size_t size, std::size_t count, void* user) {
     auto* context = static_cast<CurlWriteContext*>(user);
     const std::size_t total = size * count;
+    if (total > 0) {
+        context->received_any = true;
+        context->last_byte    = std::chrono::steady_clock::now();
+    }
     if (context->cancel.cancelled()) {
         context->aborted = true;
         return 0;
@@ -752,6 +768,18 @@ int curl_progress_callback(void* user,
     if (context->cancel.cancelled()) {
         context->aborted = true;
         return 1;
+    }
+    if (context->idle_timeout.count() > 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!context->received_any && now - context->started >= context->idle_timeout) {
+            context->idle_aborted = true;
+            return 1;
+        }
+        if (context->guard_mid_stream && context->received_any &&
+            now - context->last_byte >= context->idle_timeout) {
+            context->idle_aborted = true;
+            return 1;
+        }
     }
     return 0;
 }
@@ -955,15 +983,22 @@ Task<HttpResponse> CurlHttpTransport::postStream(const HttpRequest& request,
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
                      static_cast<long>(request.connect_timeout.count()));
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(request.total_timeout.count()));
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,
-                     static_cast<long>(std::max<std::int64_t>(
-                         1, (request.idle_timeout.count() + 999) / 1000)));
+    // 08-D17: libcurl's LOW_SPEED abort fires on any inter-byte gap, which
+    // cannot tell a hung socket from a model that is legitimately silent while
+    // reasoning. The idle guard is implemented in the progress callback and
+    // applies only until the first response byte (see CurlWriteContext).
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 0L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    context.started         = std::chrono::steady_clock::now();
+    context.last_byte       = context.started;
+    context.idle_timeout    = request.idle_timeout;
+    context.guard_mid_stream = request.total_timeout.count() <= 0;
 
     const CURLcode result = curl_easy_perform(curl);
 
@@ -976,6 +1011,8 @@ Task<HttpResponse> CurlHttpTransport::postStream(const HttpRequest& request,
     if (result != CURLE_OK) {
         if (context.aborted && cancel.cancelled()) {
             response.transport_error = make_error(LLMErrorCode::Cancelled, "cancelled");
+        } else if (context.idle_aborted) {
+            response.transport_error = make_error(LLMErrorCode::Timeout, "transport timeout");
         } else if (context.aborted) {
             response.transport_error =
                 make_error(LLMErrorCode::Cancelled, "consumer aborted stream");
@@ -1103,9 +1140,28 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
     const ModelProfile*  active_profile = config_.profile.id.empty() ? nullptr : &config_.profile;
     const ToolCallPolicy policy{active_profile, offered_names};
 
+    // 08-D18: the retry budget is bounded by the per-request deadline, not by
+    // `max_attempts` fresh deadlines (08 §3.7). A zero budget means unbounded.
+    const auto                    call_start  = std::chrono::steady_clock::now();
+    const std::chrono::milliseconds call_budget =
+        effective_timeout(request.deadline, config_.request_timeout);
+    const auto remaining_budget = [&]() -> std::chrono::milliseconds {
+        if (call_budget.count() <= 0) {
+            return std::chrono::milliseconds{0};
+        }
+        const auto used = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - call_start);
+        return call_budget - used;
+    };
+
     for (std::uint32_t attempt = 1; attempt <= max_attempts; ++attempt) {
         if (cancel.cancelled()) {
             return cancelled();
+        }
+
+        std::chrono::milliseconds budget = remaining_budget();
+        if (call_budget.count() > 0 && budget.count() <= 0) {
+            return failed(make_error(LLMErrorCode::Timeout, "request deadline exceeded"));
         }
 
         OpenAiStreamDecoder decoder(sink, capabilities_, policy, config_.max_arguments_bytes,
@@ -1118,7 +1174,7 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
         http.body = payload;
         http.connect_timeout = config_.connect_timeout;
         http.idle_timeout = config_.idle_timeout;
-        http.total_timeout = effective_timeout(request.deadline, config_.request_timeout);
+        http.total_timeout = call_budget.count() > 0 ? budget : call_budget;
 
         HttpResponse response = transport_
                                     ->postStream(
@@ -1168,6 +1224,10 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                 if (const auto retry_after = retry_after_from(response.headers)) {
                     delay = *retry_after;
                 }
+            }
+            budget = remaining_budget();
+            if (call_budget.count() > 0 && (budget.count() <= 0 || delay >= budget)) {
+                return failed(error);
             }
             if (!sleep_with_cancel(delay, cancel)) {
                 return cancelled();
