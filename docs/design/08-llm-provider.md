@@ -488,8 +488,12 @@ Normative rules:
   `request_id`, provider, model, attempt, status, and delay — **never** prompt
   or response content (L12).
 - Retry policy is config-driven (§5.3); a retry budget is bounded by
-  `max_attempts` and the per-request deadline. `LLMPool` bounds concurrent
-  requests across sessions (F8, L13).
+  `max_attempts` **and one per-request deadline shared across every attempt**
+  (**08-D18**): the deadline is computed once, each attempt is capped by the
+  time remaining, and a retry (including its backoff) is not started once the
+  budget is exhausted. `max_attempts` fresh deadlines would let a stalled
+  request defer its terminal failure by `max_attempts × request_timeout`.
+  `LLMPool` bounds concurrent requests across sessions (F8, L13).
 
 ### 3.8 Timeouts
 
@@ -498,11 +502,30 @@ Three distinct deadlines, all configurable and all cancellable:
 | Timeout | Meaning | Default |
 |---|---|---|
 | `connect_timeout` | TCP+TLS connect | 10 s |
-| `idle_timeout` | max gap between transport bytes (SSE keep-alive) | 60 s |
-| `request_timeout` | total wall time for the request | 120 s |
+| `idle_timeout` | max time from request send to the **first response byte** (response-await) | 60 s |
+| `request_timeout` | total wall time for the request, including an established stream | 120 s |
 
 `LLMRequest.deadline`, when non-zero, caps `request_timeout` for that call.
 A `Timeout` is retryable only before any event is dispatched (L7).
+
+**Scoping (08-D17).** `idle_timeout` is a **time-to-first-byte** guard, not an
+inter-byte gap. libcurl's `CURLOPT_LOW_SPEED_*` abort fires on a
+small-prefix/long-gap stream: its speed check is a short sliding window that
+falls below the limit once the gap exceeds the window, so it cannot distinguish
+a hung socket from a model that is legitimately silent while reasoning or
+assembling a long tool-call argument. Once the first response byte has arrived,
+the stream is established and only `request_timeout` bounds it; a silent
+mid-stream gap therefore does not abort the call. The adapter disables the
+low-speed abort and applies the first-byte guard in its progress callback,
+mapping an expiry to `Timeout`.
+
+**Zero semantics.** `idle_timeout = 0` disables the first-byte guard;
+`request_timeout = 0` disables the total deadline. When the total deadline is
+disabled the idle guard is the only remaining bound, so it also applies
+mid-stream (measured from the last byte) to preserve protection; with a finite
+`request_timeout` the mid-stream guard is off (08-D17). The first-byte guard is
+measured from request dispatch (it includes connect), so configure
+`idle_timeout ≥ connect_timeout`.
 
 ---
 
@@ -1360,6 +1383,22 @@ and API-key gated.
   deferred; v1 rejects literal keys (§6.4).
 - **(u) Live model and cost cap.** The live layer pins the model via
   `YMH_LIVE_LLM_MODEL` and enforces a per-run token/cost cap (§13.5).
+- **(v) `idle_timeout` is a time-to-first-byte guard (08-D17).** It is not an
+  inter-byte gap: a mid-stream silent gap is provider generation latency, not a
+  hung transport, and is bounded only by `request_timeout`. Rationale: the
+  user-observed mid-turn stall was a short prefix followed by a long silent
+  reasoning phase, which libcurl's `CURLOPT_LOW_SPEED_*` aborts as
+  `CURLE_OPERATION_TIMEDOUT` once its sliding-window speed drops below the
+  limit. Implementation: the low-speed abort is disabled and the first-byte
+  guard runs in the curl progress callback (§3.8). When `request_timeout = 0`
+  removes the total bound, the idle guard also applies mid-stream so protection
+  is never removed entirely; `idle_timeout = 0` disables the guard.
+- **(w) The retry budget shares one per-request deadline (08-D18).** The
+  deadline is computed once per `stream()` call; each attempt is capped by the
+  remaining budget and a retry is not started once the budget (or its backoff)
+  is exhausted. Rationale: applying `request_timeout` per attempt lets a
+  pre-first-event stall defer its terminal `TurnFailed` by up to
+  `max_attempts × request_timeout` with no UI indication (§3.7).
 
 ### 14.2 Open questions
 

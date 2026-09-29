@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -129,6 +130,7 @@ public:
     struct Script {
         ymh::HttpResponse response;
         std::size_t chunk_size = 4096;
+        std::chrono::milliseconds delay{0};
     };
 
     explicit FakeTransport(std::vector<Script> scripts) : scripts_(std::move(scripts)) {}
@@ -146,6 +148,9 @@ public:
         }
 
         Script& script = scripts_[index];
+        if (script.delay.count() > 0) {
+            std::this_thread::sleep_for(script.delay);
+        }
         for (std::size_t offset = 0; offset < script.response.body.size();
              offset += script.chunk_size) {
             if (cancel.cancelled()) {
@@ -176,6 +181,9 @@ struct Options {
     std::uint32_t max_attempts = 3;
     std::size_t sse_line_bytes = 1u << 20;
     std::size_t max_arguments_bytes = 1u << 20;
+    std::chrono::milliseconds connect_timeout{10'000};
+    std::chrono::milliseconds idle_timeout{60'000};
+    std::chrono::milliseconds request_timeout{120'000};
 };
 
 ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> transport,
@@ -191,6 +199,9 @@ ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> 
     config.retry.max_attempts = options.max_attempts;
     config.sse_line_bytes = options.sse_line_bytes;
     config.max_arguments_bytes = options.max_arguments_bytes;
+    config.connect_timeout = options.connect_timeout;
+    config.idle_timeout = options.idle_timeout;
+    config.request_timeout = options.request_timeout;
     return ymh::OpenAICompatibleProvider(config, options.caps, std::move(transport));
 }
 
@@ -704,6 +715,104 @@ TEST_F(OpenAiAdapterTest, CurlMidStreamDisconnectDoesNotRetry) {
     EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
     EXPECT_EQ(server.requests(), 1u);
     EXPECT_EQ(text_of(result.events), "partial");
+}
+
+TEST_F(OpenAiAdapterTest, CurlMidStreamSilentGapDoesNotTimeout) {
+    const std::string first = frame(text_frame("Hi"));
+    const std::string full = sse_body({text_frame("Hi"), finish_frame("stop")});
+
+    ymh::test::MockHttpServer server({ymh::test::MockHttpServer::Response{
+        200,
+        {{"Content-Type", "text/event-stream"}},
+        full,
+        std::numeric_limits<std::size_t>::max(),
+        first.size(),
+        std::chrono::milliseconds{8000}}});
+
+    auto provider = make_provider(
+        std::make_shared<ymh::CurlHttpTransport>(),
+        Options{.base_url = server.base_url(),
+                .max_attempts = 1,
+                .idle_timeout = std::chrono::milliseconds{1000},
+                .request_timeout = std::chrono::milliseconds{30000}});
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Completed);
+    EXPECT_EQ(text_of(result.events), "Hi");
+    EXPECT_EQ(server.requests(), 1u);
+}
+
+TEST_F(OpenAiAdapterTest, CurlMidStreamIdleGuardWhenTotalDeadlineDisabled) {
+    const std::string first = frame(text_frame("Hi"));
+    const std::string full = sse_body({text_frame("Hi"), finish_frame("stop")});
+
+    ymh::test::MockHttpServer server({ymh::test::MockHttpServer::Response{
+        200,
+        {{"Content-Type", "text/event-stream"}},
+        full,
+        std::numeric_limits<std::size_t>::max(),
+        first.size(),
+        std::chrono::milliseconds{3000}}});
+
+    auto provider = make_provider(
+        std::make_shared<ymh::CurlHttpTransport>(),
+        Options{.base_url = server.base_url(),
+                .max_attempts = 1,
+                .idle_timeout = std::chrono::milliseconds{1000},
+                .request_timeout = std::chrono::milliseconds{0}});
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
+}
+
+TEST_F(OpenAiAdapterTest, CurlPreFirstByteStallTimesOut) {
+    const std::string full = sse_body({text_frame("Hi"), finish_frame("stop")});
+
+    ymh::test::MockHttpServer server({ymh::test::MockHttpServer::Response{
+        200,
+        {{"Content-Type", "text/event-stream"}},
+        full,
+        std::numeric_limits<std::size_t>::max(),
+        0,
+        std::chrono::milliseconds{3000}}});
+
+    auto provider = make_provider(
+        std::make_shared<ymh::CurlHttpTransport>(),
+        Options{.base_url = server.base_url(),
+                .max_attempts = 1,
+                .idle_timeout = std::chrono::milliseconds{500},
+                .request_timeout = std::chrono::milliseconds{10000}});
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
+    EXPECT_EQ(server.requests(), 1u);
+}
+
+TEST_F(OpenAiAdapterTest, RetryBudgetIsBoundedByRequestDeadline) {
+    FakeTransport::Script script;
+    script.response.transport_error =
+        ymh::LLMError{ymh::LLMErrorCode::Timeout, 0, "", "transport timeout", true};
+    script.delay = std::chrono::milliseconds{300};
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>(5, script));
+    auto provider = make_provider(
+        transport,
+        Options{.max_attempts = 5,
+                .request_timeout = std::chrono::milliseconds{500}});
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = run(provider, text_request());
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
+    ASSERT_GE(transport->requests.size(), 2u);
+    EXPECT_LT(transport->requests.size(), 5u);
+    EXPECT_LT(transport->requests[1].total_timeout, transport->requests[0].total_timeout);
+    EXPECT_LT(elapsed.count(), 3000);
 }
 
 TEST_F(OpenAiAdapterTest, CurlOversizedSseLineAborts) {

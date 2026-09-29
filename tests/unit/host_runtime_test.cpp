@@ -260,9 +260,10 @@ public:
 class Bridge {
 public:
     struct Peer {
-        protocol::ClientId       id{};
-        std::vector<std::string> frames;
-        std::string              drop_reason;
+        protocol::ClientId        id{};
+        std::mutex                mutex;
+        std::vector<std::string>  frames;
+        std::string               drop_reason;
     };
 
     explicit Bridge(const std::string& prefix, FakeScript script = FakeScript{},
@@ -405,10 +406,14 @@ public:
         peer->id = server_->openConnection(
             static_cast<std::uint32_t>(::getuid()), 4321,
             [peer, engine](protocol::ClientId id, std::string frame) {
+                std::lock_guard<std::mutex> lock(peer->mutex);
                 peer->frames.push_back(std::move(frame));
                 engine->onFrameWritten(id, peer->frames.back().size());
             },
-            [peer](protocol::ClientId, std::string reason) { peer->drop_reason = std::move(reason); });
+            [peer](protocol::ClientId, std::string reason) {
+                std::lock_guard<std::mutex> lock(peer->mutex);
+                peer->drop_reason = std::move(reason);
+            });
         return peer;
     }
 
@@ -419,10 +424,13 @@ public:
 
     std::vector<nlohmann::json> drain(Peer& peer) {
         std::string buffer;
-        for (const std::string& frame : peer.frames) {
-            buffer += frame;
+        {
+            std::lock_guard<std::mutex> lock(peer.mutex);
+            for (const std::string& frame : peer.frames) {
+                buffer += frame;
+            }
+            peer.frames.clear();
         }
-        peer.frames.clear();
         std::vector<nlohmann::json> messages;
         for (const std::string& body : protocol::FrameCodec::decode(buffer, kMaxFrame)) {
             messages.push_back(nlohmann::json::parse(body));
@@ -1657,6 +1665,45 @@ TEST_F(HostRuntimeTest, CommittedEventsStreamToSubscribedClientInOrder) {
         ++streams;
     }
     EXPECT_EQ(streams, 2);
+}
+
+TEST_F(HostRuntimeTest, ProviderFailureStreamsTurnFailedToSubscribedClient) {
+    FakeScript script;
+    FakeResponseStep step;
+    step.error = LLMError{LLMErrorCode::Timeout, 0, "", "transport timeout", true};
+    script.steps.push_back(step);
+    Bridge bridge("hr_fail_stream", script);
+
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const SessionId              session = created.session;
+
+    Bridge::Peer* peer = bridge.open_peer();
+    bridge.hello(*peer);
+    nlohmann::json subscribe_params;
+    protocol::to_json(subscribe_params,
+                      protocol::SubscribeParams{session, protocol::StreamFrom{}});
+    bridge.request(*peer, 2, protocol::method::kEventSubscribe, subscribe_params);
+
+    bridge.host().agentPrompt(session, nlohmann::json("go"));
+
+    bool       saw_failed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!saw_failed && std::chrono::steady_clock::now() < deadline) {
+        for (const nlohmann::json& message : bridge.drain(*peer)) {
+            if (message.value("method", std::string{}) != "event.stream") {
+                continue;
+            }
+            const auto notification =
+                message.at("params").get<protocol::StreamNotification>();
+            if (notification.envelope.event.type == EventType::TurnFailed) {
+                saw_failed = true;
+            }
+        }
+        if (!saw_failed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    EXPECT_TRUE(saw_failed);
 }
 
 TEST_F(HostRuntimeTest, AttachRebroadcastsPendingPermission) {

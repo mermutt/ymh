@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +32,12 @@ public:
         // When set, only this many body bytes are written (Content-Length still
         // advertises the full size) to simulate a mid-stream disconnect.
         std::size_t truncate_body_at = std::numeric_limits<std::size_t>::max();
+        // When `stall_ms` is non-zero, the first `stall_after_body_bytes` body
+        // bytes are sent, then the connection is held silent for `stall_ms`
+        // before the remainder is sent. This simulates a provider that emits a
+        // prefix and then goes quiet mid-stream (a long reasoning pause).
+        std::size_t              stall_after_body_bytes = 0;
+        std::chrono::milliseconds stall_ms{0};
     };
 
     explicit MockHttpServer(std::vector<Response> responses)
@@ -141,6 +148,14 @@ private:
             response.truncate_body_at == std::numeric_limits<std::size_t>::max()
                 ? response.body.size()
                 : response.truncate_body_at;
+        if (response.stall_ms.count() > 0 &&
+            response.stall_after_body_bytes < send_bytes) {
+            send_all(client, response.body.substr(0, response.stall_after_body_bytes));
+            std::this_thread::sleep_for(response.stall_ms);
+            send_all(client, response.body.substr(response.stall_after_body_bytes,
+                                                  send_bytes - response.stall_after_body_bytes));
+            return;
+        }
         send_all(client, response.body.substr(0, send_bytes));
     }
 
