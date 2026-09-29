@@ -82,9 +82,16 @@ public:
 
 class OpenAICompatibleProvider final : public LLMProvider {
 public:
-    OpenAICompatibleProvider(LLMProviderConfig config,
-                             ProviderCapabilities capabilities,
-                             std::shared_ptr<HttpTransport> transport);
+    // 08-D18 test seam: the steady clock used to compute the shared per-request
+    // retry budget. Defaults to `std::chrono::steady_clock::now`; a test may
+    // inject a fake clock to exercise the budget arithmetic without real sleeps.
+    using SteadyNow = std::function<std::chrono::steady_clock::time_point()>;
+
+    OpenAICompatibleProvider(
+        LLMProviderConfig config,
+        ProviderCapabilities capabilities,
+        std::shared_ptr<HttpTransport> transport,
+        SteadyNow now = [] { return std::chrono::steady_clock::now(); });
 
     [[nodiscard]] ProviderId id() const override;
     [[nodiscard]] ProviderCapabilities capabilities() const override;
@@ -96,9 +103,10 @@ public:
                              CancellationToken cancel) override;
 
 private:
-    LLMProviderConfig             config_;
-    ProviderCapabilities          capabilities_;
+    LLMProviderConfig              config_;
+    ProviderCapabilities           capabilities_;
     std::shared_ptr<HttpTransport> transport_;
+    SteadyNow                      now_;
 };
 
 // Builds the OpenAI chat-completions request body (exposed for golden tests).

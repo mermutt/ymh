@@ -1035,10 +1035,12 @@ Task<HttpResponse> CurlHttpTransport::postStream(const HttpRequest& request,
 
 OpenAICompatibleProvider::OpenAICompatibleProvider(LLMProviderConfig config,
                                                    ProviderCapabilities capabilities,
-                                                   std::shared_ptr<HttpTransport> transport)
+                                                   std::shared_ptr<HttpTransport> transport,
+                                                   SteadyNow now)
     : config_(std::move(config)),
       capabilities_(capabilities),
-      transport_(std::move(transport)) {}
+      transport_(std::move(transport)),
+      now_(std::move(now)) {}
 
 ProviderId OpenAICompatibleProvider::id() const {
     return "openai-compatible";
@@ -1058,10 +1060,9 @@ std::vector<ModelInfo> OpenAICompatibleProvider::models() const {
 Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                                                    StreamSink sink,
                                                    CancellationToken cancel) {
-    const auto start_time = std::chrono::steady_clock::now();
-    const auto elapsed = [&start_time] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start_time);
+    const auto start_time = now_();
+    const auto elapsed = [this, &start_time] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now_() - start_time);
     };
 
     const auto failed = [&](LLMError error) -> Task<LLMResponse> {
@@ -1142,15 +1143,15 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
 
     // 08-D18: the retry budget is bounded by the per-request deadline, not by
     // `max_attempts` fresh deadlines (08 §3.7). A zero budget means unbounded.
-    const auto                    call_start  = std::chrono::steady_clock::now();
+    const auto                    call_start  = now_();
     const std::chrono::milliseconds call_budget =
         effective_timeout(request.deadline, config_.request_timeout);
-    const auto remaining_budget = [&]() -> std::chrono::milliseconds {
+    const auto remaining_budget = [this, &call_start, call_budget]() -> std::chrono::milliseconds {
         if (call_budget.count() <= 0) {
             return std::chrono::milliseconds{0};
         }
-        const auto used = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - call_start);
+        const auto used =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now_() - call_start);
         return call_budget - used;
     };
 
