@@ -1,7 +1,7 @@
 # 40 — Output Retention (Wave 4)
 
 ```
-Status: Rev 1 written · verified: — · reviewer: —
+Status: verified (Rev 1) · reviewer: see `DESIGN_STATUS.md` row 40 · gate: 0 HIGH / 0 MEDIUM
 Authority: owning spec for `26-dsh-alignment-part2.md` §5 Wave 4 (decisions
            `26-D10`, `26-D11`, `26-D12`, `26-D13`, `26-D21`). The reserved
            filename `28-output-retention.md` named in `26-dsh-alignment-part2.md`

@@ -8,7 +8,7 @@ plan. It follows `00-architecture.md` (cited inline as `§n`); where it cannot,
 it records the conflict under §16 *Decisions and open questions* rather than
 choosing silently.
 
-Status: **written** · verified: — · reviewer: — (tracked in `DESIGN_STATUS.md`,
+Status: **verified** · reviewer: see `DESIGN_STATUS.md` row 01 · gate: 0 HIGH / 0 MEDIUM (tracked in `DESIGN_STATUS.md`,
 `HANDOFF.md` §6–§7). No code may be written for this component until it is
 `verified`.
 

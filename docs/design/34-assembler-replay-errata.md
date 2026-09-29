@@ -1,7 +1,7 @@
 # 34 — Assembler & Replay Errata (dsh alignment, Wave 2 prerequisite)
 
 ```
-Status: Rev 4 written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Status: verified (Rev 4) · reviewer: see DESIGN_STATUS.md row 34 · gate: 0 HIGH / 0 MEDIUM (tracked in DESIGN_STATUS.md)
 Revision: Rev 4 (2026-09-19). Restores live token-by-token streaming in the
           shared run-path printer (§15 item 1, decision 34-D13, invariants
           34-I11–34-I16, failure mode 34-F9). Text deltas are written to `out`

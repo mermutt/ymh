@@ -1,7 +1,7 @@
 # 24 — Agent Lifetime Errata: Session Ownership, Detach, Turn Quiescence, and Terminal-Event Forwarding (RB-21)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 24 · gate: 0 HIGH / 0 MEDIUM
 Revision: 7 — Rev 1 repaired the four RB-21 lifetime/teardown defects with a
           reference-counted ownership model, park-on-close / join-on-shutdown,
           a queue-aware pending predicate, and a committed-record forwarding

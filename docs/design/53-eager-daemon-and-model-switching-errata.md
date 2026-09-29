@@ -16,8 +16,9 @@ Depends on: 00-architecture.md §54 (F1–F12), §44 (test strategy), §45 (Fake
             `session.set_mode` template); 45-ui-interaction-errata.md (verified)
             §4/§7/§11 (45-D2/45-D5/45-D9); 10-supervisor-tui.md (verified) §6/§7;
             52-endpoints-models-and-dsh-agent-presets.md (verified) §3
-            (52-D1/52-D3, 52-I1–I4); 49-switcher-single-workspace.md (draft) §3
-            (49-D1/49-D2).
+             (52-D1/52-D3, 52-I1–I4); `49-switcher-single-workspace.md` was
+             **deleted** (its 49-D1/49-D2 superseded here); its one live residue
+             is recorded in §12.
 Supersedes: 49-D1 (lazy workspace/daemon creation on the first prompt) and 49-D2
             (the empty state as the normal bare-`ymh` start) — both replaced by
             53-D1. Re-supersedes **16-D2's bare-cwd lazy-spawn policy** (which
@@ -30,8 +31,9 @@ Amends:     25-D1's `active == nullptr` status-line clause (53-D3); 52 §1.4's
             the transport method table and `TransportHost`/`HostRuntime`
             (53-D5/D7, mirroring 25-D5's `session.set_mode`); `01-session.md`'s
             durable event table (53-D6); **08 §5.2 (L11) / `01-session.md` §3** —
-            `SessionHeader.model` immutability (53-D6/A12); 49-I1/I2/I3/I5 and
-            49-F1/F4 (53-A1–A4). All recorded in §7.
+             `SessionHeader.model` immutability (53-D6/A12); the deleted spec 49's
+             49-I1/I2/I3/I5 and 49-F1/F4 (53-A1–A4) plus its surviving 49-D5/D6
+             Ctrl-S predicate and the live 53-F1 fallback (§12). All recorded in §7.
 Retained:   16 O1–O22 (ownership/teardown); the daemon's one-time `chdir`; the
             supervisor's read-only `sessions.db`; 45-D2/45-D5/45-D9 and 22-A2
             picker conventions; 25-D2's `session.set_mode`; 46-I13/23-D58/50-D2.1's
@@ -40,7 +42,7 @@ Retained:   16 O1–O22 (ownership/teardown); the daemon's one-time `chdir`; the
 Scope:       two halves: **(A)** eager cwd workspace/daemon creation at supervisor
             start (53-D1–D3), and **(B)** `/model` selection + the mid-flight
             `session.set_model` RPC with a durable event (53-D4–D8).
-Verification status: **DRAFT (Rev 2) — not yet reviewed.**
+Verification status: **verified (Rev 2)** — the five-reviewer adversarial gate PASSED (0 open HIGH / 0 MEDIUM); see `DESIGN_STATUS.md`.
 ```
 
 ---
@@ -159,9 +161,9 @@ if (!model_.workspaces.empty()) {
 }
 ```
 
-and `submit()` carries the lazy first-prompt path (`src/ui/supervisor.cpp:436-465`):
+and `submit()` carries the lazy first-prompt path (`src/ui/supervisor.cpp:462-486`):
 resolve/register the cwd row, queue the draft in `pending_creates_`, then
-`ensure_workspace_running(*id, SessionId{})` (`src/ui/supervisor.cpp:456-464`).
+`ensure_workspace_running(*id, SessionId{})` (`src/ui/supervisor.cpp:485`).
 
 > **Design-first note (verified, must be recorded).** The lazy behavior is present
 > in the working tree, introduced by commit `f91ef1b68` *"ui: lazy workspace
@@ -341,10 +343,10 @@ case. `run_supervisor_entry` (`src/cli/cli.cpp:468`):
    as today (`src/cli/cli.cpp:478-499`).
 3. `lifecycle.ensureRunning(row->id, identity)` **unconditionally**.
 4. **Failure semantics differ by mode** (the shared `if (row.has_value())` path
-   currently returns 1 on attach failure, `src/cli/cli.cpp:526-533`):
+   currently returns 1 on attach failure, `src/cli/cli.cpp:527-535`):
    - **Bare `ymh`** (no `--resume`/`--new`): do **not** exit. Record the error as
      an initial notice and continue with the **cwd workspace unmodeled**; the lazy
-     `submit()` path (`src/ui/supervisor.cpp:436-465`) remains the retry fallback
+     `submit()` path (`src/ui/supervisor.cpp:462-486`) remains the retry fallback
      (53-F1).
    - **Explicit activation** (`--resume`/`--new`): fatal, exit 1, as today.
 5. `DaemonSetScanner::scanOnce()` (`src/cli/cli.cpp:536-551`) then seeds
@@ -382,7 +384,7 @@ recorded as 49 §10.1. This spec gives up all four of its protections:
 
 **Ownership is unaffected (16 O1–O22), but the eager daemon IS in the orphaning
 set.** The daemon is spawned under the same `HostLifecycle::ensureRunning`
-presence model as the explicit activation path (`src/cli/cli.cpp:526-533`), so it
+presence model as the explicit activation path (`src/cli/cli.cpp:527-535`), so it
 is supervisor-owned from the first moment. With one supervisor attached to its
 eagerly-spawned daemon, `is_orphaning_view` is **true**
 (`src/ui/supervisor_presence.cpp:17-19`: `live_supervisors == 1`, no `ymh run`
@@ -1310,4 +1312,57 @@ otherwise.
 | Rev | Date | Change |
 |---|---|---|
 | 1 | 2026-09-23 | Initial draft. Four requirements from the verbatim request. Half A: eager cwd workspace/daemon creation at start (53-D1), the attach auto-create (53-D2), and the status-line model segment with a 25-D1 amendment (53-D3). Half B: the `/model` picker over spec 52's named models (53-D4), the `session.set_model` RPC (53-D5), the durable `SessionModelChanged` event (53-D6), the daemon-side `ModelSelectionController` + `ModelCatalog` + agent seam (53-D7), and the error/no-session paths (53-D8). Supersedes 49-D1/49-D2 and re-supersedes 16-D2's bare-cwd lazy policy; amends 25-D1, 52 §1.4, the transport table, and the 01 event table. Invariants 53-I1–53-I13; failure modes 53-F1–53-F11; amendment register 53-A1–53-A12; 9 open questions. Verification status: DRAFT — not yet reviewed. |
-| 2 | 2026-09-23 | Rev 2 — five-reviewer finding set applied (8 HIGH, all MEDIUM, all LOW). **H1** ownership: the eager daemon **is** in the orphaning set (`is_orphaning_view` true, `compute_orphaning_set() == [id]`), so Ctrl+Q opens the last-exit modal and `requestExit`/`--yes` tear it down via `teardown_daemons([id])`; a pre-attach quit is backstopped by the 16 §5.1 watchdog (53-D1 paragraph, 53-I3, 53-U15/U17, 53-T8). **H2** added 08 §5.2 (L11) as an amended verified spec (53-A12, `08:687-689`; header Depends/Amends). **H3** `ModelPickerModel::open` collision fixed (flag renamed `visible`). **H4** the switch now carries the entry's `parameters`+`profile`+`provider` end-to-end (`ModelSelection`), with a pinned `buildRequest`/`LlmCallConfig` field map and `:1089` provenance. **H5** `session.create` resolves the name to a wire id through `ModelCatalog` before the header/event; `effective()` is always a wire id. **H6** §9.5 now names the PTY tests (`UI49_P3`/`P4`/`P1`), the stale `:444` comment, and `UI49_G5_LazyFirstSubmit`, and corrects the `UI49_D1_*` IDs. **H7** 53-T4 (53-F2). **H8** 53-T5 (53-F7). MEDIUM: §2.1/§7 anchors re-pinned (`:504`/`:500-533`/`:528`); §2.3 optimistic-update prose; 53-D2 cites 23-D1′/23-D31 (not shipped) and gains 53-F13; 53-D3 pins canonical `display_model` (OQ-53-5 resolved); 53-D5 literal path + Automation exclusion + protocol version; 53-I6 qualified; new 53-F12; `ProjectionMemo` replaced by a local memo; `WorkspaceRuntime::model_catalog()`/`model_selection()` pinned; `effective()` cold-session semantics; `:1089` provenance; §4 literal `find`; tests 53-U17–U24, 53-T4–T10, 53-G4. LOW: `std::array<WireEntry, 30>`→`31`; `PlanFlushGuard` generalization; §2.4/§2.5 cross-refs; 49-D10 named; placeholders filled; vocabulary aligned; OQ-53-9 reclassified (implementation note) and its slot reused for subagent inheritance; 53-F3 inherited; §11 counts reconciled; `ModelSetResult::Cancelled` dropped; `SetModelResult` homed in `host.hpp`; synthetic-row endpoint note; `display_model` home; F1 row-vs-model; D-F1 winner-attach cited; `kProtocolVersion` decision. Integration test IDs renamed `53-I#`→`53-T#` to stop colliding with the invariants. Invariants 53-I1–53-I13; failure modes 53-F1–53-F13; amendment register 53-A1–53-A13; 8 open questions (OQ-53-5 resolved, kept as a record). Verification status: DRAFT (Rev 2) — awaiting independent review. |
+| 2 | 2026-09-23 | Rev 2 — five-reviewer finding set applied (8 HIGH, all MEDIUM, all LOW). **H1** ownership: the eager daemon **is** in the orphaning set (`is_orphaning_view` true, `compute_orphaning_set() == [id]`), so Ctrl+Q opens the last-exit modal and `requestExit`/`--yes` tear it down via `teardown_daemons([id])`; a pre-attach quit is backstopped by the 16 §5.1 watchdog (53-D1 paragraph, 53-I3, 53-U15/U17, 53-T8). **H2** added 08 §5.2 (L11) as an amended verified spec (53-A12, `08:687-689`; header Depends/Amends). **H3** `ModelPickerModel::open` collision fixed (flag renamed `visible`). **H4** the switch now carries the entry's `parameters`+`profile`+`provider` end-to-end (`ModelSelection`), with a pinned `buildRequest`/`LlmCallConfig` field map and `:1089` provenance. **H5** `session.create` resolves the name to a wire id through `ModelCatalog` before the header/event; `effective()` is always a wire id. **H6** §9.5 now names the PTY tests (`UI49_P3`/`P4`/`P1`), the stale `:444` comment, and `UI49_G5_LazyFirstSubmit`, and corrects the `UI49_D1_*` IDs. **H7** 53-T4 (53-F2). **H8** 53-T5 (53-F7). MEDIUM: §2.1/§7 anchors re-pinned (`:504`/`:500-533`/`:528`); §2.3 optimistic-update prose; 53-D2 cites 23-D1′/23-D31 (not shipped) and gains 53-F13; 53-D3 pins canonical `display_model` (OQ-53-5 resolved); 53-D5 literal path + Automation exclusion + protocol version; 53-I6 qualified; new 53-F12; `ProjectionMemo` replaced by a local memo; `WorkspaceRuntime::model_catalog()`/`model_selection()` pinned; `effective()` cold-session semantics; `:1089` provenance; §4 literal `find`; tests 53-U17–U24, 53-T4–T10, 53-G4. LOW: `std::array<WireEntry, 30>`→`31`; `PlanFlushGuard` generalization; §2.4/§2.5 cross-refs; 49-D10 named; placeholders filled; vocabulary aligned; OQ-53-9 reclassified (implementation note) and its slot reused for subagent inheritance; 53-F3 inherited; §11 counts reconciled; `ModelSetResult::Cancelled` dropped; `SetModelResult` homed in `host.hpp`; synthetic-row endpoint note; `display_model` home; F1 row-vs-model; D-F1 winner-attach cited; `kProtocolVersion` decision. Integration test IDs renamed `53-I#`→`53-T#` to stop colliding with the invariants. Invariants 53-I1–53-I13; failure modes 53-F1–53-F13; amendment register 53-A1–53-A13; 8 open questions (OQ-53-5 resolved, kept as a record). Verification status: **verified (Rev 2)** — five-reviewer gate PASSED (0 HIGH / 0 MEDIUM). |
+| 3 | 2026-09-29 | Rev 3 — backlog close-out (doc-only; no shipped behaviour change). Spec 49 (`49-switcher-single-workspace.md`) is **deleted**; its 49-D1/49-D2 were already superseded by 53-D1, and the residue 53 had not absorbed is recorded in **§12** (the session-aware Ctrl-S predicate 49-D5/D6, live at `src/ui/supervisor.cpp:1138`/`:1150`/`:1179`, and the 53-F1 degraded fallback, live at `src/ui/supervisor.cpp:429-431`/`:462-486` via `src/cli/cli.cpp:501-535`). Header/verification status reconciled to the shipped gate (line 43 said DRAFT against a verified gate). No code or interface changed. |
+
+---
+
+## 12. Residue from the deleted spec 49
+
+Spec 49 (`49-switcher-single-workspace.md`) is deleted: its primary decisions
+(49-D1 lazy workspace/daemon creation, 49-D2 the empty start, 49-A1/A2/A5,
+49-I1/I2/I3/I5, 49-F1/F4) are superseded by 53-D1 and recorded in the §1.3
+supersession map / §7 amendment register as 53-A1–53-A5. Deleting the spec must
+not leave shipped behaviour unspecced, so this section records the two pieces
+that 53 did **not** absorb, both of which remain live on `main`.
+
+### 12.1 The session-aware Ctrl-S predicate (was 49-D5/49-D6)
+
+The Live switcher is session-aware, not merely workspace-aware. `openSwitcher()`
+opens the switcher only when there is an actionable target; otherwise it opens the
+notice instead of an empty switcher. Pinned predicate (shipped,
+`src/ui/supervisor.cpp`):
+
+- `switcher_has_targets()` (`src/ui/supervisor.cpp:1150`) is true when there is
+  either (a) another live-renderable workspace that has a known-visible session or
+  unknown catalog membership (`catalog_membership_unknown`), or (b) a non-focused
+  leaf in the active workspace, counted when its catalog membership is unknown
+  **or** `catalog_has_session` holds (`src/ui/supervisor.cpp:1164-1170`).
+- `other_live_workspace_exists()` (`src/ui/supervisor.cpp:1138`) is used only to
+  choose the notice text.
+- `openSwitcher()` (`src/ui/supervisor.cpp:1179`; notice text at `:1182-1184`)
+  shows `"No other sessions available"` when another live workspace exists but has
+  no switchable session, else `"No other workspaces available"`.
+
+This is the 49-D5/D6 behaviour retained verbatim (49-D6's two-text notice
+survives via 53 §12.1); it is owned by this spec now that 49 is deleted.
+
+### 12.2 The 53-F1 degraded fallback (was 49-D2's empty state)
+
+The eager path is primary (53-D1). When the startup `ensureRunning` throws, the
+supervisor still starts and the cwd workspace is left **unmodeled** — 53-F1, the
+re-scoped 49-D2 empty state. The live pieces:
+
+- `src/cli/cli.cpp:501-535` — a bare `ymh` records the spawn failure in a startup
+  notice and continues; an explicit activation (`--resume`/`--new`) stays fatal
+  (the `ensureRunning` call is `:525`; the catch that records the notice is
+  `:527-535`).
+- `src/ui/supervisor.cpp:429-431` — the eager attach models the cwd workspace; the
+  zero-workspace branch survives only as this fallback.
+- `src/ui/supervisor.cpp:462-486` — `submit()`'s retained lazy path (the deleted
+  49-D1 branch) is reachable **only** in the fallback state: with no workspace,
+  the first prompt registers the cwd row, queues the draft, and spawns, modeling
+  the workspace only after `ensure_worker_loop` observes the registered daemon.
+
+These anchors, not spec 49, are now the normative reference. `UI49_*` PTY test
+names remain (the tests are unchanged) and trace to this section.

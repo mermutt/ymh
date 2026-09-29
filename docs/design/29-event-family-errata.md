@@ -1,7 +1,7 @@
 # 29 — Event-Family Errata: The dsh New-Event Contract (spec-01 amendment)
 
 ```
-Status: written · verified: — · reviewer: — · Rev 1 (Wave-0 Stage A1)
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 29 · gate: 0 HIGH / 0 MEDIUM · Rev 1 (Wave-0 Stage A1)
 Component: 29 (errata) — amends `01-session.md` §4.3/§4.4/§4.5/§15.1 by
            reference. It owns the `26-dsh-alignment-part2.md` §5 Stage-A **A1**
            freeze: the `EventType`/wire-codec extension rule, the two-axis

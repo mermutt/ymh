@@ -1,7 +1,7 @@
 # 42 — Agent Presets (Wave 5)
 
 ```
-Status: Rev 3 written · verified: — · reviewer: —
+Status: verified (Rev 3) · reviewer: see `DESIGN_STATUS.md` row 42 · gate: 0 HIGH / 0 MEDIUM
 Authority: owning spec for `26-dsh-alignment-part2.md` §5 Wave 5 (decisions
            `26-D16`, `26-D17`). The reserved filename `29-agent-presets.md`
            named in `26-dsh-alignment-part2.md` §5 Stage B (line 1394) is

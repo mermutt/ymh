@@ -1,7 +1,7 @@
 # 18 — Context Inspector Errata (`/context`: color grid + MCP/tools inventory)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 18 · gate: 0 HIGH / 0 MEDIUM
 Component: 18 (errata) — additive to 10-supervisor-tui.md and 13-context-compaction.md
 Depends on: 10-supervisor-tui.md (verified), 13-context-compaction.md (verified),
             05-transport.md + 11-m2-errata.md (frozen method catalog),

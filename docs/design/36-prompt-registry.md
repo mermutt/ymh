@@ -1,6 +1,6 @@
 # 36 — Prompt Registry (Wave 3)
 
-Status: Rev 1 written · verified: — · reviewer: —
+Status: verified (Rev 1) · reviewer: see `DESIGN_STATUS.md` row 36 · gate: 0 HIGH / 0 MEDIUM
 Authority: owning spec for `26-dsh-alignment-part2.md` §5 Wave 3
 (decisions `26-D4`, `26-D5`, `26-D6`, `26-D7`, `26-D14`, `26-D15`). The
 reserved filename `27-system-prompt.md` named in `26-dsh-alignment-part2.md`

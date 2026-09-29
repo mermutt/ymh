@@ -191,6 +191,24 @@ The earlier working name `txtcoder` is **retired** — do not reintroduce it.
   is open — the rule applies **before a spec is marked `verified`**. See
   `56-dsh-fidelity-gap-closure-errata.md` §3 (56-D6) for the convention and
   worked examples.
+- **State lifetime is part of the spec.** Every spec that introduces state (a
+  member, a cache, a registry row, a file, an event field, an in-memory map) must
+  tabulate that state's lifetime: where it is created, where it is
+  destroyed/evicted, who owns it, whether it survives a process restart,
+  reconnect, or session switch, and what each crash path does to it. Prose that
+  names state without its lifetime is a finding.
+- **New symbols are normative.** A spec must not merely name a new symbol: it
+  must give the symbol's body (its signature and the contract a caller can rely
+  on) **and at least one concrete caller** in the tree it lands in. A symbol with
+  no caller is a dead/unreachable requirement and blocks `verified` — this is the
+  failure that left the 50-D5 workspace trust tier unreachable in the built
+  binary until the default-trust fix.
+- **A spec's tracker row and its own header must agree.** The `DESIGN_STATUS.md`
+  row and the spec's `Status:` / `Verification status:` block must state the same
+  status and revision; a `verified` row needs a named reviewer and a gate-pass
+  (`0 HIGH / 0 MEDIUM`) token. The dev-side `design_status_drift` ctest check
+  verifies they agree on the merged tree and fails the suite on drift. It is a
+  drift **detector**, not a proof that code followed design.
 - Work targets **one component at a time**.
 - **Commit when a coherent change is done** — build green, full suite green,
   warnings-as-errors clean. Keep commits atomic and scoped to one logical change,

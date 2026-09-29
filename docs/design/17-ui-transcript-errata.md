@@ -1,7 +1,7 @@
 # 17 — UI Transcript & Session-Chrome Errata (RB-01/02/08/10/11)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 17 · gate: 0 HIGH / 0 MEDIUM
 Component: 17 (errata) — amends 10-supervisor-tui.md by reference only
 Depends on: 10-supervisor-tui.md (verified), 11-m2-errata.md,
             16-daemon-ownership.md §3.3/§3.6/§7.6, UI_SURFACE_INVENTORY.md (C1–C5)

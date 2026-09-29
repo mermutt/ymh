@@ -9,9 +9,7 @@ model on the daemon's loop, the caps and permission gating, the process-tree
 ownership and reaping rules (the 07 half of `04` OQ-6), and the model-facing
 `terminal` tool.
 
-This is a **design-only** artifact. It is `written`, not `verified`; no code may
-be written for this component until the gate in `HANDOFF.md` §7 passes
-(`DESIGN_STATUS.md`). The design-first rule (`AGENTS.md`) applies: the
+Status: **verified** · reviewer: see `DESIGN_STATUS.md` row 14 · gate: 0 HIGH / 0 MEDIUM. The design-first rule (`AGENTS.md`) applies: the
 `PtySession`, `PtyService`, `PtyRequest`, and `terminal`-tool signatures here are
 **pinned** and must not churn after verification.
 
@@ -2040,7 +2038,7 @@ in the default suite.
 - `docs/design/11-m2-errata.md` — §3.2 (`TurnExecutor`, E6/E7), §3.3 (child
   status, E8, M-F5; E-P5 amends "exclusively process.cpp"), §11.2/§11.3
   (destruction order and the `host.shutdown` coordinator, E18/E19; E-P2 pins the
-  PTY step), §12.2 (`host.log` redaction), §14 (E1–E21), §15 (M-F1–M-F12).
+  PTY step), §12.2 (`host.log` redaction), §14 (E1–E22), §15 (M-F1–M-F12).
 - `docs/design/12-m1-drift-errata.md` — M1 spec-text ↔ code reconciliation
   (the existing `PtyService` stub and `signal_policy.hpp`).
 - `include/ymh/execution/services.hpp` — the forward-declared

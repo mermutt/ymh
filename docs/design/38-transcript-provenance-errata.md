@@ -1,7 +1,7 @@
 # 38 - Transcript Provenance Errata (amends 17-ui-transcript-errata.md, Wave-3 slice 3)
 
 ```
-Status: Rev 2 written · verified: - · reviewer: -
+Status: verified (Rev 2) · reviewer: see `DESIGN_STATUS.md` row 38 · gate: 0 HIGH / 0 MEDIUM
 Component: 38 (errata) - amends 17-ui-transcript-errata.md by reference only
 Depends on: 17-ui-transcript-errata.md (verified), 37-message-provenance-errata.md,
             36-prompt-registry.md (verified, Rev 1), 10-supervisor-tui.md,

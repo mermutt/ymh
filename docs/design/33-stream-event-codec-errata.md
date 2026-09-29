@@ -1,7 +1,7 @@
 # 33 — Stream-Event Codec Errata: The `StreamEvent` JSON Codec (spec-08/29 amendment)
 
 ```
-Status: written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Status: verified · reviewer: see DESIGN_STATUS.md row 33 · gate: 0 HIGH / 0 MEDIUM (tracked in DESIGN_STATUS.md)
 Revision: Rev 1 — initial authoring. Pins the missing `StreamEvent` JSON codec
           (the `<existing StreamEvent codec>` dangling reference at
           `26-dsh-alignment-part2.md:964` / `29-event-family-errata.md:186`):

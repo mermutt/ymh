@@ -1,7 +1,7 @@
 # 37 - Message Provenance Errata (amends 01-session.md, Wave-3 slice 3)
 
 ```
-Status: Rev 2 written · verified: - · reviewer: -
+Status: verified (Rev 2) · reviewer: see `DESIGN_STATUS.md` row 37 · gate: 0 HIGH / 0 MEDIUM
 Component: 37 (errata) - amends 01-session.md by reference only
 Depends on: 01-session.md (verified), 36-prompt-registry.md (verified, Rev 1),
             06-agent-loop.md (verified) + 31-agent-loop-errata.md (verified, Rev 2)

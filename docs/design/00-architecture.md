@@ -1,6 +1,6 @@
 # C++ Coding Harness — Architecture & Implementation Design
 
-**Status:** Architecture baseline / implementation-ready design  
+**Status:** verified — architecture baseline / implementation-ready design  
 **Target:** Linux terminal over SSH  
 **Primary language:** Modern C++ (C++23 recommended)  
 **UI:** Native terminal UI  

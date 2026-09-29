@@ -1,7 +1,7 @@
 # 47 — Muse-Glimmer-30B Support: the Model-Profile Seam, Forced First Tool Call, the `<|eom|>` Stop Guard, Leaked-Call Detection, the Native-ATEM Detection Grammar, Argument Normalization, the Sampling/Tool-Choice Config Surface, `top_k`, Per-Provider Capabilities, `xhigh`, and the Reversibility Contract
 
 ```
-Status: **draft (Rev 4)** — awaiting the delta re-gate. Rev 4 responds to the
+Status: **verified (Rev 4)** — delta re-gate PASS (0 HIGH / 0 MEDIUM). Rev 4 responds to the
         Oracle final pass (`/tmp/opencode/spec47-oracle-final.md`: **DO NOT
         APPROVE — 0 HIGH / 2 MEDIUM / 3 LOW**, rev-3 findings only; both Rev-3
         HIGHs confirmed fixed). Every final ID (47-O2-M1/M2, 47-O2-L1/L2/L3) is

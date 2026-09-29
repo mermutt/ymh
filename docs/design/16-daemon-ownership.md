@@ -1,7 +1,7 @@
 # 16 — Daemon Ownership and the Supervisor Collective
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 16 · gate: 0 HIGH / 0 MEDIUM
 Revision: 5 — rev 0 closed 6 HIGH, 22 MEDIUM ids (16 distinct findings), 13 LOW;
           rev 1a fixed C-M4 + O-L1; rev 2 closed R-H1/N-H1 + 5 MEDIUM + 13 LOW;
           rev 3 closed N2-H1/N2-M1 + N-M3/N2-M2 + N2-L1..N2-L7; rev 4 closed
@@ -860,7 +860,7 @@ io thread (dispatch), BEFORE any state change:
        Reject -> respond AppCode::NotLastOwner; NO Draining, NO notice; return
        Accept -> continue
   2. requestShutdown(ShutdownReason::LastSupervisor)
-  3. auto-reply {accepted:true} + HostNotice{DaemonShuttingDown}   # 11 E19/E21
+  3. auto-reply {accepted:true} + HostNotice{DaemonShuttingDown}   # 11 E19/E22
 coordinator (non-io), 11 §11.3 steps 2-5 (unchanged):
   4. stop accepting; drain/close sessions                        # 04 §3.5 step 2
   5. PTY: LocalPtyService::closeAll()  -> terminate+reap every PTY   # 14 E-P2
@@ -883,7 +883,7 @@ coordinator (non-io), 11 §11.3 steps 2-5 (unchanged):
   server children (spec 15 §4.7) are terminated and reaped **before**
   `TransportServer::stop()`, so no child outlives the socket that could report
   it. This is the audited ordering the brief requires.
-- **Reply before stop.** Reused verbatim from 11 §11.3 (E19–E21): the shutdown
+- **Reply before stop.** Reused verbatim from 11 §11.3 (E19–E22): the shutdown
   reply and `DaemonShuttingDown` notice are enqueued before `stop()`, and the
   coordinator is never the io thread.
 - **Watchdog stop/join before transport stop (N2-L3, N3-M1/L2, N4-L2/R4-L3).**
@@ -948,7 +948,7 @@ admit_shutdown(caller, caller_conn, reason):
   all", closes its socket, and exits without teardown; `ymh workspace stop`
   reports "workspace in use" unless its override was confirmed (§4.6).
 - `Accept` → `requestShutdown(reason)`; the reply and `DaemonShuttingDown`
-  notice are enqueued as usual (11 E19/E21).
+  notice are enqueued as usual (11 E19/E22).
 - **One exclusion notion (R-L4).** `caller` (the requester's `ClientInstanceId`,
   from `conn.instance`) and `caller_conn` (its `ClientId`) identify the same
   connection. The live counts exclude it by `ClientId`; the fresh snapshot

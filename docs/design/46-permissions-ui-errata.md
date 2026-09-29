@@ -1,7 +1,7 @@
 # 46 — Permissions & UI Errata: Config-Gated Auto-Allow, Durable Always Grants, the Empty-Switcher Notice, Dialog Compositing, Alias Completion, Two-Press Enter, Fresh-Start Sessions, Tool Deadlines, the Turn Spinner, Prompt-History Hydration, and the LocalCode Import Expansion
 
 ```
-Status: **draft (Rev 6)** — awaiting the final Oracle design re-review. This spec amends the owning specs;
+Status: **verified (Rev 6)** — Oracle final re-review APPROVE (0 HIGH / 0 MEDIUM). This spec amends the owning specs;
         it introduces no new component. It is the second UI/permission errata
         after 45-ui-interaction-errata.md and, like 45, is written so that every
         "current state" claim is reproducible from the shipped tree.

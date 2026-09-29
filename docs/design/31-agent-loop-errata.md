@@ -1,7 +1,7 @@
 # 31 — Agent-Loop Errata: The `LlmRuntime` Seam (spec-06 amendment)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified (Rev 2) · reviewer: see `DESIGN_STATUS.md` row 31 · gate: 0 HIGH / 0 MEDIUM
 Revision: Rev 3 — citation-only hygiene pass (no design change): every spec-28
           citation re-derived against 28 Rev 3 (whose §3.5 provider pin shifted
           all later lines), `28 §3.5`/`L26`/`28-D9` named at the provider-source

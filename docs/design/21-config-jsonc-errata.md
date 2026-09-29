@@ -1,7 +1,7 @@
 # 21 — Config Format Errata: TOML → JSONC (RB-09)
 
 ```
-Status: verified + implemented (RB-09, commit 9db17cd54) · Rev 5 (21-D11–21-D14) + Rev 6 (21-D15–21-D17) + Rev 7 + Rev 8 amendments pending re-gate
+Status: verified + implemented (RB-09, commit 9db17cd54) · Rev 8 (Rev 5: 21-D11–21-D14; Rev 6: 21-D15–21-D17; Rev 7; Rev 8) — the Rev 5–8 amendment re-gate PASSED (0 open HIGH / 0 MEDIUM); see `DESIGN_STATUS.md`
 Component: 21 (errata) — amends 00 §37 and 08 §5.3 by reference; touches 15 §5.6,
            20 §3.3 and README.md as downstream references (README is a
            prerequisite of the code change, J-C11)

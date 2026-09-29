@@ -1,7 +1,7 @@
 # 44 — Goals, Jobs, and Commands (Wave 6)
 
 ```
-Status: Rev 2 written · verified: — · reviewer: —
+Status: verified (Rev 2) · reviewer: see `DESIGN_STATUS.md` row 44 · gate: 0 HIGH / 0 MEDIUM
 Authority: owning spec for `26-dsh-alignment-part2.md` §5 Wave 6 (decisions
            `26-D18`, `26-D19`, `26-D20`). The reserved filename
            `30-goals-jobs-commands.md` named in `26-dsh-alignment-part2.md`

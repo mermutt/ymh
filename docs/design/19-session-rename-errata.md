@@ -1,7 +1,7 @@
 # 19 — Session Auto-Naming & Rename Errata (RB-03)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 19 · gate: 0 HIGH / 0 MEDIUM
 Component: 19 (errata) — amends 01-session.md and 05-transport.md by reference only
 Depends on: 01-session.md (verified), 05-transport.md (verified),
             10-supervisor-tui.md (verified), 17-ui-transcript-errata.md

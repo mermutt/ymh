@@ -1,7 +1,7 @@
 # 32 — Compaction Errata: The Wave-1 Re-seam and the D12/D13 Output-Processing Contract (spec-13 amendment)
 
 ```
-Status: written · verified: — · reviewer: — · Rev 2 (Wave-1 prerequisite)
+Status: verified (Rev 1) · reviewer: see `DESIGN_STATUS.md` row 32 · gate: 0 HIGH / 0 MEDIUM (Rev 2 is a citation-only hygiene pass)
 Component: 32 (errata) — amends `13-context-compaction.md` by reference. It owns
            the 13 side of the `26-dsh-alignment-part2.md` (verified Rev 7, GATE
            PASS) decisions `26-D12` (the tool-result pruner) and `26-D13`

@@ -1,7 +1,7 @@
 # 43 — Wave-5 Dependency Errata: `01` Header/Event, `23` Creation Path, `21` Config Keys, `06` Child Creation
 
 ```
-Status: Rev 1 written · verified: — · reviewer: —
+Status: verified (Rev 1) · reviewer: see `DESIGN_STATUS.md` row 43 · gate: 0 HIGH / 0 MEDIUM
 Component: 43 (errata). Owns the four cross-spec contracts that
            `42-agent-presets.md` §9 lists as blocking prerequisites (PR-1..PR-4)
            for Wave 5. It amends `01-session.md` (the preset/depth header fields

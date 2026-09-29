@@ -1,7 +1,7 @@
 # 41: Retry Executor (the durable step-boundary retry owner)
 
 ```
-Status: Rev 1 written · verified: pending · reviewer: pending
+Status: verified (Rev 1) · reviewer: see `DESIGN_STATUS.md` row 41 · gate: 0 HIGH / 0 MEDIUM
 Revision: Rev 1 (2026-09-19). Initial write. Owns the separate durable retry
           executor that `30-architecture-cascade-errata.md` §5.1 records as a
           named ownership gap, and that `28-llm-service-boundary-errata.md`

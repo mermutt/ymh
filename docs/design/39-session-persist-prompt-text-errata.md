@@ -1,7 +1,7 @@
 # 39 — Session Prompt-Text Persistence Errata: The `session.persist_prompt_text` Key (spec-21 amendment)
 
 ```
-Status: written · verified: — · reviewer: — (DESIGN_STATUS.md row 39)
+Status: verified (Rev 1) · reviewer: see `DESIGN_STATUS.md` row 39 · gate: 0 HIGH / 0 MEDIUM
 Revision: Rev 1 — initial authoring. Pins the shipped config key
           `session.persist_prompt_text`, which no spec owned. Closes the Wave-1
           design-first debt recorded by `28 §13.5` item 5 and `30 §6 P2`, and the

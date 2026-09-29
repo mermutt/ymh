@@ -14,7 +14,7 @@ DeepSeek Harness (dsh) mapping, and the test plan. It follows `00-architecture.m
 `02-persistence.md` (cited as `02 §n`); where it cannot follow them it records
 the conflict under §15 rather than choosing silently.
 
-Status: **written** · verified: — · reviewer: — (tracked in `DESIGN_STATUS.md`,
+Status: **verified** · reviewer: see `DESIGN_STATUS.md` row 03 · gate: 0 HIGH / 0 MEDIUM (tracked in `DESIGN_STATUS.md`,
 `HANDOFF.md` §6–§7). No code may be written for this component until it is
 `verified`.
 

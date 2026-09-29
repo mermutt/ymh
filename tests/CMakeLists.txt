@@ -182,3 +182,22 @@ target_link_libraries(ymh_tests
 
 include(GoogleTest)
 gtest_discover_tests(ymh_tests)
+
+# Dev-side design/tracker drift tripwire. It is registered only when the design
+# docs are present, i.e. on the merged tree where docs/ and tests/ coexist; it is
+# deliberately never registered on a main-only checkout (docs/ absent), where it
+# could otherwise silently no-op green. It is a drift DETECTOR, not a proof that
+# code followed design.
+if(EXISTS "${CMAKE_SOURCE_DIR}/docs/design/DESIGN_STATUS.md")
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME design_status_drift
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_design_status.py"
+                    --root "${CMAKE_SOURCE_DIR}"
+        )
+    else()
+        message(WARNING "docs/ present but no Python3 interpreter: the design_status_drift tripwire is not registered")
+    endif()
+endif()

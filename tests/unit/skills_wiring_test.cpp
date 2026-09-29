@@ -395,8 +395,9 @@ TEST_F(SkillsWiringTest, CommandPathInjectsSystemMessage) {
     EXPECT_LT(injected_index, user_index);
 }
 
-TEST_F(SkillsWiringTest, WorkspaceSkillRequiresAnOutsideTrustRecord) {
+TEST_F(SkillsWiringTest, WorkspaceSkillTrustsLaunchDirAndFailsClosedElsewhere) {
     TempWorkspace workspace("skills_trust_gate_ws");
+    TempWorkspace other_launch("skills_trust_gate_launch");
     TempWorkspace home("skills_trust_gate_home");
     TempWorkspace state("skills_trust_gate_state");
     TempWorkspace config_root("skills_trust_gate_cfg");
@@ -406,8 +407,21 @@ TEST_F(SkillsWiringTest, WorkspaceSkillRequiresAnOutsideTrustRecord) {
     ScopedEnv xdg_env("XDG_CONFIG_HOME", config_root.path().string());
 
     {
+        WorkspaceRuntimeOptions options = runtime_options_for(workspace, true, false);
+        options.launch_dir              = workspace.path();
         std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
-            make_workspace_runtime(runtime_options_for(workspace, true, false));
+            make_workspace_runtime(std::move(options));
+        ASSERT_TRUE(created.has_value()) << created.error().detail;
+        const Skill* skill = (**created).skills().find("repo");
+        ASSERT_NE(skill, nullptr);
+        EXPECT_EQ(skill->trust, SkillTrust::Untrusted);
+    }
+
+    {
+        WorkspaceRuntimeOptions options = runtime_options_for(workspace, true, false);
+        options.launch_dir              = other_launch.path();
+        std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
+            make_workspace_runtime(std::move(options));
         ASSERT_TRUE(created.has_value()) << created.error().detail;
         WorkspaceRuntime& runtime = **created;
         EXPECT_EQ(runtime.skills().find("repo"), nullptr);
@@ -417,11 +431,12 @@ TEST_F(SkillsWiringTest, WorkspaceSkillRequiresAnOutsideTrustRecord) {
     ASSERT_TRUE(WorkspaceTrustStore{}.trust(workspace.path()));
 
     {
+        WorkspaceRuntimeOptions options = runtime_options_for(workspace, true, false);
+        options.launch_dir              = other_launch.path();
         std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
-            make_workspace_runtime(runtime_options_for(workspace, true, false));
+            make_workspace_runtime(std::move(options));
         ASSERT_TRUE(created.has_value()) << created.error().detail;
-        WorkspaceRuntime& runtime = **created;
-        const Skill*      skill   = runtime.skills().find("repo");
+        const Skill* skill = (**created).skills().find("repo");
         ASSERT_NE(skill, nullptr);
         EXPECT_EQ(skill->trust, SkillTrust::Untrusted);
     }

@@ -1,7 +1,7 @@
 # 30 — Architecture Cascade Errata: the dsh-Alignment Top-Level Gate (Wave-0 A0)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 30 · gate: 0 HIGH / 0 MEDIUM
 Revision: Rev 2 — closes the gate30 HIGH-1 staging defect. Stage A now records
           the `06` agent-loop errata AND the `13` context-compaction errata as
           **Wave-1 blocking prerequisites** (both are pulled forward from

@@ -11,9 +11,7 @@ interface. This spec is that interface. It is deliberately shaped like `07`
 (Tools & Execution): pinned C++ sketches, numbered invariants `M1…`, component
 failure modes, a dsh mapping, and a test plan.
 
-This is a **design-only** artifact. It is `written`, not `verified`; no code may
-be written for this component until the gate in `HANDOFF.md` §7 passes
-(`DESIGN_STATUS.md` row 15). The design-first rule (`AGENTS.md`) applies: the
+Status: **verified** · reviewer: see `DESIGN_STATUS.md` row 15 · gate: 0 HIGH / 0 MEDIUM. The design-first rule (`AGENTS.md`) applies: the
 interfaces here are **pinned** and must not churn after verification.
 
 Amendments to already-verified specs are **required** for this design to be
@@ -2125,7 +2123,7 @@ server or per call. No amendment to `04`/`07`/`11` is required.
   re-broadcast) — MCP status projection is its concern.
 - `11-m2-errata.md` §2.2 (`TransportServer`), §3.2 (`TurnExecutor`), §3.3 (child
   status), §7.2 (`PermissionBroker`, `ClockReader`), §7.3 (frozen permission
-  rules), §11.2 (destruction order), §14 (E1–E21), §15 (M-F1–M-F12).
+  rules), §11.2 (destruction order), §14 (E1–E22), §15 (M-F1–M-F12).
 - `12-m1-drift-errata.md` (M1 drift register).
 - `HANDOFF.md` §6 (component design plan), §7 (verification gate).
 - `AGENTS.md` (design-first rule, no warning suppression, naming).

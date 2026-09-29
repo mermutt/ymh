@@ -1,7 +1,7 @@
 # 20 — Skills
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: see `DESIGN_STATUS.md` row 20 · gate: 0 HIGH / 0 MEDIUM
 Revision: 3 — rev 3 fixes the round-2 gate findings H1 (the usability
           predicate, regressed by rev 2's M6 fix), M1–M2, L1–L7; rev 2 fixed the
           round-1 findings H1–H4, M1–M6, L1–L6. §17.1 records the citation

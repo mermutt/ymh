@@ -23,7 +23,7 @@ It follows `00-architecture.md` (cited inline as `§n`), `01-session.md`
 Where it cannot follow them it records the conflict under §14 rather than
 choosing silently.
 
-Status: **written** · verified: — · reviewer: — (tracked in `DESIGN_STATUS.md`,
+Status: **verified** · reviewer: see `DESIGN_STATUS.md` row 06 · gate: 0 HIGH / 0 MEDIUM (tracked in `DESIGN_STATUS.md`,
 `HANDOFF.md` §6–§7). No code may be written for this component until it is
 `verified`.
 

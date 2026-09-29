@@ -1,7 +1,10 @@
 # 11 — Milestone 2 Interface-Freeze Errata
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified · reviewer: Oracle G0 interface-freeze gate (PASS; no open
+        HIGH/MEDIUM); the post-gate additive delta — §7.2 `ClockReader` ctor,
+        §7.3 `sessionSubscriberCount`, §11.3 `waitForDrain` — re-gated
+        2026-09-29 (0 HIGH / 0 MEDIUM) against the shipped tree.
 Component: 11 (errata) — amends 03/04/05/09/10 by reference
 Depends on: 00-architecture.md §9.6/§9.10/§57 Step 13/§58; specs 01, 02, 03, 04, 05, 06, 09, 10
 Scope: Milestone 2 (supervisor TUI + per-workspace WorkspaceHost daemons)
@@ -22,7 +25,7 @@ The M1 code is the ground truth for what exists: `include/ymh/transport/*`,
 M2 code is *not* written yet; this document is the last design gate before it is.
 
 Naming note (as in every spec): defect ids are `D1`–`D26`; invariants local to
-this errata are `E1`–`E20`; failure modes are `M-F1`–`M-F12`. The review defect
+this errata are `E1`–`E22`; failure modes are `M-F1`–`M-F12`. The review defect
 ids `D1`–`D26` are **distinct from** architecture decision ids of the same
 spelling — e.g. 03's "D22" is the registry single-writer `flock` (§5), not review
 defect `D22`. Where a bare `D<n>` could be ambiguous, the decision id is written
@@ -796,7 +799,8 @@ namespace ymh {
 // permission_policy.cpp:14, process.cpp:26). Pin it as a public type here.
 using Clock = std::chrono::steady_clock;
 
-// AMENDED (post-freeze, track-E finding; additive). A `Clock&` is INERT:
+// AMENDED (post-freeze, track-E finding; additive). Re-gated 2026-09-29
+// (0 HIGH / 0 MEDIUM) against the shipped tree. A `Clock&` is INERT:
 // `clock.now()` resolves to the static `Clock::now()` regardless of the bound
 // reference, so the timeout is not injectable and timeout tests cannot be made
 // deterministic. The broker takes an injectable clock READER instead; it is the
@@ -1132,7 +1136,7 @@ on host.shutdown (io thread, inside dispatch):
   2. coordinator (non-io): transport.post([server]{ server->onDaemonShuttingDown(...) })
      # marshalled via post() (E2); queued behind the dispatch, so the notice is
      # enqueued after the reply. Idempotent: dispatch already emitted it
-     # (protocol_server.cpp:353), so this second call is a no-op (E21)
+     # (protocol_server.cpp:353), so this second call is a no-op (E22)
   3. coordinator: wait until reply + notice are flushed via
      ProtocolServer::waitForDrain(shutdown_grace) (new; see E19), which returns
      when every client's outbound queue is empty or the grace expires
@@ -1168,7 +1172,7 @@ on host.shutdown (io thread, inside dispatch):
 - **E20 — Notice sequencing.** `HostNotice{DaemonShuttingDown}` is emitted
   **after** the reply is enqueued and **before** `stop()`; `SessionClosed` /
   `LeaseLost` notices emitted during drain follow it (05 §5.3 `:605-637`).
-- **E21 — Single `DaemonShuttingDown` emission (dedupe, not removal).** Dispatch
+- **E22 — Single `DaemonShuttingDown` emission (dedupe, not removal).** Dispatch
   already emits the notice on the io thread (`protocol_server.cpp:353`) and
   coordinator step 2 re-emits it, so a client would see it twice. **Pinned:** keep
   the in-dispatch emission and make `onDaemonShuttingDown` idempotent with an
@@ -1325,7 +1329,7 @@ Wave exit gates:
 
 ---
 
-## 14. Invariants (E1–E21)
+## 14. Invariants (E1–E22)
 
 | # | Invariant | § |
 |---|---|---|
@@ -1350,6 +1354,7 @@ Wave exit gates:
 | E19 | `host.shutdown` reply and notice flush before `stop()`; `stop()` off the io thread | §11.3 |
 | E20 | `DaemonShuttingDown` precedes `SessionClosed`/`LeaseLost` notices | §11.3 |
 | E21 | Broker timeout reads the injected `ClockReader`; no direct `Clock::now()` | §7.2, §7.3 |
+| E22 | Single `DaemonShuttingDown` notice (io-thread idempotence guard; dedupe, not removal) | §11.3 |
 
 ## 15. Failure modes (M-F1–M-F12)
 

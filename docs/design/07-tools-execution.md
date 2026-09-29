@@ -8,9 +8,7 @@ resolved through, the sandbox modes, and the resource caps (F8, §9.11). It also
 pins how a tool call becomes durable `ToolCall`/`ToolResult` events without any
 tool ever appending to the log itself.
 
-This is a **design-only** artifact. It is `written`, not `verified`; no code may
-be written for this component until the gate in `HANDOFF.md` §7 passes
-(`DESIGN_STATUS.md` row 07).
+Status: **verified** · reviewer: see `DESIGN_STATUS.md` row 07 · gate: 0 HIGH / 0 MEDIUM.
 
 The design-first rule (`AGENTS.md`) applies: `ToolRegistry`, `ToolContext`, and
 `ExecutionEnvironment` signatures here are **pinned** and must not churn after

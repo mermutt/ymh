@@ -1,7 +1,10 @@
 # 50 — Skills/MCP & Session Lifecycle Errata: Claude-Code Skill/Command Discovery (`~/.ymh`, `$HOME/.claude`), the Fresh-Launch Session Guarantee, the MCP Child Environment, and the MCP Global-Layer-Only Guard
 
 ```
-Status: **draft (Rev 3) — implemented; errata recorded.** This spec amends the
+Status: **retro-verified (Rev 4)** — the Rev 2 design was implemented and its
+        errata recorded (Rev 3); Rev 4 closes the backlog items (the default-trust
+        policy replacing the dead 50-D5 gate, and the deleted-spec-49
+        reconciliation). This spec amends the
         owning specs (20, 15, 10, 46, 21, 07); it introduces no new component and
         no new subsystem. Like 45 and 46, every "current state" claim is
         reproducible from the shipped tree. Rev 3 amends the spec to the shipped
@@ -20,10 +23,15 @@ Status: **draft (Rev 3) — implemented; errata recorded.** This spec amends the
         (the underlying problem was an expired credential, not a harness defect);
         the durable diagnostic procedure is preserved in §5.5.
 
-        **Verification status: implemented (Milestone).** The Rev 2 design was
-        implemented and the suite is green; Rev 3 records the implementation
-        errata. An independent gate re-review of Rev 3 is still required before
-        the spec is marked `verified`.
+        **Verification status: retro-verified (Rev 4)** — independent re-check
+        (2026-09-29): **0 open HIGH / 0 MEDIUM**. The Rev 2 design was implemented
+        and the suite is green; Rev 3 recorded the implementation errata. The spec
+        is verified *retroactively* against the shipped tree — its code already
+        shipped, so it was **not** gated before coding. Rev 4 fixes the one open
+        defect (the unreachable 50-D5 workspace tier, §6A) and reconciles the
+        deleted spec 49. The Rev 3 sentences "behaviour (the 50-D5 workspace trust
+        gate …)" and "an independent gate re-review is still required" are
+        superseded by this line and by §6A.
 ```
 
 ## 1. Purpose, scope, and supersession map
@@ -42,8 +50,8 @@ environment (was 48-D9.1) and the MCP global-layer-only guard (was 48-D9.7).
 
 Skill and command discovery gains the Claude-Code roots (`~/.ymh`, then
 `$HOME/.claude`) with first-run scaffolding and a pinned precedence; a fresh
-launch opens a **new** session in the cwd workspace (reconciled with spec 49's
-lazy spawn); MCP stdio children spawn with the ambient environment overlaid by
+launch opens a **new** session in the cwd workspace (reconciled with spec 53's
+eager start, 53-D1/53-D2); MCP stdio children spawn with the ambient environment overlaid by
 the configured map (today `src/execution/process.cpp:544-551` does
 `::clearenv()`); and MCP server definitions become **global-layer only**, closing
 a workspace-config supply-chain vector.
@@ -91,9 +99,11 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
   (`src/mcp/mcp_transport.cpp:77-113`).
 - **User tier / workspace tier** = the trusted vs untrusted skill/command roots
   (20 §2.4).
-- **Workspace trust record** = the operator's opt-in grant (50-D5) that lets the
-  workspace tier load at all; it lives in ymh's own state directory, never inside
-  the workspace, so a cloned repository cannot ship its own grant.
+- **Workspace trust record** = the explicit grant/override record (50-D5) that
+  lets the workspace tier load from a workspace that is **not** one of the two
+  default-trusted locations (the launch directory, the global config root); it
+  lives in ymh's own state directory, never inside the workspace, so a cloned
+  repository cannot ship its own grant.
 - **The env-asymmetry defect** = `spawn()`'s `::clearenv()` versus `run()`/PTY
   inherit-and-overlay; fixed by 50-D3. It had **no bearing on the jira 401**.
 
@@ -104,14 +114,14 @@ guarantee; the MCP stdio child environment; the MCP global-layer-only guard.
 | `20-skills.md` | §2.4, §3.1, §3.2, §5.1 (`SkillSource`) | 50-D1: add `~/.ymh/skills` and `$HOME/.claude/skills` user roots; add `Home`/`Claude` provenance enumerators; pin precedence. |
 | `20-skills.md` | §5.2 (`SkillCatalog` ctor), §5.6 | 50-D1: `SkillCatalogConfig` gains the root list; the catalog receives resolved absolute roots. |
 | `src/prompt/instructions.cpp` / `include/ymh/prompt/instructions.hpp` | `global_instruction_path`, `InstructionFileConfig` | 50-D1: add `$HOME/.claude/CLAUDE.md` as a global instruction candidate. |
-| `src/commands/command_registry.cpp` + new `src/commands/file_commands.cpp` | — | 50-D1: file-based command discovery from the four roots. |
-| `46-permissions-ui-errata.md` | 46-D7.1 | 50-D2: remove the `live.front()` auto-focus; cwd-workspace startup guarantee (reconciled with spec 49). |
+| `src/commands/command_registry.cpp` + new `src/skills/file_commands.cpp` | — | 50-D1: file-based command discovery from the four roots. |
+| `46-permissions-ui-errata.md` | 46-D7.1 | 50-D2: remove the `live.front()` auto-focus; cwd-workspace startup guarantee (reconciled with spec 53's eager start). |
 | `15-mcp-adapter.md` | §4.1/§5.6/§6.7 | 50-D3: MCP child environment policy. |
 | `include/ymh/execution/process.hpp` | `ProcessRequest` | 50-D3: `env_mode` (inherit vs minimal, `Minimal` pinned) and `stderr_path` (spawn-only). |
 | `21-config-jsonc-errata.md` | §7 (`mcp`) | 50-D3: MCP children always inherit (no `mcp.inherit_env`); `mcp.log_child_stderr` (default false), global-layer only. **50-D4 (breaking): `mcp`/`mcp_servers` are global-layer only; a workspace layer is a `ConfigError`.** |
 | `src/config/config.cpp` | `apply_document` pre-scan (`:957-971`) and the `apply_mcp` call site (`:990-991`) | 50-D4: guard once at the existing `global_layer` sites; fail with `'mcp'`/`'mcp_servers' is global-layer only`. No new function parameter. |
 | `15-mcp-adapter.md` | §4.1 (MCP child `cwd`) | 50-I21 (pinned): an MCP server's `cwd` is root-confined; an out-of-root `cwd` must surface as `McpError{ConfigInvalid}`, not an unhandled `PathEscape`. Empty `cwd` defaults to the workspace root (`src/mcp/mcp_transport.cpp:98-99`). |
-| `20-skills.md` | §2.4, §3.2, §5.2 | 50-D5 (breaking): the workspace tier is gated by an outside trust record; a workspace skill/command is **absent** until the operator trusts the workspace. `SkillCatalogConfig` gains `workspace_trusted`; a new `WorkspaceTrustStore` owns the record. |
+| `20-skills.md` | §2.4, §3.2, §5.2 | 50-D5 (breaking): the workspace tier is trusted by default at the launch directory and the global config root (Rev 4), and by an outside trust record elsewhere; from any other workspace a workspace skill/command is **absent** until the operator trusts it. `SkillCatalogConfig` gains `workspace_trusted`; `WorkspaceTrustStore` owns the explicit record. |
 | `src/skills/file_commands.cpp` / `include/ymh/skills/file_commands.hpp` | `discover_file_commands` | 50-D5: the signature gains `bool workspace_trusted`; an untrusted workspace root is skipped with a warning. |
 | 50 §3.2.6 | first-run `~/.ymh` scaffolding | **Not shipped.** No `~/.ymh/skills` or `~/.ymh/commands` directory is created; absent roots are simply skipped. `scaffold_user_ymh` was removed from the pinned surface. |
 | 50 §3.2.4 | `Command::reserved` + file-command registry wiring | **Not shipped.** File-command discovery is a tested library; it is not yet registered into `CommandRegistry`, and `Command` has no `reserved` member. The reserved-name rejection is exercised at the discovery layer with the caller-supplied set. |
@@ -397,9 +407,11 @@ user actually hit. Neither branch is asserted as the user's root cause until
    branch (active workspace, no active session, no resume in flight) is
    precisely the fresh-launch/reconnect case; a reconnect has a non-empty
    `activeSessionId` and never reaches it, so no spurious sessions appear on
-   reconnect. **Reconciled with spec 49:** on a bare launch with no workspace,
-   49-D1's lazy creation runs on the first prompt and this rule applies then
-   (50-OQ-6).
+   reconnect. **Reconciled with spec 53 (eager start):** a bare `ymh` models the
+   cwd workspace before the loop (53-D1), so this rule applies on the eager
+   attach's first session; the zero-workspace case survives only as the 53-F1
+   fallback, where the deleted spec 49's lazy first prompt creates the workspace
+   and this rule applies then (50-OQ-6, 53 §12.2).
 2. **Opening an existing session is explicit only.** `/sessions`, the Ctrl-S
    switcher, and `--resume <id>` remain the ways to open a stored/live session.
    Selecting a live session still goes through `resume_after_attach`
@@ -415,18 +427,16 @@ user actually hit. Neither branch is asserted as the user's root cause until
    plus a status-bar notice only when the row is genuinely missing **for an
    explicit activation**. This removes the one-shot-scan race that is the **only**
    way a different workspace can become active (Branch B).
-   **Reconciled with spec 49 (Rev 2).** On a bare `ymh` there is **no cwd row and
-   no workspace** at startup: 49-D1 starts with zero workspaces and creates the
-   row+daemon lazily on the first prompt. Therefore, on a bare launch:
-   - `initial_workspace` is a **path hint only**; it must **not** trigger (a)
-     appending a spec from a nonexistent row, nor (b) a notice. There is nothing
-     to win yet, and emitting "cwd registry row missing" on every bare launch
-     would be a **spurious notice**.
-   - The cwd-wins guarantee (a)/(b) applies only when the row exists: an explicit
-     activation (`--resume`/`--new`, which register eagerly, 49-D3) or after
-     49-D1's lazy creation has modeled the workspace.
-   The lazy-creation timing is owned by 49-D1; the fresh-launch session guarantee
-   (D2.1) applies when the workspace is created (50-OQ-6).
+   **Reconciled with spec 53 (Rev 4).** A bare `ymh` now registers the cwd
+   workspace row and spawns/attaches its daemon **before the TUI loop** (53-D1,
+   reverting the deleted spec 49's lazy policy). The cwd-wins guarantee therefore
+   applies directly on a bare launch too: `initial_workspace` matches the modeled
+   cwd workspace, and (a)/(b) above decide as written. A genuinely missing row is
+   the explicit-activation failure (50-F6). The only zero-workspace case is the
+   53-F1 degraded fallback, reached when the eager `ensureRunning` throws; there
+   the deleted 49-D1 lazy path (`submit()`, `src/ui/supervisor.cpp:462-486`)
+   creates the workspace on the first prompt and the guarantee applies then
+   (50-OQ-6, 53 §12.2).
 4. **`--new` is explicit.** `--new` (already parsed, `src/cli/cli.cpp:1198-1200`)
    keeps its precedence over `--resume` and now also forces
    `create_session` on attach, so a scripted fresh session is unambiguous.
@@ -452,8 +462,8 @@ user actually hit. Neither branch is asserted as the user's root cause until
 
 - **50-F6** (`F10`, resume-suspended). A missing cwd registry row **during an
   explicit activation** (`--resume`/`--new`): a notice is shown and the supervisor
-  still starts; it never silently focuses a different workspace. A **bare launch**
-  has no cwd row by design (49-D1) and is **not** this failure — no notice is
+  still starts; it never silently focuses a different workspace. The 53-F1
+  degraded fallback (no modeled workspace) is **not** this failure — no notice is
   emitted.
 - **50-F7.** A resume in flight when the `session.list` reply lands: the
   `resume_in_flight_.count(workspace) == 0` guard is retained, so the create
@@ -881,6 +891,17 @@ supply-chain / arbitrary-execution vector.
 > **Origin.** This decision was not in Rev 1/Rev 2. It is the security tightening
 > the implementation shipped on top of 50-D1's trust tiers, and the spec is
 > amended to match it. It supersedes 50-S7.
+>
+> **Rev 4 amendment (user decision, 2026-09).** Rev 3's gate was fail-closed **by
+> grant**, and the grant had no production path: `WorkspaceTrustStore::trust()`
+> has no caller in `src/`, there is no `/trust` command, and
+> `make_skill_catalog` only *read* the store — so 50-D1's required workspace
+> `.ymh/skills` tier was unreachable in the built binary. The user decision makes
+> the two locations ymh trusts — the global config root (`$HOME/.config/ymh`) and
+> the directory ymh was launched in — **trusted by default**; the workspace tier
+> is therefore reachable without inventing a grant surface. Items 1 and 5 below
+> are amended; items 2–4 (record storage, canonical identity, fail-closed on a bad
+> store) are unchanged.
 
 ### 6A.1 Current state (verified)
 
@@ -892,13 +913,20 @@ has reviewed the repository.
 
 ### 6A.2 Decision (50-D5)
 
-1. **Fail closed.** The workspace tier is loaded **only** when the workspace has
-   a trust record. `SkillCatalogConfig::workspace_trusted` defaults `false`;
-   `discover()` and `discover_file_commands` skip every `SkillTrust::Untrusted`
-   root when it is false, recording one warning
-   (`workspace is not trusted: workspace tier disabled` /
-   `workspace is not trusted: command tier disabled`). The skill/command is
-   **absent from the catalog** — not merely flagged untrusted.
+1. **Trusted by default at two locations; fail closed elsewhere.** The workspace
+   tier is loaded when the workspace is either (a) the global config root
+   (`$XDG_CONFIG_HOME/ymh` else `$HOME/.config/ymh`; already
+   `SkillTrust::Trusted` in `skill_roots.cpp`) or (b) the directory ymh was
+   launched in. The runtime computes this via
+   `workspace_tier_trusted(workspace_root, launch_dir, global_config_root, store)`
+   (`include/ymh/skills/workspace_trust.hpp`; `src/agent/workspace_runtime.cpp`)
+   and assigns `SkillCatalogConfig::workspace_trusted`. Any **other** workspace
+   remains fail-closed: `discover()` and `discover_file_commands` skip every
+   `SkillTrust::Untrusted` root when `workspace_trusted` is false, recording one
+   warning (`workspace is not trusted: workspace tier disabled` /
+   `workspace is not trusted: command tier disabled`), and the skill/command is
+   **absent from the catalog** — not merely flagged untrusted. (Rev 4 replaces
+   Rev 3's blanket fail-closed default.)
 2. **The record lives outside the workspace.** `WorkspaceTrustStore`
    (`include/ymh/skills/workspace_trust.hpp`) stores canonical workspace paths in
    `${XDG_STATE_HOME}/ymh/trusted_workspaces.json` (else
@@ -909,9 +937,13 @@ has reviewed the repository.
    (a path with no filename component that is not the root folds to its parent).
 4. **Fail closed on a bad store.** A missing, unreadable, or corrupt store is
    treated as empty (untrusted); no exception escapes discovery.
-5. **Grant surface (not shipped).** No `/trust` command, CLI flag, or prompt was
-   added. The store is currently populated programmatically (and by tests); a
-   user-facing grant is a follow-up. Until then the safe default holds.
+5. **Grant surface (still not shipped, no longer needed for reachability).** No
+   `/trust` command, CLI flag, or prompt was added. The two default-trusted
+   locations make 50-D1's workspace tier reachable without one; the store remains
+   the explicit-grant/override record and is currently populated only
+   programmatically (and by tests). Rev 3's "the safe default holds" is retired:
+   the default is trust for the launch directory and the config root, and
+   fail-closed for every other workspace.
 
 ### 6A.3 Shipped vs pinned (file-command contract)
 
@@ -921,18 +953,38 @@ degradation, and user-tier ordering are implemented and unit-tested. **Not
 shipped:** the `Command::reserved` member and the `CommandRegistry` integration,
 so a discovered file command is not yet reachable from the `/` list or `/help`.
 The reserved set is passed by the caller to the discovery layer; the compiled-in
-registry is untouched.
+registry is untouched. **Recorded dead requirement (AGENTS.md "new symbols are
+normative"):** `discover_file_commands` (`src/skills/file_commands.cpp`) has no
+production caller until that integration lands — its only callers are tests. This
+is the one accepted exception for this **retro-verified** spec (its code shipped
+before the rule); the `CommandRegistry` wiring is a tracked follow-up, not a
+silent omission.
 
 ### 6A.4 Test plan
 
 - **Unit.** `WorkspaceTrustStore` round-trip, canonical trailing-slash key, `0600`
   mode, corrupt store treated as empty.
-- **Outside-in.** A fixture workspace with a skill file and **no** trust record:
-  the catalog does not contain it (`find == nullptr`, `all().empty()`) and records
-  the "not trusted" warning. After `WorkspaceTrustStore::trust(workspace)`, a
-  rebuilt runtime contains the skill (still `SkillTrust::Untrusted`).
+- **Default trust (Rev 4).** `workspace_tier_trusted` resolves true for the
+  launch directory and the global config root, false for an unrelated directory
+  with an empty store, and true again after `WorkspaceTrustStore::trust(...)`
+  (`tests/unit/workspace_trust_test.cpp`).
+- **Outside-in.** A fixture workspace whose root is **not** the launch directory
+  and has **no** trust record: the catalog does not contain it (`find == nullptr`,
+  `all().empty()`) and records the "not trusted" warning; with the launch
+  directory set to the workspace it **does** contain the skill
+  (`SkillTrust::Untrusted`); after `WorkspaceTrustStore::trust(workspace)`, a
+  rebuilt runtime contains it again (`tests/unit/skills_wiring_test.cpp`).
 - **PTY.** The workspace-skill listing test grants the workspace trust first;
   `SkillsEmptyState` continues to pass with the tier disabled.
+
+### 6A.5 State lifetime (the new `launch_dir`)
+
+The trust policy introduces one piece of state, `WorkspaceRuntimeOptions::launch_dir`
+(`include/ymh/agent/workspace_runtime.hpp`):
+
+| State | Created | Owner | Destroyed / evicted | Survives restart? | Crash paths |
+|---|---|---|---|---|---|
+| `launch_dir` | captured **before** the daemon's one-time `chdir` via `std::filesystem::current_path()` (`src/host/workspace_host.cpp`), or from the headless process cwd (`src/cli/headless.cpp`) | the caller of `make_workspace_runtime`; copied into `WorkspaceRuntime::Impl` for the runtime's lifetime | with the `WorkspaceRuntime` / process; never persisted | no — recomputed on every start | a `current_path()` failure yields an **empty** path; `create()` then falls back to `root` (`include/ymh/agent/workspace_runtime.hpp`), which still grants the launch workspace trust |
 
 ---
 
@@ -979,8 +1031,10 @@ struct SkillRoot {
 struct SkillCatalogConfig {
     bool                     enabled = true;
     bool                     expose_workspace = false;
-    // 50-D5: the workspace tier loads only when the operator has trusted this
-    // workspace (a record outside the workspace). Default false = fail closed.
+    // 50-D5 (Rev 4): true at the default-trusted locations (the launch directory
+    // and the global config root), or with an explicit record; false elsewhere.
+
+
     bool                     workspace_trusted = false;          // NEW (Rev 3)
     std::size_t              max_skills = 256;
     std::size_t              max_skill_bytes = 64u * 1024u;
@@ -1218,8 +1272,8 @@ pin**. The "Gate" column is `Y` (gates this change) or `pin` (retained).
 | 50-I4 | Y | A file command never shadows a **reserved** compiled-in command (real `Command::reserved` flag, 50-D1.4); a non-reserved compiled-in command may be shadowed with a warning. |
 | 50-I5 | Y | `$ARGUMENTS` is substituted exactly once, on the raw body, before the composer. |
 | 50-I6 | pin | A file command is not a `Tool` and is never model-invocable. |
-| 50-I7 | Y | A fresh launch creates a new session in the cwd workspace and never focuses a live one (reconciled with spec 49's lazy spawn: the session is created when the cwd workspace is lazily created on the first prompt). |
-| 50-I8 | Y | Once the cwd workspace exists (explicit activation, or 49-D1's lazy creation), it is the initial active workspace; a missing scan entry is added from the registry, never replaced by another workspace. On a bare launch no workspace exists and 49-D1 owns creation — no spec is appended and no notice is emitted. |
+| 50-I7 | Y | A fresh launch creates a new session in the cwd workspace and never focuses a live one (reconciled with spec 53's eager start: the eager attach creates the session, 53-D2; in the 53-F1 fallback it is created when the first prompt creates the workspace). |
+| 50-I8 | Y | Once the cwd workspace exists (explicit activation, or the bare-`ymh` eager start, 53-D1), it is the initial active workspace; a missing scan entry is added from the registry, never replaced by another workspace. In the 53-F1 degraded fallback (no modeled workspace) no spec is appended and no notice is emitted. |
 | 50-I9 | Y | `--resume` / `/sessions` / Ctrl-S still open the requested session; the `resume_in_flight_` gate is retained. |
 | 50-I10 | Y | A reconnect with a non-empty `activeSessionId` never creates a session. |
 | 50-I11 | Y | The MCP child **always** gets the configured `env` overlaid on the inherited env (`Inherit`); configured wins. |
@@ -1234,7 +1288,7 @@ pin**. The "Gate" column is `Y` (gates this change) or `pin` (retained).
 | 50-I20 | Y | ymh does not filter the MCP child's inherited env; `httpx`-relevant vars (proxy, `SSL_CERT_*`, `NETRC`, `HOME`) reach it. |
 | 50-I21 | Y | An MCP server's `cwd` is root-confined; an out-of-root `cwd` is `McpError{ConfigInvalid}` (never an unhandled `PathEscape`); absent defaults to the workspace root. |
 | 50-I22 | Y | MCP server definitions are global-layer only; a workspace-layer `mcp`/`mcp_servers` is a `ConfigError` with the exact text `'mcp'`/`'mcp_servers' is global-layer only`. |
-| 50-I23 | Y | The workspace tier is fail-closed: with no trust record, a workspace skill/command is **absent** from the catalog (not flagged), and exactly one "not trusted" warning is recorded per skipped root (50-D5). |
+| 50-I23 | Y | The workspace tier is loaded at the two default-trusted locations (the launch directory and the global config root) and, elsewhere, only with an explicit trust record; from any other workspace with no record, a workspace skill/command is **absent** from the catalog (not flagged), and exactly one "not trusted" warning is recorded per skipped root (50-D5). |
 | 50-I24 | Y | The trust record lives outside the workspace (`$XDG_STATE_HOME/ymh/trusted_workspaces.json`, `0600`), is keyed by canonical path (`/ws` == `/ws/`), and a missing/corrupt store reads as untrusted. |
 
 ---
@@ -1251,7 +1305,7 @@ applicable (`00-architecture.md:4836-4856`).
 | 50-F3 | — | Malformed command frontmatter | Degrade to "no description"; command still runnable. |
 | 50-F4 | — | `~/.ymh` scaffolding fails | Warning; run proceeds. |
 | 50-F5 | F6 | File command collides with a reserved command | Reject with warning; compiled-in row wins. |
-| 50-F6 | F10 | cwd registry row missing **during an explicit activation** (`--resume`/`--new`) | Notice; supervisor starts; never silently focuses another workspace. A **bare launch** has no row by design (49-D1) and is not a failure. |
+| 50-F6 | F10 | cwd registry row missing **during an explicit activation** (`--resume`/`--new`) | Notice; supervisor starts; never silently focuses another workspace. The 53-F1 fallback (no modeled workspace) is not this failure. |
 | 50-F7 | F10 | Resume in flight when `session.list` lands | `resume_in_flight_` guard; no create. |
 | 50-F8 | F3 | Late `session.list` after a selection | Branch requires empty `activeSessionId`. |
 | 50-F9 | F1 | Inherited env leaks a secret to an MCP server | `Inherit` mandatory for MCP (50-D3.3); MCP defs global-layer only (50-I22); `env_denylist` follow-up (50-OQ-4). |
@@ -1272,7 +1326,7 @@ applicable (`00-architecture.md:4836-4856`).
 | dsh concept | ymh realization (50) |
 |---|---|
 | Skill/command plugin discovery | Ordered absolute roots (`~/.ymh`, config root, `$HOME/.claude`, workspace) with trust by provenance; file commands are prompt templates, not tools. |
-| Session lifecycle | A fresh launch is a new session; resumption is an explicit act. This mirrors dsh's explicit-resume posture and strengthens 46-D7, reconciled with spec 49's lazy spawn. |
+| Session lifecycle | A fresh launch is a new session; resumption is an explicit act. This mirrors dsh's explicit-resume posture and strengthens 46-D7, reconciled with spec 53's eager start (53-D1). |
 | Capability environment | An MCP child is a capability subprocess; its environment is an explicit policy (`Inherit` mandatory for MCP), not an accident of `clearenv()`. |
 | Capability configuration | MCP server definitions are trusted configuration (global-layer only), never supplied by a cloned workspace. |
 
@@ -1368,18 +1422,18 @@ implementation plan, not this spec.
   repro is in §4.5. **Design covers both branches:** D2.1–D2.2/D2.4 fix the
   session-focus defect; D2.3 adds the cwd-wins guarantee. Neither is asserted as
   the user's root cause until this question is answered.
-- **50-OQ-6 (reconciliation with spec 49).** Spec 49
-  (`49-switcher-single-workspace.md`) makes a bare `ymh` start with **zero
-  workspaces** and create the cwd workspace lazily on the first prompt (49-D1).
-  Rev 1 framed this as a conflict with a "48-D3.3 cwd always wins at startup"
-  clause; **that clause does not exist** — spec 48 has no `D3` decision (the old
-  48-D3, the Ctrl+C re-entry item, moved to this spec as 50-D2; see §14). The
-  real overlap is 46-D7/46-I13 and 23-D58. This spec reconciles: 50-D2.3's
-  cwd-wins guarantee applies **once the cwd workspace exists**; on a bare launch
-  `initial_workspace` is a path hint only — no spec is appended and **no spurious
-  notice** is emitted (50-F6 is scoped to explicit activation). The lazy-creation
-  timing is owned by 49-D1; the fresh-launch guarantee (D2.1) applies when the
-  workspace is created. **Resolved by scoping** (no contradiction with 49).
+- **50-OQ-6 (reconciliation with the deleted spec 49).** The suspended spec 49
+  (`49-switcher-single-workspace.md`, now **deleted**) made a bare `ymh` start
+  with **zero workspaces** and create the cwd workspace lazily on the first
+  prompt (49-D1). Spec 53 supersedes that: a bare `ymh` registers the cwd row and
+  spawns/attaches its daemon before the loop (53-D1), so the cwd workspace exists
+  at startup. 50-D2.3's cwd-wins guarantee therefore applies directly on a bare
+  launch; the zero-workspace case survives only as the 53-F1 fallback, where the
+  deleted 49-D1 lazy path creates the workspace on the first prompt (53 §12.2).
+  Rev 1's "48-D3.3 cwd always wins at startup" reference remains removed:
+  **that clause does not exist** — spec 48 has no `D3` decision (the old 48-D3,
+  the Ctrl+C re-entry item, moved to this spec as 50-D2; see §14). The real
+  overlap is 46-D7/46-I13 and 23-D58. **Resolved by scoping** (no contradiction).
 
 ---
 
@@ -1401,41 +1455,39 @@ that historical note at `48:1007`). No "cwd always wins" text exists anywhere in
 50-D2). Spec 48 is not edited (it is being implemented concurrently); if 48 later
 needs an amendment it is recorded here, not in 48.
 
-### 13.2 49 ↔ 50 (lazy spawn vs the fresh-launch guarantee)
+### 13.2 49 (deleted) ↔ 50 (eager start vs the fresh-launch guarantee)
 
-- 49-D1 starts a bare `ymh` with **zero workspaces** and creates the cwd
-  row+daemon lazily on the first prompt; the workspace is modeled/attached only
-  after the daemon registers (`ensure_worker_loop`,
-  `src/ui/supervisor.cpp:1028-1079`), and the first draft rides `pending_creates_`
-  consumed on `on_link_state(Attached)` (`:1334`).
-- 50-D2.1's "always create" fresh-launch rule therefore applies **when the cwd
-  workspace exists**: an explicit activation (`--resume`/`--new`), or after
-  49-D1's lazy creation. On a bare launch there is nothing to focus or create
-  yet.
-- 50-D2.3's cwd-wins guarantee is scoped accordingly: `initial_workspace` is a
-  path hint on a bare launch — no spec is appended from a nonexistent row and
-  **no spurious notice** is emitted (50-F6 is scoped to explicit activation;
-  50-I8 restated). See 50-OQ-6.
-- Both specs route the first prompt through the same attach branch (46-I13,
+- Spec 49 is **deleted**: 49-D1 (lazy first-prompt workspace/daemon creation) is
+  superseded by 53-D1, which registers the cwd row and spawns/attaches the daemon
+  before the loop. The deleted lazy path survives only as the 53-F1 degraded
+  fallback (`submit()`, `src/ui/supervisor.cpp:462-486`; 53 §12.2).
+- 50-D2.1's "always create" fresh-launch rule therefore applies on the eager
+  attach's first session (53-D2); in the 53-F1 fallback it applies when the first
+  prompt creates the workspace.
+- 50-D2.3's cwd-wins guarantee: on the eager path `initial_workspace` matches the
+  modeled cwd workspace, so (a)/(b) decide as written; a genuinely missing row is
+  the explicit-activation failure and **no spurious notice** is emitted on a bare
+  launch (50-F6 is scoped to explicit activation; 50-I8 restated). See 50-OQ-6.
+- Both paths route the first prompt through the same attach branch (46-I13,
   `src/ui/supervisor.cpp:1415-1427`) and `create_session`
   (`src/ui/supervisor.cpp:1453-1490`).
 
-### 13.3 48 ↔ 49/50 (the split)
+### 13.3 48 ↔ 50 (the split)
 
 - 48 keeps D2/D4–D8 and is self-contained (48 §15). Its invariants 48-I11/I12
   and the span-truncation code around `48:620-643` are unrelated to
-  cwd/workspace selection; 49 no longer references them.
+  cwd/workspace selection; the deleted 49 no longer references them.
 - 48-D10 (MCP 401/403 hints) was dropped by user decision; the diagnostic
   procedure survives here in §5.5.
-- No spec 48 decision is contradicted by 49 or 50.
+- No spec 48 decision is contradicted by 50.
 
 ### 13.4 46/23 ↔ 50 (the real session-lifecycle overlap)
 
 - 50-S6 supersedes **46-D7.1**'s `focus live.front()` (`46:1530`) with
   `create_session` ("always create"). **46-I13** (`46:3474`) remains the
   complementary attach-branch description; **23-D58** (`23:375`) owns the refresh
-  auto-create. 49-D1's lazy first prompt uses the same branch, so 46/23/49/50
-  agree.
+  auto-create. The 53-F1 fallback's first prompt uses the same branch, so
+  46/23/50/53 agree.
 
 ---
 
@@ -1525,3 +1577,24 @@ needs an amendment it is recorded here, not in 48.
   **Verification status: implemented (Rev 3); pending gate re-review.** The code
   and tests are in the tree and the suite is green; an independent gate must
   re-review Rev 3 before the spec is marked `verified` (AGENTS.md, the rule).
+
+- **Rev 4 (backlog close-out; user decision 2026-09).** No new shipped behaviour
+  beyond the trust-policy fix.
+  - **50-D5 default trust.** Rev 3's fail-closed-by-grant gate was unreachable
+    (`trust()` had no `src/` caller, no `/trust` command), so 50-D1's workspace
+    `.ymh/skills` / `.ymh/commands` tier could never load in the built binary.
+    The two locations ymh trusts — the global config root (`$HOME/.config/ymh`)
+    and the directory ymh was launched in — are now trusted by default via
+    `workspace_tier_trusted` (`include/ymh/skills/workspace_trust.hpp`,
+    `src/agent/workspace_runtime.cpp`); every other workspace stays fail-closed.
+    §6A amended; §6A.4 test plan extended.
+  - **Spec 49 deleted.** The suspended spec 49 is deleted; its 49-D1/49-D2
+    supersession already lived in spec 53. The D2.3 text and §13 below that were
+    "reconciled with spec 49's lazy spawn" are **re-reconciled with spec 53's
+    eager start** (53-D1): on a bare `ymh` the cwd workspace row/daemon exist
+    before the loop, so the cwd-wins guarantee applies directly and the
+    zero-workspace case survives only as the 53-F1 fallback (53 §12.2).
+
+  **Verification status: retro-verified (Rev 4), 2026-09-29 — 0 open HIGH /
+  0 MEDIUM.** See the header. This spec was implemented before its final gate, so
+  it is recorded as verified retroactively, never as gated-before-coding.

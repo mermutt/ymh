@@ -1,7 +1,7 @@
 # 27 — Session Locking Errata: The F3 Locking Contract (Session read accessors + `PlanModeController::erase`)
 
 ```
-Status: written · verified: — · reviewer: —
+Status: verified (Rev 4) · reviewer: see `DESIGN_STATUS.md` row 27 · gate: 0 HIGH / 0 MEDIUM
 Revision: Rev 4 — closes the `header()` half of follow-up 27-R1, the latent
           unlocked-reference API hazard recorded by Rev 3 §5.3. Minimal
           resolution chosen (option a): **27-D9** makes `Session::header()`

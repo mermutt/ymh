@@ -1,7 +1,7 @@
 # 28 — LLM Service Boundary Errata (dsh alignment, Wave 0 A2)
 
 ```
-Status: written · verified: — · reviewer: — (tracked in DESIGN_STATUS.md)
+Status: verified (Rev 3) · reviewer: see DESIGN_STATUS.md row 28 · gate: 0 HIGH / 0 MEDIUM (tracked in DESIGN_STATUS.md)
 Revision: Rev 3 — pins the `LlmCallConfig::provider` source, the cross-cutting
           decision that gate31's spec-31 MEDIUM and gate32's spec-32 M2 converged
           on: `AgentConfig::provider` (a new field on `agent.hpp:94-105`),
