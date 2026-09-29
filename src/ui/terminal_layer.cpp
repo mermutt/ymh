@@ -6,16 +6,55 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
+
+#include "ymh/config/config.hpp"
 
 namespace ymh::ui {
 namespace {
 
-bool env_contains(const char* name, const char* needle) {
-    const char* actual = std::getenv(name);
-    return actual != nullptr && std::strstr(actual, needle) != nullptr;
+bool contains(std::string_view haystack, std::string_view needle) noexcept {
+    return haystack.find(needle) != std::string_view::npos;
+}
+
+std::string_view env_value(const char* name) noexcept {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string_view{value} : std::string_view{};
 }
 
 } // namespace
+
+TerminalCapabilities detect_capabilities(const TerminalEnv& env) noexcept {
+    TerminalCapabilities caps;
+    // 68-D4: NO_COLOR (no-color.org) — any non-empty value disables colour.
+    if (!env.no_color.empty()) {
+        return caps;
+    }
+    // 68-D2: an unknown or dumb terminal cannot interpret escapes; dumb also
+    // beats a contradictory COLORTERM.
+    if (env.term.empty() || env.term == "dumb") {
+        return caps;
+    }
+    const bool colorterm_true =
+        contains(env.colorterm, "truecolor") || contains(env.colorterm, "24bit");
+    caps.color = true;
+    caps.trueColor = colorterm_true;
+    // 68-I8: truecolor implies 256 colours.
+    caps.color256 = colorterm_true || contains(env.term, "256color");
+    return caps;
+}
+
+bool resolve_color(const TerminalCapabilities& caps, ColorMode mode) noexcept {
+    switch (mode) {
+        case ColorMode::Always:
+            return true;
+        case ColorMode::Never:
+            return false;
+        case ColorMode::Auto:
+            break;
+    }
+    return caps.color;
+}
 
 bool write_bracketed_paste(bool enabled, int out_fd) noexcept {
     if (out_fd < 0) {
@@ -130,11 +169,8 @@ TerminalSize TerminalLayer::size() const {
 }
 
 TerminalCapabilities TerminalLayer::capabilities() const {
-    TerminalCapabilities caps;
-    caps.trueColor = env_contains("COLORTERM", "truecolor") || env_contains("COLORTERM", "24bit");
-    caps.color256 = caps.trueColor || env_contains("TERM", "256color");
-    caps.unicode = true;
-    return caps;
+    return detect_capabilities(
+        TerminalEnv{env_value("TERM"), env_value("COLORTERM"), env_value("NO_COLOR")});
 }
 
 } // namespace ymh::ui

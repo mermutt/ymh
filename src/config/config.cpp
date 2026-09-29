@@ -324,11 +324,18 @@ std::vector<std::string> read_string_array(const Json& obj,
 }
 
 void apply_ui(Config& config, const Json& table, const std::filesystem::path& source) {
-    reject_unknown(table, "ui", {"theme", "show_activity", "side_panel"}, source);
+    reject_unknown(table, "ui", {"theme", "show_activity", "side_panel", "color"}, source);
     config.ui.theme = read_string(table, "theme", "ui", config.ui.theme, source);
     config.ui.show_activity =
         read_bool(table, "show_activity", "ui", config.ui.show_activity, source);
     config.ui.side_panel = read_string(table, "side_panel", "ui", config.ui.side_panel, source);
+    const std::string color = read_string(table, "color", "ui",
+                                          std::string{color_mode_name(config.ui.color)}, source);
+    const std::optional<ColorMode> parsed_color = parse_color_mode(color);
+    if (!parsed_color.has_value()) {
+        fail(source, "unknown ui.color '" + color + "' (expected auto, always, or never)");
+    }
+    config.ui.color = *parsed_color;
 }
 
 void apply_compaction(Config& config, const Json& table, const std::filesystem::path& source) {
@@ -1422,7 +1429,8 @@ constexpr std::string_view kDefaultConfigJsonc =
   "ui": {
     "theme": "default",          // color theme name
     "show_activity": true,       // show the activity indicator
-    "side_panel": "auto"         // "auto" | "always" | "never"
+    "side_panel": "auto",        // "auto" | "always" | "never"
+    "color": "auto"              // "auto" | "always" | "never"; "always" forces colour
   },
   "agent": {
     "model": "",                 // empty => use llm.default.model

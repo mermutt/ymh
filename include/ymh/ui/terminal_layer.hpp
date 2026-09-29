@@ -5,18 +5,55 @@
 // `enterRawMode()` clears `IXON` so `Ctrl+S`/`Ctrl+Q` reach the application
 // (U17, §7.4). The termios state is restored by an RAII guard on every exit path.
 
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <termios.h>
 
+// 68-D3/D6: `ui.color = auto|always|never`, defined with the config schema
+// (`ymh/config/config.hpp`); forward-declared here so this low-level header does
+// not pull the whole config header.
+namespace ymh {
+enum class ColorMode : std::uint8_t;
+}
+
 namespace ymh::ui {
 
+// 68-D5/68-I9: every field is assigned explicitly by `detect_capabilities`; the
+// in-class defaults are deliberately conservative (false), so a
+// default-constructed set is monochrome rather than accidentally "colour on".
 struct TerminalCapabilities {
-    bool trueColor = true;
-    bool color256 = true;
+    bool trueColor = false;
+    bool color256 = false;
+    // 68-D1: at least 8 colours — the gate `make_theme` now receives. A
+    // truecolor terminal implies 256 colours implies this (68-I8).
+    bool color = false;
+    // Not probed today (reserved); UTF-8 output is assumed.
     bool mouse = false;
     bool unicode = true;
 };
+
+// 68-D1/D2/D4/68-I6: the pure detection inputs. `detect_capabilities` never
+// touches the process environment or spawns a process, so every colour rule is
+// hermetic; `TerminalLayer::capabilities()` is the only caller that reads the
+// colour environment.
+struct TerminalEnv {
+    std::string_view term;
+    std::string_view colorterm;
+    std::string_view no_color;
+};
+
+// 68-D1: any non-empty `TERM` other than `dumb` is at least an 8-colour
+// terminal; `COLORTERM=truecolor|24bit` upgrades the tiers. 68-D2: an empty or
+// `dumb` `TERM` is monochrome (and `dumb` beats a contradictory `COLORTERM`).
+// 68-D4: a non-empty `NO_COLOR` disables colour. 68-I8 keeps the tiers monotone.
+[[nodiscard]] TerminalCapabilities detect_capabilities(const TerminalEnv& env) noexcept;
+
+// 68-D3/68-I4/68-I5: apply the `ui.color` override on top of detection.
+// `Always` forces colour even on a `dumb`/`NO_COLOR` terminal (the PuTTY escape
+// hatch); `Never` forces monochrome even on a truecolor terminal; `Auto`
+// returns `caps.color`.
+[[nodiscard]] bool resolve_color(const TerminalCapabilities& caps, ColorMode mode) noexcept;
 
 struct TerminalSize {
     int width = 80;

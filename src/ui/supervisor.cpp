@@ -3897,8 +3897,8 @@ private:
         const BracketedPasteSignalGuard paste_signal_guard(terminal.bracketedPasteActive());
         ftxui::ScreenInteractive screen = ftxui::ScreenInteractive::Fullscreen();
         screen_ = &screen;
-        const Theme theme =
-            make_theme(terminal.capabilities().trueColor, ThemeVariant::Dark);
+        const bool color = resolve_color(terminal.capabilities(), options_.config.ui.color);
+        const Theme theme = make_theme(color, ThemeVariant::Dark);
 
         auto renderer = ftxui::Renderer([this, &screen, theme] {
             const TerminalSize size{screen.dimx(), screen.dimy()};

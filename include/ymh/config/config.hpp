@@ -48,11 +48,44 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// 68-D3: how the TUI decides to emit colour. `Always` is the explicit escape
+// hatch for a terminal that advertises nothing (e.g. PuTTY `TERM=xterm` with no
+// `COLORTERM`); `Never` forces monochrome. Consumed by
+// `ymh::ui::resolve_color` (`include/ymh/ui/terminal_layer.hpp`).
+enum class ColorMode : std::uint8_t { Auto, Always, Never };
+
+[[nodiscard]] constexpr std::string_view color_mode_name(ColorMode mode) noexcept {
+    switch (mode) {
+        case ColorMode::Auto:
+            return "auto";
+        case ColorMode::Always:
+            return "always";
+        case ColorMode::Never:
+            return "never";
+    }
+    return "auto";
+}
+
+[[nodiscard]] inline std::optional<ColorMode> parse_color_mode(std::string_view value) noexcept {
+    if (value == "auto") {
+        return ColorMode::Auto;
+    }
+    if (value == "always") {
+        return ColorMode::Always;
+    }
+    if (value == "never") {
+        return ColorMode::Never;
+    }
+    return std::nullopt;
+}
+
 // [ui] — consumed by the TUI wave; parsed here so the schema is complete.
 struct UiConfig {
     std::string theme = "default";
     bool        show_activity = true;
     std::string side_panel = "auto";
+    // 68-D3: "auto" | "always" | "never".
+    ColorMode   color = ColorMode::Auto;
 };
 
 // [agent]
