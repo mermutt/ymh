@@ -266,7 +266,13 @@ Rules:
    (`include/ymh/llm/stream.hpp:119-131`).
 4. `retries_so_far + 1 >= policy.max_attempts` → no retry (budget bound). The
    first attempt counts as one, so `max_attempts = 3` allows at most two
-   retries.
+   retries. When the LLM adapter's **08-D18** shared per-request deadline is in
+   force (`08-llm-provider.md` §3.7), retries are also bounded by wall clock:
+   the deadline is computed once per `stream()` and each attempt is capped by
+   the remaining budget, so the terminal failure is bounded by one
+   `request_timeout` (120 s default), not `max_attempts × request_timeout`.
+   41's executor does not model that deadline; because 41 is **not activated**
+   (`§1.5`), the divergence is latent, not live.
 5. Otherwise retry, with `retry_index = retries_so_far + 1`.
 
 The function is the only place the retry decision is made; the executor loop is
@@ -747,7 +753,10 @@ failure, and is likewise not retried.
   `llm/retry_started` per completed wait.
 - **RE-I7: One-shot dispatch.** A fresh `PreparedCall` per attempt; no
   re-dispatch (`28-L24`).
-- **RE-I8: Bounded budget.** Retries are bounded by `policy.max_attempts`.
+- **RE-I8: Bounded budget.** Retries are bounded by `policy.max_attempts`. When
+  the adapter's 08-D18 shared deadline is active, wall clock is an additional
+  bound (one `request_timeout`, `08-llm-provider.md` §3.7); 41 does not yet
+  model it, which is latent because 41 is not activated (`§1.5`).
 - **RE-I9: Cancellable wait.** A cancel during the wait aborts immediately and
   writes no `llm/retry_started`.
 - **RE-I10: `RetryId` uniqueness.** Session-scoped, monotonic, never reused,

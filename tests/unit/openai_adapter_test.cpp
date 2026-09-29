@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -135,6 +136,12 @@ public:
 
     explicit FakeTransport(std::vector<Script> scripts) : scripts_(std::move(scripts)) {}
 
+    // 08-D18: when a fake clock is attached, a scripted delay advances it
+    // instead of sleeping, so retry-budget arithmetic is deterministic.
+    void attach_clock(std::shared_ptr<std::atomic<std::int64_t>> now_ms) {
+        clock_ = std::move(now_ms);
+    }
+
     ymh::Task<ymh::HttpResponse> postStream(const ymh::HttpRequest& request,
                                             ymh::HttpBodySink on_body,
                                             ymh::CancellationToken cancel) override {
@@ -149,7 +156,11 @@ public:
 
         Script& script = scripts_[index];
         if (script.delay.count() > 0) {
-            std::this_thread::sleep_for(script.delay);
+            if (clock_) {
+                clock_->fetch_add(script.delay.count());
+            } else {
+                std::this_thread::sleep_for(script.delay);
+            }
         }
         for (std::size_t offset = 0; offset < script.response.body.size();
              offset += script.chunk_size) {
@@ -170,8 +181,9 @@ public:
     std::vector<ymh::HttpRequest> requests;
 
 private:
-    std::vector<Script> scripts_;
-    std::size_t         calls_ = 0;
+    std::vector<Script>                        scripts_;
+    std::size_t                                calls_ = 0;
+    std::shared_ptr<std::atomic<std::int64_t>> clock_;
 };
 
 struct Options {
@@ -184,6 +196,9 @@ struct Options {
     std::chrono::milliseconds connect_timeout{10'000};
     std::chrono::milliseconds idle_timeout{60'000};
     std::chrono::milliseconds request_timeout{120'000};
+    ymh::OpenAICompatibleProvider::SteadyNow now = [] {
+        return std::chrono::steady_clock::now();
+    };
 };
 
 ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> transport,
@@ -202,7 +217,8 @@ ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> 
     config.connect_timeout = options.connect_timeout;
     config.idle_timeout = options.idle_timeout;
     config.request_timeout = options.request_timeout;
-    return ymh::OpenAICompatibleProvider(config, options.caps, std::move(transport));
+    return ymh::OpenAICompatibleProvider(config, options.caps, std::move(transport),
+                                         std::move(options.now));
 }
 
 struct Run {
@@ -791,28 +807,32 @@ TEST_F(OpenAiAdapterTest, CurlPreFirstByteStallTimesOut) {
 }
 
 TEST_F(OpenAiAdapterTest, RetryBudgetIsBoundedByRequestDeadline) {
+    auto fake_now = std::make_shared<std::atomic<std::int64_t>>(0);
+
     FakeTransport::Script script;
     script.response.transport_error =
         ymh::LLMError{ymh::LLMErrorCode::Timeout, 0, "", "transport timeout", true};
     script.delay = std::chrono::milliseconds{300};
     auto transport = std::make_shared<FakeTransport>(
         std::vector<FakeTransport::Script>(5, script));
+    transport->attach_clock(fake_now);
+
     auto provider = make_provider(
         transport,
         Options{.max_attempts = 5,
-                .request_timeout = std::chrono::milliseconds{500}});
+                .request_timeout = std::chrono::milliseconds{500},
+                .now = [fake_now] {
+                    return std::chrono::steady_clock::time_point{
+                        std::chrono::milliseconds{fake_now->load()}};
+                }});
 
-    const auto start = std::chrono::steady_clock::now();
     const auto result = run(provider, text_request());
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
 
     EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
     EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
-    ASSERT_GE(transport->requests.size(), 2u);
-    EXPECT_LT(transport->requests.size(), 5u);
+    ASSERT_EQ(transport->requests.size(), 2u);
     EXPECT_LT(transport->requests[1].total_timeout, transport->requests[0].total_timeout);
-    EXPECT_LT(elapsed.count(), 3000);
+    EXPECT_EQ(fake_now->load(), 600);
 }
 
 TEST_F(OpenAiAdapterTest, CurlOversizedSseLineAborts) {

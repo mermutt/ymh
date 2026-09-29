@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <unistd.h>
 
+#include "support/mock_http_server.hpp"
 #include "support/test_env.hpp"
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
@@ -34,6 +35,7 @@
 #include "ymh/host/host_runtime.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/llm/fake_llm.hpp"
+#include "ymh/llm/openai_adapter.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
@@ -1704,6 +1706,69 @@ TEST_F(HostRuntimeTest, ProviderFailureStreamsTurnFailedToSubscribedClient) {
         }
     }
     EXPECT_TRUE(saw_failed);
+}
+
+// LOW-1: the two halves of the transport-timeout fix are covered separately
+// (curl-level failure in openai_adapter_test, TurnFailed delivery with FakeLLM
+// above); this composes them — a real libcurl transport failure driven through
+// the agent loop reaches a subscribed client with no user input.
+TEST_F(HostRuntimeTest, CurlTransportFailureStreamsTurnFailedToSubscribedClient) {
+    ymh::test::MockHttpServer server({ymh::test::MockHttpServer::Response{
+        500, {}, "{\"error\":\"boom\"}"}});
+
+    const std::string base_url = server.base_url();
+    auto factory = [base_url](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
+        LLMProviderConfig config;
+        config.provider    = "openai-compatible";
+        config.base_url    = base_url;
+        config.model       = "test-model";
+        config.api_key     = std::string{"SECRET"};
+        config.api_key_env = std::string{};
+        config.retry.base_delay   = std::chrono::milliseconds{1};
+        config.retry.max_delay    = std::chrono::milliseconds{2};
+        config.retry.jitter       = 0.0;
+        config.retry.max_attempts = 1;
+        config.request_timeout    = std::chrono::milliseconds{5000};
+        return std::make_unique<OpenAICompatibleProvider>(
+            config, openai_compatible_capabilities(),
+            std::make_shared<CurlHttpTransport>());
+    };
+
+    Bridge bridge("hr_curl_fail", FakeScript{}, false, factory, config_with_named_models());
+
+    const protocol::SessionCreated created =
+        bridge.host().createSession(nlohmann::json{{"model", "balanced"}});
+    const SessionId session = created.session;
+
+    Bridge::Peer* peer = bridge.open_peer();
+    bridge.hello(*peer);
+    nlohmann::json subscribe_params;
+    protocol::to_json(subscribe_params,
+                      protocol::SubscribeParams{session, protocol::StreamFrom{}});
+    bridge.request(*peer, 2, protocol::method::kEventSubscribe, subscribe_params);
+
+    bridge.host().agentPrompt(session, nlohmann::json("go"));
+
+    bool       saw_failed = false;
+    const auto deadline   = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while (!saw_failed && std::chrono::steady_clock::now() < deadline) {
+        for (const nlohmann::json& message : bridge.drain(*peer)) {
+            if (message.value("method", std::string{}) != "event.stream") {
+                continue;
+            }
+            const auto notification =
+                message.at("params").get<protocol::StreamNotification>();
+            if (notification.envelope.event.type == EventType::TurnFailed) {
+                saw_failed = true;
+            }
+        }
+        if (!saw_failed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    EXPECT_TRUE(saw_failed);
+    EXPECT_EQ(bridge.permission_transport().broadcastCount(), 0u);
+    EXPECT_EQ(server.requests(), 1u);
 }
 
 TEST_F(HostRuntimeTest, AttachRebroadcastsPendingPermission) {

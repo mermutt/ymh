@@ -527,6 +527,19 @@ mid-stream (measured from the last byte) to preserve protection; with a finite
 measured from request dispatch (it includes connect), so configure
 `idle_timeout ≥ connect_timeout`.
 
+> **Footgun (08-D17).** `request_timeout = 0` combined with a nonzero
+> `idle_timeout` (60 s by default) re-enables the mid-stream idle guard and
+> therefore **re-creates the very false abort 08-D17 removes**: a legitimate
+> silent reasoning phase longer than `idle_timeout` is mapped to `Timeout` even
+> though the stream is healthy. The mid-stream guard is not disabled
+> automatically in this case because it is then the only protection against a
+> genuinely hung socket, and silently dropping it would trade the false abort
+> for an unbounded hang. A user who wants no total bound must choose
+> explicitly: set `idle_timeout = 0` as well (both zero = no bound at all,
+> documented here), or keep `request_timeout` finite and let it alone bound the
+> call. Do not set `request_timeout = 0` while leaving `idle_timeout` at its
+> default expecting "no timeouts".
+
 ---
 
 ## 4. Streaming model and durable-event mapping
@@ -1398,7 +1411,12 @@ and API-key gated.
   remaining budget and a retry is not started once the budget (or its backoff)
   is exhausted. Rationale: applying `request_timeout` per attempt lets a
   pre-first-event stall defer its terminal `TurnFailed` by up to
-  `max_attempts × request_timeout` with no UI indication (§3.7).
+  `max_attempts × request_timeout` with no UI indication (§3.7). **The guarantee
+  this buys is a bound, not immediacy:** a transport failure still surfaces only
+  after it happens, and the worst case is **one `request_timeout` after the call
+  starts** — 120 s at the default — never `max_attempts × request_timeout`. The
+  fix removes the multiplicative deferral; it does **not** make the `TurnFailed`
+  immediate.
 
 ### 14.2 Open questions
 
