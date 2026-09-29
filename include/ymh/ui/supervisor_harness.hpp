@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include <ftxui/component/event.hpp>
+
 #include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/supervisor.hpp"
 #include "ymh/ui/supervisor_connection.hpp"
@@ -143,6 +145,10 @@ public:
                                         const PermissionRequestId& request,
                                         std::string tool, std::string summary) = 0;
     virtual bool dispatch_key(const std::string& key) = 0;
+    // 66-D3 test seam: drives an arbitrary FTXUI event through the real
+    // `handle_event`, so a bracketed-paste run (open marker, body, close marker)
+    // can be replayed without a terminal.
+    virtual bool dispatch_event(ftxui::Event event) = 0;
     // 59-D7 test seam: pins the terminal width the composer wraps against so
     // vertical-caret tests do not depend on the harness default.
     virtual void set_terminal_width(int width) = 0;

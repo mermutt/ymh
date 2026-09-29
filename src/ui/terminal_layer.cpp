@@ -1,5 +1,6 @@
 #include "ymh/ui/terminal_layer.hpp"
 
+#include <cerrno>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -16,10 +17,55 @@ bool env_contains(const char* name, const char* needle) {
 
 } // namespace
 
+bool write_bracketed_paste(bool enabled, int out_fd) noexcept {
+    if (out_fd < 0) {
+        return false;
+    }
+    const std::string_view sequence =
+        enabled ? kBracketedPasteEnable : kBracketedPasteDisable;
+    const char* cursor    = sequence.data();
+    std::size_t remaining = sequence.size();
+    while (remaining > 0) {
+        const ssize_t written = ::write(out_fd, cursor, remaining);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (written == 0) {
+            return false;
+        }
+        cursor += static_cast<std::size_t>(written);
+        remaining -= static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
 TerminalLayer::TerminalLayer(int fd) : fd_(fd) {}
 
 TerminalLayer::~TerminalLayer() {
+    leaveBracketedPaste();
     leaveRawMode();
+}
+
+bool TerminalLayer::enterBracketedPaste() {
+    if (paste_) {
+        return true;
+    }
+    if (::isatty(STDOUT_FILENO) == 0) {
+        return false;
+    }
+    paste_ = write_bracketed_paste(true, STDOUT_FILENO);
+    return paste_;
+}
+
+void TerminalLayer::leaveBracketedPaste() {
+    if (!paste_) {
+        return;
+    }
+    (void)write_bracketed_paste(false, STDOUT_FILENO);
+    paste_ = false;
 }
 
 std::optional<termios> TerminalLayer::snapshot(int fd) {
@@ -88,7 +134,6 @@ TerminalCapabilities TerminalLayer::capabilities() const {
     caps.trueColor = env_contains("COLORTERM", "truecolor") || env_contains("COLORTERM", "24bit");
     caps.color256 = caps.trueColor || env_contains("TERM", "256color");
     caps.unicode = true;
-    caps.bracketedPaste = env_contains("TERM", "xterm") || env_contains("TERM", "kitty");
     return caps;
 }
 

@@ -1,9 +1,12 @@
 #include "ymh/ui/supervisor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
@@ -69,6 +72,83 @@ constexpr std::chrono::milliseconds kModalTailWindow{25};
 constexpr std::chrono::milliseconds kExitQueryMargin{500};
 constexpr std::chrono::milliseconds kOwnershipRetryInterval{100};
 constexpr int kContextScrollPage = 6;
+
+// 66-D3: bracketed-paste reassembly. The terminal wraps a paste in
+// `ESC [ 200 ~` … `ESC [ 201 ~`; FTXUI (no native support) delivers the two
+// markers as `Event::Special` and the body as a run of `Character`/`Special`
+// events. The open marker, body and close marker are contiguous. A byte cap
+// bounds the buffer; an idle gap longer than this flushes a truncated paste
+// back to normal handling so a missing close marker cannot swallow later keys.
+constexpr std::size_t kMaxPasteBytes{8u * 1024u * 1024u};
+constexpr std::chrono::milliseconds kPasteIdleFlush{500};
+inline constexpr std::string_view kBracketedPasteOpen  = "\x1b[200~";
+inline constexpr std::string_view kBracketedPasteClose = "\x1b[201~";
+
+// 66-D5: restore DECRST 2004 from an async signal handler. FTXUI's own
+// `Install()` owns SIGINT/SIGTERM/SIGSEGV/SIGILL/SIGABRT/SIGFPE and turns them
+// into a graceful loop exit (`Exit()` -> `PostMain` -> `Uninstall`), after which
+// `run_loop` calls `leaveBracketedPaste`; the guard therefore only needs the two
+// catchable signals FTXUI does not install: SIGHUP and SIGQUIT.
+// `write`/`sigaction`/`kill`/`getpid` are async-signal-safe; the signal is
+// re-delivered with the default disposition so the process still dies.
+volatile sig_atomic_t g_bracketed_paste_out_fd = -1;
+
+extern "C" void restore_bracketed_paste_handler(int signal_number) {
+    const int saved_errno = errno;
+    const int out_fd = static_cast<int>(g_bracketed_paste_out_fd);
+    if (out_fd >= 0) {
+        const ssize_t ignored =
+            ::write(out_fd, kBracketedPasteDisable.data(), kBracketedPasteDisable.size());
+        (void)ignored;
+        g_bracketed_paste_out_fd = -1;
+    }
+    struct sigaction default_action {};
+    default_action.sa_handler = SIG_DFL;
+    ::sigemptyset(&default_action.sa_mask);
+    default_action.sa_flags = 0;
+    ::sigaction(signal_number, &default_action, nullptr);
+    ::kill(::getpid(), signal_number);
+    errno = saved_errno;
+}
+
+// 66-D5 RAII: installed only while bracketed paste is active; restores the
+// previous dispositions on every non-signal exit. Leaves FTXUI's SIGWINCH/SIGTSTP
+// and its SIGINT/SIGTERM handlers untouched.
+class BracketedPasteSignalGuard {
+public:
+    explicit BracketedPasteSignalGuard(bool active) {
+        if (!active) {
+            return;
+        }
+        for (std::size_t index = 0; index < kSignals.size(); ++index) {
+            struct sigaction action {};
+            action.sa_handler = restore_bracketed_paste_handler;
+            ::sigemptyset(&action.sa_mask);
+            action.sa_flags = 0;
+            if (::sigaction(kSignals[index], &action, &saved_[index]) == 0) {
+                installed_[index] = true;
+            }
+        }
+        g_bracketed_paste_out_fd = STDOUT_FILENO;
+    }
+    ~BracketedPasteSignalGuard() {
+        g_bracketed_paste_out_fd = -1;
+        for (std::size_t index = 0; index < kSignals.size(); ++index) {
+            if (installed_[index]) {
+                ::sigaction(kSignals[index], &saved_[index], nullptr);
+            }
+        }
+    }
+    BracketedPasteSignalGuard(const BracketedPasteSignalGuard&) = delete;
+    BracketedPasteSignalGuard& operator=(const BracketedPasteSignalGuard&) = delete;
+    BracketedPasteSignalGuard(BracketedPasteSignalGuard&&) = delete;
+    BracketedPasteSignalGuard& operator=(BracketedPasteSignalGuard&&) = delete;
+
+private:
+    static constexpr std::array<int, 2> kSignals{SIGHUP, SIGQUIT};
+    std::array<struct sigaction, 2> saved_{};
+    std::array<bool, 2>             installed_{};
+};
 
 // RB-18: order-independent identity of one daemon-set scan. The scanner fires
 // every 2s; an unchanged set must not reach `on_scan` (which enqueues a UI
@@ -3615,7 +3695,109 @@ private:
         return handled;
     }
 
+    // 66-D3: bracketed paste. Returns true when the event belongs to a paste
+    // (an open marker, buffered content, or the close marker) and must not reach
+    // the key handlers. Newlines and tabs inside a paste are literal draft
+    // characters, never Return/Tab semantics. `handle_event_inner` calls this
+    // before every modal/key branch, so content is captured regardless of mode.
+    bool handle_paste_event(const ftxui::Event& event) {
+        static const ftxui::Event kPasteOpen =
+            ftxui::Event::Special(std::string(kBracketedPasteOpen));
+        static const ftxui::Event kPasteClose =
+            ftxui::Event::Special(std::string(kBracketedPasteClose));
+        if (event == kPasteOpen) {
+            // 66-F3 (LOW-8): a nested open marker is a malformed run; flush what
+            // accumulated instead of dropping it, then re-arm.
+            if (paste_active_) {
+                flush_paste();
+            }
+            paste_active_         = true;
+            paste_buffer_.clear();
+            paste_last_event_at_ = options_.monotonic_clock();
+            return true;
+        }
+        if (!paste_active_) {
+            return false;
+        }
+        // 66-F4: a truncated paste (no close marker) must not swallow later
+        // keystrokes. On an idle gap, flush what arrived and dispatch this event
+        // normally.
+        const auto now = options_.monotonic_clock();
+        if (event != kPasteClose && now - paste_last_event_at_ > kPasteIdleFlush) {
+            paste_active_ = false;
+            flush_paste();
+            return false;
+        }
+        paste_last_event_at_ = now;
+        if (event == kPasteClose) {
+            paste_active_ = false;
+            flush_paste();
+            return true;
+        }
+        if (event == ftxui::Event::Custom) {
+            drain();
+            return true;
+        }
+        if (event.is_mouse() || event.is_cursor_position() || event.is_cursor_shape()) {
+            return true;
+        }
+        paste_buffer_ += event.input();
+        if (paste_buffer_.size() > kMaxPasteBytes) {
+            flush_paste();
+        }
+        return true;
+    }
+
+    // 66-D4: one bulk insert of the accumulated paste into the composer draft.
+    // Never submits; never runs the per-character refresh/hint cycle. The
+    // read-only child view (58-E8) is respected: a paste there is discarded
+    // rather than mutating the frozen composer.
+    void flush_paste() {
+        std::string text = std::move(paste_buffer_);
+        paste_buffer_.clear();
+        if (text.empty() || !model_.subagent_path.empty()) {
+            return;
+        }
+        SessionUiState* state = active();
+        if (state == nullptr) {
+            state = model_.workspaces.empty() ? &model_.pendingComposer
+                                              : model_.ensureActiveSession();
+        }
+        if (state == nullptr) {
+            return;
+        }
+        InputModel& input = state->input;
+        input.draft.insert(input.cursor, text);
+        input.cursor += text.size();
+        // 66-F3 (M1): a paste made while a modal owns the keyboard must survive
+        // `release_modal_composer`, which restores the snapshot taken at open.
+        // Mirror the insert into the live snapshot so the text is not dropped.
+        if (modal_composer_snapshot_.has_value() &&
+            modal_composer_snapshot_->session == state->id) {
+            InputModel& snapshot = modal_composer_snapshot_->input;
+            snapshot.draft.insert(snapshot.cursor, text);
+            snapshot.cursor += text.size();
+        }
+        state->hints_dismissed   = false;
+        state->composer_input_at = std::chrono::steady_clock::now();
+        state->esc_arm           = EscArm::Disarmed;
+        state->esc_armed_at.reset();
+        refresh_hints(*state);
+        // 66-F3 (M1/L5): keep the modal snapshot's hints in step with the draft
+        // so a modal close does not restore pre-paste completion hints.
+        if (modal_composer_snapshot_.has_value() &&
+            modal_composer_snapshot_->session == state->id) {
+            modal_composer_snapshot_->command_hints = state->command_hints;
+            modal_composer_snapshot_->command_hint_selected =
+                state->command_hint_selected;
+        }
+        model_.dirty.mark(state->id, UiDirtyFlag::Input);
+    }
+
     bool handle_event_inner(ftxui::Event event) {
+        if (handle_paste_event(event)) {
+            return true;
+        }
         if (event == ftxui::Event::Custom) {
             drain();
             return true;
@@ -3711,6 +3893,8 @@ private:
     int run_loop() {
         TerminalLayer terminal(STDIN_FILENO);
         terminal.enterRawMode();
+        terminal.enterBracketedPaste();
+        const BracketedPasteSignalGuard paste_signal_guard(terminal.bracketedPasteActive());
         ftxui::ScreenInteractive screen = ftxui::ScreenInteractive::Fullscreen();
         screen_ = &screen;
         const Theme theme =
@@ -3758,6 +3942,9 @@ private:
 
         screen.Loop(component);
         quit_.store(true);
+        // 66-D5/L1: restore DECRST before the (up to 50 ms) timer join, so no
+        // SIGINT/SIGTERM window exists between the loop ending and the restore.
+        terminal.leaveBracketedPaste();
         timer.join();
         screen_ = nullptr;
         terminal.leaveRawMode();
@@ -3774,6 +3961,12 @@ private:
     // integration test can assert exactly one cancel is submitted. Inert in
     // production (never read outside the harness).
     std::size_t agent_cancel_count_ = 0;
+    // 66-D3: bracketed-paste reassembly (UI thread only). While `paste_active_`
+    // every event is literal paste content; the buffer flushes as one bulk
+    // insert on the close marker.
+    bool                                   paste_active_ = false;
+    std::string                            paste_buffer_;
+    std::chrono::steady_clock::time_point  paste_last_event_at_{};
     CommandRegistry registry_;
     std::string preferred_model_;
     // 45-D6.11: set once when the daemon reports `mcp.status` unavailable, so
@@ -4075,6 +4268,10 @@ public:
 
     void set_terminal_width(int width) override {
         app_.composer_terminal_width_ = width;
+    }
+
+    bool dispatch_event(ftxui::Event event) override {
+        return app_.handle_event(std::move(event));
     }
 
     bool dispatch_key(const std::string& key) override {
