@@ -79,6 +79,11 @@ struct WorkspaceRuntimeError {
 struct WorkspaceRuntimeOptions {
     Config                config;
     std::filesystem::path root;     // canonical workspace root (04 H2)
+    // The directory ymh was launched in, captured before the daemon's one-time
+    // chdir; the default-trust policy (spec 50 §6A.2, 50-D5 amended) trusts the
+    // workspace `.ymh/skills` tier when it equals this directory. Empty falls
+    // back to `root`.
+    std::filesystem::path launch_dir;
     BootId                boot_id;  // minted once by the owner (02 §5.2)
 
     // When true, the owned `PermissionGate` is attached to `AgentServices`

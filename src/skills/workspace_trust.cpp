@@ -142,4 +142,18 @@ bool WorkspaceTrustStore::untrust(const std::filesystem::path& workspace) const 
     return write_trusted(store_path_, trusted);
 }
 
+bool workspace_tier_trusted(const std::filesystem::path& workspace,
+                            const std::filesystem::path& launch_dir,
+                            const std::filesystem::path& global_config_root,
+                            const WorkspaceTrustStore&   store) {
+    if (launch_dir.empty() || global_config_root.empty()) {
+        return store.is_trusted(workspace);
+    }
+    const std::string key = canonical_key(workspace);
+    if (key == canonical_key(launch_dir) || key == canonical_key(global_config_root)) {
+        return true;
+    }
+    return store.is_trusted(workspace);
+}
+
 } // namespace ymh

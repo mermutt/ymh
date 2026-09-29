@@ -138,6 +138,11 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config  = options.config;
     runtime_options.root    = root;
+    std::error_code launch_error;
+    runtime_options.launch_dir = std::filesystem::current_path(launch_error);
+    if (launch_error) {
+        runtime_options.launch_dir = root;
+    }
     runtime_options.boot_id = mint_boot_id();
     runtime_options.provider_factory = make_provider_factory(options.provider_factory);
 

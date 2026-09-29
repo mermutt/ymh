@@ -68,13 +68,16 @@ std::string sandbox_mode_name(SandboxMode mode) {
 
 std::shared_ptr<SkillCatalog> make_skill_catalog(const Config& config,
                                                  const ExecutionEnvironment& environment,
+                                                 const std::filesystem::path& launch_dir,
                                                  Logger& logger) {
     std::vector<SkillRoot> roots = default_skill_roots();
     roots.push_back(SkillRoot{environment.root() / ".ymh" / "skills", SkillSource::Workspace,
                               SkillTrust::Untrusted});
     SkillCatalogConfig catalog_config = to_skill_catalog_config(config);
     catalog_config.workspace_trusted =
-        WorkspaceTrustStore{}.is_trusted(environment.root());
+        workspace_tier_trusted(environment.root(), launch_dir,
+                               default_global_config_path().parent_path(),
+                               WorkspaceTrustStore{});
     auto catalog =
         std::make_shared<SkillCatalog>(catalog_config, environment, std::move(roots), logger);
     if (catalog->config().enabled) {
@@ -235,6 +238,7 @@ class WorkspaceRuntime::Impl {
 public:
     Impl(Config config,
          std::filesystem::path root,
+         std::filesystem::path launch_dir,
          std::unique_ptr<SessionStore> store,
          SessionPersistence* persistence,
          LLMProviderConfig provider_config,
@@ -258,7 +262,7 @@ public:
                    : nullptr),
           environment_(std::make_unique<LocalEnvironment>(
               root_, effective_sandbox_mode(config), tool_config_, pty_.get())),
-          skill_catalog_(make_skill_catalog(config, *environment_,
+          skill_catalog_(make_skill_catalog(config, *environment_, launch_dir,
                                             category_logger(LogCategory::Tool))),
           permission_config_(to_permission_config(config)),
           default_permission_preset_(default_permission_preset_name(config)),
@@ -634,8 +638,10 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
     }
 
     try {
+        const std::filesystem::path launch_dir =
+            options.launch_dir.empty() ? options.root : options.launch_dir;
         auto impl = std::make_unique<Impl>(std::move(options.config), std::move(options.root),
-                                           std::move(store), persistence,
+                                           launch_dir, std::move(store), persistence,
                                            std::move(provider_config), std::move(provider),
                                            std::move(providers),
                                            std::move(options.provider_factory),

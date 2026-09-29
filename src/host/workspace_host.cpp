@@ -486,8 +486,10 @@ HostExitCode WorkspaceHost::Impl::startup() {
         return HostExitCode::SocketPathTooLong;
     }
 
-    if (config_.foreground) {
-        saved_cwd_ = std::filesystem::current_path(error);
+    saved_cwd_ = std::filesystem::current_path(error);
+    if (error) {
+        saved_cwd_.clear();
+        error.clear();
     }
     if (::chdir(canonical_root_.c_str()) != 0) {
         return HostExitCode::StartupRejected;
@@ -541,6 +543,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config                = config_.config;
     runtime_options.root                  = canonical_root_;
+    runtime_options.launch_dir            = saved_cwd_;
     runtime_options.boot_id               = to_boot_id(boot_id_);
     runtime_options.attach_permission_gate = false;
     runtime_options.attach_permission_resolver = true;
