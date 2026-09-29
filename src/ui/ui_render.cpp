@@ -1518,7 +1518,41 @@ Element render_notice(const UiModel& model, const Theme& theme) {
            ftxui::clear_under | ftxui::center;
 }
 
-Element render_header(const UiModel& model, const Theme& theme) {
+// 67-D1: UTF-8-safe display-column truncation with a single-glyph ellipsis.
+// Returns `text` unchanged when it already fits `max_width` columns (or when the
+// budget is empty).
+std::string truncate_to_width(std::string_view text, int max_width) {
+    if (max_width <= 0) {
+        return {};
+    }
+    if (ftxui::string_width(std::string(text)) <= max_width) {
+        return std::string(text);
+    }
+    if (max_width == 1) {
+        return "…";
+    }
+    const int target = max_width - 1;
+    std::string kept;
+    int width = 0;
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const std::string_view glyph = glyph_at(text, index);
+        if (glyph.empty()) {
+            break;
+        }
+        const int glyph_width = ftxui::string_width(std::string(glyph));
+        if (width + glyph_width > target) {
+            break;
+        }
+        kept.append(glyph);
+        width += glyph_width;
+        index += glyph.size();
+    }
+    kept += "…";
+    return kept;
+}
+
+Element render_header(const UiModel& model, const Theme& theme, int width) {
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     std::string title = "ymh";
     if (workspace != model.workspaces.end() && !workspace->second.cwd.empty()) {
@@ -1539,6 +1573,14 @@ Element render_header(const UiModel& model, const Theme& theme) {
                 }
             }
         }
+    }
+    // 67-D1: a title up to 120 bytes can exceed a narrow terminal; truncate the
+    // right slot to the cells left of the workspace title so the header can
+    // never overflow or push the left slot off-screen.
+    if (!session_title.empty() && width > 0) {
+        const int inner = std::max(1, width - 2);
+        const int available = inner - ftxui::string_width(title) - 1;
+        session_title = truncate_to_width(session_title, available);
     }
     return ftxui::hbox({paint(ftxui::text(title), ftxui::Color::Cyan, theme) | ftxui::bold,
                         ftxui::filler(), ftxui::text(session_title)});
@@ -1996,7 +2038,7 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     }
 
     Elements above;
-    above.push_back(render_header(model, theme));
+    above.push_back(render_header(model, theme, size.width));
     if (!model.subagent_path.empty()) {
         above.push_back(render_subagent_breadcrumb(model, theme));
     }
