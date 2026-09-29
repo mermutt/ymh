@@ -185,6 +185,37 @@ private:
     return std::make_shared<TranscriptViewportNode>(std::move(child), out);
 }
 
+// 60-D10 (Rev 6): reports the transcript's laid-out content height during
+// `SetBox`, mirroring `TranscriptViewportNode`. The pre-layout
+// `ComputeRequirement()` runs with FTXUI's default flexbox width
+// (`flexbox.cpp` `asked_ = 6000`), so a `paragraph`/`hflow` that wraps to the
+// pane measures short; this node sits inside the `yframe`, whose layout recomputes
+// the requirement with the real pane width, so `requirement_.min_y` is the
+// wrapped row count `Frame::SetBox` scrolls in.
+class TranscriptContentNode final : public ftxui::Node {
+public:
+    TranscriptContentNode(Element child, TranscriptMetrics* out)
+        : ftxui::Node(Elements{std::move(child)}), out_(out) {}
+
+    void SetBox(ftxui::Box box) override {
+        ftxui::Node::SetBox(box);
+        if (out_ != nullptr) {
+            // The final `ComputeRequirement()` (run with the flexbox width set by
+            // the `yframe`) carries the wrapped height; the assigned box is the
+            // frame's one-row-larger internal box, so `min_y` is the exact count.
+            out_->content_rows = std::max(1, requirement_.min_y);
+        }
+        children_[0]->SetBox(box);
+    }
+
+private:
+    TranscriptMetrics* out_;
+};
+
+[[nodiscard]] Element wrap_content_metrics(Element child, TranscriptMetrics* out) {
+    return std::make_shared<TranscriptContentNode>(std::move(child), out);
+}
+
 Element spans_to_element(const StyledLine& line, const Theme& theme) {
     Elements cells;
     cells.reserve(line.size());
@@ -500,11 +531,17 @@ Element render_conversation(const SessionUiState* active, const RenderContext& c
     }
     Element content = ftxui::vbox(std::move(rows));
     content->ComputeRequirement();
-    const int measured = std::max(1, content->requirement().min_y);
+    const int pre_layout = std::max(1, content->requirement().min_y);
     if (out != nullptr) {
-        out->content_rows = measured;
+        content = wrap_content_metrics(std::move(content), out);
     }
-    Element framed = std::move(content) | row_focus(active->scroll.focus_row(measured)) |
+    // 60-D2 (Rev 6): the row space shared with `Frame::SetBox` is the laid-out
+    // (wrapped) height, so the focus row is derived from the last true
+    // measurement stored on the scroll model, not the pre-layout
+    // `ComputeRequirement()` height that the default flexbox width under-counts.
+    const int focus_content =
+        active->scroll.content_rows > 0 ? active->scroll.content_rows : pre_layout;
+    Element framed = std::move(content) | row_focus(active->scroll.focus_row(focus_content)) |
                      ftxui::yframe | ftxui::vscroll_indicator;
     return out != nullptr ? wrap_viewport_metrics(std::move(framed), out) : std::move(framed);
 }
