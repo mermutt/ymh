@@ -38,6 +38,8 @@ add_executable(ymh_tests
     unit/errata53_ui_test.cpp
     unit/errata57_ui_test.cpp
     unit/errata58_ui_test.cpp
+    unit/errata66_ui_test.cpp
+    unit/errata67_ui_test.cpp
     unit/agent_loop_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp
@@ -143,6 +145,10 @@ target_link_libraries(fake_mcp_server PRIVATE nlohmann_json::nlohmann_json ymh::
 target_include_directories(ymh_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        # 66-U7: the private FTXUI input-parser header, so the bracketed-paste
+        # root-cause mapping is tested against the real parser. Dev-side only;
+        # the path tracks the FetchContent source tree.
+        ${ftxui_SOURCE_DIR}/src
 )
 
 target_compile_definitions(ymh_tests PRIVATE
