@@ -628,6 +628,115 @@ TEST(HostLifecycleTest, ReapIfStaleClearsStaleClaim) {
     EXPECT_FALSE(refreshed->host.has_value());
 }
 
+// 69-host-startup-diagnosability-errata: the user must never see a bare
+// `StartupRejected`. The child's errno (log-sink open / execve) and the
+// daemon's bounded stderr tail must reach the readiness HostError.
+std::filesystem::path write_daemon_script(const std::filesystem::path& directory,
+                                          const std::string&         body) {
+    const std::filesystem::path script = directory / "fake-daemon.sh";
+    std::ofstream(script, std::ios::binary) << "#!/bin/sh\n" << body << "exit 16\n";
+    std::filesystem::permissions(
+        script,
+        std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
+            std::filesystem::perms::others_read,
+        std::filesystem::perm_options::replace);
+    return script;
+}
+
+std::string ensure_running_failure(ForkExecLauncher& launcher, WorkspaceRegistry& registry,
+                                   const WorkspaceId& workspace) {
+    HostLifecycle lifecycle(launcher, registry);
+    try {
+        (void)lifecycle.ensureRunning(
+            workspace, AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                      protocol::ClientRole::Supervisor});
+    } catch (const std::exception& error) {
+        return error.what();
+    }
+    return {};
+}
+
+TEST(StartupDiagnosability, ExecveFailureSurfacesErrno) {
+    ShortTempRoot root("ymh-startup-execve");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "execve");
+
+    ForkExecLauncher launcher(canonical / "ymh-missing-executable");
+    HostLifecycle    lifecycle(launcher, *registry);
+    try {
+        (void)lifecycle.ensureRunning(
+            record.id, AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                      protocol::ClientRole::Supervisor});
+        FAIL() << "expected HostError";
+    } catch (const HostError& error) {
+        const std::string message = error.what();
+        EXPECT_EQ(error.code(), protocol::HostErrorCode::HostUnreachable);
+        EXPECT_NE(message.find("execve failed"), std::string::npos) << message;
+        EXPECT_NE(message.find(std::strerror(ENOENT)), std::string::npos) << message;
+        EXPECT_NE(message.find("ldd"), std::string::npos) << message;
+        EXPECT_NE(message,
+                  "daemon did not become ready: startup was rejected (StartupRejected)")
+            << message;
+    }
+}
+
+TEST(StartupDiagnosability, UnwritableLogSinkSurfacesDistinctReason) {
+    ShortTempRoot root("ymh-startup-logsink");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::filesystem::create_directories(canonical / ".ymh" / "host.log");
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "logsink");
+
+    ForkExecLauncher launcher(canonical / "ymh-any");
+    HostLifecycle    lifecycle(launcher, *registry);
+    try {
+        (void)lifecycle.ensureRunning(
+            record.id, AttachIdentity{protocol::ClientInstanceId{generate_uuid_v4()},
+                                      protocol::ClientRole::Supervisor});
+        FAIL() << "expected HostError";
+    } catch (const HostError& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("log sink"), std::string::npos) << message;
+        EXPECT_NE(message.find(std::strerror(EISDIR)), std::string::npos) << message;
+        EXPECT_EQ(message.find("execve failed"), std::string::npos) << message;
+    }
+}
+
+TEST(StartupDiagnosability, LogTailSurfacesDaemonStderr) {
+    ShortTempRoot root("ymh-startup-tail");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "tail");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical, "echo 'fatal: simulated daemon startup failure: missing widget' >&2\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+    EXPECT_NE(message.find("simulated daemon startup failure"), std::string::npos) << message;
+    EXPECT_NE(message.find("startup was rejected (StartupRejected)"), std::string::npos)
+        << message;
+}
+
+TEST(StartupDiagnosability, RedactionDropsSecretLines) {
+    ShortTempRoot root("ymh-startup-redact");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "redact");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical, "echo 'api_key=sk-should-never-appear' >&2\n"
+                   "echo 'benign loader marker' >&2\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+    EXPECT_NE(message.find("benign loader marker"), std::string::npos) << message;
+    EXPECT_EQ(message.find("sk-should-never-appear"), std::string::npos) << message;
+}
+
 TEST(WorkspaceHostLease, FakeStoreDaemonSessionLifecycleDoesNotThrow) {
     ShortTempRoot root("ymh-host-lease-fake");
     const std::filesystem::path canonical = std::filesystem::canonical(root.path());
