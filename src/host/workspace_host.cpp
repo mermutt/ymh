@@ -18,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -153,10 +154,15 @@ void write_child_diagnostic(int fd, const char* text) noexcept {
 }
 
 constexpr std::size_t kMaxChildDiagnosticBytes = 1024;
-constexpr std::size_t kMaxLogTailReadBytes      = 4096;
+// 69-D8: the cause is found by scanning this bounded window of the daemon's log
+// sink (content, not position). The window is larger than the 69-D10 context
+// bound so a cause line followed by benign shutdown noise is still found.
+constexpr std::size_t kMaxLogScanBytes          = 256 * 1024;
 constexpr std::size_t kMaxLogTailLines          = 4;
 constexpr std::size_t kMaxLogTailLineBytes      = 240;
 constexpr std::size_t kMaxLogTailBytes          = 512;
+// 69-D8: every daemon-side startup diagnostic is emitted with this prefix.
+constexpr std::string_view kHostDiagnosticPrefix = "ymh --host: ";
 
 // 69-D7: the supervisor reads the pipe read end once, on the reaped path. The
 // fd is non-blocking, so a lingering writer yields EAGAIN rather than a stall.
@@ -204,10 +210,10 @@ bool line_has_secret_marker(const std::string& line) {
     return false;
 }
 
-// 69-D3/69-D6: bounded (<=4 non-empty lines / <=512 bytes / <=240 bytes/line),
-// redacted tail of the daemon's stderr sink. This is the channel that carries
-// the dynamic loader's own `error while loading shared libraries: …` text.
-std::string sanitize_log_tail(const std::string& raw) {
+// 69-D6/69-D10: split the raw tail into non-empty, redacted, per-line-bounded
+// lines. Secret-shaped lines are dropped whole; position is preserved so the
+// caller selects the cause by content and the context by position.
+std::vector<std::string> sanitize_log_lines(const std::string& raw) {
     std::vector<std::string> lines;
     std::string              line;
     const auto               flush = [&lines, &line]() {
@@ -230,29 +236,18 @@ std::string sanitize_log_tail(const std::string& raw) {
         }
     }
     flush();
-
-    std::string out;
-    const std::size_t start = lines.size() > kMaxLogTailLines ? lines.size() - kMaxLogTailLines : 0;
-    for (std::size_t index = start; index < lines.size(); ++index) {
-        if (!out.empty()) {
-            out += " / ";
-        }
-        out += lines[index];
-    }
-    if (out.size() > kMaxLogTailBytes) {
-        out.resize(kMaxLogTailBytes);
-    }
-    return out;
+    return lines;
 }
 
-std::string read_log_sink_tail(const std::filesystem::path& path) {
+std::vector<std::string> read_log_sink_lines(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
         return {};
     }
     stream.seekg(0, std::ios::end);
     const std::streamoff size = stream.tellg();
-    const std::streamoff want = std::min<std::streamoff>(size, kMaxLogTailReadBytes);
+    const std::streamoff want =
+        std::min<std::streamoff>(size, static_cast<std::streamoff>(kMaxLogScanBytes));
     if (want <= 0) {
         return {};
     }
@@ -260,7 +255,32 @@ std::string read_log_sink_tail(const std::filesystem::path& path) {
     std::string raw(static_cast<std::size_t>(want), '\0');
     stream.read(raw.data(), static_cast<std::streamsize>(want));
     raw.resize(static_cast<std::size_t>(stream.gcount()));
-    return sanitize_log_tail(raw);
+    return sanitize_log_lines(raw);
+}
+
+// 69-D8: the cause is selected by content, never by position. The dynamic
+// loader's `error while loading shared libraries` line wins; otherwise the last
+// daemon startup diagnostic (`ymh --host:`) wins. Position picks only context.
+std::optional<std::size_t> select_primary_cause(const std::vector<std::string>& lines) {
+    std::optional<std::size_t> loader;
+    std::optional<std::size_t> daemon;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (lines[index].find("error while loading shared libraries") != std::string::npos) {
+            loader = index;
+        }
+        if (lines[index].find(kHostDiagnosticPrefix) != std::string::npos) {
+            daemon = index;
+        }
+    }
+    return loader.has_value() ? loader : daemon;
+}
+
+std::string without_host_diagnostic_prefix(const std::string& line) {
+    const std::size_t position = line.find(kHostDiagnosticPrefix);
+    if (position == std::string::npos) {
+        return line;
+    }
+    return line.substr(position + kHostDiagnosticPrefix.size());
 }
 
 // 69-D4: human-readable name for the daemon's own startup diagnostic.
@@ -282,20 +302,57 @@ const char* runtime_error_name(WorkspaceRuntimeErrorCode code) noexcept {
 
 std::string describe_host_exit(int status);
 
-// 69-D4/69-D7: the readiness reason is the code text plus a specific cause.
-// The pipe (pre-exec failure) is authoritative; the daemon's stderr tail is the
-// fallback for a post-exec failure (including the loader's exit-127 message).
+// 69-D4/69-D7/69-D9/69-D10: the readiness body is the code text plus a
+// multi-line, labelled block. The cause leads on its own `reason:` line; the
+// bounded, redacted log context follows under `recent daemon log:` with its
+// newlines preserved. The pipe (pre-exec failure) is authoritative and the log
+// is never mixed in beside it.
 std::string startup_failure_reason(int status, int diagnostic_fd,
                                    const std::filesystem::path& log_sink) {
-    std::string reason   = describe_host_exit(status);
-    std::string specific = read_child_diagnostic(diagnostic_fd);
-    if (specific.empty()) {
-        specific = read_log_sink_tail(log_sink);
+    const std::string pipe_reason = read_child_diagnostic(diagnostic_fd);
+    std::string       body        = describe_host_exit(status);
+    if (!pipe_reason.empty()) {
+        body += "\n  reason: " + pipe_reason;
+        return body;
     }
-    if (!specific.empty()) {
-        reason += ": " + specific;
+
+    const std::vector<std::string> lines = read_log_sink_lines(log_sink);
+    const std::optional<std::size_t> cause = select_primary_cause(lines);
+    if (cause.has_value()) {
+        body += "\n  reason: " + without_host_diagnostic_prefix(lines[*cause]);
     }
-    return reason;
+
+    std::vector<std::string> context;
+    std::size_t              context_bytes = 0;
+    for (std::size_t index = lines.size(); index-- > 0;) {
+        if (context.size() >= kMaxLogTailLines) {
+            break;
+        }
+        if (cause.has_value() && index == *cause) {
+            continue;
+        }
+        if (context_bytes + lines[index].size() > kMaxLogTailBytes) {
+            break;
+        }
+        context_bytes += lines[index].size();
+        context.push_back(lines[index]);
+    }
+    std::reverse(context.begin(), context.end());
+    if (!context.empty()) {
+        body += "\n  recent daemon log:";
+        for (const std::string& line : context) {
+            body += "\n    " + line;
+        }
+    }
+    const std::size_t candidates = lines.size() - (cause.has_value() ? 1u : 0u);
+    if (candidates > context.size()) {
+        std::string log_path = log_sink.string();
+        if (log_path.size() > kMaxLogTailLineBytes) {
+            log_path.resize(kMaxLogTailLineBytes);
+        }
+        body += "\n  daemon log: " + log_path;
+    }
+    return body;
 }
 
 std::unique_ptr<HostConnection> connect_to(const std::filesystem::path& socket_path) {

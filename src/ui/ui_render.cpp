@@ -895,6 +895,27 @@ Element render_context_bar(std::uint64_t used, std::uint64_t window, const Theme
     return ftxui::hbox(std::move(cells));
 }
 
+// 69-D11: `ftxui::text()` drops an embedded '\n' and concatenates the segments
+// on one row, so a multi-line notice (a daemon startup failure) is stacked
+// explicitly; the caller's chrome budget reserves the extra rows.
+Element render_notice_block(const std::string& notice) {
+    if (notice.find('\n') == std::string::npos) {
+        return ftxui::text(notice);
+    }
+    Elements    rows;
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t end = notice.find('\n', start);
+        rows.push_back(ftxui::text(notice.substr(
+            start, end == std::string::npos ? std::string::npos : end - start)));
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return ftxui::vbox(std::move(rows));
+}
+
 Element render_status(const UiModel& model, const SessionUiState* active, const Theme& theme,
                       int width) {
     const AggregateStatus& counts = model.aggregate.current;
@@ -938,7 +959,7 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
             left += " · no session";
             return ftxui::hbox({ftxui::text(fit(std::move(left))), ftxui::filler(), aggregate});
         }
-        return ftxui::hbox({ftxui::text(notice), ftxui::filler(), aggregate});
+        return ftxui::hbox({render_notice_block(notice), ftxui::filler(), aggregate});
     }
 
     const StatusModel& status = active->status;
@@ -1021,7 +1042,9 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     const bool include_context  = try_include(context_width);
     const bool include_note =
         !status.note.empty() && try_include(ftxui::string_width(status.note));
-    const bool include_notice = !notice.empty() && try_include(ftxui::string_width(notice));
+    const bool notice_is_block = notice.find('\n') != std::string::npos;
+    const bool include_notice =
+        !notice_is_block && !notice.empty() && try_include(ftxui::string_width(notice));
     const bool include_tps    = try_include(ftxui::string_width(tps));
     const bool include_state =
         !state.empty() && try_include(ftxui::string_width(state));
@@ -1084,7 +1107,12 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
         append_segment(ftxui::text(notice));
     }
 
-    return ftxui::hbox({ftxui::hbox(std::move(left_cells)), ftxui::filler(), aggregate});
+    Element status_line =
+        ftxui::hbox({ftxui::hbox(std::move(left_cells)), ftxui::filler(), aggregate});
+    if (notice_is_block) {
+        return ftxui::vbox({std::move(status_line), render_notice_block(notice)});
+    }
+    return status_line;
 }
 
 Element render_dialog(const UiModel& model, const Theme& theme) {
