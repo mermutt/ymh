@@ -3429,4 +3429,43 @@ TEST(UiRenderGolden, UI58_G8_SubagentStatusLinePrefix) {
     EXPECT_NE(finished.find("0 active · 0 waiting"), std::string::npos);
 }
 
+// 69-D11 (69-F10/69-I12): FTXUI's `text()` drops an embedded '\n' and joins the
+// segments, so a multi-line startup-failure notice must render on separate rows.
+TEST(UiRenderGolden, UI69_MultiLineStartupNoticeRendersOnSeparateRows) {
+    UiModel model;
+    model.pushNotice(
+        "daemon did not become ready: startup was rejected (StartupRejected)\n"
+        "  reason: no LLM provider is configured");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    const std::size_t first  = rendered.find("startup was rejected");
+    const std::size_t second = rendered.find("reason: no LLM provider");
+    ASSERT_NE(first, std::string::npos) << rendered;
+    ASSERT_NE(second, std::string::npos) << rendered;
+    const std::size_t newline = rendered.find('\n', first);
+    ASSERT_NE(newline, std::string::npos) << rendered;
+    EXPECT_GT(second, newline) << rendered;
+}
+
+// 69-D11 (69-F10b/69-I12): with an active session the status line is single-line
+// and width-fitted, so the multi-line notice is rendered as a row below it and
+// is not silently dropped.
+TEST(UiRenderGolden, UI69_MultiLineStartupNoticeRendersWithActiveSession) {
+    UiModel model = build_model();
+    model.pushNotice(
+        "daemon did not become ready: startup was rejected (StartupRejected)\n"
+        "  reason: no LLM provider is configured");
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    const std::size_t first  = rendered.find("startup was rejected");
+    const std::size_t second = rendered.find("reason: no LLM provider");
+    ASSERT_NE(first, std::string::npos) << rendered;
+    ASSERT_NE(second, std::string::npos) << rendered;
+    const std::size_t newline = rendered.find('\n', first);
+    ASSERT_NE(newline, std::string::npos) << rendered;
+    EXPECT_GT(second, newline) << rendered;
+}
+
 } // namespace

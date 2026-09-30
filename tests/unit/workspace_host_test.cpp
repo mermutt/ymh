@@ -737,6 +737,122 @@ TEST(StartupDiagnosability, RedactionDropsSecretLines) {
     EXPECT_EQ(message.find("sk-should-never-appear"), std::string::npos) << message;
 }
 
+// 69-D8/69-D9/69-I10/69-I11/69-I13: the cause is selected by content (the
+// `ymh --host:` diagnostic), leads the message, and is never joined with ` / `
+// or buried under the trailing shutdown noise that follows it in the sink.
+TEST(StartupDiagnosability, SpecificReasonLeadsOverTrailingNoise) {
+    ShortTempRoot root("ymh-startup-reason-first");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "reason-first");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical,
+        "echo 'ymh --host: startup rejected: no LLM provider is configured "
+        "(provider setup failed)' >&2\n"
+        "i=0\n"
+        "while [ $i -lt 20 ]; do\n"
+        "  echo \"2026-09-30 16:41:42.927 [tool] [warning] noise line $i\" >&2\n"
+        "  i=$((i+1))\n"
+        "done\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+
+    const std::size_t reason  = message.find("reason: startup rejected: no LLM provider");
+    const std::size_t context = message.find("recent daemon log:");
+    ASSERT_NE(reason, std::string::npos) << message;
+    ASSERT_NE(context, std::string::npos) << message;
+    EXPECT_LT(reason, context) << message;
+    EXPECT_EQ(message.find("ymh --host:"), std::string::npos) << message;
+    EXPECT_EQ(message.find(" / "), std::string::npos) << message;
+    EXPECT_NE(message.find("\n  reason: "), std::string::npos) << message;
+    EXPECT_NE(message.find("\n  recent daemon log:\n    "), std::string::npos) << message;
+}
+
+// 69-D9/69-I11: the message is a labelled multi-line block, not one line.
+TEST(StartupDiagnosability, MessageIsMultiLineIndentedAndLabelled) {
+    ShortTempRoot root("ymh-startup-multiline");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "multiline");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical,
+        "echo 'ymh --host: startup rejected: cannot create state dir /ws/.ymh: "
+        "Permission denied' >&2\n"
+        "echo 'warning one' >&2\n"
+        "echo 'warning two' >&2\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+
+    const std::size_t newlines = static_cast<std::size_t>(
+        std::count(message.begin(), message.end(), '\n'));
+    EXPECT_GE(newlines, 3u) << message;
+    EXPECT_NE(message.find("\n  reason: "), std::string::npos) << message;
+    EXPECT_NE(message.find("\n  recent daemon log:\n    "), std::string::npos) << message;
+}
+
+// 69-D10/69-F11: a very long tail stays bounded and still yields the cause.
+TEST(StartupDiagnosability, LongTailIsBounded) {
+    ShortTempRoot root("ymh-startup-longtail");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "longtail");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical,
+        "echo 'ymh --host: runtime setup failed (ProviderSetupFailed): boom' >&2\n"
+        "i=0\n"
+        "while [ $i -lt 500 ]; do\n"
+        "  printf '%0300d\\n' $i >&2\n"
+        "  i=$((i+1))\n"
+        "done\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+
+    EXPECT_NE(message.find("reason: runtime setup failed (ProviderSetupFailed): boom"),
+              std::string::npos) << message;
+    EXPECT_LT(message.size(), 2048u) << message.size();
+    std::size_t indented = 0;
+    std::size_t cursor   = 0;
+    while ((cursor = message.find("\n    ", cursor)) != std::string::npos) {
+        ++indented;
+        const std::size_t line_start = cursor + 5;
+        const std::size_t line_end   = message.find('\n', line_start);
+        const std::size_t length =
+            (line_end == std::string::npos ? message.size() : line_end) - line_start;
+        EXPECT_LE(length, 240u) << message;
+        cursor = line_start;
+    }
+    EXPECT_LE(indented, 4u) << message;
+    EXPECT_GE(indented, 1u) << message;
+}
+
+// 69-D8: the dynamic loader's line outranks a daemon diagnostic when both are
+// present in the sink (the loader cause is the more specific failure).
+TEST(StartupDiagnosability, LoaderLineOutranksDaemonDiagnostic) {
+    ShortTempRoot root("ymh-startup-loader-priority");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "loader-priority");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical,
+        "echo 'ymh --host: startup rejected: not the cause' >&2\n"
+        "echo 'error while loading shared libraries: libfoo.so: cannot open shared object "
+        "file' >&2\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+    EXPECT_NE(message.find("reason: error while loading shared libraries"),
+              std::string::npos) << message;
+    EXPECT_EQ(message.find("reason: startup rejected: not the cause"), std::string::npos)
+        << message;
+}
+
 TEST(WorkspaceHostLease, FakeStoreDaemonSessionLifecycleDoesNotThrow) {
     ShortTempRoot root("ymh-host-lease-fake");
     const std::filesystem::path canonical = std::filesystem::canonical(root.path());
