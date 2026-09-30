@@ -41,6 +41,7 @@
 #include "ymh/llm/redaction.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/logging.hpp"
+#include "ymh/core/version.hpp"
 #include "ymh/execution/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
@@ -51,10 +52,6 @@
 #include "ymh/ui/session_catalog.hpp"
 #include "ymh/ui/supervisor.hpp"
 #include "ymh/ui/supervisor_presence.hpp"
-
-#ifndef YMH_VERSION
-#define YMH_VERSION "0.0.0"
-#endif
 
 namespace ymh {
 

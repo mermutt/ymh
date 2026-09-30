@@ -19,6 +19,7 @@
 #include <ftxui/screen/string.hpp>
 #include <nlohmann/json.hpp>
 
+#include "ymh/core/version.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/ui/render/diff_renderer.hpp"
 #include "ymh/ui/render/markdown_renderer.hpp"
@@ -1619,7 +1620,8 @@ std::string truncate_to_width(std::string_view text, int max_width) {
 
 Element render_header(const UiModel& model, const Theme& theme, int width) {
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
-    std::string title = "ymh";
+    // 72-D3: the top-left product mark carries the build version.
+    std::string title = std::string{"ymh (v"} + YMH_VERSION + ")";
     if (workspace != model.workspaces.end() && !workspace->second.cwd.empty()) {
         title += " · " + workspace->second.cwd;
     }

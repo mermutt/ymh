@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(
     ymh
-    VERSION 0.1.0
+    VERSION 0.001
     DESCRIPTION "Terminal coding-agent harness"
     LANGUAGES CXX
 )
@@ -767,6 +767,10 @@ target_link_libraries(ymh_ui
         Threads::Threads
         ymh::warnings
 )
+
+# 72-A2: the header renderer (`src/ui/ui_render.cpp`) reads YMH_VERSION; keep
+# the same single source (PROJECT_VERSION) as the CLI and the executable.
+target_compile_definitions(ymh_ui PRIVATE YMH_VERSION="${PROJECT_VERSION}")
 
 # ---------------------------------------------------------------------------
 # CLI library (§41, §42)
