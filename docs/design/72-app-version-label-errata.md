@@ -1,17 +1,19 @@
 # 72 — App Version Label Errata
 
 ```
-Status: implemented (self-verified) · reviewer: version-label (team) ·
-        gate: presentation-only, no design gate
+Status: verified (Rev 1) · reviewer: Oracle gate (round 2) · gate: 0 HIGH / 0 MEDIUM
+Verification status: Oracle gate round 2 PASS — 0 HIGH / 0 MEDIUM; round 1 (2 MEDIUM) fixed in Rev 1
 Revision: 1
-Component: 72 (errata) — amends 10-supervisor-tui.md §8.2 (the header render),
-           67-session-rename-display-errata.md (67-D1 truncation math),
-           17-ui-transcript-errata.md (RB-10 right-aligned title), and the
-           build-version plumbing shared by 41/44 (`ymh --version`/`--version`)
+Component: 72 (errata) — amends 10-supervisor-tui.md §8.1 (the component
+           hierarchy's header row), 67-session-rename-display-errata.md (67-D1
+           truncation math), 17-ui-transcript-errata.md (RB-10 right-aligned
+           title), 45-ui-interaction-errata.md §9 (45-D7, the `/status` version
+           line), and the build-version plumbing (`ymh --version`)
 Depends on: 67-session-rename-display-errata.md (verified + implemented),
             68-terminal-color-capability-errata.md (implemented),
             10-supervisor-tui.md (verified),
-            17-ui-transcript-errata.md (verified)
+            17-ui-transcript-errata.md (verified),
+            45-ui-interaction-errata.md (verified; the `/status` version line, 45-D7)
 Scope: the app version shown in the TUI header's top-left product label, and the
        single compile-time source of that version
 ```
@@ -26,7 +28,8 @@ This errata changes **presentation only**: the header's left slot, and the CMake
 plumbing that makes the version visible to the renderer. It changes no wire
 method, event, persistence row, session/title semantics, or keyboard handling.
 
-**Precedence.** `10 §8.2` owns `render_header`; `67-D1` owns the right-slot
+**Precedence.** `10 §8.1` owns the header row in the component hierarchy (the
+`render_header` widget); `67-D1` owns the right-slot
 truncation arithmetic; this errata only extends the *left* slot's fixed prefix
 and is therefore subordinate to both (the version is part of `title` and so is
 already counted by `67-D1`'s `string_width(title)` budget — see 72-I3).
@@ -35,10 +38,11 @@ already counted by `67-D1`'s `string_width(title)` budget — see 72-I3).
 
 | ID | Amends | Anchor | Change |
 |---|---|---|---|
-| 72-A1 | 10 §8.2 header / 67-D1 | `src/ui/ui_render.cpp:1621-1652` | the header left slot is `ymh (v<YMH_VERSION>)`, then ` · <cwd>` when a cwd is set |
-| 72-A2 | build-version plumbing | `CMakeLists.txt:3-8`, `:773`, `:816`, `:828`, new `ymh_ui` define | the top-level `project(ymh VERSION 0.001)` stays the single source; `YMH_VERSION` is now also compiled into `ymh_ui` (the header renderer's target) |
+| 72-A1 | 10 §8.1 header / 67-D1 | `src/ui/ui_render.cpp:1621-1652` | the header left slot is `ymh (v<YMH_VERSION>)`, then ` · <cwd>` when a cwd is set |
+| 72-A2 | build-version plumbing; `ymh --version`/`/status` output | `CMakeLists.txt:3-8`, `:773`, `:816`, `:828`, new `ymh_ui` define | sets the top-level `project(ymh VERSION 0.001)` — changed from `0.1.0`, so `ymh --version` and `/status` now read `0.001` — as the single source; `YMH_VERSION` is now also compiled into `ymh_ui` (the header renderer's target) |
 | 72-A3 | `src/cli/cli.cpp:55-57` | `include/ymh/core/version.hpp` | the `#ifndef YMH_VERSION` fallback is centralised in one header and included by both consumers |
 | 72-A4 | `tests/unit/ui_render_golden_test.cpp` | `:286`, `:877`, `:2109`, new `HeaderShowsVersionLabel` | pin the new label text and prove the test fails pre-change |
+| 72-A5 | 45-ui-interaction-errata.md §9.1/§9.2 (45-D7) | `docs/design/45-ui-interaction-errata.md:809-814`, `:848` | records the version-value change (`0.1.0` → `0.001`) and the single access point (`include/ymh/core/version.hpp`), and corrects the `/status` version account (the supervisor now reads the version) |
 
 ## 3. Version source of truth (decisions 72-D1, 72-D2)
 
@@ -70,7 +74,7 @@ non-CMake/editor builds:
 Body and callers (56-D6 / "new symbols are normative"): the macro has no
 runtime symbol; its concrete callers are `src/ui/ui_render.cpp` (label text,
 72-A1) and `src/cli/cli.cpp` (`options.version`, `ymh --version`; `:554`,
-`:1324`, `:1458`), which previously carried a duplicated local `#ifndef`.
+`:1328`, `:1462`), which previously carried a duplicated local `#ifndef`.
 
 **Non-hardcoding.** The literal `0.001` appears **only** in `CMakeLists.txt`
 (72-D1) and in the test assertion that pins the shipped string (72-U1). No
@@ -132,7 +136,7 @@ none (out of scope). Anchor: repo search of `src/ include/ tests/`, this spec §
 |---|---|---|
 | build/version string | `YMH_VERSION` from `PROJECT_VERSION` (72-D1) | **mirrored**: both derive the app version from the build system, not a hardcoded runtime literal. Anchor: 72-D1, `CMakeLists.txt:5`. |
 | version in the product header | `ymh (v<YMH_VERSION>)` left slot (72-D3) | **non-mirror, presentation**: dsh carries its version in CLI/`--version` output, not its TUI header; ymh additionally surfaces it top-left at the user's request. This is a deliberate ymh-local presentation choice with no architectural seam. Anchor: 72-D3. |
-| terminal window title | none (72 §5) | **non-mirror**: dsh and ymh both leave the terminal title unset in this codebase; adding one would require an OSC writer that no spec defines. Anchor: this spec §5. |
+| terminal window title | none (72 §5) | **mirror, absence**: neither dsh nor ymh sets a terminal window title in this codebase; adding one would require an OSC writer that no spec defines. Anchor: `src/ui/ui_render.cpp:1621-1652` (header render emits no OSC), 72-D3. |
 
 ## 9. Test plan
 

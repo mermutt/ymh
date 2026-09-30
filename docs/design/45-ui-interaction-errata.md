@@ -806,12 +806,13 @@ catalog) and §7.3 profile gating, `10` §9.2, `18` §4 (shared MCP schema).
 
 ### 9.1 Current state (verified)
 
-- **Version.** `project(ymh VERSION 0.1.0)` (`CMakeLists.txt:3-5`).
-  `YMH_VERSION` is defined **PRIVATE** to `ymh_cli` and `ymh` only
-  (`CMakeLists.txt:772`, `:784`); `ymh_ui` (which compiles `supervisor.cpp`,
-  `CMakeLists.txt:689-729`) does **not** receive it. `src/cli/cli.cpp:53-54`
-  provides a `"0.0.0"` fallback and prints it at `:1154-1156`. There is no
-  `version.hpp`. **The supervisor cannot read the version today.**
+- **Version.** `project(ymh VERSION 0.001)` (`CMakeLists.txt:3-5`) — the value
+  was `0.1.0` before 72-A2, which also records the change (72-A5). `YMH_VERSION`
+  is defined **PRIVATE** to `ymh_cli`, `ymh`, and `ymh_ui` (`CMakeLists.txt:816`,
+  `:828`, `:773`); the single access point is `include/ymh/core/version.hpp`
+  (72-D2). `ymh --version` prints `ymh 0.001` (`src/cli/cli.cpp:1328`), and the
+  supervisor reads the same value for the header label (72-A1) and `/status`.
+  **The supervisor can read the version.**
 - **Model.** `effective_model()` = `agent.model` if non-empty else `llm.model`
   (`include/ymh/config/config.hpp:314-315`, `src/config/config.cpp:1525-1530`);
   defaults `llm.model = "deepseek-flash"`, `agent.model = ""`
@@ -845,7 +846,7 @@ block to the active session (or a notice if none):
 
 ```text
 ymh status
-  version:  0.1.0
+  version:  0.001
   model:    deepseek-flash
   api:      ok | error: <bounded last_error> | unknown
   daemon:   attached (workspace: <title>) | connecting | detached | ...

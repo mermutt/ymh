@@ -127,6 +127,27 @@ TEST(Spec71D2, SkipsNonSkillEntriesAndAbsentSource) {
     EXPECT_FALSE(std::filesystem::exists(workspace.path() / "other" / "skills"));
 }
 
+TEST(Spec71D2, SymlinkedSkillMdAndDirectoryAreNotFollowed) {
+    test::TempWorkspace workspace("spec71_symlink");
+    const std::filesystem::path localcode = workspace.path() / "localcode";
+    const std::filesystem::path skills   = workspace.path() / "config" / "skills";
+
+    write_file(localcode / "skills" / "real" / "SKILL.md", "REAL\n");
+    const std::filesystem::path outside = workspace.path() / "outside.md";
+    write_file(outside, "OUTSIDE\n");
+    std::filesystem::create_directories(localcode / "skills" / "linked");
+    std::filesystem::create_symlink(outside, localcode / "skills" / "linked" / "SKILL.md");
+    std::filesystem::create_symlink(localcode / "skills" / "real",
+                                    localcode / "skills" / "linked-dir");
+
+    std::ostringstream err;
+    EXPECT_EQ(import_localcode_skills(localcode, skills, err), 1u) << err.str();
+    EXPECT_TRUE(std::filesystem::is_regular_file(skills / "real" / "SKILL.md"));
+    EXPECT_FALSE(std::filesystem::exists(skills / "linked"));
+    EXPECT_FALSE(std::filesystem::exists(skills / "linked-dir"));
+    EXPECT_NE(err.str().find("no regular SKILL.md"), std::string::npos);
+}
+
 TEST(Spec71D5, ImportedPermissionsSectionIsConsumed) {
     const nlohmann::json localcode = nlohmann::json::parse(R"JSON({
       "skip_permissions": true,
