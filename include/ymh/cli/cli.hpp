@@ -103,4 +103,16 @@ int run_cli(int argc, char** argv);
 // 25-D14: hard size bound on the localcode file read before prompting.
 inline constexpr std::size_t kLocalcodeImportMaxBytes = 4u * 1024u * 1024u;
 
+// 71-D1/D6: copies a localcode skills tree (`<localcode_dir>/skills/<name>/…`)
+// into the ymh user skills tier (`<skills_root>/<name>/…`), one directory per
+// skill, identified by a regular top-level `SKILL.md` (20-skills.md §3.2). A
+// skill's optional supporting files are copied too. Never overwrites an existing
+// destination file (stage temp + `link()`, 71-D3); an existing destination file
+// is skipped. A missing source or a directory without `SKILL.md` is skipped.
+// Returns the number of skill directories copied. `err` receives per-skill notes.
+[[nodiscard]] std::size_t import_localcode_skills(
+    const std::filesystem::path& localcode_dir,
+    const std::filesystem::path& skills_root,
+    std::ostream& err);
+
 } // namespace ymh

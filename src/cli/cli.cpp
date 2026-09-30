@@ -888,6 +888,121 @@ bool write_imported_config(const nlohmann::json& document,
     return true;
 }
 
+enum class InstallOutcome { Installed, Exists, Failed };
+
+// 71-D3 / 52-F21: install `source` at `target` without ever replacing an
+// existing file. Stage a 0600 temp beside the target, then `link()` it into
+// place; `link` fails EEXIST, closing the check-then-write race a bare rename
+// would leave open. Symlinks are never followed (the caller rejects them).
+InstallOutcome install_file_no_clobber(const std::filesystem::path& source,
+                                       const std::filesystem::path& target,
+                                       std::string& error) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(source, ec) || ec) {
+        error = "not a regular file";
+        return InstallOutcome::Failed;
+    }
+    std::filesystem::create_directories(target.parent_path(), ec);
+    if (ec) {
+        error = "cannot create '" + target.parent_path().string() + "': " + ec.message();
+        return InstallOutcome::Failed;
+    }
+
+    const std::filesystem::path temp = target.string() + ".import.tmp";
+    const auto                  open_temp = [&] {
+        return ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    };
+    int fd = open_temp();
+    if (fd < 0 && errno == EEXIST) {
+        (void)::unlink(temp.c_str());
+        fd = open_temp();
+    }
+    if (fd < 0) {
+        error = "cannot create temp file";
+        return InstallOutcome::Failed;
+    }
+
+    std::ifstream input{source, std::ios::binary};
+    bool          ok = static_cast<bool>(input);
+    char          buffer[16384];
+    while (ok && (input.read(buffer, static_cast<std::streamsize>(sizeof(buffer))) ||
+                  input.gcount() > 0)) {
+        const std::streamsize count   = input.gcount();
+        std::streamsize       written = 0;
+        while (written < count) {
+            const ssize_t count_written =
+                ::write(fd, buffer + written, static_cast<std::size_t>(count - written));
+            if (count_written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                ok = false;
+                break;
+            }
+            written += count_written;
+        }
+    }
+    if (input.bad()) {
+        ok = false;
+    }
+    if (::close(fd) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        (void)::unlink(temp.c_str());
+        error = "cannot write temp file";
+        return InstallOutcome::Failed;
+    }
+
+    if (::link(temp.c_str(), target.c_str()) != 0) {
+        const int link_errno = errno;
+        (void)::unlink(temp.c_str());
+        if (link_errno == EEXIST) {
+            return InstallOutcome::Exists;
+        }
+        error = "cannot install '" + target.string() + "': " + std::strerror(link_errno);
+        return InstallOutcome::Failed;
+    }
+    (void)::unlink(temp.c_str());
+    return InstallOutcome::Installed;
+}
+
+// Returns true iff at least one file was newly installed into `target`.
+bool copy_skill_directory(const std::filesystem::path& source,
+                          const std::filesystem::path& target, std::ostream& err) {
+    bool            installed_any = false;
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(source, ec), end; it != end;
+         it.increment(ec)) {
+        if (ec) {
+            err << "ymh: note: cannot read skill tree at '" << source.string() << "'\n";
+            break;
+        }
+        std::error_code entry_ec;
+        if (it->is_symlink(entry_ec) || entry_ec) {
+            continue;
+        }
+        if (!it->is_regular_file(entry_ec) || entry_ec) {
+            continue;
+        }
+        const std::filesystem::path relative =
+            std::filesystem::relative(it->path(), source, entry_ec);
+        if (entry_ec) {
+            continue;
+        }
+        std::string          reason;
+        const InstallOutcome outcome =
+            install_file_no_clobber(it->path(), target / relative, reason);
+        if (outcome == InstallOutcome::Installed) {
+            installed_any = true;
+        } else if (outcome == InstallOutcome::Failed) {
+            err << "ymh: note: skipping skill file '" << it->path().string() << "': " << reason
+                << "\n";
+        }
+    }
+    return installed_any;
+}
+
 } // namespace
 
 std::vector<std::string> daemon_override_flags(const CliInvocation& invocation) {
@@ -973,7 +1088,7 @@ bool maybe_import_localcode_config(const CliInvocation& invocation,
 
     out << "ymh: first run — no config at " << global_config.string() << ".\n"
         << "     Found localcode settings at " << localcode.string() << ".\n"
-        << "     Import MCP servers, model parameters, API keys, and permission rules?\n"
+        << "     Import MCP servers, model parameters, API keys, permission rules, and skills?\n"
         << "     [Y/n] ";
     out.flush();
     if (!prompt_import_yes(in, out)) {
@@ -995,7 +1110,47 @@ bool maybe_import_localcode_config(const CliInvocation& invocation,
     if (!validate_imported_mcp(result->document, *localcode_doc, global_config, err)) {
         return false;
     }
-    return write_imported_config(result->document, global_config, err);
+    if (!write_imported_config(result->document, global_config, err)) {
+        return false;
+    }
+    (void)import_localcode_skills(localcode.parent_path(),
+                                  global_config.parent_path() / "skills", err);
+    return true;
+}
+
+std::size_t import_localcode_skills(const std::filesystem::path& localcode_dir,
+                                    const std::filesystem::path& skills_root,
+                                    std::ostream& err) {
+    const std::filesystem::path source = localcode_dir / "skills";
+    std::error_code             ec;
+    if (!std::filesystem::is_directory(source, ec) || ec) {
+        return 0;
+    }
+    std::filesystem::directory_iterator iterator(source, ec);
+    if (ec) {
+        return 0;
+    }
+
+    std::size_t copied = 0;
+    for (const std::filesystem::directory_entry& entry : iterator) {
+        std::error_code entry_ec;
+        if (entry.is_symlink(entry_ec) || entry_ec) {
+            continue;
+        }
+        if (!entry.is_directory(entry_ec) || entry_ec) {
+            continue;
+        }
+        const std::filesystem::path skill_md = entry.path() / "SKILL.md";
+        if (!std::filesystem::is_regular_file(skill_md, entry_ec) || entry_ec) {
+            err << "ymh: note: skipping skill directory '" << entry.path().string()
+                << "': no regular SKILL.md\n";
+            continue;
+        }
+        if (copy_skill_directory(entry.path(), skills_root / entry.path().filename(), err)) {
+            ++copied;
+        }
+    }
+    return copied;
 }
 
 CliInvocation parse_cli(const std::vector<std::string>& args) {
