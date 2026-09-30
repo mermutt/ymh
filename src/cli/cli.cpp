@@ -1137,8 +1137,12 @@ std::size_t import_localcode_skills(const std::filesystem::path& localcode_dir,
         if (!entry.is_directory(entry_ec) || entry_ec) {
             continue;
         }
-        const std::filesystem::path skill_md = entry.path() / "SKILL.md";
-        if (!std::filesystem::is_regular_file(skill_md, entry_ec) || entry_ec) {
+        const std::filesystem::path      skill_md = entry.path() / "SKILL.md";
+        // 71-D2/71-I4: a symlinked `SKILL.md` is not a regular file and is not
+        // followed (mirrors `copy_skill_directory`'s symlink skip).
+        const std::filesystem::file_status skill_status =
+            std::filesystem::symlink_status(skill_md, entry_ec);
+        if (entry_ec || !std::filesystem::is_regular_file(skill_status)) {
             err << "ymh: note: skipping skill directory '" << entry.path().string()
                 << "': no regular SKILL.md\n";
             continue;

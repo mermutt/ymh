@@ -105,7 +105,7 @@ inline constexpr std::size_t kLocalcodeImportMaxBytes = 4u * 1024u * 1024u;
 
 // 71-D1/D6: copies a localcode skills tree (`<localcode_dir>/skills/<name>/…`)
 // into the ymh user skills tier (`<skills_root>/<name>/…`), one directory per
-// skill, identified by a regular top-level `SKILL.md` (20-skills.md §3.2). A
+// skill, identified by a regular top-level `SKILL.md` (20-skills.md §2.1). A
 // skill's optional supporting files are copied too. Never overwrites an existing
 // destination file (stage temp + `link()`, 71-D3); an existing destination file
 // is skipped. A missing source or a directory without `SKILL.md` is skipped.
