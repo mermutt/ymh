@@ -139,6 +139,47 @@ McpServerConfig stdio_server(std::string id) {
     return server;
 }
 
+class ThrowingManagerClient final : public ymh::McpClient {
+public:
+    ThrowingManagerClient(McpServerConfig config, McpErrorCode code, std::string message)
+        : id_(config.id), code_(code), message_(std::move(message)) {}
+
+    const ymh::McpServerId& id() const noexcept override { return id_; }
+    McpServerState state() const noexcept override { return state_; }
+
+    ymh::Task<void> start(ymh::CancellationToken) override {
+        state_ = McpServerState::Failed;
+        throw ymh::McpError{code_, message_};
+    }
+
+    ymh::Task<std::vector<McpToolInfo>> listTools(ymh::CancellationToken) override {
+        return ymh::Task<std::vector<McpToolInfo>>(std::vector<McpToolInfo>{});
+    }
+
+    ymh::Task<ymh::McpCallResult> callTool(std::string_view, const nlohmann::json&,
+                                           const ymh::McpCallOptions&,
+                                           ymh::CancellationToken) override {
+        return ymh::Task<ymh::McpCallResult>(ymh::McpCallResult{});
+    }
+
+    std::optional<CallSlot> tryAcquireCallSlot() override { return CallSlot([] {}); }
+    ymh::Task<bool> ping() override { return ymh::Task<bool>{true}; }
+    ymh::Task<void> shutdown(std::chrono::milliseconds) override {
+        state_ = McpServerState::Stopped;
+        return {};
+    }
+    void setNotificationHandler(
+        std::function<void(std::string_view, const nlohmann::json&)>,
+        std::function<void()>) override {}
+    ymh::McpServerStatus status() const override { return {}; }
+
+private:
+    ymh::McpServerId id_;
+    McpErrorCode     code_;
+    std::string      message_;
+    McpServerState   state_{McpServerState::Disabled};
+};
+
 } // namespace
 
 TEST(AdapterScopeTest, OpenBeforeFreezeReplaceAfterFreeze) {
@@ -491,4 +532,136 @@ TEST(McpConfigTest, StrictLoaderParsesAndRejectsUnknownKeys) {
                     "{ \"mcp\": { \"server\": [ { \"id\": \"x\", \"command\": \"c\", "
                     "\"bogus\": 1 } ] } }\n");
     EXPECT_THROW((void)ymh::load_config(ymh::ConfigPaths{config_path, {}}), ymh::ConfigError);
+}
+
+// 70-D7/70-I4/70-I10: the choke point drops secret-shaped lines, bounds lines and
+// total size, preserves newlines, and is idempotent.
+TEST(McpDiagnosability, BoundReasonRedactsAndBounds) {
+    std::string input = "spawn failed: /opt/mcp: exec: No such file or directory";
+    input += "\napi_key=SUPERSECRET";
+    input += "\n" + std::string(300, 'x');
+    const std::string bounded = ymh::bound_mcp_reason(input);
+    EXPECT_NE(bounded.find("No such file or directory"), std::string::npos);
+    EXPECT_EQ(bounded.find("SUPERSECRET"), std::string::npos);
+    EXPECT_EQ(bounded.find('\n') != std::string::npos, true);
+    EXPECT_LE(bounded.find_last_not_of('\n') + 1, 512u);
+    for (std::size_t start = 0; start <= bounded.size();) {
+        const std::size_t end = bounded.find('\n', start);
+        const std::size_t line_end = end == std::string::npos ? bounded.size() : end;
+        EXPECT_LE(line_end - start, 240u);
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    EXPECT_EQ(ymh::bound_mcp_reason(bounded), bounded);
+}
+
+// 70-I12: the reason must be valid UTF-8 even when the child emitted arbitrary
+// bytes, or dump() throws type_error.316.
+TEST(McpDiagnosability, BoundReasonStaysValidUtf8) {
+    std::string input = "cause";
+    input += "\ninvalid: ";
+    input.push_back(static_cast<char>(0xFF));
+    input.push_back(static_cast<char>(0x00));
+    input += "\ntruncated: \xE2\x82";
+    input += "\n" + std::string(300, '\xC3') + "\xA9";
+    const std::string bounded = ymh::bound_mcp_reason(input);
+    EXPECT_EQ(bounded.find('\0'), std::string::npos);
+    const auto dumps = [&bounded]() {
+        const nlohmann::json json{{"reason", bounded}};
+        (void)json.dump();
+    };
+    EXPECT_NO_THROW(dumps());
+}
+
+// 70-D11/70-I12: mcp_truncate_utf8 never splits a codepoint at any byte cap.
+TEST(McpDiagnosability, TruncateUtf8NeverSplitsCodepoint) {
+    const std::string text = "\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80" "abc";
+    for (std::size_t cap = 0; cap <= text.size() + 2; ++cap) {
+        const std::string truncated = ymh::mcp_truncate_utf8(text, cap);
+        EXPECT_LE(truncated.size(), cap);
+        const auto dumps = [&truncated]() {
+            const nlohmann::json json{{"text", truncated}};
+            (void)json.dump();
+        };
+        EXPECT_NO_THROW(dumps());
+    }
+}
+
+// 70-D1/70-I1: the manager stores the specific cause, never the bare enum token.
+TEST(McpDiagnosability, ManagerPreservesSpecificReason) {
+    ymh::test::ToolEnv env("mcp_diag_specific");
+    ToolRegistry registry;
+    McpConfig config;
+    config.servers.push_back(stdio_server("alpha"));
+    ymh::McpManager manager(config, ToolConfig{}, env.env, env.governor, registry, env.bus,
+                            env.logger);
+    manager.setClientFactory(
+        [](const McpServerConfig& server, McpConfig&, ymh::ExecutionEnvironment&,
+           ymh::ResourceGovernor&, ymh::Logger&) -> std::unique_ptr<ymh::McpClient> {
+            return std::make_unique<ThrowingManagerClient>(
+                server, McpErrorCode::SpawnFailed,
+                "spawn failed: /opt/mcp: exec: No such file or directory");
+        });
+    manager.start({}).get();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 1u);
+    EXPECT_EQ(statuses.front().state, McpServerState::Failed);
+    EXPECT_NE(statuses.front().last_error.find("No such file or directory"), std::string::npos);
+    EXPECT_NE(statuses.front().last_error, "SpawnFailed");
+    manager.shutdown(100ms).get();
+}
+
+// 70-D1: distinct failures stay distinguishable per server.
+TEST(McpDiagnosability, DistinctServersYieldDistinctReasons) {
+    ymh::test::ToolEnv env("mcp_diag_distinct");
+    ToolRegistry registry;
+    McpConfig config;
+    config.servers.push_back(stdio_server("alpha"));
+    config.servers.push_back(stdio_server("beta"));
+    ymh::McpManager manager(config, ToolConfig{}, env.env, env.governor, registry, env.bus,
+                            env.logger);
+    manager.setClientFactory(
+        [](const McpServerConfig& server, McpConfig&, ymh::ExecutionEnvironment&,
+           ymh::ResourceGovernor&, ymh::Logger&) -> std::unique_ptr<ymh::McpClient> {
+            if (server.id.value == "alpha") {
+                return std::make_unique<ThrowingManagerClient>(
+                    server, McpErrorCode::SpawnFailed, "spawn failed: exec: No such file");
+            }
+            return std::make_unique<ThrowingManagerClient>(
+                server, McpErrorCode::HandshakeTimeout, "initialize timed out (handshake_timeout=200ms)");
+        });
+    manager.start({}).get();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 2u);
+    EXPECT_NE(statuses[0].last_error, statuses[1].last_error);
+    EXPECT_NE(statuses[0].last_error.find("No such file"), std::string::npos);
+    EXPECT_NE(statuses[1].last_error.find("timed out"), std::string::npos);
+    EXPECT_NE(statuses[1].last_error.find("handshake_timeout=200ms"), std::string::npos);
+    manager.shutdown(100ms).get();
+}
+
+// 70-D7/70-I8: a secret-shaped reason is redacted before storage.
+TEST(McpDiagnosability, ManagerRedactsSecretReason) {
+    ymh::test::ToolEnv env("mcp_diag_redact");
+    ToolRegistry registry;
+    McpConfig config;
+    config.servers.push_back(stdio_server("alpha"));
+    ymh::McpManager manager(config, ToolConfig{}, env.env, env.governor, registry, env.bus,
+                            env.logger);
+    manager.setClientFactory(
+        [](const McpServerConfig& server, McpConfig&, ymh::ExecutionEnvironment&,
+           ymh::ResourceGovernor&, ymh::Logger&) -> std::unique_ptr<ymh::McpClient> {
+            return std::make_unique<ThrowingManagerClient>(
+                server, McpErrorCode::Internal, "failure token=SUPERSECRET");
+        });
+    manager.start({}).get();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 1u);
+    EXPECT_EQ(statuses.front().last_error.find("SUPERSECRET"), std::string::npos);
+    manager.shutdown(100ms).get();
 }

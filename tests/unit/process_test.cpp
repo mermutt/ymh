@@ -307,4 +307,30 @@ TEST(ProcessService, SpawnMinimalModeSeedsOnlyPathAndOverlay) {
     EXPECT_EQ(output.find("YMH_TEST_AMBIENT="), std::string::npos);
 }
 
+TEST(ProcessService, TryReapIsMonotonic) {
+    ymh::test::TempWorkspace workspace("proc_try_reap");
+    LocalProcessService service;
+
+    ProcessRequest request;
+    request.executable = "/bin/sh";
+    request.argv = {"/bin/sh", "-c", "exit 7"};
+    request.cwd = workspace.path();
+    std::unique_ptr<ChildProcessHandle> handle = service.spawn(request).get();
+    ASSERT_NE(handle, nullptr);
+    handle->closeStdin();
+
+    std::optional<ProcessResult> status;
+    for (int attempt = 0; attempt < 200 && !status.has_value(); ++attempt) {
+        status = handle->tryReap();
+        if (!status.has_value()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(status->exit_code, 7);
+    EXPECT_TRUE(handle->reaped());
+    EXPECT_FALSE(handle->tryReap().has_value());
+    EXPECT_TRUE(handle->reaped());
+}
+
 } // namespace

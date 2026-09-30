@@ -58,13 +58,18 @@ McpToolInfo tool_info(std::string name) {
 // mcp.status serializer is exercised with a real `McpServerStatus`.
 class FakeMcpClient final : public McpClient {
 public:
-    FakeMcpClient(McpServerConfig config, std::vector<McpToolInfo> tools)
-        : id_(config.id), tools_(std::move(tools)) {}
+    FakeMcpClient(McpServerConfig config, std::vector<McpToolInfo> tools,
+                  std::optional<std::string> fail_message = std::nullopt)
+        : id_(config.id), tools_(std::move(tools)), fail_message_(std::move(fail_message)) {}
 
     const McpServerId& id() const noexcept override { return id_; }
     McpServerState state() const noexcept override { return state_; }
 
     Task<void> start(CancellationToken) override {
+        if (fail_message_.has_value()) {
+            state_ = McpServerState::Failed;
+            throw McpError{McpErrorCode::SpawnFailed, *fail_message_};
+        }
         state_ = McpServerState::Ready;
         return {};
     }
@@ -100,6 +105,7 @@ public:
 private:
     McpServerId             id_;
     std::vector<McpToolInfo> tools_;
+    std::optional<std::string> fail_message_;
     McpServerState          state_{McpServerState::Disabled};
 };
 
@@ -115,7 +121,8 @@ McpServerSettings stdio_server(std::string id, std::vector<std::string> denied =
 class McpRpcFixture {
 public:
     explicit McpRpcFixture(const std::string& prefix, std::vector<McpServerSettings> servers,
-                           std::vector<McpToolInfo> tools) {
+                           std::vector<McpToolInfo> tools,
+                           std::optional<std::string> client_fail = std::nullopt) {
         root_ = std::filesystem::canonical(workspace_.path());
         RegistryConfig registry_config;
         registry_config.db_path = registry_dir_.path() / "registry.db";
@@ -136,10 +143,10 @@ public:
             return std::make_unique<FakeLLM>(script);
         };
         options.mcp_client_factory =
-            [tools = std::move(tools)](const McpServerConfig& config, McpConfig&,
-                                       ExecutionEnvironment&, ResourceGovernor&,
-                                       Logger&) -> std::unique_ptr<McpClient> {
-            return std::make_unique<FakeMcpClient>(config, tools);
+            [tools = std::move(tools), client_fail = std::move(client_fail)](
+                const McpServerConfig& config, McpConfig&, ExecutionEnvironment&,
+                ResourceGovernor&, Logger&) -> std::unique_ptr<McpClient> {
+            return std::make_unique<FakeMcpClient>(config, tools, client_fail);
         };
         std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
             make_workspace_runtime(std::move(options));
@@ -200,6 +207,28 @@ TEST(McpRpcTest, UI45_D6_McpStatusWireShape) {
     EXPECT_FALSE(server.at("has_error").get<bool>());
     EXPECT_EQ(result.at("tool_total").get<std::size_t>(), 1u);
 
+    EXPECT_FALSE(server.contains("last_error"));
+    EXPECT_FALSE(server.contains("server_name"));
+    EXPECT_FALSE(server.contains("server_version"));
+    EXPECT_FALSE(server.contains("reason"));
+}
+
+// 70-D9/70-I5: a failing server ships a bounded, redacted `reason`; the raw
+// `last_error` key is still never shipped.
+TEST(McpRpcTest, UI45_D6_FailedServerShipsReason) {
+    McpRpcFixture fixture(
+        "mcp-reason", {stdio_server("alpha")}, {},
+        std::string{"spawn failed: /opt/mcp: exec: No such file or directory"});
+    const nlohmann::json result = fixture.host().mcpStatus();
+    ASSERT_EQ(result.at("servers").size(), 1u);
+    const nlohmann::json& server = result.at("servers").at(0);
+
+    EXPECT_EQ(server.at("state").get<std::string>(), "failed");
+    EXPECT_FALSE(server.at("connected").get<bool>());
+    EXPECT_TRUE(server.at("has_error").get<bool>());
+    ASSERT_TRUE(server.contains("reason"));
+    EXPECT_NE(server.at("reason").get<std::string>().find("No such file or directory"),
+              std::string::npos);
     EXPECT_FALSE(server.contains("last_error"));
     EXPECT_FALSE(server.contains("server_name"));
     EXPECT_FALSE(server.contains("server_version"));

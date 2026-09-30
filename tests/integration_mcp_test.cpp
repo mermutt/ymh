@@ -284,3 +284,61 @@ TEST(McpIntegrationTest, ContextSnapshotListsMcpToolsWithProvenance) {
 
     manager.shutdown(300ms).get();
 }
+
+// 70-D2/70-I2: a missing command yields the OS error text and the command itself.
+TEST(McpDiagnosticIntegration, MissingCommandReasonIsSpecific) {
+    ymh::test::ToolEnv env("mcp_diag_missing_cmd");
+    ToolRegistry registry;
+    McpConfig config;
+    config.startup_deadline = 3000ms;
+    config.handshake_timeout = 2000ms;
+    config.shutdown_grace = 300ms;
+    McpServerConfig server;
+    server.id.value = "fake";
+    server.command = "/nonexistent/ymh-mcp-does-not-exist";
+    config.servers.push_back(server);
+    ymh::McpManager manager(config, ToolConfig{}, env.env, env.governor, registry, env.bus,
+                            env.logger);
+    manager.start({}).get();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 1u);
+    EXPECT_EQ(statuses.front().state, McpServerState::Failed);
+    EXPECT_NE(statuses.front().last_error.find("No such file or directory"),
+              std::string::npos);
+    EXPECT_NE(statuses.front().last_error.find("/nonexistent/ymh-mcp-does-not-exist"),
+              std::string::npos);
+    manager.shutdown(300ms).get();
+}
+
+// 70-D3/70-D4/70-F2: a child that starts and exits non-zero leaves its captured
+// stderr and exit status in the reason.
+TEST(McpDiagnosticIntegration, ChildExitStderrIsSurfaced) {
+    ymh::test::ToolEnv env("mcp_diag_exit_stderr");
+    ToolRegistry registry;
+    ymh::McpManager manager(scenario_config("exit_stderr"), ToolConfig{}, env.env,
+                            env.governor, registry, env.bus, env.logger);
+    manager.start({}).get();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 1u);
+    EXPECT_EQ(statuses.front().state, McpServerState::Failed);
+    EXPECT_NE(statuses.front().last_error.find("exit_stderr marker"), std::string::npos);
+    EXPECT_NE(statuses.front().last_error.find("code 2"), std::string::npos);
+    manager.shutdown(300ms).get();
+}
+
+// 70-D6/70-F4: an unsupported revision names the revision the server reported.
+TEST(McpDiagnosticIntegration, BadRevisionReasonNamesRevision) {
+    ymh::test::ToolEnv env("mcp_diag_bad_revision");
+    ToolRegistry registry;
+    ymh::McpManager manager(scenario_config("bad_revision"), ToolConfig{}, env.env,
+                            env.governor, registry, env.bus, env.logger);
+    manager.start({}).get();
+
+    const std::vector<ymh::McpServerStatus> statuses = manager.statuses();
+    ASSERT_EQ(statuses.size(), 1u);
+    EXPECT_EQ(statuses.front().state, McpServerState::Failed);
+    EXPECT_NE(statuses.front().last_error.find("1999-01-01"), std::string::npos);
+    manager.shutdown(300ms).get();
+}

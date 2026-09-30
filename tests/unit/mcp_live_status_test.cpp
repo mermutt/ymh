@@ -83,3 +83,23 @@ TEST(McpLiveStatusTest, UiProjectsStatusNotice) {
 
     EXPECT_EQ(model.mcp_status, "mcp alpha ready tools=2");
 }
+
+// 70-D11/70-I12: a long multibyte live notice is truncated on a codepoint boundary
+// before it is JSON-serialized, so HostNotice::dump() never throws.
+TEST(McpLiveStatusTest, NoticeDetailWithLongMultibyteReasonDumps) {
+    std::string detail = "mcp alpha failed tools=0 ";
+    for (int i = 0; i < 100; ++i) {
+        detail += "\xE2\x82\xAC";
+    }
+    const std::string bounded = ymh::mcp_truncate_utf8(detail, 256);
+    EXPECT_LE(bounded.size(), 256u);
+
+    ymh::protocol::HostNotice notice;
+    notice.kind = ymh::protocol::HostNoticeKind::McpServerStatus;
+    notice.workspace.value = "ws";
+    notice.detail = bounded;
+    EXPECT_NO_THROW({
+        const nlohmann::json json = notice;
+        (void)json.dump();
+    });
+}

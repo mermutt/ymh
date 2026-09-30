@@ -195,3 +195,30 @@ TEST(StatusFormat, UI45_D7_StatusNoSessionNotice) {
 }
 
 } // namespace
+
+// 70-D10/70-I7: a failing server renders its bounded reason under the server row,
+// with the cause leading and the context indented; newlines are preserved.
+TEST(StatusFormat, McpDiagnosabilityRenderShowsReasonPerServer) {
+    const nlohmann::json result{
+        {"servers",
+         nlohmann::json::array(
+             {nlohmann::json{{"id", "alpha"},
+                             {"state", "failed"},
+                             {"connected", false},
+                             {"tool_count", 0},
+                             {"skipped", 0},
+                             {"skipped_tools", nlohmann::json::array()},
+                             {"has_error", true},
+                             {"reason", "transport closed (server closed the connection "
+                                        "(EOF))\nrecent server output:\n  python3: can't "
+                                        "open file 'x.py'"}},
+              server_json("beta", "ready", true, 2, nlohmann::json::array(), false)})},
+        {"tool_total", 2}};
+    const std::string block = format_mcp_block(result);
+    EXPECT_NE(block.find("alpha  not connected  failed"), std::string::npos);
+    EXPECT_NE(block.find("    reason: transport closed (server closed the connection (EOF))"),
+              std::string::npos);
+    EXPECT_NE(block.find("    recent server output:"), std::string::npos);
+    EXPECT_NE(block.find("      python3: can't open file 'x.py'"), std::string::npos);
+    EXPECT_EQ(block.find("reason:", block.find("beta")), std::string::npos);
+}

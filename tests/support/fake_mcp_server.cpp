@@ -82,6 +82,10 @@ int main(int argc, char** argv) {
             if (scenario == "hang") {
                 continue;
             }
+            if (scenario == "exit_stderr") {
+                std::cerr << "ymh-fake-mcp: exit_stderr marker" << '\n' << std::flush;
+                ::_exit(2);
+            }
             if (scenario == "bad_revision") {
                 send(ok(id, {{"protocolVersion", "1999-01-01"},
                              {"capabilities", json::object()},
