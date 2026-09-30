@@ -80,6 +80,7 @@ add_executable(ymh_tests
     unit/muse_replay_test.cpp
     unit/logging_test.cpp
     unit/cli_test.cpp
+    unit/spec71_localcode_import_test.cpp
     unit/headless_test.cpp
     unit/session_cli_test.cpp
     unit/headless_live_test.cpp
