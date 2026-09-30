@@ -1,6 +1,8 @@
 #include "ymh/host/workspace_host.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -109,7 +111,7 @@ void write_self_ignoring_gitignore(const std::filesystem::path& directory) {
     std::ofstream(path, std::ios::binary) << "*\n";
 }
 
-void close_extra_fds() {
+void close_extra_fds(int keep_fd = -1) {
     DIR* directory = ::opendir("/proc/self/fd");
     if (directory == nullptr) {
         return;
@@ -118,7 +120,7 @@ void close_extra_fds() {
     std::vector<int> fds;
     while (dirent* entry = ::readdir(directory)) {
         const int fd = std::atoi(entry->d_name);
-        if (fd > STDERR_FILENO && fd != directory_fd) {
+        if (fd > STDERR_FILENO && fd != directory_fd && fd != keep_fd) {
             fds.push_back(fd);
         }
     }
@@ -126,6 +128,174 @@ void close_extra_fds() {
     for (const int fd : fds) {
         ::close(fd);
     }
+}
+
+// 69-D2: the pre-exec child writes a single bounded line to the diagnostic pipe
+// before `_exit`; only `write(2)` is used and errors are ignored (a dropped
+// diagnostic must never turn a startup failure into a different one).
+void write_child_diagnostic(int fd, const char* text) noexcept {
+    if (fd < 0 || text == nullptr) {
+        return;
+    }
+    const std::size_t length = std::strlen(text);
+    std::size_t       offset = 0;
+    while (offset < length) {
+        const ssize_t written = ::write(fd, text + offset, length - offset);
+        if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+}
+
+constexpr std::size_t kMaxChildDiagnosticBytes = 1024;
+constexpr std::size_t kMaxLogTailReadBytes      = 4096;
+constexpr std::size_t kMaxLogTailLines          = 4;
+constexpr std::size_t kMaxLogTailLineBytes      = 240;
+constexpr std::size_t kMaxLogTailBytes          = 512;
+
+// 69-D7: the supervisor reads the pipe read end once, on the reaped path. The
+// fd is non-blocking, so a lingering writer yields EAGAIN rather than a stall.
+std::string read_child_diagnostic(int fd) {
+    if (fd < 0) {
+        return {};
+    }
+    std::string out;
+    char        buffer[256];
+    while (out.size() < kMaxChildDiagnosticBytes) {
+        const ssize_t count = ::read(fd, buffer, sizeof buffer);
+        if (count > 0) {
+            out.append(buffer, static_cast<std::size_t>(count));
+            continue;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    const std::size_t newline = out.find('\n');
+    if (newline != std::string::npos) {
+        out.resize(newline);
+    }
+    return out;
+}
+
+// 69-D6: a conservative marker set; a startup diagnostic line that carries any
+// credential-shaped key is dropped rather than surfaced.
+bool line_has_secret_marker(const std::string& line) {
+    static const char* const kMarkers[] = {"api_key",    "api-key", "apikey",
+                                           "authorization", "bearer ", "secret",
+                                           "password",   "passwd",  "credential",
+                                           "token="};
+    std::string lowered = line;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char character) {
+                       return static_cast<char>(std::tolower(character));
+                   });
+    for (const char* marker : kMarkers) {
+        if (lowered.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 69-D3/69-D6: bounded (<=4 non-empty lines / <=512 bytes / <=240 bytes/line),
+// redacted tail of the daemon's stderr sink. This is the channel that carries
+// the dynamic loader's own `error while loading shared libraries: …` text.
+std::string sanitize_log_tail(const std::string& raw) {
+    std::vector<std::string> lines;
+    std::string              line;
+    const auto               flush = [&lines, &line]() {
+        if (line.empty()) {
+            return;
+        }
+        if (!line_has_secret_marker(line)) {
+            if (line.size() > kMaxLogTailLineBytes) {
+                line.resize(kMaxLogTailLineBytes);
+            }
+            lines.push_back(line);
+        }
+        line.clear();
+    };
+    for (const char character : raw) {
+        if (character == '\n') {
+            flush();
+        } else if (character != '\r') {
+            line.push_back(character);
+        }
+    }
+    flush();
+
+    std::string out;
+    const std::size_t start = lines.size() > kMaxLogTailLines ? lines.size() - kMaxLogTailLines : 0;
+    for (std::size_t index = start; index < lines.size(); ++index) {
+        if (!out.empty()) {
+            out += " / ";
+        }
+        out += lines[index];
+    }
+    if (out.size() > kMaxLogTailBytes) {
+        out.resize(kMaxLogTailBytes);
+    }
+    return out;
+}
+
+std::string read_log_sink_tail(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        return {};
+    }
+    stream.seekg(0, std::ios::end);
+    const std::streamoff size = stream.tellg();
+    const std::streamoff want = std::min<std::streamoff>(size, kMaxLogTailReadBytes);
+    if (want <= 0) {
+        return {};
+    }
+    stream.seekg(size - want, std::ios::beg);
+    std::string raw(static_cast<std::size_t>(want), '\0');
+    stream.read(raw.data(), static_cast<std::streamsize>(want));
+    raw.resize(static_cast<std::size_t>(stream.gcount()));
+    return sanitize_log_tail(raw);
+}
+
+// 69-D4: human-readable name for the daemon's own startup diagnostic.
+const char* runtime_error_name(WorkspaceRuntimeErrorCode code) noexcept {
+    switch (code) {
+        case WorkspaceRuntimeErrorCode::WorkspaceMissing:
+            return "WorkspaceMissing";
+        case WorkspaceRuntimeErrorCode::StoreUnavailable:
+            return "StoreUnavailable";
+        case WorkspaceRuntimeErrorCode::WorkspaceBusy:
+            return "WorkspaceBusy";
+        case WorkspaceRuntimeErrorCode::ProviderSetupFailed:
+            return "ProviderSetupFailed";
+        case WorkspaceRuntimeErrorCode::Internal:
+            return "Internal";
+    }
+    return "Unknown";
+}
+
+std::string describe_host_exit(int status);
+
+// 69-D4/69-D7: the readiness reason is the code text plus a specific cause.
+// The pipe (pre-exec failure) is authoritative; the daemon's stderr tail is the
+// fallback for a post-exec failure (including the loader's exit-127 message).
+std::string startup_failure_reason(int status, int diagnostic_fd,
+                                   const std::filesystem::path& log_sink) {
+    std::string reason   = describe_host_exit(status);
+    std::string specific = read_child_diagnostic(diagnostic_fd);
+    if (specific.empty()) {
+        specific = read_log_sink_tail(log_sink);
+    }
+    if (!specific.empty()) {
+        reason += ": " + specific;
+    }
+    return reason;
 }
 
 std::unique_ptr<HostConnection> connect_to(const std::filesystem::path& socket_path) {
@@ -236,6 +406,10 @@ public:
         // store, no claimHost) so no H21 releaseHost is owed. `foreground` is
         // exempt; both opt-out arms are rejected.
         if (!config_.foreground && !owner_watchdog_armed(config_)) {
+            std::fprintf(stderr,
+                         "ymh --host: startup rejected: owner watchdog is not armed "
+                         "(require_owner=%d watchdog_disabled=%d)\n",
+                         config_.require_owner ? 1 : 0, config_.watchdog_disabled ? 1 : 0);
             return HostExitCode::StartupRejected;
         }
         HostExitCode code = HostExitCode::Internal;
@@ -492,6 +666,9 @@ HostExitCode WorkspaceHost::Impl::startup() {
         error.clear();
     }
     if (::chdir(canonical_root_.c_str()) != 0) {
+        const int saved = errno;
+        std::fprintf(stderr, "ymh --host: startup rejected: chdir to %s failed: %s\n",
+                     canonical_root_.c_str(), std::strerror(saved));
         return HostExitCode::StartupRejected;
     }
     chdir_done_ = true;
@@ -499,6 +676,8 @@ HostExitCode WorkspaceHost::Impl::startup() {
     const std::filesystem::path state_dir = canonical_root_ / ".ymh";
     std::filesystem::create_directories(state_dir, error);
     if (error) {
+        std::fprintf(stderr, "ymh --host: startup rejected: cannot create state dir %s: %s\n",
+                     state_dir.c_str(), error.message().c_str());
         return HostExitCode::StartupRejected;
     }
     ::chmod(state_dir.c_str(), S_IRWXU);
@@ -555,11 +734,16 @@ HostExitCode WorkspaceHost::Impl::startup() {
     std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
         WorkspaceRuntime::create(std::move(runtime_options));
     if (!created.has_value()) {
+        std::fprintf(stderr, "ymh --host: runtime setup failed (%s): %s\n",
+                     runtime_error_name(created.error().code), created.error().detail.c_str());
         return mapRuntimeError(created.error().code);
     }
     runtime_ = std::move(*created);
 
     if (!runtime_->has_provider()) {
+        std::fprintf(stderr,
+                     "ymh --host: startup rejected: no LLM provider is configured "
+                     "(provider setup failed)\n");
         return HostExitCode::StartupRejected;
     }
 
@@ -1080,17 +1264,38 @@ HostLauncher::SpawnResult ForkExecLauncher::spawn(const HostConfig& config) {
     effective.boot_id          = boot_id;
     const std::vector<std::string> argv_strings = build_argv(effective, executable);
 
+    int diagnostic_pipe[2] = {-1, -1};
+    if (::pipe2(diagnostic_pipe, O_CLOEXEC) != 0) {
+        diagnostic_pipe[0] = -1;
+        diagnostic_pipe[1] = -1;
+    }
+
     const pid_t child = ::fork();
     if (child < 0) {
+        if (diagnostic_pipe[0] >= 0) {
+            ::close(diagnostic_pipe[0]);
+        }
+        if (diagnostic_pipe[1] >= 0) {
+            ::close(diagnostic_pipe[1]);
+        }
         throw HostError(protocol::HostErrorCode::SocketUnavailable, "fork failed");
     }
     if (child == 0) {
+        const int diagnostic_fd = diagnostic_pipe[1];
+        if (diagnostic_pipe[0] >= 0) {
+            ::close(diagnostic_pipe[0]);
+        }
         ::setsid();
         ::umask(0077);
 
         const int log_fd =
             ::open(config.log_sink.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         if (log_fd < 0) {
+            char      message[768];
+            const int saved = errno;
+            std::snprintf(message, sizeof message, "cannot open log sink %s: %s",
+                          config.log_sink.c_str(), std::strerror(saved));
+            write_child_diagnostic(diagnostic_fd, message);
             ::_exit(static_cast<int>(HostExitCode::StartupRejected));
         }
         ::dup2(log_fd, STDOUT_FILENO);
@@ -1105,7 +1310,7 @@ HostLauncher::SpawnResult ForkExecLauncher::spawn(const HostConfig& config) {
         if (log_fd > STDERR_FILENO) {
             ::close(log_fd);
         }
-        close_extra_fds();
+        close_extra_fds(diagnostic_fd);
 
         std::vector<char*> argv;
         argv.reserve(argv_strings.size() + 1);
@@ -1114,10 +1319,29 @@ HostLauncher::SpawnResult ForkExecLauncher::spawn(const HostConfig& config) {
         }
         argv.push_back(nullptr);
         ::execv(executable.c_str(), argv.data());
+        char      message[1024];
+        const int saved = errno;
+        if (saved == ENOENT && executable.is_absolute()) {
+            std::snprintf(message, sizeof message,
+                          "execve failed: %s (%s) (a missing shared library or interpreter "
+                          "can cause this: run 'ldd %s')",
+                          std::strerror(saved), executable.c_str(), executable.c_str());
+        } else {
+            std::snprintf(message, sizeof message, "execve failed: %s (%s)",
+                          std::strerror(saved), executable.c_str());
+        }
+        write_child_diagnostic(diagnostic_fd, message);
         ::_exit(static_cast<int>(HostExitCode::StartupRejected));
     }
 
-    return SpawnResult{HostPid{static_cast<std::int32_t>(child)}, boot_id, config.socket_path};
+    if (diagnostic_pipe[1] >= 0) {
+        ::close(diagnostic_pipe[1]);
+    }
+    if (diagnostic_pipe[0] >= 0) {
+        ::fcntl(diagnostic_pipe[0], F_SETFL, O_NONBLOCK);
+    }
+    return SpawnResult{HostPid{static_cast<std::int32_t>(child)}, boot_id, config.socket_path,
+                       diagnostic_pipe[0]};
 }
 
 void ForkExecLauncher::requestStop(HostPid pid, ShutdownReason) {
@@ -1183,6 +1407,17 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
                                            const AttachIdentity&  identity) {
     const HostConfig                    config  = configFor(record);
     const HostLauncher::SpawnResult     spawned = launcher_.spawn(config);
+    // 69-D5: the diagnostic pipe read end is parent-owned and single-consumer;
+    // this closer releases it on every return/throw path (success, winner
+    // attach, and both failure paths).
+    struct DiagnosticFdCloser {
+        int fd;
+        ~DiagnosticFdCloser() {
+            if (fd >= 0) {
+                ::close(fd);
+            }
+        }
+    } close_diagnostic{spawned.diagnostic_fd};
     const std::chrono::steady_clock::time_point deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
     std::optional<int> daemon_exit;
@@ -1194,7 +1429,8 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
         if (const std::optional<int> status = launcher_.tryReap(spawned.pid);
             status.has_value()) {
             daemon_exit = status;
-            last_error  = describe_host_exit(*status);
+            last_error =
+                startup_failure_reason(*status, spawned.diagnostic_fd, config.log_sink);
             break;
         }
         // Ordering invariant: the daemon binds its socket before publishing its

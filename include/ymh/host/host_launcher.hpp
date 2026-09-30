@@ -45,6 +45,15 @@ public:
         HostPid                pid;         // child pid (> 0)
         HostBootId             bootId;      // provisional until host.hello
         std::filesystem::path  socketPath;  // the path the daemon will bind
+
+        // 69-D2/69-D5 (69-host-startup-diagnosability-errata): read end of the
+        // CLOEXEC pre-exec diagnostic pipe, or -1 when none exists (fake
+        // launchers; pipe-creation failure). Parent-owned and single-consumer:
+        // the caller MUST close it. `HostLifecycle::spawnAndAttach` wraps it in
+        // an RAII closer on every path. It holds the child's `strerror(errno)`
+        // reason for a log-sink-open or `execve` failure, and is empty on a
+        // successful `execve` (the write end is CLOEXEC).
+        int                    diagnostic_fd{-1};
     };
 
     // Fork+setsid+exec. Returns as soon as the child is exec'd; readiness is
