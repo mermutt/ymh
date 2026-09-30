@@ -185,13 +185,11 @@ std::string mcp_status_detail(const Event& event) {
     detail += std::to_string(payload.value("tool_count", static_cast<std::size_t>(0)));
     const std::string reason = payload.value("reason", std::string{});
     if (!reason.empty()) {
+        const std::size_t newline = reason.find('\n');
         detail += " ";
-        detail += reason;
+        detail += newline == std::string::npos ? reason : reason.substr(0, newline);
     }
-    if (detail.size() > 256) {
-        detail.resize(256);
-    }
-    return detail;
+    return mcp_truncate_utf8(detail, 256);
 }
 
 nlohmann::json skill_list_json(const SkillCatalog& catalog) {
@@ -232,24 +230,27 @@ nlohmann::json skill_show_json(const Skill& skill) {
                           {"body", skill.body}};
 }
 
-// 45-D6.9: the mcp.status serializer. It emits the shared base schema
+// 45-D6.9 / 70-D9: the mcp.status serializer. It emits the shared base schema
 // ({id,state,tool_count,skipped:<int>,has_error}) plus the mcp.status-only
-// `connected` and `skipped_tools`. `last_error` is never read into the JSON.
+// `connected` and `skipped_tools`, and — for a non-connected server with a cause —
+// the bounded, redacted `reason` (the raw `last_error` is never shipped).
 nlohmann::json mcp_status_json(const std::vector<McpServerStatus>& statuses) {
     nlohmann::json servers = nlohmann::json::array();
     std::size_t    tool_total = 0;
     for (const McpServerStatus& status : statuses) {
         const bool connected = status.state == McpServerState::Ready;
         tool_total += status.tool_count;
-        servers.push_back(nlohmann::json{
-            {"id", status.id.value},
-            {"state", std::string{mcp_state_token(status.state)}},
-            {"connected", connected},
-            {"tool_count", status.tool_count},
-            {"skipped", status.skipped_tools.size()},
-            {"skipped_tools", status.skipped_tools},
-            {"has_error", !status.last_error.empty()},
-        });
+        nlohmann::json server{{"id", status.id.value},
+                              {"state", std::string{mcp_state_token(status.state)}},
+                              {"connected", connected},
+                              {"tool_count", status.tool_count},
+                              {"skipped", status.skipped_tools.size()},
+                              {"skipped_tools", status.skipped_tools},
+                              {"has_error", !status.last_error.empty()}};
+        if (!connected && !status.last_error.empty()) {
+            server["reason"] = status.last_error;
+        }
+        servers.push_back(std::move(server));
     }
     return nlohmann::json{{"servers", std::move(servers)}, {"tool_total", tool_total}};
 }

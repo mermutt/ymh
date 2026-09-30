@@ -128,6 +128,23 @@ std::string format_mcp_block(const nlohmann::json& result) {
         } else {
             block += "not connected  " + state;
         }
+        if (!is_connected && server.contains("reason") && server.at("reason").is_string()) {
+            const std::string reason = server.at("reason").get<std::string>();
+            std::size_t start = 0;
+            bool        first = true;
+            for (std::size_t index = 0; index <= reason.size(); ++index) {
+                if (index != reason.size() && reason[index] != '\n') {
+                    continue;
+                }
+                const std::string line = reason.substr(start, index - start);
+                start = index + 1;
+                if (line.empty()) {
+                    continue;
+                }
+                block += first ? "\n    reason: " + line : "\n    " + line;
+                first = false;
+            }
+        }
         if (server.contains("skipped_tools") && server.at("skipped_tools").is_array() &&
             !server.at("skipped_tools").empty()) {
             const std::size_t skipped = json_size(server.value("skipped", nlohmann::json{0}));

@@ -35,6 +35,10 @@ struct ProcessRequest {
     std::vector<std::pair<std::string, std::string>> environment;
     ProcessEnvMode            env_mode = ProcessEnvMode::Inherit;
     std::optional<std::filesystem::path> stderr_path;  // spawn()-only
+    // 70-A13: spawn()-only. When set, the child dup2s it onto fd 2 in the stderr
+    // block (before close_inherited_fds), taking precedence over stderr_path; used
+    // to pass an already-open anonymous capture fd so no path is reopened.
+    std::optional<int>        stderr_fd;
     std::chrono::milliseconds timeout{0};      // 0 => no deadline
     // 46-D8: the clamped per-tool-run budget. `nullopt` => the deadline layer is
     // disabled (`timeout` applies); `0ms` => already expired, the child is NOT
@@ -89,6 +93,11 @@ public:
 
     virtual void signal(int sig) noexcept = 0;   // signals the process group
     virtual Task<ProcessResult> wait(CancellationToken) = 0;
+
+    // 70-A14: non-blocking reap that also sets the handle's internal reaped_ flag
+    // (monotonically), so close()/~SpawnedChild never signal a reaped pid.
+    virtual std::optional<ProcessResult> tryReap() = 0;
+    [[nodiscard]] virtual bool reaped() const noexcept = 0;
 };
 
 class LocalProcessService final : public ProcessService {

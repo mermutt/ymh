@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <array>
@@ -11,11 +12,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "ymh/execution/errors.hpp"
 
@@ -90,6 +93,69 @@ StdioMcpTransport::~StdioMcpTransport() {
     if (child_ != nullptr) {
         (void)close(std::chrono::milliseconds{200}).get();
     }
+    closeCaptureFd();
+}
+
+bool StdioMcpTransport::openCaptureFd() {
+    closeCaptureFd();
+    if (log_child_stderr_) {
+        const std::filesystem::path directory = environment_.root() / ".ymh" / "mcp";
+        const std::filesystem::path path =
+            directory / (sanitize_server_id(config_.id.value) + ".stderr.log");
+        std::error_code ec;
+        std::filesystem::create_directories(directory, ec);
+        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_APPEND, 0600);
+        if (fd < 0) {
+            logger_.warn("mcp: cannot open child stderr log '" + path.string() +
+                         "': " + std::strerror(errno));
+            return false;
+        }
+        struct stat info {};
+        capture_offset_ =
+            ::fstat(fd, &info) == 0 ? static_cast<std::uintmax_t>(info.st_size) : 0;
+        capture_path_ = path;
+        capture_fd_ = fd;
+        return true;
+    }
+    std::error_code temp_ec;
+    const std::filesystem::path directory = std::filesystem::temp_directory_path(temp_ec);
+    if (temp_ec) {
+        logger_.warn("mcp: no temporary directory for a stderr capture: " +
+                     temp_ec.message());
+        return false;
+    }
+    int fd = -1;
+#ifdef O_TMPFILE
+    fd = ::open(directory.c_str(), O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+#endif
+    if (fd < 0) {
+        std::string tmpl = (directory / "ymh-mcp-XXXXXX").string();
+        std::vector<char> buffer(tmpl.begin(), tmpl.end());
+        buffer.push_back('\0');
+        fd = ::mkstemp(buffer.data());
+        if (fd >= 0) {
+            capture_path_.clear();
+            ::unlink(buffer.data());
+        }
+    }
+    if (fd < 0) {
+        logger_.warn("mcp: cannot create a stderr capture for '" + config_.id.value +
+                     "': " + std::strerror(errno));
+        return false;
+    }
+    capture_fd_ = fd;
+    capture_offset_ = 0;
+    capture_path_.clear();
+    return true;
+}
+
+void StdioMcpTransport::closeCaptureFd() {
+    if (capture_fd_ >= 0) {
+        ::close(capture_fd_);
+        capture_fd_ = -1;
+    }
+    capture_path_.clear();
+    capture_offset_ = 0;
 }
 
 Task<void> StdioMcpTransport::start(CancellationToken cancel) {
@@ -127,29 +193,23 @@ Task<void> StdioMcpTransport::start(CancellationToken cancel) {
                            "': cwd escapes the workspace root"};
     }
 
-    if (log_child_stderr_) {
-        const std::filesystem::path directory = environment_.root() / ".ymh" / "mcp";
-        const std::filesystem::path path =
-            directory / (sanitize_server_id(config_.id.value) + ".stderr.log");
-        std::error_code ec;
-        std::filesystem::create_directories(directory, ec);
-        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
-        if (fd >= 0) {
-            ::close(fd);
-            request.stderr_path = path;
+    if (openCaptureFd()) {
+        if (log_child_stderr_) {
+            request.stderr_path = capture_path_;
         } else {
-            logger_.warn("mcp: cannot open child stderr log '" + path.string() +
-                         "': " + std::strerror(errno));
+            request.stderr_fd = capture_fd_;
         }
     }
 
     try {
         child_ = environment_.process().spawn(request).get();
     } catch (const ToolError& error) {
-        throw McpError{McpErrorCode::SpawnFailed, std::string{to_string(error.code())}};
+        throw McpError{McpErrorCode::SpawnFailed,
+                       "spawn failed: " + config_.command + ": " + error.what()};
     }
     if (child_ == nullptr) {
-        throw McpError{McpErrorCode::SpawnFailed, "spawn returned no child"};
+        throw McpError{McpErrorCode::SpawnFailed,
+                       "spawn failed: " + config_.command + ": spawn returned no child"};
     }
     return Task<void>{};
 }
@@ -168,7 +228,8 @@ Task<void> StdioMcpTransport::send(const nlohmann::json& message,
     try {
         child_->writeStdin(line, cancel).get();
     } catch (const ToolError& error) {
-        throw McpError{McpErrorCode::TransportClosed, std::string{to_string(error.code())}};
+        throw McpError{McpErrorCode::TransportClosed,
+                       "transport write failed: " + std::string{error.what()}};
     }
     return Task<void>{};
 }
@@ -187,24 +248,60 @@ Task<void> StdioMcpTransport::close(std::chrono::milliseconds grace) {
         return Task<void>{};
     }
     child_->closeStdin();
-    child_->signal(SIGTERM);
-
-    const int pid = static_cast<int>(child_->pid());
-    const auto deadline = std::chrono::steady_clock::now() + grace;
-    bool reaped = false;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (tryReap(pid).has_value()) {
-            reaped = true;
-            break;
+    if (!child_->reaped() && !child_->tryReap().has_value()) {
+        child_->signal(SIGTERM);
+        const auto deadline = std::chrono::steady_clock::now() + grace;
+        while (!child_->reaped() && std::chrono::steady_clock::now() < deadline) {
+            if (child_->tryReap().has_value()) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{5});
-    }
-    if (!reaped) {
-        child_->signal(SIGKILL);
-        (void)reap(pid);
+        if (!child_->reaped()) {
+            child_->signal(SIGKILL);
+        }
     }
     child_.reset();
+    closeCaptureFd();
     return Task<void>{};
+}
+
+std::string StdioMcpTransport::failureContext() {
+    std::string context;
+    if (child_ != nullptr && !child_->reaped()) {
+        if (const std::optional<ProcessResult> status = child_->tryReap();
+            status.has_value()) {
+            if (status->signalled) {
+                context = "server killed by signal " + std::to_string(status->signal);
+            } else {
+                context = "server exited with code " + std::to_string(status->exit_code);
+            }
+        }
+    }
+    if (capture_fd_ >= 0) {
+        struct stat info {};
+        if (::fstat(capture_fd_, &info) == 0) {
+            constexpr std::uintmax_t kMaxCaptureScan = 64u * 1024u;
+            const auto size = static_cast<std::uintmax_t>(info.st_size);
+            std::uintmax_t begin = capture_offset_;
+            if (size > begin + kMaxCaptureScan) {
+                begin = size - kMaxCaptureScan;
+            }
+            if (begin < size) {
+                std::string raw(static_cast<std::size_t>(size - begin), '\0');
+                const ssize_t count =
+                    ::pread(capture_fd_, raw.data(), raw.size(), static_cast<off_t>(begin));
+                if (count > 0) {
+                    raw.resize(static_cast<std::size_t>(count));
+                    if (!context.empty()) {
+                        context.push_back('\n');
+                    }
+                    context += raw;
+                }
+            }
+        }
+    }
+    return bound_mcp_reason(context);
 }
 
 std::uint64_t StdioMcpTransport::childPid() const noexcept {

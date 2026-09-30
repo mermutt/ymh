@@ -15,6 +15,22 @@
 #include "ymh/mcp/schema_translation.hpp"
 
 namespace ymh {
+namespace {
+
+std::string mcp_failure_reason(const McpError& error) {
+    std::string text = error.what();
+    if (text.empty()) {
+        text = "mcp failure: " + std::string{to_string(error.code())};
+    }
+    return bound_mcp_reason(text);
+}
+
+std::string mcp_failure_reason(const std::exception& error) {
+    const std::string text = error.what();
+    return bound_mcp_reason(text.empty() ? "mcp failure: unknown error" : text);
+}
+
+} // namespace
 
 std::chrono::milliseconds compute_mcp_backoff(std::uint32_t attempt,
                                               const McpConfig& config,
@@ -252,7 +268,8 @@ Task<void> McpManager::start(CancellationToken cancel) {
             std::optional<Event> event;
             {
                 const std::lock_guard lock(mutex_);
-                event = setStateLocked(slots_[index], McpServerState::Failed, error.what());
+                event = setStateLocked(slots_[index], McpServerState::Failed,
+                                       mcp_failure_reason(error));
             }
             bus_.publish(std::move(*event));
             if (config.required) {
@@ -288,7 +305,7 @@ Task<void> McpManager::start(CancellationToken cancel) {
             {
                 const std::lock_guard lock(mutex_);
                 event = setStateLocked(slots_[index], McpServerState::Failed,
-                                       std::string{to_string(error.code())});
+                                       mcp_failure_reason(error));
             }
             bus_.publish(std::move(*event));
             if (config.required) {
@@ -299,7 +316,8 @@ Task<void> McpManager::start(CancellationToken cancel) {
             std::optional<Event> event;
             {
                 const std::lock_guard lock(mutex_);
-                event = setStateLocked(slots_[index], McpServerState::Failed, error.what());
+                event = setStateLocked(slots_[index], McpServerState::Failed,
+                                       mcp_failure_reason(error));
             }
             bus_.publish(std::move(*event));
             if (config.required) {
@@ -341,7 +359,7 @@ Task<void> McpManager::start(CancellationToken cancel) {
             {
                 const std::lock_guard lock(mutex_);
                 event = setStateLocked(slots_[index], McpServerState::Failed,
-                                       std::string{to_string(error.code())});
+                                       mcp_failure_reason(error));
             }
             bus_.publish(std::move(*event));
             if (config.required) {
@@ -351,7 +369,8 @@ Task<void> McpManager::start(CancellationToken cancel) {
             std::optional<Event> event;
             {
                 const std::lock_guard lock(mutex_);
-                event = setStateLocked(slots_[index], McpServerState::Failed, error.what());
+                event = setStateLocked(slots_[index], McpServerState::Failed,
+                                       mcp_failure_reason(error));
             }
             bus_.publish(std::move(*event));
             if (config.required) {
@@ -409,7 +428,7 @@ Task<void> McpManager::refresh(McpServerId id, CancellationToken cancel) {
             const std::lock_guard lock(mutex_);
             ServerSlot* slot = findSlotLocked(id);
             if (slot != nullptr) {
-                slot->last_error = std::string{to_string(error.code())};
+                slot->last_error = mcp_failure_reason(error);
                 event = makeStatusEventLocked(*slot, slot->last_error);
             }
         }
@@ -425,7 +444,7 @@ Task<void> McpManager::refresh(McpServerId id, CancellationToken cancel) {
             const std::lock_guard lock(mutex_);
             ServerSlot* slot = findSlotLocked(id);
             if (slot != nullptr) {
-                slot->last_error = error.what();
+                slot->last_error = mcp_failure_reason(error);
                 event = makeStatusEventLocked(*slot, slot->last_error);
             }
         }

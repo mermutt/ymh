@@ -189,6 +189,21 @@ public:
 
     int stdoutFd() const noexcept { return stdout_fd_; }
 
+    // 70-A14: reaps through the handle so `reaped_` is set monotonically; the
+    // destructor then never signals (or re-reaps) an already-reaped pid.
+    std::optional<ProcessResult> tryReap() override {
+        if (reaped_) {
+            return std::nullopt;
+        }
+        std::optional<ProcessResult> result = ymh::tryReap(static_cast<int>(pid_));
+        if (result.has_value()) {
+            reaped_ = true;
+        }
+        return result;
+    }
+
+    [[nodiscard]] bool reaped() const noexcept override { return reaped_; }
+
     Task<void> writeStdin(std::string_view bytes, CancellationToken cancel) override {
         std::size_t offset = 0;
         while (offset < bytes.size()) {
@@ -262,7 +277,7 @@ public:
 
     Task<ProcessResult> wait(CancellationToken cancel) override {
         for (;;) {
-            if (const std::optional<ProcessResult> reaped = tryReap(pid_);
+            if (const std::optional<ProcessResult> reaped = ymh::tryReap(pid_);
                 reaped.has_value()) {
                 reaped_ = true;
                 return Task<ProcessResult>{*reaped};
@@ -541,7 +556,10 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         ::dup2(in.read_fd, STDIN_FILENO);
         ::dup2(out.write_fd, STDOUT_FILENO);
         bool stderr_redirected = false;
-        if (request.stderr_path.has_value()) {
+        if (request.stderr_fd.has_value()) {
+            ::dup2(*request.stderr_fd, STDERR_FILENO);
+            stderr_redirected = true;
+        } else if (request.stderr_path.has_value()) {
             const int fd =
                 ::open(request.stderr_path->c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
             if (fd >= 0) {

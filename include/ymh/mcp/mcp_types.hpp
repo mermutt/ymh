@@ -95,6 +95,19 @@ enum class McpErrorCode : std::uint8_t {
 
 [[nodiscard]] std::string_view to_string(McpErrorCode code) noexcept;
 
+// 70-D7/70-D11: UTF-8-safe truncation. Returns a prefix of `text` of at most
+// `max_bytes` bytes, never splitting a UTF-8 codepoint; an invalid byte counts as
+// one byte. Callers: bound_mcp_reason (mcp_types.cpp) and mcp_status_detail
+// (host_runtime.cpp). Total; never throws.
+[[nodiscard]] std::string mcp_truncate_utf8(std::string_view text, std::size_t max_bytes);
+
+// 70-D7: the single bound/redact choke point for an MCP failure reason. Coerces to
+// valid UTF-8, strips control bytes, drops secret-shaped lines (69-D6 marker set),
+// and bounds to <=4 non-empty lines / <=512 bytes / <=240 bytes per line while
+// preserving newlines. Total and idempotent; never throws. Callers: McpManager's
+// failure sites (src/mcp/mcp_manager.cpp).
+[[nodiscard]] std::string bound_mcp_reason(std::string_view reason);
+
 // 15 §2.2: the single classification boundary. Maps an adapter failure onto the
 // frozen `07 §2.1` vocabulary so no MCP-specific code reaches a durable result.
 [[nodiscard]] ToolErrorCode to_tool_error_code(McpErrorCode code) noexcept;
@@ -115,6 +128,11 @@ enum class McpDisconnectReason : std::uint8_t {
     ProtocolError,
     TransportError,
 };
+
+// 70-D5: the total disconnect-reason token map. Never returns a bare
+// McpDisconnectReason spelling; used by DefaultMcpClient's transport-closed
+// reason. Mirrors mcp_state_token.
+[[nodiscard]] std::string_view mcp_disconnect_token(McpDisconnectReason reason) noexcept;
 
 struct McpToolInfo {
     McpRemoteToolName          remote_name;

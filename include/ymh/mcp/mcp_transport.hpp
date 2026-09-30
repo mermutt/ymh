@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -56,13 +57,26 @@ public:
     virtual bool poll(std::chrono::milliseconds timeout) = 0;
 };
 
+// 70-A2: additive diagnostic seam. `failureContext()` returns the bounded, redacted
+// context of the most recent failure (child exit status when known + a bounded tail
+// of the child's captured stderr). Empty when unavailable; never secret-bearing;
+// never throws. A transport without the seam yields no context.
+class McpDiagnosticTransport {
+public:
+    virtual ~McpDiagnosticTransport() = default;
+
+    [[nodiscard]] virtual std::string failureContext() = 0;
+};
+
 // Resolve "KEY=VALUE" entries; each VALUE may contain ${ENV} references read
 // from the process environment. Throws McpError{ConfigInvalid} when a variable
 // is missing or an entry is malformed. Resolved values are never logged (M12).
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> resolve_mcp_env(
     const std::vector<std::string>& entries);
 
-class StdioMcpTransport final : public McpTransport, public McpPollableTransport {
+class StdioMcpTransport final : public McpTransport,
+                                public McpPollableTransport,
+                                public McpDiagnosticTransport {
 public:
     StdioMcpTransport(const McpServerConfig& config,
                       McpConfig& mcp_config,
@@ -82,9 +96,13 @@ public:
 
     bool poll(std::chrono::milliseconds timeout) override;
 
+    [[nodiscard]] std::string failureContext() override;
+
 private:
     void dispatchLine(std::string line);
     void notifyClose(McpDisconnectReason reason);
+    void closeCaptureFd();
+    bool openCaptureFd();
 
     McpServerConfig                     config_;
     std::size_t                         max_frame_bytes_;
@@ -96,6 +114,9 @@ private:
     std::function<void(McpDisconnectReason)> close_handler_;
     std::mutex                          send_mutex_;
     std::string                         buffer_;
+    std::filesystem::path               capture_path_;
+    int                                 capture_fd_{-1};
+    std::uintmax_t                      capture_offset_{0};
     bool                                eof_ = false;
     bool                                close_notified_ = false;
 };

@@ -1,9 +1,13 @@
 #include "ymh/mcp/mcp_types.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ymh {
 namespace {
@@ -34,6 +38,122 @@ constexpr std::array<std::pair<McpTransportKind, std::string_view>, 2> kTranspor
     {McpTransportKind::Stdio, "stdio"},
     {McpTransportKind::HttpSse, "http_sse"},
 }};
+
+bool is_utf8_continuation(unsigned char byte) noexcept {
+    return (byte & 0xC0) == 0x80;
+}
+
+// 70-D7: the byte length (1..4) of the valid UTF-8 sequence at `text[index]`, or 0
+// when the byte starts no valid sequence (invalid, overlong, surrogate, or out of
+// RFC 3629 range). An invalid byte counts as one byte to the caller.
+std::size_t utf8_sequence_length(std::string_view text, std::size_t index) noexcept {
+    const auto first = static_cast<unsigned char>(text[index]);
+    if (first < 0x80) {
+        return 1;
+    }
+    std::size_t length = 0;
+    std::uint32_t codepoint = 0;
+    if ((first & 0xE0) == 0xC0) {
+        length = 2;
+        codepoint = first & 0x1Fu;
+    } else if ((first & 0xF0) == 0xE0) {
+        length = 3;
+        codepoint = first & 0x0Fu;
+    } else if ((first & 0xF8) == 0xF0) {
+        length = 4;
+        codepoint = first & 0x07u;
+    } else {
+        return 0;
+    }
+    if (index + length > text.size()) {
+        return 0;
+    }
+    for (std::size_t offset = 1; offset < length; ++offset) {
+        const auto byte = static_cast<unsigned char>(text[index + offset]);
+        if (!is_utf8_continuation(byte)) {
+            return 0;
+        }
+        codepoint = (codepoint << 6) | (byte & 0x3Fu);
+    }
+    static constexpr std::uint32_t kMinimum[5] = {0, 0, 0x80, 0x800, 0x10000};
+    if (codepoint < kMinimum[length]) {
+        return 0;
+    }
+    if (codepoint >= 0xD800 && codepoint <= 0xDFFF) {
+        return 0;
+    }
+    if (codepoint > 0x10FFFF) {
+        return 0;
+    }
+    return length;
+}
+
+// 70-D7: the same conservative marker set as 69-D6; a line carrying a
+// credential-shaped key is dropped rather than surfaced.
+bool reason_line_has_secret(const std::string& line) {
+    static constexpr std::string_view kMarkers[] = {
+        "api_key", "api-key", "apikey", "authorization", "bearer ",
+        "secret",  "password", "passwd", "credential",   "token="};
+    std::string lowered;
+    lowered.reserve(line.size());
+    for (const char c : line) {
+        lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    for (const std::string_view marker : kMarkers) {
+        if (lowered.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string normalize_line_endings(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const char c = text[index];
+        if (c == '\r') {
+            out.push_back('\n');
+            if (index + 1 < text.size() && text[index + 1] == '\n') {
+                ++index;
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::string coerce_valid_utf8(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t index = 0; index < text.size();) {
+        const std::size_t length = utf8_sequence_length(text, index);
+        if (length == 0) {
+            out.push_back('?');
+            ++index;
+            continue;
+        }
+        if (length == 1) {
+            const auto byte = static_cast<unsigned char>(text[index]);
+            if (byte == '\n' || byte == '\t') {
+                out.push_back(static_cast<char>(byte));
+            } else if (byte < 0x20 || byte == 0x7F) {
+                out.push_back(' ');
+            } else {
+                out.push_back(static_cast<char>(byte));
+            }
+        } else {
+            out.append(text, index, length);
+        }
+        index += length;
+    }
+    return out;
+}
+
+constexpr std::size_t kMaxReasonLines = 4;
+constexpr std::size_t kMaxReasonBytes = 512;
+constexpr std::size_t kMaxReasonLineBytes = 240;
 
 } // namespace
 
@@ -122,6 +242,74 @@ std::string_view to_string(McpErrorCode code) noexcept {
         case McpErrorCode::Internal:           return "Internal";
     }
     return "Internal";
+}
+
+std::string_view mcp_disconnect_token(McpDisconnectReason reason) noexcept {
+    switch (reason) {
+        case McpDisconnectReason::ClientClose:    return "client closed";
+        case McpDisconnectReason::ServerEof:      return "server closed the connection (EOF)";
+        case McpDisconnectReason::SpawnFailed:    return "spawn failed";
+        case McpDisconnectReason::ProtocolError:  return "protocol error";
+        case McpDisconnectReason::TransportError: return "transport I/O error";
+    }
+    return "unknown";
+}
+
+std::string mcp_truncate_utf8(std::string_view text, std::size_t max_bytes) {
+    std::string out;
+    out.reserve(std::min(text.size(), max_bytes));
+    std::size_t index = 0;
+    while (index < text.size() && out.size() < max_bytes) {
+        const std::size_t length = utf8_sequence_length(text, index);
+        const std::size_t step = length == 0 ? 1 : length;
+        if (out.size() + step > max_bytes) {
+            break;
+        }
+        out.append(text.substr(index, step));
+        index += step;
+    }
+    return out;
+}
+
+std::string bound_mcp_reason(std::string_view reason) {
+    if (reason.empty()) {
+        return {};
+    }
+    const std::string clean = coerce_valid_utf8(normalize_line_endings(reason));
+    std::vector<std::string> lines;
+    std::size_t              total = 0;
+    std::size_t              start = 0;
+    for (std::size_t index = 0; index <= clean.size(); ++index) {
+        if (index != clean.size() && clean[index] != '\n') {
+            continue;
+        }
+        std::string line = clean.substr(start, index - start);
+        start = index + 1;
+        if (line.empty() || reason_line_has_secret(line)) {
+            continue;
+        }
+        line = mcp_truncate_utf8(line, kMaxReasonLineBytes);
+        if (line.empty()) {
+            continue;
+        }
+        if (lines.size() >= kMaxReasonLines ||
+            total + line.size() + (lines.empty() ? 0u : 1u) > kMaxReasonBytes) {
+            break;
+        }
+        total += line.size();
+        lines.push_back(std::move(line));
+    }
+    if (lines.empty()) {
+        return "failure reason withheld";
+    }
+    std::string out;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (index != 0) {
+            out.push_back('\n');
+        }
+        out += lines[index];
+    }
+    return out;
 }
 
 ToolErrorCode to_tool_error_code(McpErrorCode code) noexcept {

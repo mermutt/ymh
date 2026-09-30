@@ -10,6 +10,30 @@
 #include <utility>
 
 namespace ymh {
+namespace {
+
+std::string rpc_error_text(const nlohmann::json& error) {
+    if (!error.is_object()) {
+        return "malformed error";
+    }
+    std::string text;
+    if (error.contains("code") && error["code"].is_number_integer()) {
+        text += std::to_string(error["code"].get<std::int64_t>());
+    }
+    const std::string message =
+        error.contains("message") && error["message"].is_string()
+            ? error["message"].get<std::string>()
+            : std::string{};
+    if (!message.empty()) {
+        if (!text.empty()) {
+            text += " ";
+        }
+        text += message;
+    }
+    return text.empty() ? "unspecified error" : text;
+}
+
+} // namespace
 
 bool is_supported_mcp_revision(std::string_view revision) noexcept {
     return revision == "2025-06-18" || revision == "2025-03-26";
@@ -57,6 +81,7 @@ public:
           now_(std::move(now)) {
         status_.id = id_;
         pollable_ = dynamic_cast<McpPollableTransport*>(transport_.get());
+        diagnostic_ = dynamic_cast<McpDiagnosticTransport*>(transport_.get());
         transport_->setMessageHandler(
             [this](nlohmann::json message) { handleMessage(std::move(message)); });
         transport_->setCloseHandler(
@@ -68,6 +93,22 @@ public:
     McpServerState state() const noexcept override { return state_.load(); }
 
     Task<void> start(CancellationToken cancel) override {
+        try {
+            return startImpl(cancel);
+        } catch (const McpError& error) {
+            throw McpError{error.code(), std::string{error.what()} + failure_suffix()};
+        }
+    }
+
+    Task<std::vector<McpToolInfo>> listTools(CancellationToken cancel) override {
+        try {
+            return listToolsImpl(cancel);
+        } catch (const McpError& error) {
+            throw McpError{error.code(), std::string{error.what()} + failure_suffix()};
+        }
+    }
+
+    Task<void> startImpl(CancellationToken cancel) {
         if (state_.load() == McpServerState::Ready) {
             return Task<void>{};
         }
@@ -95,34 +136,47 @@ public:
         } catch (const McpError& error) {
             fail();
             if (error.code() == McpErrorCode::CallTimeout) {
-                throw McpError{McpErrorCode::HandshakeTimeout, "initialize timed out"};
+                throw McpError{McpErrorCode::HandshakeTimeout,
+                               "initialize timed out (handshake_timeout=" +
+                                   std::to_string(mcp_config_.handshake_timeout.count()) +
+                                   "ms)"};
             }
             throw;
         }
         if (response.contains("error")) {
             fail();
-            throw McpError{McpErrorCode::HandshakeRejected, "initialize was rejected"};
+            throw McpError{McpErrorCode::HandshakeRejected,
+                           "initialize was rejected: " + rpc_error_text(response["error"])};
         }
         if (!response.contains("result") || !response["result"].is_object()) {
             fail();
-            throw McpError{McpErrorCode::ProtocolViolation, "initialize had no result"};
+            throw McpError{McpErrorCode::ProtocolViolation,
+                           "initialize had no result: " +
+                               mcp_truncate_utf8(response.dump(), 200)};
         }
         const nlohmann::json& result = response["result"];
-        const std::string revision = result.value("protocolVersion", std::string{});
+        const std::string revision =
+            result.contains("protocolVersion") && result["protocolVersion"].is_string()
+                ? result["protocolVersion"].get<std::string>()
+                : std::string{};
         if (!is_supported_mcp_revision(revision)) {
             fail();
             throw McpError{McpErrorCode::HandshakeRejected,
-                           "unsupported protocol revision"};
+                           "unsupported protocol revision: " +
+                               (revision.empty() ? std::string{"<absent>"} : revision)};
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             protocol_version_ = revision;
             status_.protocol_version = revision;
             if (result.contains("serverInfo") && result["serverInfo"].is_object()) {
-                status_.server_name =
-                    result["serverInfo"].value("name", std::string{});
-                status_.server_version =
-                    result["serverInfo"].value("version", std::string{});
+                const nlohmann::json& info = result["serverInfo"];
+                if (info.contains("name") && info["name"].is_string()) {
+                    status_.server_name = info["name"].get<std::string>();
+                }
+                if (info.contains("version") && info["version"].is_string()) {
+                    status_.server_version = info["version"].get<std::string>();
+                }
             }
         }
 
@@ -137,7 +191,7 @@ public:
         return Task<void>{};
     }
 
-    Task<std::vector<McpToolInfo>> listTools(CancellationToken cancel) override {
+    Task<std::vector<McpToolInfo>> listToolsImpl(CancellationToken cancel) {
         const McpServerState current = state_.load();
         if (current != McpServerState::Ready && current != McpServerState::Degraded) {
             throw McpError{McpErrorCode::TransportClosed, "tools/list before ready"};
@@ -152,10 +206,13 @@ public:
             nlohmann::json response =
                 sendRequest("tools/list", std::move(params), mcp_config_.list_timeout, cancel);
             if (response.contains("error")) {
-                throw McpError{McpErrorCode::RpcError, "tools/list error"};
+                throw McpError{McpErrorCode::RpcError,
+                               "tools/list error: " + rpc_error_text(response["error"])};
             }
             if (!response.contains("result") || !response["result"].is_object()) {
-                throw McpError{McpErrorCode::ProtocolViolation, "tools/list had no result"};
+                throw McpError{McpErrorCode::ProtocolViolation,
+                               "tools/list had no result: " +
+                                   mcp_truncate_utf8(response.dump(), 200)};
             }
             const nlohmann::json& result = response["result"];
             if (result.contains("tools") && result["tools"].is_array()) {
@@ -310,15 +367,42 @@ private:
     }
 
     void onClose(McpDisconnectReason reason) {
-        (void)reason;
         state_.store(McpServerState::Disconnected);
         setStatusState(McpServerState::Disconnected);
         std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_reason_ = reason;
         for (auto& [id, pending] : pending_) {
             (void)id;
             pending.done = true;
             pending.closed = true;
         }
+    }
+
+    std::string disconnect_suffix() const {
+        if (!disconnect_reason_.has_value()) {
+            return {};
+        }
+        return " (" + std::string{mcp_disconnect_token(*disconnect_reason_)} + ")";
+    }
+
+    std::string failure_suffix() {
+        if (diagnostic_ == nullptr) {
+            return {};
+        }
+        const std::string context = diagnostic_->failureContext();
+        if (context.empty()) {
+            return {};
+        }
+        std::string out = "\nrecent server output:";
+        std::size_t start = 0;
+        for (std::size_t index = 0; index <= context.size(); ++index) {
+            if (index != context.size() && context[index] != '\n') {
+                continue;
+            }
+            out += "\n  " + context.substr(start, index - start);
+            start = index + 1;
+        }
+        return out;
     }
 
     void sendCancelled(std::int64_t id) noexcept {
@@ -367,13 +451,14 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 const auto found = pending_.find(id);
                 if (found == pending_.end()) {
-                    throw McpError{McpErrorCode::TransportClosed, "request was abandoned"};
+                    throw McpError{McpErrorCode::TransportClosed,
+                                   "request was abandoned" + disconnect_suffix()};
                 }
                 if (found->second.done) {
                     if (found->second.closed) {
                         pending_.erase(found);
                         throw McpError{McpErrorCode::TransportClosed,
-                                       "transport closed"};
+                                       "transport closed" + disconnect_suffix()};
                     }
                     nlohmann::json response = std::move(found->second.message);
                     pending_.erase(found);
@@ -465,11 +550,13 @@ private:
     McpConfig                          mcp_config_;
     std::unique_ptr<McpTransport>      transport_;
     McpPollableTransport*              pollable_ = nullptr;
+    McpDiagnosticTransport*            diagnostic_ = nullptr;
     Logger&                            logger_;
     McpClockReader                     now_;
     std::atomic<McpServerState>        state_{McpServerState::Disabled};
 
     mutable std::mutex                 mutex_;
+    std::optional<McpDisconnectReason> disconnect_reason_;
     McpServerStatus                    status_;
     std::map<std::int64_t, Pending>    pending_;
     std::int64_t                       next_id_{1};
