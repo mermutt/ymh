@@ -1,8 +1,8 @@
 # 66 — Bracketed Paste / Clipboard Paste Errata
 
 ```
-Status: verified (Rev 4) · reviewer: see `DESIGN_STATUS.md` row 66 · gate: 0 HIGH / 0 MEDIUM
-Revision: 4
+Status: verified (Rev 5) · reviewer: see `DESIGN_STATUS.md` row 66 · gate: 0 HIGH / 0 MEDIUM
+Revision: 5
 Component: 66 (errata) — amends 10-supervisor-tui.md (§8.3, §8.4) and
            45-ui-interaction-errata.md (§6) by reference; corrects the
            `TerminalCapabilities` sketch in 00-architecture.md §20.19 / 10 §8.3
@@ -120,16 +120,16 @@ reference (recorded in the DESIGN_STATUS row).
 ### 4.3 Reassembly (decision 66-D3)
 
 `SupervisorApp::handle_paste_event` runs at the top of `handle_event_inner`
-(`supervisor.cpp:3703-3749`, called at `:3790`):
+(`supervisor.cpp:3708-3762`, called at `:3811`):
 
 1. `Event::Special("\x1b[200~")` → arm: record the clock. If a run was already
    armed (a malformed nested marker), flush it first rather than dropping it
-   (`:3708-3714`).
+   (`:3721-3731`).
 2. While armed, every event is **content**: `event.input()` is appended
-   (`:3744`), including `Event::Return` (`"\n"`), `Event::Tab` (`"\t")` and any
+   (`:3757`), including `Event::Return` (`"\n"`), `Event::Tab` (`"\t")` and any
    escape run the parser produced. `Event::Custom` still drains daemon replies;
    mouse/cursor-position/cursor-shape events are terminal-protocol events, not
-   paste bytes, and are ignored (`:3737-3742`).
+   paste bytes, and are ignored (`:3750-3756`).
 3. `Event::Special("\x1b[201~")` → disarm and flush.
 
 **Parser normalization (66-I3, R1).** The bytes ymh receives are the bytes in the
@@ -147,8 +147,8 @@ State: `paste_active_` / `paste_buffer_` / `paste_last_event_at_`
 
 | State | Created | Destroyed | Survives restart? | Crash |
 |---|---|---|---|---|
-| `paste_active_`, `paste_last_event_at_` | `SupervisorApp` construction; re-armed at each open marker | close marker (`:3733`) / idle flush (`:3727`); app teardown | no (never persisted) | lost with the process; no draft mutation was committed |
-| `paste_buffer_` | armed open marker; appended per content event (`:3744`) | close/idle flush (moved into the draft), byte-cap flush (`:3745`), app teardown | no | lost with the process |
+| `paste_active_`, `paste_last_event_at_` | `SupervisorApp` construction; re-armed at each open marker | close marker (`:3745`) / idle flush (`:3739`); app teardown | no (never persisted) | lost with the process; no draft mutation was committed |
+| `paste_buffer_` | armed open marker; appended per content event (`:3757`) | close/idle flush (moved into the draft), byte-cap flush (`:3758`), app teardown | no | lost with the process |
 | `g_bracketed_paste_out_fd` (66-D5) | `BracketedPasteSignalGuard` ctor while paste is active (`:3889`) | guard dtor, and by the handler after it writes (`:103`) | no | signal path writes DECRST then dies |
 | `saved_[]` dispositions (66-D5) | guard ctor | guard dtor | no | process death leaves the OS default table |
 | `TerminalLayer* terminal_` (66-D9) | `run_loop` after the layer is constructed (`supervisor.cpp`, `run_loop`) | `RunLoopExitGuard` dtor (66-D12); null on every exit | no (points at a stack local) | cleared during unwinding by the guard; the layer itself is destroyed after the guard |
@@ -317,7 +317,7 @@ destructor that throws is out of scope (the guarded operations are `noexcept`).
 * **66-F3 (F1 drop)** — a missing close marker is bounded by `kMaxPasteBytes`
   (a flush that keeps the run armed) and `kPasteIdleFlush` (a flush that
   disarms). The idle flush is **event-driven**: it fires only when a further
-  event arrives after the gap (`supervisor.cpp:3725-3728`). A run that never
+  event arrives after the gap (`supervisor.cpp:3739-3743`). A run that never
   closes and is never followed by another event keeps its buffered text until app
   teardown, where it is lost with the process — the one bounded hole. Any flush
   that runs inserts its text, never drops it; a nested open marker flushes the
@@ -432,6 +432,9 @@ Hermetic, in `tests/unit/errata66_ui_test.cpp` (registered in
   DISABLE (before the fork) then ENABLE (after the child exits). Fails pre-fix
   (no DISABLE/ENABLE pair; `ctrl-e` leaves DECSET on). Uses
   `install_prompt_editor_io` + the existing `ScopedEnv` editor pattern.
+  `edit_export_file` (`/export --edit`) wraps the identical
+  `BracketedPasteSuspension` call but is **not** separately pty-tested (it needs a
+  seeded workspace store); the shared suspension primitive is covered by 66-U12.
 * **66-U14** `CapExceededPasteFlushesWithoutSubmitting` — a paste larger than
   `kMaxPasteBytes` followed by the close marker inserts the whole payload and
   never submits (`agent.prompt` count 0), pinning the corrected 66-I2 (multiple
@@ -462,3 +465,4 @@ Hermetic, in `tests/unit/errata66_ui_test.cpp` (registered in
 | 2026-09-29 | Rev 2 (draft) | Oracle round 1 FAIL (0 HIGH / 4 MEDIUM) fixed: M1 modal-snapshot drop (66-D8/66-F7/U8), M2 byte-cap invariant corrected, M3 special-event scope stated, M4 signal guard narrowed to SIGHUP/SIGQUIT; L2 raw-parser test (U7), L3 state table, L4 resolution wording, L7 `kill`/`errno`, L8 nested marker (U9), L9 supersession recorded. |
 | 2026-09-29 | Rev 3 (draft) | Oracle round 2 (0 HIGH / 1 MEDIUM, R1): 66-I3/F1 scoped to `input()` modulo FTXUI `g_uniformize`/UTF-8 drop (§4.3 + U10); L1 DECRST moved before `timer.join()` + residual windows stated in 66-I1; L2 signal path noted not-hermetic; L3 table split; L4 citations; L5 snapshot hints synced. |
 | 2026-10-01 | Rev 4 (draft) | Independent verification of the shipped code reopened the spec with 2 reported MEDIUMs: (M5a) DECSET 2004 leaked into the forked `$EDITOR` (`WithRestoredIO` touches no mode) — **real**, fixed by `BracketedPasteSuspension` at both call sites (66-D9/§4.6/66-I9/66-F8/U12/U13); (M5b) the SIGWINCH sentinel `Event::Special({0})` was reported as appended to the buffer — **did not reproduce**: `Event::Custom == Event::Special({0})`, so the existing Custom branch already consumes it; 66-D10 names it explicitly and 66-U11 is a guard. Reconciles five overstatements (66-D11): 66-F3 idle flush is event-driven; 66-F5 permits a bounded partial sequence; 66-I2 is per-flush-segment; 66-I3 discloses `\r`→`\n`/`\x08`→`\x7f`; 66-I1's exception path is now real via `RunLoopExitGuard` (66-D12/§4.8/U14/U15). |
+| 2026-10-01 | Rev 5 (verified) | Post-gate Oracle LOW audit (§4.3 lifetime-table and §4.6/§4.7 citations re-anchored to the shipped `supervisor.cpp` lines; 66-F3's idle-flush anchor corrected to `:3739-3743`; `edit_export_file` recorded as sharing the 66-D9 suspension path without a separate pty test). No normative change; `0 HIGH / 0 MEDIUM` gate unchanged. |

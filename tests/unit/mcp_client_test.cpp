@@ -166,6 +166,22 @@ bool throws_code(const std::function<void()>& fn, McpErrorCode code) {
     return false;
 }
 
+// 70-D6/70-I2: the reason (70-D9) must lead with the specific cause, not the
+// bare enum token; returns the message only when the code also matches.
+std::optional<std::string> throws_message(const std::function<void()>& fn, McpErrorCode code) {
+    try {
+        fn();
+    } catch (const McpError& error) {
+        if (error.code() == code) {
+            return std::string(error.what());
+        }
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 TEST(McpClientTest, HandshakeBeforeUse) {
@@ -203,7 +219,55 @@ TEST(McpClientTest, UnsupportedRevisionRejectsHandshake) {
     };
     EXPECT_TRUE(throws_code([&] { harness.client->start({}).get(); },
                             McpErrorCode::HandshakeRejected));
+    const std::optional<std::string> message = throws_message(
+        [&] { harness.client->start({}).get(); }, McpErrorCode::HandshakeRejected);
+    ASSERT_TRUE(message.has_value());
+    EXPECT_NE(message->find("unsupported protocol revision: 1999-01-01"),
+              std::string::npos)
+        << *message;
     EXPECT_EQ(harness.client->state(), ymh::McpServerState::Failed);
+}
+
+// 70-D6/70-I2: the server's own JSON-RPC error text is preserved in the reason,
+// so an operator can tell an initialize rejection from a tools/list failure.
+TEST(McpClientTest, HandshakeAndToolListFailuresNameTheirCause) {
+    {
+        Harness harness;
+        harness.transport_->responder = [](const nlohmann::json& request) {
+            if (request.value("method", std::string{}) == "initialize") {
+                return std::optional<nlohmann::json>{nlohmann::json{
+                    {"jsonrpc", "2.0"},
+                    {"id", request["id"]},
+                    {"error", {{"code", -32602}, {"message", "bad params"}}}}};
+            }
+            return std::optional<nlohmann::json>{response_for(request)};
+        };
+        const std::optional<std::string> message = throws_message(
+            [&] { harness.client->start({}).get(); }, McpErrorCode::HandshakeRejected);
+        ASSERT_TRUE(message.has_value());
+        EXPECT_NE(message->find("initialize was rejected: -32602 bad params"),
+                  std::string::npos)
+            << *message;
+    }
+    {
+        Harness harness;
+        harness.client->start({}).get();
+        harness.transport_->responder = [](const nlohmann::json& request) {
+            if (request.value("method", std::string{}) == "tools/list") {
+                return std::optional<nlohmann::json>{nlohmann::json{
+                    {"jsonrpc", "2.0"},
+                    {"id", request["id"]},
+                    {"error", {{"code", -32000}, {"message", "listing boom"}}}}};
+            }
+            return std::optional<nlohmann::json>{response_for(request)};
+        };
+        const std::optional<std::string> message = throws_message(
+            [&] { (void)harness.client->listTools({}).get(); }, McpErrorCode::RpcError);
+        ASSERT_TRUE(message.has_value());
+        EXPECT_NE(message->find("tools/list error: -32000 listing boom"),
+                  std::string::npos)
+            << *message;
+    }
 }
 
 TEST(McpClientTest, CallToolMapsContent) {

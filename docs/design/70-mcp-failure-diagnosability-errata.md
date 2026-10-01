@@ -1,8 +1,8 @@
 # 70 — MCP Failure Diagnosability Errata
 
 ```
-Status: verified (Rev 6) · reviewer: Oracle gate (round 6) · gate: 0 HIGH / 0 MEDIUM
-Revision: 6
+Status: verified (Rev 7) · reviewer: Oracle gate (round 6) + post-gate LOW audit · gate: 0 HIGH / 0 MEDIUM
+Revision: 7
 Component: 70 (errata) — amends 15-mcp-adapter.md (§4.2, §4.3, §4.7, §5.1,
            §9.2 MCP-F1/F2/F3/F7), 07-tools-execution.md §6.4
            (`ProcessRequest::stderr_fd`, `ChildProcessHandle::tryReap`,
@@ -164,6 +164,20 @@ grace window. Rev 6 pins that the post-SIGKILL disposal does not use the free
 `child_->tryReap()`), and 70-I9 now enumerates that path; the header's `Amends`
 parenthetical lists all three process-seam members.
 
+**Rev 7 (post-gate LOW audit).** An independent Oracle re-audit returned
+**PASS (0 HIGH / 0 MEDIUM)** with seven LOW accuracy findings; this revision
+closes them: the §10 test labels are corrected to the shipped
+`McpDiagnosticIntegration.*` / `ProcessService.TryReapIsMonotonic` names; the
+`McpLiveStatusTest` row now states it pins the `mcp_truncate_utf8` primitive
+(the host wrapper is translation-unit local); and 70-I3/70-F8 describe the
+sink-selection fallback accurately (when the selected sink — the durable
+`stderr_path` under `log_child_stderr`, else the anonymous capture fd — cannot be
+created, neither `stderr_path` nor `stderr_fd` is set and the child degrades to
+`/dev/null`). The diagnostic read end **is** set non-blocking
+(`src/host/workspace_host.cpp:1459`), so the 69-D7 comment is accurate. Adds
+`McpClientTest.HandshakeAndToolListFailuresNameTheirCause` pinning the server's
+own JSON-RPC error text in the reason.
+
 **Gate (per `AGENTS.md`).** Independent Oracle review marks this `verified` once
 the reason channel, the stderr-capture/lifetime decision, the bound/redaction
 decision, the wire-field amendment to 45-I14, and the per-server render are
@@ -236,9 +250,11 @@ offset are read, and the read is **capped at the last ≤ 64 KiB** of the captur
 file description with the child (fork + `dup2`), so the parent MUST read it with
 **`pread`** (positional), never `lseek`+`read`, or it would move the shared offset
 out from under a live child; the durable path is a separate parent `open` and is
-unaffected. `stderr_path` remains the fallback only when `log_child_stderr` is on; if
-no capture fd can be created and no durable path is configured, the child's stderr
-degrades to today's `/dev/null` (70-F8) and the reason is still specific. This is the
+unaffected. The sink is selected **before** spawn: the durable `stderr_path` when
+`log_child_stderr` is on, otherwise the anonymous capture fd. If the selected sink
+cannot be created (the durable file open fails, or `O_TMPFILE`/`mkstemp` fails),
+the code sets neither `stderr_path` nor `stderr_fd`, so the child's stderr degrades
+to today's `/dev/null` (70-F8) and the reason is still specific. This is the
 actionable cause for a server that spawns successfully and then exits (a missing
 script argument, a bad interpreter path, a server banner on stderr).
 
@@ -434,7 +450,7 @@ class ChildProcessHandle {
 |---|---|
 | **70-I1** | No MCP failure stores or emits a bare enum token — whether an `McpErrorCode` token or a `ToolErrorCode` token — as the whole `last_error`/`reason`; every failure names a cause (70-D1). |
 | **70-I2** | A spawn failure's reason contains the OS error text (`strerror`) and the command; a missing executable yields text containing `No such file or directory` (70-D2). |
-| **70-I3** | When a stdio transport is active and its capture fd could be created, the child's stderr is never routed to `/dev/null`; a bounded tail is available to `failureContext()` on failure. When the capture fd cannot be created (70-F8), the degraded path may fall back to `stderr_path` or `/dev/null`, and the reason is still specific. |
+| **70-I3** | When a stdio transport is active and its selected sink (the durable `stderr_path` when `log_child_stderr` is on, else the anonymous capture fd) could be created, the child's stderr is never routed to `/dev/null`; a bounded tail is available to `failureContext()` on failure. When the selected sink cannot be created (70-F8), neither `stderr_path` nor `stderr_fd` is set and the child's stderr degrades to `/dev/null`, and the reason is still specific. |
 | **70-I4** | The stored `reason` is ≤4 non-empty lines / ≤512 bytes total / ≤240 bytes per line and contains no line matching the 70-D7 marker set (70-D7, 70-D12). |
 | **70-I5** | `mcp.status`'s `reason` is present iff `!connected` and a cause exists; ready and disabled servers ship no `reason`; `has_error` is unchanged (70-D9). |
 | **70-I6** | `context.show`'s `mcp_servers` schema is byte-for-byte unchanged: only `{id,state,tool_count,skipped,has_error}` and no reason text (70-A9, 18-M8). |
@@ -473,7 +489,7 @@ the MCP instance of `69-F1`/`69-F2`.
 | **70-F5** | `initialize` rejected | `response["error"]` present | reason `initialize was rejected: <code> <message>` (70-D6) |
 | **70-F6** | `tools/list` error | `response["error"]` present | reason `tools/list error: <code> <message>` (70-D6) |
 | **70-F7** | Secret-shaped child output | 70-D7 marker match | the line is dropped; the rest survives; all-dropped ⇒ `failure reason withheld` (70-I4, 70-I8) |
-| **70-F8** | Capture fd uncreatable | `O_TMPFILE`/`mkstemp` fails | the transport falls back to the durable `stderr_path` when `log_child_stderr` is on, else the child's stderr degrades to `/dev/null` (today's behavior) and the reason is still specific; a warning is logged; no throw (70-I3 degraded) |
+| **70-F8** | Capture fd uncreatable | `O_TMPFILE`/`mkstemp` fails (anonymous mode), or the durable file open fails (`log_child_stderr` on) | the transport sets neither `stderr_path` nor `stderr_fd`, so the child's stderr degrades to `/dev/null` (today's behavior) and the reason is still specific; a warning is logged; no throw (70-I3 degraded) |
 | **70-F9** | Child reaped by `failureContext()` / the graceful loop | `tryReap` returns a result | `close()` short-circuits signalling on `reaped()`, and the post-SIGKILL disposal leaves the reap to `~SpawnedChild`; no free `reap(int)` in the transport (70-D4, 70-I9) |
 
 ## 9. dsh (DeepSeek Harness) mapping
@@ -492,16 +508,17 @@ Hermetic (no real LLM, no network; real stdio via the fake server where noted):
 | Test | Setup | Assertion |
 |---|---|---|
 | `McpDiagnosability.BoundReasonRedactsAndBounds` (unit) | `bound_mcp_reason` with a multi-line input containing an `api_key=` line and 300-byte lines | the secret line is gone; ≤4 lines / ≤512 bytes; newlines preserved; idempotent (70-D7, 70-I4, 70-I10) |
-| `ProcessHandle.TryReapIsMonotonic` (unit, `tests/unit/process_test.cpp`) | a `spawn()`ed child that exits immediately; `handle->tryReap()` until it returns a result, then again | the first call returns the status and `handle->reaped() == true`; a subsequent `tryReap()` returns `nullopt` and `reaped()` stays `true` (70-A14, 70-I15) |
+| `ProcessService.TryReapIsMonotonic` (unit, `tests/unit/process_test.cpp:310`) | a `spawn()`ed child that exits immediately; `handle->tryReap()` until it returns a result, then again | the first call returns the status and `handle->reaped() == true`; a subsequent `tryReap()` returns `nullopt` and `reaped()` stays `true` (70-A14, 70-I15) |
 | `McpDiagnosability.BoundReasonStaysValidUtf8` (unit) | `bound_mcp_reason` with a lone `0xFF` byte, a truncated multibyte sequence, a NUL, and a 240-byte multibyte line | the result is valid UTF-8, contains no NUL/control byte, and `nlohmann::json({{"reason", out}}).dump()` does not throw (70-I12) |
 | `McpDiagnosability.TruncateUtf8NeverSplitsCodepoint` (unit) | `mcp_truncate_utf8` over a multibyte string at every byte length boundary | the result is always valid UTF-8 and never longer than the requested cap (70-D11, 70-I12) |
-| `McpLiveStatusTest.NoticeDetailWithLongMultibyteReasonDumps` (unit) | a `HostNotice` whose `detail` was produced by `mcp_status_detail`-style truncation from a >256-byte multibyte reason | `nlohmann::json(notice).dump()` does not throw and the `detail` is valid UTF-8 (70-D11, 70-I12) |
+| `McpLiveStatusTest.NoticeDetailWithLongMultibyteReasonDumps` (unit, `tests/unit/mcp_live_status_test.cpp:89`) | the primitive `ymh::mcp_truncate_utf8` (the one `mcp_status_detail` composes with) applied to a >256-byte multibyte reason; the test then serializes a `HostNotice` carrying the bounded detail | the result is ≤256 bytes on a codepoint boundary, `nlohmann::json(notice).dump()` does not throw, and the `detail` is valid UTF-8 (70-D11, 70-I12). The host wrapper `mcp_status_detail` itself is not invoked (it is translation-unit local); this pins the shared truncation primitive. |
+| `McpClientTest.HandshakeAndToolListFailuresNameTheirCause` (unit, `tests/unit/mcp_client_test.cpp`) | the scripted transport returns an `initialize` JSON-RPC error object in one harness and a `tools/list` error object in another | `start()` throws `HandshakeRejected` whose `what()` contains `initialize was rejected: -32602 bad params`; `listTools()` throws `RpcError` whose `what()` contains `tools/list error: -32000 listing boom` (70-D6, 70-I2) |
 | `McpDiagnosability.ManagerPreservesSpecificReason` (unit, `mcp_manager_test.cpp`) | a factory client whose `start()` throws `McpError{SpawnFailed, "spawn failed: /opt/mcp: exec: No such file or directory"}` | `statuses().front().last_error` contains `No such file or directory` and is **not** the bare `SpawnFailed` (70-D1, 70-I1) |
 | `McpDiagnosability.DistinctServersYieldDistinctReasons` (unit) | two servers, two factories throwing different reasons | the two `last_error` strings differ and each contains its own cause (70-D1) |
 | `McpDiagnosability.ManagerRedactsSecretReason` (unit) | factory throws a reason containing a `token=` line | stored `last_error` does not contain the secret (70-D7, 70-I8) |
-| `McpIntegrationTest.MissingCommandReasonIsSpecific` (integration) | `command = "/nonexistent/ymh-mcp-does-not-exist"` | `status().state == Failed`; `last_error` contains `No such file or directory` and the command (70-D2, 70-I2) |
-| `McpIntegrationTest.ChildExitStderrIsSurfaced` (integration) | fake server **extended** with a scenario `exit_stderr` that writes a marker to stderr and `_exit(2)` on `initialize` (`tests/support/fake_mcp_server.cpp` currently supports `bad_revision` at `:85`) | `last_error` contains the marker and the exit code (70-D3, 70-D4, 70-F2) |
-| `McpIntegrationTest.BadRevisionReasonNamesRevision` (integration) | fake server scenario `bad_revision` | `last_error` contains `1999-01-01` (70-D6, 70-F4) |
+| `McpDiagnosticIntegration.MissingCommandReasonIsSpecific` (integration, `tests/integration_mcp_test.cpp:289`) | `command = "/nonexistent/ymh-mcp-does-not-exist"` | `status().state == Failed`; `last_error` contains `No such file or directory` and the command (70-D2, 70-I2) |
+| `McpDiagnosticIntegration.ChildExitStderrIsSurfaced` (integration, `:316`) | fake server **extended** with a scenario `exit_stderr` that writes a marker to stderr and `_exit(2)` on `initialize` (`tests/support/fake_mcp_server.cpp:85-90`) | `last_error` contains the marker and the exit code (70-D3, 70-D4, 70-F2) |
+| `McpDiagnosticIntegration.BadRevisionReasonNamesRevision` (integration, `:332`) | fake server scenario `bad_revision` | `last_error` contains `1999-01-01` (70-D6, 70-F4) |
 | `McpDiagnosability.RenderShowsReasonPerServer` (unit, `status_format_test.cpp`) | `format_mcp_block` with a failed server carrying a multi-line `reason` | the block contains `reason: <cause>` and the context line; newlines preserved; a ready server has no reason row (70-D10, 70-I7) |
 | `McpRpcTest.UI45_D6_FailedServerShipsReason` (unit, `mcp_rpc_test.cpp`) | a fixture whose client fails with a specific reason | `mcp.status` server object contains `reason` with the cause; a ready server object has no `reason`; the raw `last_error` key is still absent (70-D9, 70-I5) |
 | existing `ContextSnapshot.McpServerListIsBoundedAndRedacted` | unchanged | still passes: `context.show` does not ship the text (70-I6) |
