@@ -1,5 +1,7 @@
 #include "ymh/mcp/mcp_client.hpp"
 
+#include "ymh/core/version.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -126,7 +128,7 @@ public:
              config_.protocol_version.empty() ? std::string{newest_mcp_revision()}
                                               : config_.protocol_version},
             {"capabilities", nlohmann::json::object()},
-            {"clientInfo", {{"name", "ymh"}, {"version", "0.1.0"}}},
+            {"clientInfo", {{"name", "ymh"}, {"version", YMH_VERSION}}},
         };
 
         nlohmann::json response;

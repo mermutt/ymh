@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(
     ymh
-    VERSION 0.001
+    VERSION 0.002
     DESCRIPTION "Terminal coding-agent harness"
     LANGUAGES CXX
 )
@@ -368,6 +368,10 @@ add_library(ymh_mcp STATIC
     src/mcp/mcp_manager.cpp
 )
 add_library(ymh::mcp ALIAS ymh_mcp)
+
+# 72-A6: the MCP client's `clientInfo.version` is the same single-sourced
+# YMH_VERSION (it previously sent a stray hardcoded "0.1.0").
+target_compile_definitions(ymh_mcp PRIVATE YMH_VERSION="${PROJECT_VERSION}")
 
 target_include_directories(ymh_mcp
     PUBLIC
