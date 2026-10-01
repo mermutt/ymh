@@ -81,7 +81,9 @@ bool write_bracketed_paste(bool enabled, int out_fd) noexcept {
     return true;
 }
 
-TerminalLayer::TerminalLayer(int fd) : fd_(fd) {}
+TerminalLayer::TerminalLayer(int fd) : TerminalLayer(fd, STDOUT_FILENO) {}
+
+TerminalLayer::TerminalLayer(int fd, int out_fd) : fd_(fd), out_fd_(out_fd) {}
 
 TerminalLayer::~TerminalLayer() {
     leaveBracketedPaste();
@@ -92,10 +94,10 @@ bool TerminalLayer::enterBracketedPaste() {
     if (paste_) {
         return true;
     }
-    if (::isatty(STDOUT_FILENO) == 0) {
+    if (::isatty(out_fd_) == 0) {
         return false;
     }
-    paste_ = write_bracketed_paste(true, STDOUT_FILENO);
+    paste_ = write_bracketed_paste(true, out_fd_);
     return paste_;
 }
 
@@ -103,8 +105,23 @@ void TerminalLayer::leaveBracketedPaste() {
     if (!paste_) {
         return;
     }
-    (void)write_bracketed_paste(false, STDOUT_FILENO);
+    (void)write_bracketed_paste(false, out_fd_);
     paste_ = false;
+}
+
+// 66-D9: `was_active_` is the only re-arm gate, so subprocess hand-off on an
+// inactive (or null) layer emits nothing and does not arm the mode.
+BracketedPasteSuspension::BracketedPasteSuspension(TerminalLayer* layer) noexcept
+    : layer_(layer), was_active_(layer != nullptr && layer->bracketedPasteActive()) {
+    if (was_active_) {
+        layer_->leaveBracketedPaste();
+    }
+}
+
+BracketedPasteSuspension::~BracketedPasteSuspension() {
+    if (was_active_ && layer_ != nullptr) {
+        layer_->enterBracketedPaste();
+    }
 }
 
 std::optional<termios> TerminalLayer::snapshot(int fd) {

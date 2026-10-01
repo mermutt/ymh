@@ -74,9 +74,37 @@ inline constexpr std::string_view kBracketedPasteDisable = "\x1b[?2004l";
 // written. `fd < 0` is a no-op returning `false`.
 [[nodiscard]] bool write_bracketed_paste(bool enabled, int out_fd) noexcept;
 
+class TerminalLayer;
+
+// 66-D9: RAII suspension of DECSET 2004 for the window a subprocess that cannot
+// parse bracketed-paste markers (`$EDITOR`) is running. Construction emits DECRST
+// when paste is active; destruction re-arms DECSET. **Idempotent**: an inactive
+// layer (or a null layer) is neither changed nor armed, so an editor hand-off in
+// a non-tty/test host is a no-op.
+class BracketedPasteSuspension {
+public:
+    explicit BracketedPasteSuspension(TerminalLayer* layer) noexcept;
+    ~BracketedPasteSuspension();
+
+    BracketedPasteSuspension(const BracketedPasteSuspension&) = delete;
+    BracketedPasteSuspension& operator=(const BracketedPasteSuspension&) = delete;
+    BracketedPasteSuspension(BracketedPasteSuspension&&) = delete;
+    BracketedPasteSuspension& operator=(BracketedPasteSuspension&&) = delete;
+
+    [[nodiscard]] bool suspended() const noexcept { return was_active_; }
+
+private:
+    TerminalLayer* layer_ = nullptr;
+    bool           was_active_ = false;
+};
+
 class TerminalLayer {
 public:
     explicit TerminalLayer(int fd);
+    // 66-D9: the bracketed-paste sequence is emitted on `out_fd` (default stdout,
+    // the production case); the split lets a test drive the lifecycle against a
+    // pty slave without redirecting the process stdout.
+    TerminalLayer(int fd, int out_fd);
     ~TerminalLayer();
 
     TerminalLayer(const TerminalLayer&) = delete;
@@ -89,8 +117,9 @@ public:
     [[nodiscard]] bool rawMode() const noexcept { return raw_; }
 
     // Bracketed-paste lifecycle (66-D2). `enterBracketedPaste` emits DECSET 2004
-    // on `STDOUT_FILENO` and is a no-op when stdout is not a tty; the destructor
-    // (and `leaveBracketedPaste`) restores DECRST 2004 on every exit path.
+    // on `out_fd_` (stdout in production) and is a no-op when that fd is not a
+    // tty; the destructor (and `leaveBracketedPaste`) restores DECRST 2004 on
+    // every exit path.
     bool enterBracketedPaste();
     void leaveBracketedPaste();
     [[nodiscard]] bool bracketedPasteActive() const noexcept { return paste_; }
@@ -103,6 +132,7 @@ public:
 
 private:
     int               fd_;
+    int               out_fd_;
     bool              raw_ = false;
     bool              paste_ = false;
     std::optional<termios> saved_;

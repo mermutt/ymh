@@ -2246,6 +2246,9 @@ private:
             return -1;
         }
         int status = -1;
+        // 66-D9: the forked `$EDITOR` cannot parse bracketed-paste markers, so
+        // DECRST 2004 for its lifetime and re-arm DECSET after.
+        BracketedPasteSuspension paste_suspended(terminal_);
         screen_->WithRestoredIO(
             [&status, &file] { status = run_editor(file, editor_from_environment()); })();
         return status;
@@ -2262,6 +2265,8 @@ private:
         std::optional<std::string> edited;
         std::string                error;
         const auto run = [&] { edited = edit_text_in_editor(state.input.draft, error); };
+        // 66-D9: suspend bracketed paste across the fork, re-arm after it exits.
+        BracketedPasteSuspension paste_suspended(terminal_);
         if (with_restored_io_) {
             with_restored_io_(run);
         } else {
@@ -3705,6 +3710,14 @@ private:
             ftxui::Event::Special(std::string(kBracketedPasteOpen));
         static const ftxui::Event kPasteClose =
             ftxui::Event::Special(std::string(kBracketedPasteClose));
+        // 66-D10: FTXUI posts a single NUL byte as its resize sentinel
+        // (`Event::Special({0})`, screen_interactive.cpp:1066). `Event::Custom`
+        // is the same event value (event.cpp:327; `operator==` compares `input_`),
+        // so the Custom branch below consumes it. The sentinel is named
+        // explicitly so the coverage is documented and does not silently depend
+        // on that coincidence.
+        static const ftxui::Event kResizeSentinel =
+            ftxui::Event::Special(std::string(1, '\0'));
         if (event == kPasteOpen) {
             // 66-F3 (LOW-8): a nested open marker is a malformed run; flush what
             // accumulated instead of dropping it, then re-arm.
@@ -3734,7 +3747,7 @@ private:
             flush_paste();
             return true;
         }
-        if (event == ftxui::Event::Custom) {
+        if (event == ftxui::Event::Custom || event == kResizeSentinel) {
             drain();
             return true;
         }
@@ -3897,6 +3910,7 @@ private:
         const BracketedPasteSignalGuard paste_signal_guard(terminal.bracketedPasteActive());
         ftxui::ScreenInteractive screen = ftxui::ScreenInteractive::Fullscreen();
         screen_ = &screen;
+        terminal_ = &terminal;
         const bool color = resolve_color(terminal.capabilities(), options_.config.ui.color);
         const Theme theme = make_theme(color, ThemeVariant::Dark);
 
@@ -3940,14 +3954,32 @@ private:
             }
         });
 
+        // 66-D5/L1 + 66-D12: the teardown is the guard's destructor so it runs on
+        // the normal return and on a `screen.Loop` throw. A throwing loop must not
+        // reach `timer`'s std::thread destructor with `quit_` still false (the
+        // join would hang before `~TerminalLayer` could emit DECRST). Restore
+        // DECRST before the (up to 50 ms) timer join, so no SIGINT/SIGTERM window
+        // exists between the loop ending and the restore.
+        struct RunLoopExitGuard {
+            std::atomic<bool>&         quit;
+            std::thread&               timer;
+            TerminalLayer&             terminal;
+            TerminalLayer*&            terminal_slot;
+            ftxui::ScreenInteractive*& screen_slot;
+
+            ~RunLoopExitGuard() {
+                quit.store(true);
+                terminal.leaveBracketedPaste();
+                if (timer.joinable()) {
+                    timer.join();
+                }
+                terminal_slot = nullptr;
+                screen_slot   = nullptr;
+                terminal.leaveRawMode();
+            }
+        } exit_guard{quit_, timer, terminal, terminal_, screen_};
+
         screen.Loop(component);
-        quit_.store(true);
-        // 66-D5/L1: restore DECRST before the (up to 50 ms) timer join, so no
-        // SIGINT/SIGTERM window exists between the loop ending and the restore.
-        terminal.leaveBracketedPaste();
-        timer.join();
-        screen_ = nullptr;
-        terminal.leaveRawMode();
         return 0;
     }
 
@@ -4013,6 +4045,10 @@ private:
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
+    // 66-D9: the run loop's terminal layer, so the subprocess-editor hand-off can
+    // suspend/re-arm bracketed paste. UI-thread only; set in `run_loop` and
+    // cleared by `RunLoopExitGuard`. Null in tests without a terminal.
+    TerminalLayer* terminal_ = nullptr;
     // 59-D7: the terminal width of the last render, used to wrap the composer
     // draft for vertical caret motion. The renderer refreshes it every frame; the
     // default keeps key handling sane before the first frame (and in tests).
@@ -4158,6 +4194,12 @@ public:
 
     void install_prompt_editor_io() override {
         app_.with_restored_io_ = [](const std::function<void()>& run) { run(); };
+    }
+
+    void install_bracketed_paste_terminal(int out_fd) override {
+        test_terminal_ = std::make_unique<TerminalLayer>(STDIN_FILENO, out_fd);
+        test_terminal_->enterBracketedPaste();
+        app_.terminal_ = test_terminal_.get();
     }
 
     bool dispatch_command_line(const std::string& line) override {
@@ -4458,6 +4500,9 @@ public:
 
 private:
     SupervisorApp app_;
+    // 66-D9 test seam; declared after `app_` so it is destroyed first, leaving
+    // `app_.terminal_` non-owning and never read during teardown.
+    std::unique_ptr<TerminalLayer> test_terminal_;
 };
 
 } // namespace

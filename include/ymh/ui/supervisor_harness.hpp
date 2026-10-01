@@ -81,6 +81,10 @@ public:
     // 46-D13: installs a pass-through terminal hand-off so the editor runs
     // without an FTXUI loop.
     virtual void install_prompt_editor_io() = 0;
+    // 66-D9 test seam: installs a pty-backed TerminalLayer as the app's active
+    // terminal (bracketed paste entered) so the editor hand-off's DECRST/DECSET
+    // pair is observable hermetically. `out_fd` is the pty slave.
+    virtual void install_bracketed_paste_terminal(int out_fd) = 0;
 
     // 45-D6/D7: drives the real slash-command dispatch directly (bypassing the
     // composer's auto-create path) so the session-less `/mcp`/`/status`
