@@ -10,6 +10,8 @@
 #include <string_view>
 #include <utility>
 
+#include "ymh/core/text.hpp"
+
 namespace ymh {
 namespace {
 
@@ -189,15 +191,11 @@ bool is_placeholder_title(std::string_view title) noexcept {
 }
 
 std::string normalize_title(std::string_view title) {
-    std::size_t begin = 0;
-    std::size_t end   = title.size();
-    while (begin < end && is_trim_byte(title[begin])) {
-        ++begin;
-    }
-    while (end > begin && is_trim_byte(title[end - 1])) {
-        --end;
-    }
-    std::string normalized{title.substr(begin, end - begin)};
+    // 67-D3: trim the same Unicode whitespace set the `/rename` argument parser
+    // uses (`trim_unicode_whitespace`), so a lone U+00A0 cannot be stored as a
+    // whitespace-only title. U+000A is excluded and still rejected below as a
+    // control character.
+    std::string normalized{trim_unicode_whitespace(title)};
     if (normalized.empty()) {
         throw std::invalid_argument("session title must not be empty");
     }
@@ -221,19 +219,18 @@ std::optional<std::string> derive_auto_title(std::string_view prompt) {
     const std::string_view line =
         newline == std::string_view::npos ? prompt : prompt.substr(0, newline);
 
-    std::size_t begin = 0;
-    std::size_t end   = line.size();
-    while (begin < end && is_trim_byte(line[begin])) {
-        ++begin;
-    }
-    while (end > begin && is_trim_byte(line[end - 1])) {
-        --end;
+    // 67-D7: the auto-title path is a second title writer; it must apply the same
+    // Unicode trim as `normalize_title`, or a first turn of only U+00A0 derives a
+    // whitespace-only title (the 19/RN8 fail-soft nullopt is unchanged).
+    const std::string_view trimmed = trim_unicode_whitespace(line);
+    if (trimmed.empty()) {
+        return std::nullopt;
     }
 
     std::string collapsed;
     bool        pending_space = false;
-    for (std::size_t index = begin; index < end; ++index) {
-        if (is_trim_byte(line[index])) {
+    for (const char character : trimmed) {
+        if (is_trim_byte(character)) {
             pending_space = true;
             continue;
         }
@@ -241,7 +238,7 @@ std::optional<std::string> derive_auto_title(std::string_view prompt) {
             collapsed.push_back(' ');
         }
         pending_space = false;
-        collapsed.push_back(line[index]);
+        collapsed.push_back(character);
     }
     if (collapsed.empty()) {
         return std::nullopt;

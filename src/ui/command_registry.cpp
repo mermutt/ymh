@@ -4,20 +4,15 @@
 #include <cctype>
 #include <utility>
 
+#include "ymh/core/text.hpp"
+
 namespace ymh::ui {
 namespace {
 
 std::string trim(const std::string& input) {
-    std::size_t begin = 0;
-    while (begin < input.size() &&
-           std::isspace(static_cast<unsigned char>(input[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = input.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
-        --end;
-    }
-    return input.substr(begin, end - begin);
+    // 67-D3: the same Unicode whitespace rule the daemon's `normalize_title`
+    // applies, so `/rename` with only a U+00A0 argument is a local usage notice.
+    return std::string(trim_unicode_whitespace(input));
 }
 
 void append_system(CommandContext& context, std::string text) {
