@@ -1,8 +1,8 @@
 # 68 — Terminal Colour Capability & `ui.color` Override Errata
 
 ```
-Status: verified · reviewer: see `DESIGN_STATUS.md` row 68 · gate: 0 HIGH / 0 MEDIUM
-Revision: 2
+Status: verified (Rev 3) · reviewer: see `DESIGN_STATUS.md` row 68 · gate: 0 HIGH / 0 MEDIUM
+Revision: 3
 Component: 68 (errata) — amends 48-ui-and-config-errata.md (TUI/config surface),
            10-supervisor-tui.md §8.3/§20.19 (theme wiring in `run_loop`),
            21-config-jsonc-errata.md §6 (the `[ui]` key set), and
@@ -35,6 +35,13 @@ This errata makes the colour decision honest for an 8/16-colour terminal, honour
 `NO_COLOR`, and adds a `ui.color = auto|always|never` override so the user has an
 explicit escape hatch for exactly the PuTTY case. It changes no wire, event,
 persistence, or renderer shape.
+
+**Out of scope (68-D8).** This errata governs the **TUI** colour gate only. The
+non-TUI stderr logger still chooses colour from `isatty(STDERR_FILENO)` alone
+(`src/cli/cli.cpp`, `src/core/logging.cpp`), so `ui.color = never` does not
+suppress colour on a tty logger. That is a recorded disposition, not an open
+question: the logging path is a separate surface with a different (global,
+pre-config) lifetime and is not part of the reported PuTTY TUI defect.
 
 **Precedence.** For the colour gate this errata wins over the implicit
 "truecolor-only" reading of 48/51. `make_theme(bool color, ...)`
@@ -156,6 +163,11 @@ AGENTS.md requires every introduced piece of state to tabulate its lifetime.
 * **68-I9** `TerminalCapabilities`' in-class defaults are conservative
   (`trueColor = color256 = color = false`) and agree with the detection, which
   sets each field explicitly (68-D5).
+* **68-I10** The CLI/stderr logging colour choice is independent of
+  `TerminalCapabilities`/`ui.color` and remains `isatty(STDERR_FILENO)`-based;
+  this is a deliberate scope boundary (68-D8), not an invariant violated by this
+  errata. Any future change that routes the logger through `resolve_color` must
+  be its own errata.
 
 ## 6. Failure modes
 
@@ -197,6 +209,9 @@ AGENTS.md requires every introduced piece of state to tabulate its lifetime.
   heuristic is authoritative (see §4.2).
 * **68-D7** There is no `bracketedPaste` capability flag; bracketed paste stays a
   runtime emission (66-D2). Nothing is removed because nothing existed.
+* **68-D8** The CLI/stderr logging colour path (`isatty(stderr)`-based) is
+  explicitly **out of scope**: `ui.color` governs the TUI gate only. Recorded as
+  a disposition in §1, not deferred (see 68-I10).
 
 ## 9. Test plan
 
@@ -246,6 +261,7 @@ spec 66's `Errata66Ui.*`, and `make_theme` (51-D2).
 * Light/dark theme auto-selection (51-D2.8 / OQ-51-2 stay deferred).
 * Changing `Theme` fields or the meaning of `make_theme`'s `color` parameter.
 * A capability probe for bracketed paste (66-D2 stands).
+* The CLI/stderr logging colour path — dispositioned by 68-D8/68-I10.
 
 ## 11. Revision log
 
@@ -253,3 +269,4 @@ spec 66's `Errata66Ui.*`, and `make_theme` (51-D2).
 |---|---|---|
 | 2026-09-29 | Rev 1 (draft) | initial errata: heuristic detection, `NO_COLOR`, `ui.color`, flag disposition |
 | 2026-09-29 | Rev 2 (draft) | Oracle gate round 1: 0 HIGH / 1 MEDIUM (state-lifetime table added, §4.4) + LOWs (anchor refresh, reporting-only `trueColor`/`color256` row, 68-U16 `always`+`NO_COLOR`, `same_config` field) |
+| 2026-10-01 | Rev 3 (draft) | Independent verification noted the CLI/stderr logger still colours from `isatty(stderr)` alone, so `ui.color = never` can colourise tty logs. Recorded as an explicit out-of-scope disposition (68-D8/68-I10/§1) rather than a deferred feature; no behaviour change. |
