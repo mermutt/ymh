@@ -322,6 +322,14 @@ std::size_t ConversationModel::find_reasoning_message(const std::string& id) con
     return it == by_reasoning_message.end() ? kNoEntry : it->second;
 }
 
+bool ConversationModel::mark_seen(const MessageId& id) {
+    return seen_ids_.insert(id).second;
+}
+
+void ConversationModel::reset_dedup() {
+    seen_ids_.clear();
+}
+
 std::size_t ToolModel::find(const std::string& id) const {
     const auto it = by_id.find(id);
     return it == by_id.end() ? kNoEntry : it->second;
@@ -1032,15 +1040,17 @@ void UiModel::apply(const UiEvent& event) {
             using T = std::decay_t<decltype(e)>;
             SessionUiState& state = ensureSession(e.session);
             if constexpr (std::is_same_v<T, UserMessage>) {
-                ConversationEntry entry;
-                entry.role   = ConversationRole::User;
-                entry.text   = e.text;
-                entry.source = e.source;
-                state.conversation.entries.push_back(std::move(entry));
-                if (e.source.kind == MessageSource::Kind::User) {
-                    state.input.push_history(e.text);
+                if (state.conversation.mark_seen(e.id)) {
+                    ConversationEntry entry;
+                    entry.role   = ConversationRole::User;
+                    entry.text   = e.text;
+                    entry.source = e.source;
+                    state.conversation.entries.push_back(std::move(entry));
+                    if (e.source.kind == MessageSource::Kind::User) {
+                        state.input.push_history(e.text);
+                    }
+                    dirty.mark(e.session, UiDirtyFlag::Conversation);
                 }
-                dirty.mark(e.session, UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, AssistantMessageStarted>) {
                 if (state.conversation.find_message(e.message) == kNoEntry) {
                     ConversationEntry entry;
@@ -1172,13 +1182,15 @@ void UiModel::apply(const UiEvent& event) {
                 }
                 dirty.mark(e.session, UiDirtyFlag::Tools | UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, ContextInjected>) {
-                ConversationEntry entry;
-                entry.role    = ConversationRole::Context;
-                entry.text    = e.text;
-                entry.source  = e.source;
-                entry.context = e.context;
-                state.conversation.entries.push_back(std::move(entry));
-                dirty.mark(e.session, UiDirtyFlag::Conversation);
+                if (state.conversation.mark_seen(e.id)) {
+                    ConversationEntry entry;
+                    entry.role    = ConversationRole::Context;
+                    entry.text    = e.text;
+                    entry.source  = e.source;
+                    entry.context = e.context;
+                    state.conversation.entries.push_back(std::move(entry));
+                    dirty.mark(e.session, UiDirtyFlag::Conversation);
+                }
             } else if constexpr (std::is_same_v<T, FileChanged>) {
                 dirty.mark(e.session, UiDirtyFlag::Diff);
             } else if constexpr (std::is_same_v<T, DiffUpdated>) {

@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -123,6 +124,18 @@ struct ConversationModel {
 
     [[nodiscard]] std::size_t find_message(const std::string& id) const;
     [[nodiscard]] std::size_t find_reasoning_message(const std::string& id) const;
+
+    // 73-D7: idempotent append guard for `UserMessage`/`ContextInjected`.
+    // Returns true iff `id` was not already applied, so a replayed stream
+    // cannot double-render. The set is per-session and dies with this model.
+    [[nodiscard]] bool mark_seen(const MessageId& id);
+    // 73-D8/58-A10: the explicit "re-apply is intended" signal. Called by
+    // `UiEventAdapter::forget_session` (the 58 HIGH-1 dedup reset), it drops the
+    // seen-ids only; rendered entries are untouched.
+    void reset_dedup();
+
+  private:
+    std::unordered_set<MessageId> seen_ids_;
 };
 
 // Per-session conversation viewport (10 §8.2 refinement; 60-D2). Supervisor-local,

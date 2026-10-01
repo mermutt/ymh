@@ -325,6 +325,12 @@ void UiEventAdapter::onSessionEnvelope(const WorkspaceId& workspace,
 void UiEventAdapter::forget_session(const SessionId& id) {
     applied_event_ids_.erase(id);
     applied_event_order_.erase(id);
+    // 73-D8: keep the model-level idempotency guard consistent with the 58-A10
+    // adapter dedup reset, so re-entry after a pop can re-apply its events.
+    const auto session = model_.sessions.find(id);
+    if (session != model_.sessions.end()) {
+        session->second.conversation.reset_dedup();
+    }
 }
 
 void UiEventAdapter::onPermissionRequest(const SessionId& session,
