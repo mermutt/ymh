@@ -373,17 +373,21 @@ TEST_F(HeadlessTest, DurableMessageWithoutLiveChunksIsHandled) {
     options.err       = &err;
     options.provider_factory = [](const LLMProviderConfig&) -> std::unique_ptr<LLMProvider> {
         FakeScript script;
-        FakeResponseStep step;
-        step.text   = "";
-        step.finish = FinishReason::Stop;
-        script.steps.push_back(std::move(step));
+        FakeResponseStep empty;
+        empty.text   = "";
+        empty.finish = FinishReason::Stop;
+        script.steps.push_back(std::move(empty));
+        FakeResponseStep recovered;
+        recovered.text   = "recovered";
+        recovered.finish = FinishReason::Stop;
+        script.steps.push_back(std::move(recovered));
         return std::make_unique<FakeLLM>(std::move(script));
     };
 
     const HeadlessResult result = run_headless(options);
     EXPECT_EQ(result.exit_code, 0);
     EXPECT_EQ(result.terminal, "turn/end");
-    EXPECT_TRUE(result.assistant_text.empty());
+    EXPECT_EQ(result.assistant_text, "recovered");
 }
 
 TEST_F(HeadlessTest, BusyWorkspaceReportsActionableError) {

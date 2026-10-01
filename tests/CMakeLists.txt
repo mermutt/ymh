@@ -43,6 +43,7 @@ add_executable(ymh_tests
     unit/errata67_ui_test.cpp
     unit/errata68_ui_test.cpp
     unit/agent_loop_test.cpp
+    unit/agent_non_action_test.cpp
     unit/agent_inbox_test.cpp
     unit/agent_registry_test.cpp
     unit/agent_turn_executor_test.cpp
@@ -84,6 +85,7 @@ add_executable(ymh_tests
     unit/session_cli_test.cpp
     unit/headless_live_test.cpp
     unit/ui_model_test.cpp
+    unit/ui_model_dedup_test.cpp
     unit/command_registry_test.cpp
     unit/status_format_test.cpp
     unit/session_catalog_test.cpp

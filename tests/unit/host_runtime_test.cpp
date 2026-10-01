@@ -1871,7 +1871,12 @@ TEST_F(HostRuntimeTest, RenameSessionValidatesNormalizesAndForwards) {
 }
 
 TEST_F(HostRuntimeTest, AgentPromptAutoNamesOnce) {
-    Bridge bridge("hr_autoname");
+    // 73-D2: each prompt needs a substantive reply; a blank (exhausted) script
+    // would now trigger the bounded non-action guard and stop with turn/fail.
+    FakeScript script;
+    script.steps.push_back(text_step("hello"));
+    script.steps.push_back(text_step("hello again"));
+    Bridge bridge("hr_autoname", script);
     const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
     const SessionId              session = created.session;
     EXPECT_EQ(bridge.runtime().sessions().sessionPtr(session)->header().title, "");
