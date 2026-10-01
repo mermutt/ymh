@@ -123,6 +123,102 @@ TEST(Errata60, ShrinkKeepsTailReachable) {
     EXPECT_GE(marker_row(screen, "TAIL-END-MARKER"), 0);
 }
 
+// 60-U11 (Rev 7): the shrink fix must also hold across a shrink-then-grow, at
+// extreme widths, and when a resize lands on the frame that appends content.
+TEST(Errata60, ShrinkThenGrowKeepsTailReachable) {
+    UiModel model = make_model();
+    for (int index = 0; index < 25; ++index) {
+        append_message(model, wrapped_paragraph(index));
+    }
+    append_message(model, "TAIL-END-MARKER");
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    TranscriptMetrics metrics;
+    ftxui::Screen     screen = draw_frame(model, {60, 20}, {60, 20}, metrics);
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {60, 20}, {60, 20}, metrics);
+    }
+    ASSERT_TRUE(state->scroll.following);
+    EXPECT_GE(marker_row(screen, "TAIL-END-MARKER"), 0);
+
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {44, 14}, {44, 14}, metrics);
+    }
+    EXPECT_GE(marker_row(screen, "TAIL-END-MARKER"), 0);
+    const int narrow_content = state->scroll.content_rows;
+
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {90, 28}, {90, 28}, metrics);
+    }
+    ASSERT_TRUE(state->scroll.following);
+    EXPECT_GE(marker_row(screen, "TAIL-END-MARKER"), 0);
+    // A wider pane wraps into fewer rows; the measured content height must shrink
+    // with it (the Rev 6 measurement is post-layout, not a pre-layout constant).
+    EXPECT_LT(state->scroll.content_rows, narrow_content);
+}
+
+TEST(Errata60, VeryNarrowWidthKeepsTailReachable) {
+    UiModel model = make_model();
+    for (int index = 0; index < 25; ++index) {
+        append_message(model, wrapped_paragraph(index));
+    }
+    append_message(model, "ZZMARK");
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    TranscriptMetrics metrics;
+    ftxui::Screen     screen = draw_frame(model, {16, 12}, {16, 12}, metrics);
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {16, 12}, {16, 12}, metrics);
+    }
+    ASSERT_TRUE(state->scroll.following);
+    EXPECT_GT(state->scroll.max_top(), 0);
+    EXPECT_GE(marker_row(screen, "ZZMARK"), 0);
+}
+
+TEST(Errata60, VeryWideWidthKeepsTailReachable) {
+    UiModel model = make_model();
+    for (int index = 0; index < 40; ++index) {
+        append_message(model, wrapped_paragraph(index));
+    }
+    append_message(model, "TAIL-END-MARKER");
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    TranscriptMetrics metrics;
+    ftxui::Screen     screen = draw_frame(model, {240, 24}, {240, 24}, metrics);
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {240, 24}, {240, 24}, metrics);
+    }
+    ASSERT_TRUE(state->scroll.following);
+    EXPECT_GE(marker_row(screen, "TAIL-END-MARKER"), 0);
+}
+
+TEST(Errata60, ResizeWhileStreamingKeepsTailPinned) {
+    UiModel model = make_model();
+    for (int index = 0; index < 25; ++index) {
+        append_message(model, wrapped_paragraph(index));
+    }
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    TranscriptMetrics metrics;
+    ftxui::Screen     screen = draw_frame(model, {60, 20}, {60, 20}, metrics);
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {60, 20}, {60, 20}, metrics);
+    }
+    ASSERT_TRUE(state->scroll.following);
+
+    append_message(model, "STREAM-TAIL-MARKER");
+    screen = draw_frame(model, {60, 20}, {80, 30}, metrics);
+    for (int index = 0; index < 3; ++index) {
+        screen = draw_frame(model, {80, 30}, {80, 30}, metrics);
+    }
+    ASSERT_TRUE(state->scroll.following);
+    EXPECT_GE(marker_row(screen, "STREAM-TAIL-MARKER"), 0);
+}
+
 TEST(Errata60, ContentRowsMatchWrappedHeight) {
     UiModel model = make_model();
     for (int index = 0; index < 20; ++index) {
