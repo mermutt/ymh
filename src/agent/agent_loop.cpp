@@ -1,6 +1,7 @@
 #include "ymh/agent/agent_loop.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <exception>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -44,6 +46,48 @@ std::string assembled_system_prompt(const LLMRequest& request) {
 std::string first_line(const std::string& text) {
     const std::size_t newline = text.find('\n');
     return text.substr(0, newline == std::string::npos ? text.size() : newline);
+}
+
+// 73-D1: the settled assistant text is the concatenation of the Text blocks
+// only; reasoning/thinking blocks are excluded, so a reasoning-only completion
+// with no visible answer and no tool call is a non-action.
+std::string text_of_blocks(const std::vector<ContentBlock>& blocks) {
+    std::string text;
+    for (const ContentBlock& block : blocks) {
+        if (block.kind == ContentBlockKind::Text) {
+            text += block.text;
+        }
+    }
+    return text;
+}
+
+// 73-D1: "blank" is empty or whitespace-only. It is a purely structural test;
+// no identity, vendor, model-name, or prompt-wording inspection happens here.
+bool is_blank(std::string_view text) {
+    return std::all_of(text.begin(), text.end(),
+                       [](unsigned char character) { return std::isspace(character) != 0; });
+}
+
+// 73-D2: the single bounded corrective nudge. It is a user-role message so the
+// provider presents it as the latest instruction; its Plugin source keeps it out
+// of the composer history and the user-message job-wakeup path while still
+// rendering visibly (73-D6).
+constexpr std::string_view kNudgeText =
+    "No answer or tool call was produced. Continue the task now: call the "
+    "appropriate tool, or give the final answer in text.";
+
+Message make_nudge_message() {
+    Message message;
+    message.role = Role::User;
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = std::string{kNudgeText};
+    message.content.push_back(std::move(block));
+    MessageSource source;
+    source.kind   = MessageSource::Kind::Plugin;
+    source.plugin = "agent-nudge";
+    message.source = std::move(source);
+    return message;
 }
 
 // 62-D6 (Rev 3): progress is novelty, not success. A step's *action signature*
@@ -1093,6 +1137,9 @@ void AgentLoop::runTurn() {
     std::size_t       segments_completed   = 0;
     std::size_t       no_progress_streak   = 0;
     bool              segment_had_success  = false;
+    // 73-D3: at most one corrective nudge per user turn; reset for every
+    // runTurn(), so a second non-action cannot re-enter the nudge branch.
+    bool nudge_emitted_for_turn = false;
     std::unordered_set<std::string> seen_actions;
     std::unordered_set<std::string> seen_results;
     for (std::size_t stepNumber = 1;; ++stepNumber) {
@@ -1151,6 +1198,9 @@ void AgentLoop::runTurn() {
 
         const MessageId      messageId = make_event_id().value;
         std::optional<Usage> settledUsage;
+        // 73-D1: settled text of the Completed attempt, captured outside the
+        // per-attempt scope so the terminal decision can inspect it.
+        std::string settled_text;
 
         LLMResponse response;
         bool        slotCancelled = false;
@@ -1249,6 +1299,7 @@ void AgentLoop::runTurn() {
                 assistant.replay_state = assembler.replay_state();
                 const ModelSelection stamped = effective_model_selection();
                 assistant.source = model_message_source(stamped.provider, stamped.model);
+                settled_text = text_of_blocks(assistant.content);
                 session_.append(assistant);
                 settledUsage = assembler.usage();
             } else {
@@ -1312,6 +1363,32 @@ void AgentLoop::runTurn() {
             return;
         }
 
+        // 73-D1/D2/D4: a Completed response with no tool call and blank settled
+        // text is a non-action. The first one in a turn earns exactly one
+        // bounded corrective nudge and re-enters the step loop; a second one
+        // stops recoverably instead of looping. Non-blank text (73-D5) and
+        // tool calls are untouched.
+        const bool non_action = response.tool_calls.empty() && is_blank(settled_text);
+        if (non_action && !nudge_emitted_for_turn) {
+            if (usage.has_value()) {
+                session_.append(payload::TokenUsage{*usage, turn});
+            }
+            session_.append(payload::StepEnded{turn, step});
+            nudge_emitted_for_turn = true;
+            appendUserMessage(make_nudge_message());
+            continue;
+        }
+        if (non_action) {
+            if (usage.has_value()) {
+                session_.append(payload::TokenUsage{*usage, turn});
+            }
+            session_.append(payload::StepEnded{turn, step});
+            appendTurnFailed(turn, AgentErrorCode::StepLimitExceeded,
+                             "no substantive response after corrective nudge "
+                             "\u2014 task incomplete; send a message to continue",
+                             /*recoverable=*/true);
+            return;
+        }
         if (response.tool_calls.empty()) {
             if (usage.has_value()) {
                 session_.append(payload::TokenUsage{*usage, turn});
