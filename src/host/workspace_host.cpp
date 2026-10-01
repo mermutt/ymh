@@ -190,9 +190,12 @@ std::string read_child_diagnostic(int fd) {
     return out;
 }
 
-// 69-D6: a conservative marker set; a startup diagnostic line that carries any
-// credential-shaped key is dropped rather than surfaced.
-bool line_has_secret_marker(const std::string& line) {
+// 69-D6/69-D12: a conservative marker set. A line carrying a credential-shaped
+// key is masked **in place** — from the first marker to the end of the line —
+// rather than dropped, so a `ymh --host:` diagnostic that names a marker is
+// still selectable as the cause (69-I1). Returns the line unchanged when no
+// marker is present.
+std::string redact_secrets(std::string line) {
     static const char* const kMarkers[] = {"api_key",    "api-key", "apikey",
                                            "authorization", "bearer ", "secret",
                                            "password",   "passwd",  "credential",
@@ -202,17 +205,26 @@ bool line_has_secret_marker(const std::string& line) {
                    [](unsigned char character) {
                        return static_cast<char>(std::tolower(character));
                    });
+    std::size_t first = std::string::npos;
     for (const char* marker : kMarkers) {
-        if (lowered.find(marker) != std::string::npos) {
-            return true;
+        const std::size_t position = lowered.find(marker);
+        if (position != std::string::npos &&
+            (first == std::string::npos || position < first)) {
+            first = position;
         }
     }
-    return false;
+    if (first == std::string::npos) {
+        return line;
+    }
+    line.resize(first);
+    line += "[redacted]";
+    return line;
 }
 
-// 69-D6/69-D10: split the raw tail into non-empty, redacted, per-line-bounded
-// lines. Secret-shaped lines are dropped whole; position is preserved so the
-// caller selects the cause by content and the context by position.
+// 69-D6/69-D10/69-D12: split the raw tail into non-empty, redacted, per-line-
+// bounded lines. Marker-bearing lines are masked, never dropped; position is
+// preserved so the caller selects the cause by content and the context by
+// position.
 std::vector<std::string> sanitize_log_lines(const std::string& raw) {
     std::vector<std::string> lines;
     std::string              line;
@@ -220,12 +232,11 @@ std::vector<std::string> sanitize_log_lines(const std::string& raw) {
         if (line.empty()) {
             return;
         }
-        if (!line_has_secret_marker(line)) {
-            if (line.size() > kMaxLogTailLineBytes) {
-                line.resize(kMaxLogTailLineBytes);
-            }
-            lines.push_back(line);
+        std::string redacted = redact_secrets(line);
+        if (redacted.size() > kMaxLogTailLineBytes) {
+            redacted.resize(kMaxLogTailLineBytes);
         }
+        lines.push_back(std::move(redacted));
         line.clear();
     };
     for (const char character : raw) {
@@ -385,7 +396,57 @@ std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& soc
     return connection;
 }
 
+// 69-D13: name the signal a killed daemon died from; a signal number outside
+// this list falls back to a numeric form in `describe_host_exit`.
+const char* signal_name(int number) noexcept {
+    switch (number) {
+        case SIGHUP:
+            return "SIGHUP";
+        case SIGINT:
+            return "SIGINT";
+        case SIGQUIT:
+            return "SIGQUIT";
+        case SIGILL:
+            return "SIGILL";
+        case SIGTRAP:
+            return "SIGTRAP";
+        case SIGABRT:
+            return "SIGABRT";
+        case SIGBUS:
+            return "SIGBUS";
+        case SIGFPE:
+            return "SIGFPE";
+        case SIGKILL:
+            return "SIGKILL";
+        case SIGUSR1:
+            return "SIGUSR1";
+        case SIGSEGV:
+            return "SIGSEGV";
+        case SIGUSR2:
+            return "SIGUSR2";
+        case SIGPIPE:
+            return "SIGPIPE";
+        case SIGALRM:
+            return "SIGALRM";
+        case SIGTERM:
+            return "SIGTERM";
+        default:
+            return nullptr;
+    }
+}
+
 std::string describe_host_exit(int status) {
+    // 69-D13/69-I14: `ForkExecLauncher::tryReap` encodes a signal death as
+    // 128 + WTERMSIG; name it instead of returning a bare number. A normal
+    // `exit(128+n)` is indistinguishable through the int seam and renders the
+    // same way (recorded, accepted).
+    if (status > 128 && status <= 128 + 64) {
+        const int   number = status - 128;
+        const char* name   = signal_name(number);
+        const std::string cause =
+            name != nullptr ? std::string(name) : "signal " + std::to_string(number);
+        return "exit code " + std::to_string(status) + " (killed by " + cause + ")";
+    }
     switch (static_cast<HostExitCode>(status)) {
         case HostExitCode::Ok:
             return "exited cleanly";
