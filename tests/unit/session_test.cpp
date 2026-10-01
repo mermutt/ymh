@@ -711,7 +711,7 @@ TEST(SessionTitle, PlaceholderSet) {
     EXPECT_FALSE(is_placeholder_title("tui2"));
 }
 
-TEST(SessionTitle, NormalizeTrimsOnlyThePinnedSet) {
+TEST(SessionTitle, NormalizeTrimsUnicodeWhitespace) {
     EXPECT_EQ(normalize_title("  my title  "), "my title");
     EXPECT_EQ(normalize_title("\tmy title\t"), "my title");
     EXPECT_EQ(normalize_title("\rmy title\f"), "my title");
@@ -722,6 +722,15 @@ TEST(SessionTitle, NormalizeTrimsOnlyThePinnedSet) {
     EXPECT_THROW(static_cast<void>(normalize_title("\t\r\v\f")), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(normalize_title("\nmy title")), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(normalize_title("my title\n")), std::invalid_argument);
+
+    // 67-D3: the trimmed set is Unicode White_Space, not ASCII only. A lone
+    // U+00A0 (NBSP) must not be stored as a whitespace-only title; an interior
+    // NBSP is a significant character and survives.
+    EXPECT_EQ(normalize_title("\xc2\xa0my title\xc2\xa0"), "my title");
+    EXPECT_EQ(normalize_title("\xe2\x80\x83my title"), "my title"); // U+2003 EM SPACE
+    EXPECT_EQ(normalize_title("my\xc2\xa0title"), "my\xc2\xa0title");
+    EXPECT_THROW(static_cast<void>(normalize_title("\xc2\xa0")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(normalize_title("\xe3\x80\x80")), std::invalid_argument);
 }
 
 TEST(SessionTitle, NormalizeRejectsControlsDelAndInvalidUtf8) {
@@ -755,6 +764,14 @@ TEST(SessionTitle, DeriveAutoTitleFirstLineTrimCollapse) {
     EXPECT_FALSE(derive_auto_title("\nleading newline").has_value());
     EXPECT_FALSE(derive_auto_title("bad\x01text").has_value());
     EXPECT_FALSE(derive_auto_title("\xc0\xaf").has_value());
+
+    // 67-D7: the auto-title writer applies the same Unicode trim; a lone NBSP
+    // (or U+3000) must not derive a whitespace-only title.
+    EXPECT_FALSE(derive_auto_title("\xc2\xa0").has_value());
+    EXPECT_FALSE(derive_auto_title("\xc2\xa0 \xc2\xa0").has_value());
+    EXPECT_FALSE(derive_auto_title("\xe3\x80\x80").has_value());
+    EXPECT_EQ(*derive_auto_title("\xc2\xa0hello\xc2\xa0"), "hello");
+    EXPECT_EQ(*derive_auto_title("a\xc2\xa0" "b"), "a\xc2\xa0" "b");
 }
 
 TEST(SessionTitle, DeriveAutoTitleCutsOnCodePointBoundary) {
@@ -907,6 +924,8 @@ TEST(SessionManagerAutoName, NonPlaceholderAndEmptyPromptSuppress) {
     const SessionId empty_id = empty_manager.createSession(options);
     EXPECT_FALSE(empty_manager.maybeAutoName(empty_id, "").has_value());
     EXPECT_FALSE(empty_manager.maybeAutoName(empty_id, "   \n  ").has_value());
+    EXPECT_FALSE(empty_manager.maybeAutoName(empty_id, "\xc2\xa0").has_value());
+    EXPECT_FALSE(empty_manager.maybeAutoName(empty_id, "\xe3\x80\x80").has_value());
     EXPECT_FALSE(empty_manager.maybeAutoName(SessionId{"missing"}, "prompt").has_value());
 }
 

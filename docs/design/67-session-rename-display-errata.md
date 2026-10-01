@@ -1,8 +1,8 @@
 # 67 — Session Rename Display & Edge-Case Errata (`/rename`)
 
 ```
-Status: verified · reviewer: see `DESIGN_STATUS.md` row 67 · gate: 0 HIGH / 0 MEDIUM
-Revision: 2
+Status: verified (Rev 3) · reviewer: see `DESIGN_STATUS.md` row 67 · gate: 0 HIGH / 0 MEDIUM
+Revision: 3
 Component: 67 (errata) — amends 19-session-rename-errata.md (§6.1/§6.3) and
            17-ui-transcript-errata.md (§6, RB-10) by reference; touches the
            header renderer and the supervisor-level `/rename` coverage
@@ -34,8 +34,11 @@ remaining display defect and the supervisor-level observable behaviour that
 right-slot overflow behaviour; `19` still owns the mutation, the wire method,
 and the title validator. It changes no persistence, event, or wire shape.
 
-**Gate (per `AGENTS.md`).** Independent Oracle review marked this `verified`
-(round 3 PASS, 0 HIGH / 0 MEDIUM; the round-1 LOWs were applied in Rev 2).
+**Gate (per `AGENTS.md`).** Rev 2 was marked `verified` by an independent Oracle
+review (round 3 PASS, 0 HIGH / 0 MEDIUM; the round-1 LOWs were applied in Rev 2).
+Rev 3 re-gated after 67-D7/67-A6: round 1 reopened with 0 HIGH / 1 MEDIUM (the
+auto-title writer bypassed `normalize_title`), closed by 67-A6/67-I9; final
+**PASS (0 HIGH / 0 MEDIUM)**.
 
 ## 2. Amendment register
 
@@ -44,6 +47,9 @@ and the title validator. It changes no persistence, event, or wire shape.
 | 67-A1 | 17 §6 / 10 §8.1 header | `src/ui/ui_render.cpp:1524-1583`, call `:2041` | truncate the right-aligned session title to the cells left of the workspace title |
 | 67-A2 | 19 §6.1 rules | `src/ui/command_registry.cpp:195-209`, `src/ui/supervisor.cpp:2652-2674` | restate the binding `/rename` semantics and pin the observable outcomes |
 | 67-A3 | 19 §12.5 | `tests/unit/errata67_ui_test.cpp` | supervisor-level coverage of spaces / empty / rejection / non-live |
+| 67-A4 | 19 §6.1 validator / 67-D3 | `src/session/session.cpp` `normalize_title`, `src/ui/command_registry.cpp` `trim` | both use the shared `ymh::trim_unicode_whitespace` (`include/ymh/core/text.hpp`) so NBSP is whitespace (67-D7) |
+| 67-A5 | 19 §12 validator test | `tests/unit/session_test.cpp` `SessionTitle.NormalizeTrimsUnicodeWhitespace` | assert NBSP-only is rejected and interior NBSP survives |
+| 67-A6 | 19 §5.2 auto-title path | `src/session/session.cpp` `derive_auto_title` | apply `ymh::trim_unicode_whitespace` and return `std::nullopt` on an empty result, closing the second title writer (67-I9) |
 
 ## 3. Verified current state (before this errata)
 
@@ -92,6 +98,13 @@ These are already implemented; this errata makes them observable and explicit:
 * **67-D2 (spaces)** — the argument is the whole trimmed remainder, so
   `/rename my new title` renames to `my new title`.
 * **67-D3 (empty / whitespace)** — a local `usage:` notice, **no wire call**.
+  "Whitespace" is the Unicode `White_Space` property (67-D7), not ASCII only:
+  `/rename` followed by a single U+00A0 must produce the notice, not reach the
+  wire. On the `/rename` path `normalize_title` (67-D4) applies the same trim, so
+  the registry and the validator agree. **Scoped (67-A6/67-I9):** the other title
+  writer, the auto-title path (`derive_auto_title` → `Session::appendAutoRename`),
+  does not go through `normalize_title`; it applies the same `trim_unicode_whitespace`
+  itself (67-D7), so no first-turn-only-NBSP title can be stored there either.
 * **67-D4 (long / invalid)** — the client never pre-validates; the daemon is the
   single validator (19 §6.1 rule 4) and the reply lambda surfaces
   `rename failed: <error>`. A title longer than 120 bytes is rejected, not
@@ -120,6 +133,23 @@ These are already implemented; this errata makes them observable and explicit:
   a successful rename appends none (success is the streamed title change).
 * **67-I7** The stored title is the exact validated title; only the header
   render is truncated.
+* **67-I8** The empty/whitespace predicate is identical in the registry argument
+  trim and `normalize_title`: both strip the same Unicode `White_Space` set via
+  `ymh::trim_unicode_whitespace` (`include/ymh/core/text.hpp`). U+000A (LF) is
+  **not** in the trim set and remains a rejected control character (19/RN8). A
+  title consisting only of U+00A0 / U+2000–U+200A / U+3000 is rejected; an
+  interior NBSP is preserved (67-D2).
+* **67-I9** The auto-title writer (`derive_auto_title`, reached via
+  `SessionManager::maybeAutoName` → `Session::appendAutoRename`) applies the same
+  Unicode trim: a first user turn consisting only of U+00A0/U+3000 derives **no**
+  title (`std::nullopt`, fail-soft per 19/RN8) and the session keeps its
+  placeholder title. **Scope:** the two rename-adjacent writers governed here —
+  `/rename` (`normalize_title`) and the auto-title path — cannot store a
+  whitespace-only title. Creation-time titles are separate inputs owned by 19/25:
+  `session.create`'s `title` param (`host_runtime.cpp`) and headless
+  `ymh run`'s `first_line(task, 60)` (`headless.cpp`) are stored as given,
+  including whitespace; they are **out of scope** for this errata's whitespace
+  rule (recorded, not silently claimed closed).
 
 ## 6. Failure modes
 
@@ -131,6 +161,15 @@ These are already implemented; this errata makes them observable and explicit:
   routes it through the existing `ErrorOccurred` path.
 * **67-F4 (F10 layout)** — a 120-byte title cannot overflow the header or
   displace the workspace title.
+* **67-F5 (F7 wrong action)** — ASCII-only trimming would accept a whitespace-only
+  NBSP title and store it, so a rename could blank the header. Forbidden by
+  67-D3/67-D7/67-I8; 67-U8/U9 and `SessionTitle.NormalizeTrimsUnicodeWhitespace`
+  pin the fix (they fail pre-fix: the NBSP argument reached the wire).
+* **67-F6 (F7 wrong action)** — the auto-title path could derive an NBSP-only
+  title from a first turn of only U+00A0, bypassing `normalize_title`. Forbidden
+  by 67-D7/67-I9; `SessionTitle.DeriveAutoTitleFirstLineTrimCollapse` and
+  `SessionManagerAutoName.NonPlaceholderAndEmptyPromptSuppress` pin the fix (they
+  fail pre-fix: the derived title was the NBSP).
 
 ## 7. dsh mapping
 
@@ -152,6 +191,10 @@ These are already implemented; this errata makes them observable and explicit:
   not addressable via `/rename`.
 * **67-D6 (rejected)** A second "title" notion (e.g. a UI-only label): reuses
   the existing session title instead (per the binding user semantics).
+* **67-D7** The whitespace rule is the Unicode `White_Space` property, shared by
+  the registry trim, `normalize_title`, **and the auto-title `derive_auto_title`**
+  via `ymh::trim_unicode_whitespace`; LF is excluded so newline titles stay
+  rejected. See §4.2/67-I8/67-I9.
 
 ## 9. Test plan
 
@@ -178,13 +221,29 @@ These are already implemented; this errata makes them observable and explicit:
 * **67-U7** existing `PersistenceRename.*` / `SessionManagerRename.*` /
   `UiModel.SessionTitleChangedUpdatesCellAndMarks` — persistence and model
   delivery are owned by spec 19; cited, not re-implemented.
+* **67-U8** `Errata67Rename.NonBreakingSpaceOnlyArgIsUsageWithNoWireCall`
+  (`tests/unit/errata67_ui_test.cpp`) — `/rename` + U+00A0 makes no wire call and
+  shows `usage`. Fails pre-fix (ASCII trim leaves the NBSP, the call is sent).
+* **67-U9** `Errata67Rename.NonBreakingSpaceAroundTitleIsTrimmed` — leading and
+  trailing U+00A0 are stripped, an interior NBSP survives. Fails pre-fix (the
+  transmitted title keeps the surrounding NBSP).
+* `SessionTitle.NormalizeTrimsUnicodeWhitespace` (`tests/unit/session_test.cpp`,
+  extends the former `NormalizeTrimsOnlyThePinnedSet`) — U+00A0-only and U+3000
+  are rejected; leading/trailing NBSP and U+2003 are trimmed; interior NBSP is
+  preserved; LF is still rejected. Fails pre-fix (NBSP-only does not throw).
+* `SessionTitle.DeriveAutoTitleFirstLineTrimCollapse` +
+  `SessionManagerAutoName.NonPlaceholderAndEmptyPromptSuppress` (extended) — a
+  first turn of only U+00A0/U+3000 derives no auto title and leaves the
+  placeholder; leading/trailing NBSP is trimmed, interior NBSP survives. Fails
+  pre-fix (67-I9: the derived title was the NBSP).
 
 ## 10. Non-goals
 
 * A modal rename editor (19 §11 rule 5 already rejects it).
 * Renaming a workspace, project, or the binary (the user semantics are
   session-only; the project name `ymh` is frozen).
-* Changing `kMaxSessionTitleBytes` (120) or `normalize_title`.
+* Changing `kMaxSessionTitleBytes` (120), the storage rule, or any validator
+  other than the shared whitespace trim (67-D7).
 
 ## 11. Revision log
 
@@ -192,3 +251,4 @@ These are already implemented; this errata makes them observable and explicit:
 |---|---|---|
 | 2026-09-29 | Rev 1 (draft) | Header truncation pinned (67-D1); `/rename` edge-case semantics restated and covered end-to-end (67-D2..D5); tests U1–U6. |
 | 2026-09-29 | Rev 2 (draft) | Oracle round 1 findings applied: L1 citations re-derived; L5 test-scope honesty (U1 width guard, U5 error-rendering not validation, U2 model-only); L6 cwd qualification in 67-I1/I2. |
+| 2026-10-01 | Rev 3 (draft) | Independent verification found the whitespace rule was ASCII-only, so `/rename` + U+00A0 stored a whitespace-only title. 67-D7/67-I8/67-F5: the rule is now the Unicode `White_Space` property shared by `normalize_title` and the registry trim via `ymh::trim_unicode_whitespace`; LF stays excluded. Oracle gate round 1 (0 HIGH / 1 MEDIUM: the auto-title writer `derive_auto_title` bypasses `normalize_title`) closed by 67-A6/67-D7/67-I9/67-F6: that path now applies the same trim and returns no title for an NBSP-only first turn. Adds 67-A4/A5/A6 and tests 67-U8/U9 + `SessionTitle.NormalizeTrimsUnicodeWhitespace` + the derive/auto-name NBSP cases (fail pre-fix). |

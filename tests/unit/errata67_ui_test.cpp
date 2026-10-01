@@ -76,6 +76,29 @@ TEST(Errata67Rename, EmptyOrWhitespaceArgMakesNoWireCallAndShowsUsage) {
     EXPECT_NE(last_entry(fixture).text.find("usage"), std::string::npos);
 }
 
+TEST(Errata67Rename, NonBreakingSpaceOnlyArgIsUsageWithNoWireCall) {
+    // 67-D3/67-I8: a U+00A0-only argument is whitespace, not a title. ASCII-only
+    // trimming let it reach the wire and be stored as a whitespace-only title.
+    Fixture fixture = make_fixture();
+    EXPECT_TRUE(fixture.harness->dispatch_command_line("/rename \xc2\xa0"));
+
+    ASSERT_EQ(fixture.harness->submitted_count("session.rename"), 0u);
+    EXPECT_NE(last_entry(fixture).text.find("usage"), std::string::npos);
+}
+
+TEST(Errata67Rename, NonBreakingSpaceAroundTitleIsTrimmed) {
+    // 67-D2/67-D3: leading/trailing U+00A0 is trimmed; an interior NBSP is a
+    // significant title character and survives.
+    Fixture fixture = make_fixture();
+    EXPECT_TRUE(
+        fixture.harness->dispatch_command_line("/rename \xc2\xa0my\xc2\xa0title\xc2\xa0"));
+
+    const std::optional<nlohmann::json> params =
+        fixture.harness->last_submitted_params("session.rename");
+    ASSERT_TRUE(params.has_value());
+    EXPECT_EQ((*params)["title"].get<std::string>(), "my\xc2\xa0title");
+}
+
 TEST(Errata67Rename, RejectionIsVisible) {
     Fixture fixture = make_fixture();
     fixture.harness->install_method_error_reply("session.rename", -32602,
