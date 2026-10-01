@@ -9,10 +9,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <ftxui/component/event.hpp>
@@ -68,6 +71,28 @@ void dispatch_body(SupervisorHarness& harness, const std::string& text) {
             harness.dispatch_event(ftxui::Event::Character(std::string(1, character)));
         }
     }
+}
+
+std::string read_pty_until(int master, std::size_t expected,
+                           std::chrono::milliseconds timeout) {
+    const int flags = ::fcntl(master, F_GETFL, 0);
+    if (flags >= 0) {
+        ::fcntl(master, F_SETFL, flags | O_NONBLOCK);
+    }
+    std::string out;
+    const auto  deadline = std::chrono::steady_clock::now() + timeout;
+    while (out.size() < expected && std::chrono::steady_clock::now() < deadline) {
+        char          buffer[128] = {};
+        const ssize_t chunk       = ::read(master, buffer, sizeof(buffer));
+        if (chunk > 0) {
+            out.append(buffer, static_cast<std::size_t>(chunk));
+        } else if (chunk < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            break;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    return out;
 }
 
 TEST(Errata66Paste, BulkInsertPreservesNewlinesAndNeverSubmits) {
@@ -283,6 +308,190 @@ TEST(Errata66Paste, TerminalLayerRestoresDecrstOnDestruction) {
 
     ::close(slave);
     ::close(master);
+}
+
+TEST(Errata66Paste, ResizeSentinelIsNotPasteContent) {
+    // 66-D10/66-I10: FTXUI's SIGWINCH sentinel (`Event::Special({0})`) is not
+    // paste content; a resize while armed must not inject a NUL into the draft.
+    const std::unique_ptr<SupervisorHarness> harness = make_harness();
+    const WorkspaceId workspace{"ws-a"};
+    const SessionId   session{"s1"};
+    harness->seed_active_workspace(live_workspace(workspace, "alpha"));
+    harness->activate_session(workspace, session);
+
+    harness->dispatch_event(ftxui::Event::Special(kPasteOpen));
+    dispatch_body(*harness, "ab");
+    harness->dispatch_event(ftxui::Event::Special(std::string(1, '\0')));
+    dispatch_body(*harness, "cd");
+    harness->dispatch_event(ftxui::Event::Special(kPasteClose));
+
+    EXPECT_EQ(draft_of(*harness, session), "abcd");
+    EXPECT_EQ(harness->submitted_count("agent.prompt"), 0u);
+}
+
+TEST(Errata66Paste, BracketedPasteSuspensionEmitsDecrstAndRearms) {
+    // 66-D9/66-I9: the RAII suspension emits DECRST and re-arms DECSET; it is a
+    // no-op on an inactive layer. The layer writes to the pty slave it is given.
+    const int master = ::posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT_GE(master, 0);
+    ASSERT_EQ(::grantpt(master), 0);
+    ASSERT_EQ(::unlockpt(master), 0);
+    const char* slave_name = ::ptsname(master);
+    ASSERT_NE(slave_name, nullptr);
+    const int slave = ::open(slave_name, O_RDWR | O_NOCTTY);
+    ASSERT_GE(slave, 0);
+
+    {
+        TerminalLayer layer(slave, slave);
+        ASSERT_TRUE(layer.enterBracketedPaste());
+        {
+            BracketedPasteSuspension suspension(&layer);
+            EXPECT_TRUE(suspension.suspended());
+            EXPECT_FALSE(layer.bracketedPasteActive());
+        }
+        EXPECT_TRUE(layer.bracketedPasteActive());
+        layer.leaveBracketedPaste();
+    }
+
+    const std::string expected = std::string(kBracketedPasteEnable) +
+                                 std::string(kBracketedPasteDisable) +
+                                 std::string(kBracketedPasteEnable) +
+                                 std::string(kBracketedPasteDisable);
+    EXPECT_EQ(read_pty_until(master, expected.size(), std::chrono::milliseconds(500)),
+              expected);
+
+    {
+        TerminalLayer inactive(slave, slave);
+        BracketedPasteSuspension suspension(&inactive);
+        EXPECT_FALSE(suspension.suspended());
+        EXPECT_FALSE(inactive.bracketedPasteActive());
+    }
+    EXPECT_TRUE(read_pty_until(master, 1, std::chrono::milliseconds(50)).empty());
+
+    ::close(slave);
+    ::close(master);
+}
+
+namespace {
+
+class ScopedEditorEnv {
+public:
+    explicit ScopedEditorEnv(const char* value) {
+        const char* visual = std::getenv("VISUAL");
+        const char* editor = std::getenv("EDITOR");
+        had_visual_        = visual != nullptr;
+        had_editor_        = editor != nullptr;
+        if (had_visual_) {
+            visual_ = visual;
+        }
+        if (had_editor_) {
+            editor_ = editor;
+        }
+        ::setenv("VISUAL", value, 1);
+        ::setenv("EDITOR", value, 1);
+    }
+    ~ScopedEditorEnv() {
+        if (had_visual_) {
+            ::setenv("VISUAL", visual_.c_str(), 1);
+        } else {
+            ::unsetenv("VISUAL");
+        }
+        if (had_editor_) {
+            ::setenv("EDITOR", editor_.c_str(), 1);
+        } else {
+            ::unsetenv("EDITOR");
+        }
+    }
+    ScopedEditorEnv(const ScopedEditorEnv&) = delete;
+    ScopedEditorEnv& operator=(const ScopedEditorEnv&) = delete;
+
+private:
+    bool        had_visual_ = false;
+    bool        had_editor_ = false;
+    std::string visual_;
+    std::string editor_;
+};
+
+} // namespace
+
+TEST(Errata66Paste, EditorHandoffSuspendsBracketedPaste) {
+    // 66-D9/66-I9: `ctrl-e` must emit DISABLE (before the fork) and ENABLE
+    // (after the child exits) while the mode was active.
+    const int master = ::posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT_GE(master, 0);
+    ASSERT_EQ(::grantpt(master), 0);
+    ASSERT_EQ(::unlockpt(master), 0);
+    const char* slave_name = ::ptsname(master);
+    ASSERT_NE(slave_name, nullptr);
+    const int slave = ::open(slave_name, O_RDWR | O_NOCTTY);
+    ASSERT_GE(slave, 0);
+
+    const ScopedEditorEnv editor("/bin/true");
+    SupervisorRunOptions options;
+    options.identity = test_identity();
+    const std::unique_ptr<SupervisorHarness> harness =
+        make_supervisor_harness(std::move(options));
+    harness->install_prompt_editor_io();
+    harness->install_bracketed_paste_terminal(slave);
+    const WorkspaceId workspace{"ws-a"};
+    const SessionId   session{"s1"};
+    harness->seed_active_workspace(live_workspace(workspace, "alpha"));
+    harness->activate_session(workspace, session);
+    harness->dispatch_event(ftxui::Event::Character("d"));
+
+    EXPECT_TRUE(harness->dispatch_key("ctrl-e"));
+
+    const std::string expected = std::string(kBracketedPasteEnable) +
+                                 std::string(kBracketedPasteDisable) +
+                                 std::string(kBracketedPasteEnable);
+    EXPECT_EQ(read_pty_until(master, expected.size(), std::chrono::milliseconds(500)),
+              expected);
+
+    ::close(slave);
+    ::close(master);
+}
+
+TEST(Errata66Paste, CapExceededPasteFlushesWithoutSubmitting) {
+    // 66-I2 (corrected): a paste above `kMaxPasteBytes` mutates more than once
+    // but never submits and never loses bytes.
+    const std::unique_ptr<SupervisorHarness> harness = make_harness();
+    const WorkspaceId workspace{"ws-a"};
+    const SessionId   session{"s1"};
+    harness->seed_active_workspace(live_workspace(workspace, "alpha"));
+    harness->activate_session(workspace, session);
+
+    const std::size_t payload_size = 8u * 1024u * 1024u + 4096u;
+    harness->dispatch_event(ftxui::Event::Special(kPasteOpen));
+    harness->dispatch_event(ftxui::Event::Character(std::string(payload_size, 'x')));
+    harness->dispatch_event(ftxui::Event::Special(kPasteClose));
+
+    EXPECT_EQ(draft_of(*harness, session).size(), payload_size);
+    EXPECT_EQ(harness->submitted_count("agent.prompt"), 0u);
+}
+
+TEST(Errata66Paste, CarriageReturnInsidePasteBecomesNewline) {
+    // 66-I3/§4.3: FTXUI's `g_uniformize` maps a pasted `\r` to `\n`; this pins
+    // the disclosed normalization rather than byte-verbatim preservation.
+    const std::string raw = "\x1b[200~a\rb\x1b[201~";
+    auto receiver         = ftxui::MakeReceiver<ftxui::Task>();
+    {
+        ftxui::TerminalInputParser parser(receiver->MakeSender());
+        for (const char byte : raw) {
+            parser.Add(byte);
+        }
+    }
+
+    const std::unique_ptr<SupervisorHarness> harness = make_harness();
+    const WorkspaceId workspace{"ws-a"};
+    const SessionId   session{"s1"};
+    harness->seed_active_workspace(live_workspace(workspace, "alpha"));
+    harness->activate_session(workspace, session);
+
+    ftxui::Task task;
+    while (receiver->Receive(&task)) {
+        harness->dispatch_event(std::get<ftxui::Event>(task));
+    }
+    EXPECT_EQ(draft_of(*harness, session), "a\nb");
 }
 
 } // namespace

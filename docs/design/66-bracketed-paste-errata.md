@@ -1,8 +1,8 @@
 # 66 — Bracketed Paste / Clipboard Paste Errata
 
 ```
-Status: verified · reviewer: see `DESIGN_STATUS.md` row 66 · gate: 0 HIGH / 0 MEDIUM
-Revision: 3
+Status: verified (Rev 4) · reviewer: see `DESIGN_STATUS.md` row 66 · gate: 0 HIGH / 0 MEDIUM
+Revision: 4
 Component: 66 (errata) — amends 10-supervisor-tui.md (§8.3, §8.4) and
            45-ui-interaction-errata.md (§6) by reference; corrects the
            `TerminalCapabilities` sketch in 00-architecture.md §20.19 / 10 §8.3
@@ -13,8 +13,9 @@ Depends on: 10-supervisor-tui.md (verified), 17-ui-transcript-errata.md (verifie
             (verified; multi-line drafts), 62-composer-caret-and-step-limit-errata.md
             (verified)
 Scope: clipboard paste into the live `ui::run_supervisor` composer — the
-       DECSET/DECRST 2004 lifecycle and the ymh-side reassembly of the
-       `ESC [ 200 ~` … `ESC [ 201 ~` run
+       DECSET/DECRST 2004 lifecycle, the ymh-side reassembly of the
+       `ESC [ 200 ~` … `ESC [ 201 ~` run, and the bracketed-paste lifecycle
+       around the forked `$EDITOR` subprocess (§4.6)
 ```
 
 ## 1. Purpose, scope, and precedence
@@ -30,8 +31,10 @@ field list (the decorative `bracketedPaste` field is removed) and over `45 §6`
 for input dispatch (a bracketed-paste run is captured before every modal/key
 branch). It does not touch `58-E8`: the child composer stays read-only.
 
-**Gate (per `AGENTS.md`).** Independent Oracle review marked this `verified`
-(round 3 PASS, 0 HIGH / 0 MEDIUM; rounds 1-2 findings all closed).
+**Gate (per `AGENTS.md`).** Independent Oracle review marked Rev 4 `verified`:
+the editor-leak MEDIUM was fixed and re-gated, final **PASS (0 HIGH / 0 MEDIUM)**.
+The reported SIGWINCH-sentinel MEDIUM was re-confirmed as not reproducing (§4.7).
+Rev 3's earlier round-3 PASS is superseded by this Rev 4 gate.
 
 ## 2. Amendment register
 
@@ -43,6 +46,9 @@ branch). It does not touch `58-E8`: the child composer stays read-only.
 | 66-A4 | 45 §6 input dispatch | `src/ui/supervisor.cpp:3789-3793` | paste events are consumed before the `Event::Custom`/modal branches |
 | 66-A5 | 10 §8.3 terminal lifecycle | `src/ui/supervisor.cpp:3885-3941` | enable on TUI start, restore on the normal path; signal-guarded restore |
 | 66-A6 | 58-E8 | `src/ui/supervisor.cpp:3758-3760` | a paste in the read-only child view is discarded, never dispatched |
+| 66-A7 | 10 §8.4 terminal lifecycle | `src/ui/supervisor.cpp` `edit_export_file`/`edit_prompt` | suspend DECRST 2004 before forking `$EDITOR` and re-arm DECSET after, at both call sites (66-D9) |
+| 66-A8 | 10 §8.4 input dispatch | `src/ui/supervisor.cpp` `handle_paste_event` | ignore FTXUI's resize sentinel `Event::Special({0})` while armed (66-D10) |
+| 66-A9 | 10 §8.4 terminal lifecycle | `src/ui/supervisor.cpp` `run_loop` | run the teardown (set `quit_`, restore DECRST, join the timer, restore raw mode) from an RAII guard so a throwing `screen.Loop` cannot skip it (66-D12) |
 
 ## 3. Verified root cause (empirical, not derived)
 
@@ -145,6 +151,9 @@ State: `paste_active_` / `paste_buffer_` / `paste_last_event_at_`
 | `paste_buffer_` | armed open marker; appended per content event (`:3744`) | close/idle flush (moved into the draft), byte-cap flush (`:3745`), app teardown | no | lost with the process |
 | `g_bracketed_paste_out_fd` (66-D5) | `BracketedPasteSignalGuard` ctor while paste is active (`:3889`) | guard dtor, and by the handler after it writes (`:103`) | no | signal path writes DECRST then dies |
 | `saved_[]` dispositions (66-D5) | guard ctor | guard dtor | no | process death leaves the OS default table |
+| `TerminalLayer* terminal_` (66-D9) | `run_loop` after the layer is constructed (`supervisor.cpp`, `run_loop`) | `RunLoopExitGuard` dtor (66-D12); null on every exit | no (points at a stack local) | cleared during unwinding by the guard; the layer itself is destroyed after the guard |
+| `BracketedPasteSuspension` (66-D9) | stack temporary at each editor call site | end of the enclosing scope (after the child exits) | no | destructor re-arms DECSET during unwinding, so a throwing editor path still restores the mode |
+| `RunLoopExitGuard` (66-D12) | `run_loop`, after the timer thread | `run_loop` scope end / unwind, before `thread`/`screen`/`TerminalLayer` destructors | no | runs on the throwing path; sets `quit_` so the timer join returns |
 
 ### 4.4 Bulk insert (decision 66-D4)
 
@@ -187,27 +196,99 @@ step too (`:3790-3792`), so a close does not restore pre-paste completion hints.
   next key dispatch normally. If the terminal never sends markers, pasted bytes
   reach the draft as ordinary input (unchanged behaviour).
 
+### 4.6 Subprocess-editor hand-off (decision 66-D9, M5)
+
+`Ctrl-E` / `/export --edit` restore the terminal and fork `$EDITOR`
+(`edit_prompt`/`edit_export_file`, `src/ui/supervisor.cpp`) through FTXUI's
+`WithRestoredIO`, which is `Uninstall(); fn(); Install()`
+(`build/_deps/ftxui-src/src/ftxui/component/screen_interactive.cpp:560-566`) and
+touches **no** private-mode state: `grep -rn 2004 build/_deps/ftxui-src` is empty.
+DECSET 2004 therefore stayed active across the fork, so pasting into a
+non-paste-aware editor injected literal `\x1b[200~` … `\x1b[201~` text.
+
+The fix wraps both call sites in a `BracketedPasteSuspension` RAII guard
+(`include/ymh/ui/terminal_layer.hpp`, `src/ui/terminal_layer.cpp`): construction
+calls `TerminalLayer::leaveBracketedPaste()` (DECRST) when paste is active;
+destruction calls `enterBracketedPaste()` (DECSET). Suspension is **idempotent**:
+an inactive layer emits nothing and stays inactive (`was_active_` is the only
+re-arm gate), so calling the guard in a test host or a non-tty process is a
+no-op. `SupervisorApp` gains a UI-thread-only `TerminalLayer* terminal_` member,
+set in `run_loop` and cleared by the exit guard (§4.8); the harness installs a
+pty-backed layer (66-U13). The editor's own lifetime is inside the guard, so the
+terminal is un-bracketed for exactly the fork window and re-armed immediately
+after `Install()`.
+
+### 4.7 Synthetic events are never paste content (decision 66-D10, M5)
+
+FTXUI posts `Event::Special({0})` — a single NUL byte — on `SIGWINCH`
+(`build/_deps/ftxui-src/src/ftxui/component/screen_interactive.cpp:1066`) and on
+the Windows buffer-size event (`:123`). **Re-confirmation against the shipped
+code:** the finding that this NUL reaches `paste_buffer_` does **not** reproduce.
+FTXUI defines `Event::Custom = Event::Special({0})` (`event.cpp:327`) and
+`Event::operator==` compares only `input_` (`event.hpp:98`), so the reassembly
+state machine's existing `event == ftxui::Event::Custom` branch (which `drain()`s
+and returns before the append) already consumes the resize sentinel. A NUL never
+reaches the draft in the shipped binary; 66-U11 pins this.
+
+The fix is therefore **intent, not behaviour**: the sentinel is named explicitly
+and folded into the same ignore branch as `Event::Custom`, so the coverage is
+documented and does not silently depend on the library coincidence that the two
+events share a value.
+
+**Audit.** The only synthetic non-content events FTXUI delivers are
+`Event::Custom`/the NUL resize sentinel (handled: drains, never appended) and the
+mouse/cursor-position/cursor-shape events (already ignored). Every other
+`Event::Special`/`Event::Character` is parser output and stays content per 66-I3.
+No other synthetic event is exposed.
+
+### 4.8 Exception-safe teardown (decision 66-D12, M5)
+
+`run_loop` constructed the timer thread and then, after `screen.Loop(component)`,
+plainly called `quit_.store(true)`, `leaveBracketedPaste()`, `timer.join()`, and
+`leaveRawMode()`. A `screen.Loop` throw unwinds: the guard-less tail is skipped,
+and `timer` is still joinable (nobody joined it, and `quit_` was only set in the
+skipped tail), so `std::thread`'s destructor calls `std::terminate` — the process
+aborts before `~TerminalLayer` can emit DECRST. (Even a join attempted there would
+block: `!quit_.load()` is still true.) 66-I1's "error exits" claim was therefore
+false for the throwing path.
+
+The teardown moves into an RAII `RunLoopExitGuard` constructed after the timer
+and before `screen.Loop`. Its destructor is the single teardown body (set
+`quit_`, restore DECRST, join the timer, clear `screen_`/`terminal_`, restore raw
+mode), so it runs on the normal return **and** during exception unwinding, in the
+same order the old tail used (DECRST before the join). `std::terminate` from a
+destructor that throws is out of scope (the guarded operations are `noexcept`).
+
 ## 5. Invariants
 
 * **66-I1** On a tty, entering the TUI emits `\x1b[?2004h` exactly once; leaving
-  emits `\x1b[?2004l` exactly once, on normal, FTXUI-handled signal, and error
-  exits. SIGHUP/SIGQUIT are handled by the guard; SIGINT/SIGTERM/SIGSEGV/SIGILL/
-  SIGABRT/SIGFPE by FTXUI's graceful exit calling `leaveBracketedPaste`. Two
-  residual windows are excluded and recorded: the interval between
+  emits `\x1b[?2004l` exactly once, on normal, FTXUI-handled signal, **and
+  exception** exits. SIGHUP/SIGQUIT are handled by the guard;
+  SIGINT/SIGTERM/SIGSEGV/SIGILL/SIGABRT/SIGFPE by FTXUI's graceful exit calling
+  `leaveBracketedPaste`; a throw from `screen.Loop` unwinds through
+  `RunLoopExitGuard`, which restores DECRST before joining the timer (66-D12).
+  Two residual windows are excluded and recorded: the interval between
   `enterBracketedPaste` and FTXUI's `Install()` (its handlers are not installed
   yet), and `SIGKILL`/`SIGSTOP`, which are uncatchable. The signal path itself is
-  not hermetically testable; 66-U5/U6 pin the bytes and the normal restore.
-* **66-I2** A `\x1b[200~` … `\x1b[201~` run produces exactly one draft mutation
-  and zero `session.submit`/`agent.prompt` calls, regardless of the number of
-  embedded newlines.
+  not hermetically testable; 66-U5/U6 pin the bytes and the normal restore, and
+  the exit guard is a plain in-tree RAII object.
+* **66-I2** A `\x1b[200~` … `\x1b[201~` run produces exactly **one draft mutation
+  per flush segment** and zero `session.submit`/`agent.prompt` calls, regardless
+  of the number of embedded newlines. A run at or below `kMaxPasteBytes` flushes
+  once (close marker, idle gap, or nested open marker → one mutation); a run
+  larger than the cap flushes once per cap segment plus the final close, i.e.
+  multiple atomic, non-submitting mutations. There is no path with an
+  intermediate submit.
 * **66-I3** Every byte contained in the `input()` of the `Event::Character` /
   `Event::Special` events between the markers reaches the draft, including `\n`,
   `\t`, and valid UTF-8. This is **modulo FTXUI's parser**: `g_uniformize`
-  rewrites legacy F-key/mouse encodings (e.g. `\x1b[11~` → `\x1bOP`) and
-  malformed UTF-8 is dropped before ymh sees it (see §4.3). Terminal-protocol
-  events (`Event::Custom`, mouse, cursor position/shape) are not paste bytes and
-  are not appended; a paste in the read-only child view (58-E8) is deliberately
-  not inserted.
+  rewrites legacy F-key/mouse encodings (e.g. `\x1b[11~` → `\x1bOP`), maps a
+  pasted `\r` to `\n` and a pasted `\x08` (BS) to `\x7f` (DEL)
+  (`terminal_input_parser.cpp:19-25`); malformed UTF-8 is dropped before ymh
+  sees it (see §4.3). Terminal-protocol events (`Event::Custom`, the NUL resize
+  sentinel, mouse, cursor position/shape) are not paste bytes and are not
+  appended; a paste in the read-only child view (58-E8) is deliberately not
+  inserted.
 * **66-I4** The paste is inserted at the caret; bytes after the caret shift.
 * **66-I5** `paste_active_` is cleared by the close marker and by the idle
   flush; a byte-cap flush empties `paste_buffer_` but keeps the run armed until
@@ -216,6 +297,14 @@ step too (`:3790-3792`), so a close does not restore pre-paste completion hints.
 * **66-I7** While a child is viewed (58-E8) a paste does not mutate the draft.
 * **66-I8** A paste made while a modal owns the keyboard survives the modal's
   composer restore.
+* **66-I9** While a subprocess editor is forked by `Ctrl-E`/`/export --edit`,
+  DECSET 2004 is suspended (DECRST emitted) for the fork window and re-armed
+  (DECSET) after the child exits, at both call sites. Suspension is idempotent:
+  an inactive layer emits nothing and is not armed. Byte order at the call site
+  is DISABLE before the fork, ENABLE after the wait.
+* **66-I10** FTXUI's resize sentinel `Event::Special({0})` and `Event::Custom`
+  are never appended to `paste_buffer_`; only genuine paste bytes are. A resize
+  while a run is armed leaves the buffer unchanged.
 
 ## 6. Failure modes
 
@@ -226,18 +315,34 @@ step too (`:3790-3792`), so a close does not restore pre-paste completion hints.
 * **66-F2 (F7 wrong action)** — an embedded newline is a literal draft newline,
   never Enter/submit.
 * **66-F3 (F1 drop)** — a missing close marker is bounded by `kMaxPasteBytes`
-  and `kPasteIdleFlush`; buffered text is inserted, never dropped. A nested open
-  marker flushes the accumulated run before re-arming.
+  (a flush that keeps the run armed) and `kPasteIdleFlush` (a flush that
+  disarms). The idle flush is **event-driven**: it fires only when a further
+  event arrives after the gap (`supervisor.cpp:3725-3728`). A run that never
+  closes and is never followed by another event keeps its buffered text until app
+  teardown, where it is lost with the process — the one bounded hole. Any flush
+  that runs inserts its text, never drops it; a nested open marker flushes the
+  accumulated run before re-arming.
 * **66-F4 (F1 drop)** — an idle gap mid-run flushes and returns the triggering
   event to normal dispatch.
 * **66-F5 (F10 terminal corruption)** — DECRST 2004 is restored on the signal
   path (SIGHUP/SIGQUIT) and by FTXUI's graceful exit for the signals it owns; a
-  write failure to a closed tty is ignored (no sequence is left half-written
-  because `write_bracketed_paste` loops to completion).
+  write failure to a closed tty is ignored. `write_bracketed_paste` loops over
+  partial writes and `EINTR`, but a failure **after** a partial write can leave a
+  bounded partial sequence (the whole sequence is ≤ 8 bytes;
+  `terminal_layer.cpp:59-79` returns `false` and the caller ignores it). No
+  complete sequence is emitted twice and no unbounded corruption is possible.
 * **66-F6 (F8 permission)** — none: paste mutates only the local draft; it
   cannot submit or execute.
 * **66-F7 (F1 drop)** — a paste made while a modal owns the keyboard is mirrored
   into the modal composer snapshot, so closing the modal does not discard it.
+* **66-F8 (F10 terminal corruption)** — while DECSET 2004 is active, a paste into
+  the forked `$EDITOR` would inject literal `ESC[200~` … `ESC[201~` text because
+  FTXUI's `WithRestoredIO` does not touch the mode. Forbidden by 66-D9/66-I9.
+* **66-F9 (F3 stream corruption)** — the FTXUI resize sentinel
+  `Event::Special({0})` arriving mid-run must not append its NUL byte to
+  `paste_buffer_` and reach the draft. Already satisfied pre-fix because
+  `Event::Custom == Event::Special({0})` (66-D10/§4.7); the explicit guard and
+  66-U11 keep it satisfied if FTXUI ever decouples the two.
 
 ## 7. dsh mapping
 
@@ -265,6 +370,20 @@ step too (`:3790-3792`), so a close does not restore pre-paste completion hints.
   `UiMode` state for nothing (cf. 19 §11 rule 5). Rejected.
 * **66-D8 (M1)** A modal-owned composer snapshot is kept in sync with a paste so
   the close does not drop it. See §4.4.
+* **66-D9 (M5)** Suspend DECRST 2004 around the forked `$EDITOR` and re-arm
+  DECSET after, at both call sites, via an idempotent `BracketedPasteSuspension`
+  RAII guard; the harness gets a pty-backed terminal seam. See §4.6.
+* **66-D10 (M5)** Ignore FTXUI's resize sentinel `Event::Special({0})` while a
+  run is armed; the synthetic-event audit is recorded in §4.7.
+* **66-D11 (R4)** Reconcile the failure-mode/invariant text with the shipped
+  code rather than overstating it: 66-F3's idle flush is event-driven (a run with
+  no further event is lost at teardown); 66-F5 allows a bounded partial sequence
+  on a mid-write failure; 66-I2 is one mutation **per flush segment** (a >cap
+  paste mutates more than once); 66-I3 discloses `g_uniformize`'s `\r`→`\n` and
+  `\x08`→`\x7f` mapping in addition to the F-key/mouse rewrites. See §4.5/§5.
+* **66-D12 (M5)** Run the `run_loop` teardown from an RAII exit guard so a
+  throwing `screen.Loop` still restores DECRST, releases the timer, and restores
+  raw mode. See §4.8.
 
 ## 9. Test plan
 
@@ -296,9 +415,36 @@ Hermetic, in `tests/unit/errata66_ui_test.cpp` (registered in
 * **66-U10** `ParserNormalizationOfLegacyFunctionKeysIsTracked` — a pasted
   `\x1b[11~` reaches the draft as `\x1bOP`, pinning the 66-I3/§4.3 parser
   normalization rather than implying byte-verbatim preservation.
+* **66-U11** `ResizeSentinelIsNotPasteContent` — arm a run, dispatch
+  `Event::Special(std::string(1, '\0'))` (the FTXUI SIGWINCH sentinel), then a
+  body and the close marker; the draft must contain only the body, with no NUL.
+  **Guard (passes pre-fix):** the sentinel is already `Event::Custom` by value
+  (66-D10/§4.7), so this is a regression pin on that identity, not a pre-fix
+  failure.
+* **66-U12** `BracketedPasteSuspensionEmitsDecrstAndRearms` — a pty-backed
+  `TerminalLayer`: `enterBracketedPaste()`, construct a `BracketedPasteSuspension`,
+  destroy it, then `leaveBracketedPaste()`. The pty yields ENABLE, DISABLE,
+  ENABLE, DISABLE in order. A second layer that never entered paste emits no
+  bytes and stays inactive (idempotence). Fails pre-fix (no suspension type).
+* **66-U13** `EditorHandoffSuspendsBracketedPaste` — the supervisor harness
+  installs a pty-backed terminal (66-D9 seam), seeds a session, and dispatches
+  `ctrl-e` with a trivial `$EDITOR` script; the pty stream shows ENABLE then
+  DISABLE (before the fork) then ENABLE (after the child exits). Fails pre-fix
+  (no DISABLE/ENABLE pair; `ctrl-e` leaves DECSET on). Uses
+  `install_prompt_editor_io` + the existing `ScopedEnv` editor pattern.
+* **66-U14** `CapExceededPasteFlushesWithoutSubmitting` — a paste larger than
+  `kMaxPasteBytes` followed by the close marker inserts the whole payload and
+  never submits (`agent.prompt` count 0), pinning the corrected 66-I2 (multiple
+  non-submitting mutations rather than one). Guard (also passes pre-fix).
+* **66-U15** `CarriageReturnInsidePasteBecomesNewline` — the real
+  `ftxui::TerminalInputParser` fed `\x1b[200~a\rb\x1b[201~` yields draft `"a\nb"`,
+  pinning the 66-I3/§4.3 `g_uniformize` `\r`→`\n` disclosure. Guard (also passes
+  pre-fix).
 * **Signal path (not hermetic).** 66-U5/U6 pin the DECSET/DECRST bytes and the
   normal destructor restore; `restore_bracketed_paste_handler` is exercised only
-  by an out-of-tree probe (a subprocess signal test is not part of the suite).
+  by an out-of-tree probe (a subprocess signal test is not part of the suite). The
+  66-D12 exit guard is ordinary in-tree RAII and is not separately fault-injected
+  (forcing `screen.Loop` to throw is not reachable through the harness).
 
 ## 10. Non-goals
 
@@ -315,3 +461,4 @@ Hermetic, in `tests/unit/errata66_ui_test.cpp` (registered in
 | 2026-09-29 | Rev 1 (draft) | Root cause verified with a hermetic parser probe; seam, lifecycle, reassembly, degradation pinned; tests U1–U6. |
 | 2026-09-29 | Rev 2 (draft) | Oracle round 1 FAIL (0 HIGH / 4 MEDIUM) fixed: M1 modal-snapshot drop (66-D8/66-F7/U8), M2 byte-cap invariant corrected, M3 special-event scope stated, M4 signal guard narrowed to SIGHUP/SIGQUIT; L2 raw-parser test (U7), L3 state table, L4 resolution wording, L7 `kill`/`errno`, L8 nested marker (U9), L9 supersession recorded. |
 | 2026-09-29 | Rev 3 (draft) | Oracle round 2 (0 HIGH / 1 MEDIUM, R1): 66-I3/F1 scoped to `input()` modulo FTXUI `g_uniformize`/UTF-8 drop (§4.3 + U10); L1 DECRST moved before `timer.join()` + residual windows stated in 66-I1; L2 signal path noted not-hermetic; L3 table split; L4 citations; L5 snapshot hints synced. |
+| 2026-10-01 | Rev 4 (draft) | Independent verification of the shipped code reopened the spec with 2 reported MEDIUMs: (M5a) DECSET 2004 leaked into the forked `$EDITOR` (`WithRestoredIO` touches no mode) — **real**, fixed by `BracketedPasteSuspension` at both call sites (66-D9/§4.6/66-I9/66-F8/U12/U13); (M5b) the SIGWINCH sentinel `Event::Special({0})` was reported as appended to the buffer — **did not reproduce**: `Event::Custom == Event::Special({0})`, so the existing Custom branch already consumes it; 66-D10 names it explicitly and 66-U11 is a guard. Reconciles five overstatements (66-D11): 66-F3 idle flush is event-driven; 66-F5 permits a bounded partial sequence; 66-I2 is per-flush-segment; 66-I3 discloses `\r`→`\n`/`\x08`→`\x7f`; 66-I1's exception path is now real via `RunLoopExitGuard` (66-D12/§4.8/U14/U15). |
