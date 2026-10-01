@@ -818,6 +818,16 @@ distinct (`01 §16.1(e)(f)`): a failed turn's unmatched `tool_use` blocks
 project to `ToolResult{outcome = Error}`; a cancelled turn's project to
 `ToolResult{outcome = Cancelled}` (`01` I12).
 
+**Non-action guard (73-D1–73-D5, additive).** A `Completed` response with
+`tool_calls.empty()` and **blank** settled assistant text (Text blocks only;
+reasoning excluded) is a *non-action*: the loop appends one bounded corrective
+user-role nudge (`MessageSource::Plugin`, `plugin="agent-nudge"`) and re-enters
+the step loop, consuming one step; a second non-action in the same turn stops
+recoverably with `TurnFailed{StepLimitExceeded}` (62-D4). The predicate is
+structural (empty/whitespace-only) and never inspects identity, vendor, model
+name, or prompt wording. At most one nudge per turn. See
+`73-non-action-guard-and-replay-dedup-errata.md` §2/§4.
+
 ### 5.7 Provider failure → `TurnFailed`
 
 - A terminal provider `StreamError`/`Failed` response (`08 §2.2`, `08 §4.5`)

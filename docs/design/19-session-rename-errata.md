@@ -37,6 +37,12 @@ right-aligned title slot are reused as-is; `/rename` is merely a new registry
 entry that RB-08 picks up automatically, and rename delivery reuses RB-10's
 `setCellTitle` path.
 
+**73 amendment (additive).** Replaying a session log's id-carrying
+user/context events (`UserMessage`, `ContextInjected`) into a consumer is
+idempotent on the event `MessageId` (73-D7/D8): the event log, its ordering, its
+rename behaviour, and 01 §4.5 are unchanged; only the consumer's rendering is
+made replay-safe. See `73-non-action-guard-and-replay-dedup-errata.md` §2/§4.
+
 **Gate (per `AGENTS.md`).** Independent Oracle review must mark this `verified`
 with no open HIGH/MEDIUM findings **before any code**. Nothing here is verified.
 

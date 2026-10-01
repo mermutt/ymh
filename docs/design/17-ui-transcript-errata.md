@@ -50,6 +50,14 @@ were corrected; the code is authoritative:
 | RB-10 | 10 §8.1 (`:913`); §4.4 (`:418-444`) | `ui_render.cpp:364-372,79-81,219`; `ui_model.hpp:203,319`; `ui_model.cpp:294-296,328-346`; `supervisor.cpp:280-329` (`:295`,`:316`); `supervisor_connection.hpp:123-124`; `host_runtime.cpp:142`; `protocol_server.cpp:374-379`; `supervisor.cpp:347` | session name right-aligned in header |
 | RB-11 | 10 §6.1 (`:758-785`); §8.1 (`:921`); **§3.5 (`:275-320`); §11.3 (`:1159-1170`); F2 (`:1319`); U-F13 (`:1355`); §4.4 comment (`:425`)** | `ui_render.cpp:212-236,405,255-284,413,344,352`; `ui_model.hpp:257-262`; `ui_model.cpp:225-241` | bottom line drops the per-session list; badge becomes switcher-only |
 
+**73 amendment (additive).** The `ConversationModel` entry appends for
+`UserMessage` and `ContextInjected` are idempotent on the event `MessageId`
+(73-D7/D8, 73-I7–I9): a replayed stream cannot double-render a prompt or an
+injected context. This refines the RB-01 user-block append and the reasoning
+fold (RB-02) without changing either for live events. The dedup key comes from
+the same id the adapter propagates (`ui_event_adapter.cpp:83`); see
+`73-non-action-guard-and-replay-dedup-errata.md` §2/§4.
+
 ---
 
 ## 3. RB-01 — Transcript styling (drop role labels; user block)
