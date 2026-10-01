@@ -1,8 +1,8 @@
 # 69 — Host Startup Diagnosability Errata
 
 ```
-Status: verified (Rev 2) · reviewer: see `DESIGN_STATUS.md` row 69 · gate: 0 HIGH / 0 MEDIUM
-Revision: 2
+Status: verified (Rev 3) · reviewer: see `DESIGN_STATUS.md` row 69 · gate: 0 HIGH / 0 MEDIUM
+Revision: 3
 Component: 69 (errata) — amends 04-workspace-host-daemon.md (§2.2, §3.2, §3.3,
            §6.2, §11.2) and 11-m2-errata.md (§9.2) by reference, and
            10-supervisor-tui.md (§6.3 status bar) for the multi-line notice
@@ -81,10 +81,10 @@ leads a multi-line, labelled, bounded message (69-D9/69-D10) that both the CLI
 and the TUI render without dropping newlines (69-D11). No new channel, no
 `HostExitCode` change, no wire change.
 
-**Gate (per `AGENTS.md`).** Independent Oracle review marks this `verified` once
-the reason channel, the redaction bound, the fd lifetime, AND the Rev 2
-cause-selection/format/rendering decisions are confirmed
-(see `DESIGN_STATUS.md` row 69).
+**Gate (per `AGENTS.md`).** Rev 2 was marked `verified` once the reason channel,
+the redaction bound, the fd lifetime, AND the Rev 2 cause-selection/format/
+rendering decisions were confirmed. Rev 3 re-gated after the 69-D4/69-D12/69-D13
+changes: final **PASS (0 HIGH / 0 MEDIUM)** (see `DESIGN_STATUS.md` row 69).
 
 ## 2. Amendment register
 
@@ -135,8 +135,9 @@ post-`execve` startup failures (69-A4). The tail is bounded to **at most 4
 non-empty lines / 512 bytes total**, each line truncated to 240 bytes, and any
 line whose text (case-insensitively) contains `api_key`, `api-key`, `apikey`,
 `authorization`, `bearer `, `secret`, `password`, `passwd`, `credential`, or
-`token=` is dropped before inclusion (69-D6). Tail reading happens only on a
-startup failure, never on the success path.
+`token=` is **redacted in place** — the marker and the rest of its line become
+`[redacted]`, and the line is **not** dropped (69-D6/69-D12). Tail reading
+happens only on a startup failure, never on the success path.
 
 **69-D4 — Every `StartupRejected` return is specific.** Each return site
 (`WorkspaceHost::Impl::run`'s owner-watchdog guard; `WorkspaceHost::Impl::startup`'s
@@ -144,9 +145,12 @@ startup failure, never on the success path.
 log-sink-open and `execve` arms — all in `src/host/workspace_host.cpp`) emits a
 distinct `stderr` diagnostic naming the cause (and, for `execve`/chdir/open,
 `strerror(errno)`). The readiness error composes
-`"daemon did not become ready: " + describe_host_exit(status) + ": " + reason`
-when a specific reason exists, so a user never sees only
-`startup was rejected (StartupRejected)`.
+`"daemon did not become ready: " + describe_host_exit(status)` followed by
+69-D9's multi-line block (a `\n  reason:` line when a reason exists, then the
+labelled, bounded context), so a user never sees only
+`startup was rejected (StartupRejected)`. (Rev 3 reconciles this cell with
+69-D9; the Rev 1/2 `… + ": " + reason` single-line form is superseded by
+69-A9/69-D9.)
 
 **69-D5 — Diagnostic-fd lifetime.** `SpawnResult::diagnostic_fd` is
 parent-owned and single-consumer. `HostLifecycle::spawnAndAttach` wraps it in an
@@ -159,9 +163,29 @@ at process exit is bounded by process termination; no fd survives into the daemo
 **69-D6 — No secret or prompt leakage.** The errata never writes prompts,
 credentials, environment dumps, or `HostConfig` contents into the reason. The
 child writes only `strerror(errno)` + the executable/log-sink path. The log tail
-is bounded and redacted per 69-D3. This honours `AGENTS.md` ("never dump full
-prompts or sensitive tool output to normal logs by default") and does not consume
-`logging.log_prompts`.
+is bounded and redacted per 69-D3/69-D12: masking starts at the first matched
+marker, so bytes before it are preserved verbatim (a credential with no marker
+word is not caught — recorded in 69-OQ2). This honours `AGENTS.md` ("never dump
+full prompts or sensitive tool output to normal logs by default") and does not
+consume `logging.log_prompts`.
+
+**69-D12 — Redact in place; never drop the line (Rev 3).** The Rev 1/2 redactor
+dropped any line containing a marker. That contradicted absolute 69-I1: a
+diagnostic that itself named a marker (e.g. `ymh --host: cannot read token=…`)
+was deleted, so `select_primary_cause` found no cause and the user got the bare
+`startup was rejected (StartupRejected)` back. Rev 3 masks instead of dropping:
+`redact_secrets` rewrites the line from the first marker onward to `[redacted]`,
+preserving the text before it — including the `ymh --host:` diagnostic prefix, so
+the line stays selectable as the cause. A line is never removed for containing a
+marker.
+
+**69-D13 — A signaled exit is named (Rev 3).** `ForkExecLauncher::tryReap`
+encodes a signal death as `128 + WTERMSIG`. `describe_host_exit` gains a branch
+that renders `exit code <128+sig> (killed by <SIGNAME>)` (e.g. `exit code 139
+(killed by SIGSEGV)`) instead of the bare number, for the daemon that dies before
+writing anything. Unknown signal numbers render `(killed by signal <n>)`. The
+encoding is a heuristic: a normal `exit(128+n)` is indistinguishable through the
+`int` seam and is rendered the same way (recorded in 69-I14).
 
 **69-D7 — Readiness-error envelope and pipe precedence.** The thrown message is
 always prefixed `daemon did not become ready: <describe_host_exit(status)>`; the
@@ -296,12 +320,12 @@ even when trailing shutdown noise follows it. The pipe rows are unchanged.
 
 | ID | Invariant |
 |---|---|
-| **69-I1** | For every `StartupRejected` exit, the readiness `HostError::what()` is strictly more than the bare `describe_host_exit(16)` string and names a cause (errno text, a named cause, or a log tail). No path yields a bare `StartupRejected`. |
+| **69-I1** | For every `StartupRejected` exit, the readiness `HostError::what()` is strictly more than the bare `describe_host_exit(16)` string and names a cause (errno text, a named cause, or a log tail). No path yields a bare `StartupRejected`. **Rev 3:** a cause line carrying a redaction marker is masked in place (69-D12), never dropped, so the content-based cause selection still finds it; a marker-only `ymh --host:` diagnostic therefore still yields `reason: [redacted]`, not the bare code. |
 | **69-I2** | The `execve`-failure reason contains `strerror(errno)` (e.g. `No such file or directory`, `Permission denied`, `Exec format error`). |
 | **69-I3** | The log-sink-open-failure reason is textually distinct from the `execve`-failure reason (it contains `log sink`; the latter contains `execve`). |
 | **69-I4** | No `HostExitCode` numeric value changes; `StartupRejected == 16`. |
 | **69-I5** | The diagnostic pipe's write end is CLOEXEC and is the only fd preserved across `close_extra_fds`; the daemon inherits no diagnostic fd. |
-| **69-I6** | The log context block surfaced is ≤4 lines / ≤512 bytes / ≤240 bytes per line and contains no line matching the 69-D6 redaction set. |
+| **69-I6** | The log context block surfaced is ≤4 lines / ≤512 bytes / ≤240 bytes per line. **Rev 3 (69-D12):** a marker-bearing line is not excluded from the context — it is included with its marker and everything after it replaced by `[redacted]`, so the context never contains an unmasked marker value and the line count/bounds still hold. |
 | **69-I7** | On the success path (claim published, or winner-attach), the parent closes `diagnostic_fd`; no fd leak accrues across repeated spawns. |
 | **69-I8** | A pipe-creation failure degrades to the daemon-stderr/describe path; `spawn` never throws for want of a diagnostic. |
 | **69-I9** | The child writes at most one bounded single-line diagnostic and uses only `write(2)` on the pipe (no unbounded allocation, no secret material, no `HostConfig` dump). |
@@ -309,6 +333,7 @@ even when trailing shutdown noise follows it. The pipe rows are unchanged.
 | **69-I11** | When a cause exists it appears before the `recent daemon log:` context (69-D9); the context is always labelled, never presented as the reason. The cause is selected by 69-D8's content rule, not by line position. |
 | **69-I12** | The TUI renders a notice containing `'\n'` on separate rows and never concatenates **or silently drops** it, in both the no-active-session and active-session status layouts; the CLI renders `what()` verbatim. |
 | **69-I13** | A daemon log whose cause line is followed by ≥N lines of benign noise still yields the cause as the `reason:` headline (the 69-D8 scan is bounded to 256 KiB and independent of the context's 4-line bound). |
+| **69-I14** | A reap status above 128 renders as `exit code <status> (killed by <SIGNAME>)` with a named signal for the standard signals, or `(killed by signal <n>)` otherwise; it is never a bare `exit code <n>`. The `128+n` encoding conflates a signaled death with a normal `exit(128+n)` through the `int` `tryReap` seam; both render identically (recorded, accepted). |
 
 ## 7. Failure modes (`69-F#`)
 
@@ -322,13 +347,14 @@ diagnostics for `D-F1`/`D-F4`/`D-F21`.
 | **69-F3** | Log sink unwritable | `open(log_sink, …)` < 0 in the child | Child writes `cannot open log sink <path>: <strerror>` to the pipe; never bare (69-A7, 69-I3) |
 | **69-F4** | Provider setup / runtime build failure | `WorkspaceRuntime::create` returns an error | Daemon prints `runtime setup failed (<code>): <detail>`; supervisor surfaces it as the `reason:` headline (69-A4, 69-D8) |
 | **69-F5** | Diagnostic pipe cannot be created | `pipe2` < 0 | Spawn proceeds; readiness falls back to `describe_host_exit` + log tail; never a new failure (69-I8) |
-| **69-F6** | Log tail contains credential-like text | line matches the 69-D6 redaction set | Line dropped before inclusion (69-I6) |
+| **69-F6** | Log tail contains credential-like text | line matches the 69-D6 redaction set | Line is **redacted in place** (`[redacted]` from the marker onward) and included; never dropped, so a marker-bearing cause is not lost (69-D12/69-I1/69-I6) |
 | **69-F7** | Daemon exits 0 before readiness | `tryReap` → 0 | Unchanged: `describe_host_exit(0)` = `exited cleanly`; no reason invention |
 | **69-F8** | Supervisor dies with the read end open | process teardown | The kernel closes the fd; no daemon impact (the child end is already CLOEXEC-closed) (69-I5, 69-I7) |
 | **69-F9** | The daemon's cause line is followed by benign shutdown noise | 69-D8 scan finds the `ymh --host:` line above the noise | The cause is the `reason:` headline; the noise is bounded, labelled context (69-I11, 69-I13) |
 | **69-F10** | A multi-line notice reaches the TUI status bar | `render_status` sees `'\n'` in the notice | The rows are stacked as a block; only single-line notices use the inline segment (69-D11, 69-I12) |
 | **69-F10b** | A long startup notice would not fit the inline status width while a session is active | `render_status` skips the inline include for a `'\n'` notice | The block is still rendered as a row below the status line; it is never silently dropped (69-D11, 69-I12) |
 | **69-F11** | The log sink holds more than the 69-D10 context bound | `read_log_sink_lines` reaches the scan bound | No error; the cause is still surfaced; context is truncated to the bound and the `daemon log: <path>` pointer is emitted (69-D10) |
+| **69-F12** | Daemon killed by a signal before readiness | `tryReap` returns `128 + WTERMSIG` (>128) | `describe_host_exit` names the signal (69-D13/69-I14); a `SIGSEGV` daemon surfaces `exit code 139 (killed by SIGSEGV)`, never a bare number |
 
 ## 8. dsh (DeepSeek Harness) mapping
 
@@ -347,7 +373,9 @@ Hermetic (`tests/unit/workspace_host_test.cpp`, no real LLM, no network):
 | `StartupDiagnosability.ExecveFailureSurfacesErrno` | real `ForkExecLauncher` with an absolute path that cannot be executed (a non-existent `/…/ymh-does-not-exist`), a registered workspace row | the thrown `HostError::what()` contains `execve failed`, `No such file or directory`, and the `ldd` hint; it is **not** the bare `startup was rejected (StartupRejected)`; `HostError::code()` is `HostUnreachable` (69-I1, 69-I2) |
 | `StartupDiagnosability.UnwritableLogSinkSurfacesDistinctReason` | real `ForkExecLauncher`; make `<root>/.ymh/host.log` a directory so `open(…, O_WRONLY)` returns `EISDIR` | the message contains `log sink` and `Is a directory`; it does not contain `execve`; distinct from 69-F1 (69-I3, 69-A7) |
 | `StartupDiagnosability.LogTailSurfacesDaemonStderr` | real `ForkExecLauncher` pointed at an executable `/bin/sh` script that writes a marker to stderr and exits 16 | the message contains the marker from the log sink (69-D3, 69-F2) |
-| `StartupDiagnosability.RedactionDropsSecretLines` | script writes a `api_key=…` line and a benign marker | the marker appears; `api_key=` does not (69-D6, 69-I6, 69-F6) |
+| `StartupDiagnosability.RedactionMasksSecretLinesInPlace` (Rev 3; was `RedactionDropsSecretLines`) | script writes an `api_key=…` line and a benign marker | the benign marker appears; the secret value does not; the marker-bearing line is present as `[redacted]` rather than removed (69-D6/69-D12, 69-I6, 69-F6) |
+| `StartupDiagnosability.RedactionKeepsMarkerOnlyCause` (Rev 3) | script writes a `ymh --host: startup rejected: cannot read token=sk-secret` line, exit 16 | the message contains a `reason:` line carrying `startup rejected: cannot read [redacted]` (the `ymh --host:` prefix is stripped by `without_host_diagnostic_prefix`), does **not** contain `sk-secret`, and is not the bare `startup was rejected (StartupRejected)` (69-D12, 69-I1) |
+| `StartupDiagnosability.SignaledExitIsNamed` (Rev 3) | script `kill -SEGV $$` (killed before readiness, before writing) | the message contains `exit code 139 (killed by SIGSEGV)`, not a bare `exit code 139` (69-D13, 69-I14, 69-F12) |
 | `StartupDiagnosability.SpecificReasonLeadsOverTrailingNoise` (Rev 2) | script writes `ymh --host: startup rejected: no LLM provider is configured (provider setup failed)` **then** 20 benign `[tool] [warning]` lines, exit 16 | the message contains the reason with the `ymh --host:` prefix stripped; the reason's byte offset is **less than** the first context line's; the message contains no `" / "` (69-D8, 69-I10, 69-I11, 69-I13, 69-F9) |
 | `StartupDiagnosability.MessageIsMultiLineIndentedAndLabelled` (Rev 2) | same script | the message contains `"\n  reason: "` and `"\n  recent daemon log:\n    "`; the context lines are on separate `'\n'`-separated indented rows; `HostError::what()` has ≥3 lines (69-D9, 69-I11) |
 | `StartupDiagnosability.LongTailIsBounded` (Rev 2) | script writes the cause then 500 × 300-byte warning lines | the cause still appears as `reason:`; the message length is bounded (`< 2048` bytes); the context block holds ≤4 lines and no surfaced line exceeds 240 bytes (69-D10, 69-F11) |
@@ -367,6 +395,13 @@ with `" / "` (no `"\n  reason: "`, no labelled block), selects the cause by
 position so trailing noise wins (`SpecificReasonLeadsOverTrailingNoise`), and
 FTXUI concatenates the notice rows (`MultiLineNoticeRendersOnSeparateRows`). The
 transcripts of the pre-fix runs are recorded in the change set / report.
+
+**Rev 3 pre-fix evidence.** `RedactionKeepsMarkerOnlyCause` fails against the
+Rev 2 tree: the redactor drops the `ymh --host:` cause line, so no cause is
+selected and the message is the bare `startup was rejected (StartupRejected)`.
+`SignaledExitIsNamed` fails against the Rev 2 tree: `describe_host_exit(139)`
+returns the bare `exit code 139`. `RedactionMasksSecretLinesInPlace`'s
+`[redacted]` presence fails pre-fix (the line was absent).
 
 **Verification.** `cmake --build build -j` (warnings are errors) and
 `ctest --test-dir build --output-on-failure --timeout 120` must be 100 % green,
@@ -393,3 +428,11 @@ path).
   (the long-tail test stays inside the window so the cause is found). Accepted
   for now: the window is a safety bound, not a correctness contract, and the
   cause is emitted near the end of the daemon's life in the real failure.
+
+## 11. Revision log
+
+| Date | Revision | Note |
+|---|---|---|
+| 2026-09-30 | Rev 1 (draft) | Reason channel (pipe + bounded log tail), specific `StartupRejected` diagnostics, exit codes frozen. |
+| 2026-09-30 | Rev 2 (draft) | Presentation: cause selected by content (69-D8), multi-line labelled block (69-D9/69-D10), TUI stacked rows (69-D11). |
+| 2026-10-01 | Rev 3 (draft) | Independent verification fixes: 69-D4's single-line `… + ": " + reason` envelope was stale and now agrees with 69-D9; the 69-D6 redactor masks in place instead of dropping a marker-bearing line (69-D12/69-I6/69-F6), so a marker-named cause no longer regresses 69-I1 to a bare code; `describe_host_exit` names a signaled exit (69-D13/69-I14/69-F12). Tests: `RedactionKeepsMarkerOnlyCause`, `SignaledExitIsNamed`, `RedactionMasksSecretLinesInPlace`. |

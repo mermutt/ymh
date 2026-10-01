@@ -721,7 +721,7 @@ TEST(StartupDiagnosability, LogTailSurfacesDaemonStderr) {
         << message;
 }
 
-TEST(StartupDiagnosability, RedactionDropsSecretLines) {
+TEST(StartupDiagnosability, RedactionMasksSecretLinesInPlace) {
     ShortTempRoot root("ymh-startup-redact");
     const std::filesystem::path canonical = std::filesystem::canonical(root.path());
     std::unique_ptr<WorkspaceRegistry> registry =
@@ -735,6 +735,45 @@ TEST(StartupDiagnosability, RedactionDropsSecretLines) {
     const std::string message = ensure_running_failure(launcher, *registry, record.id);
     EXPECT_NE(message.find("benign loader marker"), std::string::npos) << message;
     EXPECT_EQ(message.find("sk-should-never-appear"), std::string::npos) << message;
+    EXPECT_NE(message.find("[redacted]"), std::string::npos) << message;
+}
+
+// 69-D12/69-I1: a cause line that itself names a marker must be masked, not
+// dropped, so the content-selected cause does not regress to the bare code.
+TEST(StartupDiagnosability, RedactionKeepsMarkerOnlyCause) {
+    ShortTempRoot root("ymh-startup-redact-cause");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "redact-cause");
+
+    const std::filesystem::path script = write_daemon_script(
+        canonical,
+        "echo 'ymh --host: startup rejected: cannot read token=sk-secret' >&2\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+    EXPECT_NE(message.find("\n  reason: startup rejected: cannot read"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("[redacted]"), std::string::npos) << message;
+    EXPECT_EQ(message.find("sk-secret"), std::string::npos) << message;
+    EXPECT_NE(message,
+              "daemon did not become ready: startup was rejected (StartupRejected)")
+        << message;
+}
+
+// 69-D13/69-I14/69-F12: a daemon killed before writing yields a named signal,
+// not a bare numeric exit code.
+TEST(StartupDiagnosability, SignaledExitIsNamed) {
+    ShortTempRoot root("ymh-startup-signal");
+    const std::filesystem::path canonical = std::filesystem::canonical(root.path());
+    std::unique_ptr<WorkspaceRegistry> registry =
+        WorkspaceRegistry::open(registry_config_for(canonical));
+    const WorkspaceRecord record = registry->registerWorkspace(canonical, "signal");
+
+    const std::filesystem::path script = write_daemon_script(canonical, "kill -SEGV $$\n");
+    ForkExecLauncher launcher(script);
+    const std::string message = ensure_running_failure(launcher, *registry, record.id);
+    EXPECT_NE(message.find("exit code 139 (killed by SIGSEGV)"), std::string::npos) << message;
 }
 
 // 69-D8/69-D9/69-I10/69-I11/69-I13: the cause is selected by content (the
