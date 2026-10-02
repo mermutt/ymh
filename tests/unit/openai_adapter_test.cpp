@@ -5,9 +5,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -15,6 +18,8 @@
 #include <vector>
 
 #include "support/mock_http_server.hpp"
+#include "support/short_temp.hpp"
+#include "ymh/llm/llm_transcript.hpp"
 #include "ymh/llm/openai_adapter.hpp"
 #include "ymh/llm/redaction.hpp"
 
@@ -199,6 +204,7 @@ struct Options {
     ymh::OpenAICompatibleProvider::SteadyNow now = [] {
         return std::chrono::steady_clock::now();
     };
+    std::shared_ptr<ymh::LlmTranscript> transcript = nullptr;
 };
 
 ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> transport,
@@ -217,6 +223,7 @@ ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> 
     config.connect_timeout = options.connect_timeout;
     config.idle_timeout = options.idle_timeout;
     config.request_timeout = options.request_timeout;
+    config.transcript = std::move(options.transcript);
     return ymh::OpenAICompatibleProvider(config, options.caps, std::move(transport),
                                          std::move(options.now));
 }
@@ -870,3 +877,195 @@ TEST_F(OpenAiAdapterTest, CurlToolCallRoundTrip) {
     EXPECT_EQ(result.response.tool_calls[0].id, "call_9");
     EXPECT_EQ(result.response.tool_calls[0].arguments, nlohmann::json({{"path", "x"}}));
 }
+
+// 74-llm-transcript-errata.md §8 (74-T1, 74-T2, 74-T3, 74-T5).
+namespace {
+
+class LlmTranscriptTest : public ::testing::Test {
+protected:
+    void SetUp() override { ::setenv("YMH_TEST_API_KEY", "test-key", 1); }
+    void TearDown() override { ::unsetenv("YMH_TEST_API_KEY"); }
+};
+
+ymh::HttpResponse http_ok(std::string body) {
+    ymh::HttpResponse response;
+    response.status = 200;
+    response.body = std::move(body);
+    return response;
+}
+
+std::string read_text(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+std::vector<nlohmann::json> read_records(const std::filesystem::path& path) {
+    std::vector<nlohmann::json> records;
+    std::istringstream stream(read_text(path));
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty()) {
+            records.push_back(nlohmann::json::parse(line));
+        }
+    }
+    return records;
+}
+
+std::size_t count_transcript_files(const std::filesystem::path& dir, std::uintmax_t& max_size) {
+    std::size_t count = 0;
+    max_size = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.path().extension() == ".jsonl") {
+            ++count;
+            max_size = std::max(max_size, entry.file_size());
+        }
+    }
+    return count;
+}
+
+TEST_F(LlmTranscriptTest, EnabledRecordsExactRequestAndFullStreamedResponse) {
+    ymh::test::ShortTempRoot root("ymh_tx_roundtrip");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path()});
+
+    const std::string sse = sse_body({text_frame("hel"), text_frame("lo"), finish_frame("stop")});
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>{{.response = http_ok(sse), .chunk_size = 1}});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+
+    const ymh::LLMRequest        request = text_request();
+    const ymh::ProviderCapabilities caps = ymh::openai_compatible_capabilities();
+    const auto                   result = run(provider, request);
+    ASSERT_EQ(result.response.outcome, ymh::StreamOutcome::Completed)
+        << "error code=" << static_cast<int>(result.response.error.code)
+        << " http_status=" << result.response.error.http_status
+        << " detail=" << result.response.error.detail
+        << " message=" << result.response.error.provider_message;
+
+    const auto records = read_records(transcript->path());
+    ASSERT_EQ(records.size(), 2u);
+
+    const nlohmann::json expected_body = ymh::build_chat_completions_body(request, caps);
+    EXPECT_EQ(records[0]["direction"], "request");
+    EXPECT_EQ(records[0]["model"], "test-model");
+    EXPECT_EQ(records[0]["endpoint_host"], "127.0.0.1:9");
+    EXPECT_EQ(records[0]["body"].get<std::string>(), expected_body.dump());
+    EXPECT_EQ(records[0]["body_bytes"].get<std::size_t>(), expected_body.dump().size());
+
+    EXPECT_EQ(records[1]["direction"], "response");
+    EXPECT_EQ(records[1]["status"], 200);
+    EXPECT_EQ(records[1]["raw"].get<std::string>(), sse);
+    EXPECT_EQ(records[1]["assembled"]["content"], "hello");
+    EXPECT_EQ(records[1]["assembled"]["finish_reason"], "stop");
+    EXPECT_FALSE(records[1]["truncated"].get<bool>());
+}
+
+TEST_F(LlmTranscriptTest, DisabledByDefaultWritesNoFile) {
+    ymh::test::ShortTempRoot root("ymh_tx_default_off");
+    auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+        {.response = http_ok(sse_body({text_frame("hi"), finish_frame("stop")}))}});
+    auto provider = make_provider(transport);
+    (void)run(provider, text_request());
+
+    std::uintmax_t max_size = 0;
+    EXPECT_EQ(count_transcript_files(root.path(), max_size), 0u);
+    EXPECT_FALSE(std::filesystem::exists(root.path() / "llm-transcript.jsonl"));
+}
+
+TEST_F(LlmTranscriptTest, NeverContainsApiKeyOrAuthorization) {
+    ::setenv("YMH_TX_SECRET_KEY", "sk-sentinel-DO-NOT-LOG-0123456789", 1);
+    ymh::test::ShortTempRoot root("ymh_tx_secret");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path()});
+    auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+        {.response = http_ok(sse_body({text_frame("ok"), finish_frame("stop")}))}});
+    auto provider = make_provider(
+        transport, Options{.api_key_env = "YMH_TX_SECRET_KEY", .transcript = transcript});
+    (void)run(provider, text_request());
+    ::unsetenv("YMH_TX_SECRET_KEY");
+
+    const std::string text = read_text(transcript->path());
+    ASSERT_FALSE(text.empty());
+    ASSERT_NE(text.find("\"direction\":\"request\""), std::string::npos);
+    EXPECT_EQ(text.find("sk-sentinel-DO-NOT-LOG-0123456789"), std::string::npos);
+    EXPECT_EQ(text.find("Authorization"), std::string::npos);
+    EXPECT_EQ(text.find("Bearer"), std::string::npos);
+    EXPECT_EQ(text.find("YMH_TX_SECRET_KEY"), std::string::npos);
+}
+
+TEST_F(LlmTranscriptTest, RotationBoundsRetainedFiles) {
+    ymh::test::ShortTempRoot root("ymh_tx_rotation");
+    const std::size_t      cap   = 700;
+    const std::size_t      files = 2;
+    ymh::LlmTranscriptOptions options;
+    options.directory         = root.path();
+    options.max_bytes_per_file = cap;
+    options.max_files          = files;
+    auto transcript = std::make_shared<ymh::LlmTranscript>(std::move(options));
+
+    for (int i = 0; i < 8; ++i) {
+        auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+            {.response = http_ok(sse_body({text_frame("chunk"), finish_frame("stop")}))}});
+        auto provider = make_provider(transport, Options{.transcript = transcript});
+        (void)run(provider, text_request());
+    }
+
+    std::uintmax_t    max_size = 0;
+    const std::size_t retained = count_transcript_files(root.path(), max_size);
+    EXPECT_EQ(retained, files);
+    EXPECT_GT(max_size, 0u);
+    EXPECT_LE(max_size, static_cast<std::uintmax_t>(cap));
+}
+
+TEST_F(LlmTranscriptTest, UnwritableWriterDoesNotBreakTheTurn) {
+    ymh::test::ShortTempRoot root("ymh_tx_unwritable");
+    root.write("blocker", "not a directory");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path() / "blocker" / "sub"});
+    ASSERT_FALSE(transcript->healthy());
+
+    auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+        {.response = http_ok(sse_body({text_frame("ok"), finish_frame("stop")}))}});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+    const auto result = run(provider, text_request());
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Completed);
+}
+
+TEST_F(LlmTranscriptTest, InvalidUtf8DoesNotEscapeTheWriter) {
+    ymh::test::ShortTempRoot root("ymh_tx_badutf8");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path()});
+    std::string body = "data: {\"choices\":[{\"delta\":{\"content\":\"";
+    body.push_back(static_cast<char>(0xFF));
+    body += "\"}}]}\n\n";
+
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>{{.response = http_ok(body)}});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+    (void)run(provider, text_request());
+    EXPECT_FALSE(transcript->healthy());
+}
+
+TEST_F(LlmTranscriptTest, NonStreamingJsonBodyIsRecordedVerbatim) {
+    ymh::test::ShortTempRoot root("ymh_tx_nonstream");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path()});
+
+    const std::string body =
+        R"({"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hello json"},)"
+        R"("finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}})";
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>{{.response = http_ok(body)}});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+    (void)run(provider, text_request());
+
+    const auto records = read_records(transcript->path());
+    ASSERT_EQ(records.size(), 2u);
+    EXPECT_EQ(records[1]["raw"].get<std::string>(), body);
+    EXPECT_EQ(records[1]["assembled"]["content"], "hello json");
+    EXPECT_EQ(records[1]["assembled"]["finish_reason"], "stop");
+}
+
+} // namespace

@@ -1215,6 +1215,18 @@
       "section": "7.6"
     },
     {
+      "symbol": "config::logging.llm_transcript",
+      "category": "config_key",
+      "spec": "74-llm-transcript-errata.md",
+      "section": "3.1"
+    },
+    {
+      "symbol": "config::logging.transcript_dir",
+      "category": "config_key",
+      "spec": "74-llm-transcript-errata.md",
+      "section": "3.1"
+    },
+    {
       "symbol": "config::mcp.allow_network_servers",
       "category": "config_key",
       "spec": "21-config-jsonc-errata.md",

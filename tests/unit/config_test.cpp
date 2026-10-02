@@ -764,6 +764,58 @@ TEST(Config, SessionSectionRejectedInWorkspaceLayer) {
     }
 }
 
+TEST(Config, LlmTranscriptDefaultsOffAndParsesGlobally) {
+    Config defaults;
+    EXPECT_FALSE(defaults.logging.llm_transcript);
+    EXPECT_TRUE(defaults.logging.transcript_dir.empty());
+
+    test::TempWorkspace workspace("config_llm_transcript");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc",
+                    "{ \"logging\": { \"llm_transcript\": true, "
+                    "\"transcript_dir\": \"/tmp/ymh-tx\" } }\n");
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace.path() / "absent.jsonc";
+    const Config config = load_config(paths);
+    EXPECT_TRUE(config.logging.llm_transcript);
+    EXPECT_EQ(config.logging.transcript_dir, "/tmp/ymh-tx");
+}
+
+TEST(Config, LlmTranscriptRejectedInWorkspaceLayer) {
+    test::TempWorkspace workspace("config_llm_transcript_ws");
+    workspace.write(".ymh/config.jsonc", "{ \"logging\": { \"llm_transcript\": true } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError for a workspace-layer logging.llm_transcript";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("global-layer only"), std::string::npos)
+            << error.what();
+    }
+}
+
+TEST(Config, LlmTranscriptEnvOverride) {
+    ::setenv("YMH_LLM_TRANSCRIPT", "1", 1);
+    ::setenv("YMH_LLM_TRANSCRIPT_DIR", "/tmp/ymh-env-tx", 1);
+    Config enabled;
+    apply_env_overrides(enabled);
+    EXPECT_TRUE(enabled.logging.llm_transcript);
+    EXPECT_EQ(enabled.logging.transcript_dir, "/tmp/ymh-env-tx");
+
+    ::setenv("YMH_LLM_TRANSCRIPT", "0", 1);
+    Config disabled;
+    apply_env_overrides(disabled);
+    EXPECT_FALSE(disabled.logging.llm_transcript);
+
+    ::unsetenv("YMH_LLM_TRANSCRIPT");
+    ::unsetenv("YMH_LLM_TRANSCRIPT_DIR");
+}
+
 TEST(Config, ApplyJsoncRequiredFlag) {
     test::TempWorkspace workspace("config_required_flag");
     const std::filesystem::path absent = workspace.path() / "absent.jsonc";
