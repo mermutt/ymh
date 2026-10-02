@@ -196,6 +196,21 @@ private:
     // 55-D10: record that a terminal event was appended this activation.
     void                      noteTerminal();
 
+    // 73-D9/D10: one completed-turn observation for cross-turn repetition
+    // detection. `*_hash` are SHA-256 of the structurally normalized prompt /
+    // answer (73-D9), so an entry is fixed-size regardless of prompt length.
+    struct AnswerObservation {
+        std::string prompt_hash;
+        std::string answer_hash;
+    };
+    // 73-D10: record one turn's observation; bounded to `kAnswerLogCapacity`.
+    void note_answer_observation(const std::string& prompt_hash,
+                                 const std::string& answer_hash);
+    // 73-D9: true iff the same normalized answer has been seen for
+    // `kRepeatOccurrences` distinct normalized prompts (current turn included).
+    [[nodiscard]] bool repeats_prior_answer(const std::string& prompt_hash,
+                                            const std::string& answer_hash) const;
+
     // 40 §2.4: the per-call body split so the scheduler can overlap only the
     // execution while the loop thread keeps the durable appends (40-I4).
     struct PreparedToolCall {
@@ -245,6 +260,9 @@ private:
     CancellationSource                  turn_cancel_;
     ToolResultPruner                    pruner_;
     RepeatToolReminder                  reminder_;
+    // 73-D10: bounded, per-session (one per AgentLoop) ring of recent completed
+    // turns' (prompt, answer) hashes. Worker-only; never serialized.
+    std::deque<AnswerObservation>       recent_answers_;
 };
 
 // 40-output-retention.md §2.3 (26-D10). Exclusive calls form barriers;

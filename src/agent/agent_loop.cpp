@@ -68,6 +68,44 @@ bool is_blank(std::string_view text) {
                        [](unsigned char character) { return std::isspace(character) != 0; });
 }
 
+// 73-D9: structural normalization for cross-turn repetition. ASCII-only and
+// locale-independent: trim leading/trailing ASCII whitespace, collapse every run
+// of ASCII whitespace to one space, and ASCII-lowercase A-Z. No Unicode
+// normalization and no punctuation stripping — those would merge distinct texts
+// and raise false positives.
+std::string normalize_reply(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool pending_space = false;
+    for (const char raw : text) {
+        const unsigned char character = static_cast<unsigned char>(raw);
+        const bool          ascii_space =
+            character == ' ' || character == '\t' || character == '\n' ||
+            character == '\r' || character == '\f' || character == '\v';
+        if (ascii_space) {
+            pending_space = !out.empty();
+            continue;
+        }
+        if (pending_space) {
+            out.push_back(' ');
+            pending_space = false;
+        }
+        if (character >= 'A' && character <= 'Z') {
+            out.push_back(static_cast<char>(character + ('a' - 'A')));
+        } else {
+            out.push_back(raw);
+        }
+    }
+    return out;
+}
+
+// 73-D9: how many distinct normalized prompts one repeated answer must be seen
+// against before the repetition arm fires; the current turn counts as one, so
+// the predicate needs `kRepeatOccurrences - 1` prior distinct-prompt matches.
+constexpr std::size_t kRepeatOccurrences = 3;
+// 73-D10: fixed bound on the per-session observation ring.
+constexpr std::size_t kAnswerLogCapacity = 8;
+
 // 73-D2: the single bounded corrective nudge. It is a user-role message so the
 // provider presents it as the latest instruction; its Plugin source keeps it out
 // of the composer history and the user-message job-wakeup path while still
@@ -1056,6 +1094,29 @@ void AgentLoop::runMaintenanceTurn(TurnId turn) {
     noteTerminal();
 }
 
+void AgentLoop::note_answer_observation(const std::string& prompt_hash,
+                                        const std::string& answer_hash) {
+    recent_answers_.push_back(AnswerObservation{prompt_hash, answer_hash});
+    while (recent_answers_.size() > kAnswerLogCapacity) {
+        recent_answers_.pop_front();
+    }
+}
+
+bool AgentLoop::repeats_prior_answer(const std::string& prompt_hash,
+                                     const std::string& answer_hash) const {
+    if (answer_hash.empty()) {
+        return false;
+    }
+    std::unordered_set<std::string> distinct_prompts;
+    distinct_prompts.insert(prompt_hash);
+    for (const AnswerObservation& observation : recent_answers_) {
+        if (observation.answer_hash == answer_hash) {
+            distinct_prompts.insert(observation.prompt_hash);
+        }
+    }
+    return distinct_prompts.size() >= kRepeatOccurrences;
+}
+
 void AgentLoop::runTurn() {
     drainFoldedItems();
     InboxItem trigger;
@@ -1088,6 +1149,14 @@ void AgentLoop::runTurn() {
         }
         appendUserMessage(trigger.message);
     }
+    // 73-D9: the normalized current user prompt, captured once for the turn.
+    // Repetition is only meaningful for a turn that carries user prompt text, so
+    // an Inject turn (or an empty/whitespace-only prompt) is ineligible: it
+    // neither records nor matches, which keeps non-user prompts out of the
+    // distinct-prompt count.
+    const std::string normalized_prompt = normalize_reply(text_of_blocks(trigger.message.content));
+    const bool        repetition_eligible = !normalized_prompt.empty();
+    const std::string current_prompt_hash = sha256_hex(normalized_prompt);
     session_.append(payload::TurnStarted{turn, trigger.origin});
     TurnFlushGuard turn_flush{services_.plan_mode, services_.model_selection, session_};
 
@@ -1140,6 +1209,8 @@ void AgentLoop::runTurn() {
     // 73-D3: at most one corrective nudge per user turn; reset for every
     // runTurn(), so a second non-action cannot re-enter the nudge branch.
     bool nudge_emitted_for_turn = false;
+    // 73-D10: at most one repetition observation per user turn.
+    bool answer_observed_for_turn = false;
     std::unordered_set<std::string> seen_actions;
     std::unordered_set<std::string> seen_results;
     for (std::size_t stepNumber = 1;; ++stepNumber) {
@@ -1363,12 +1434,30 @@ void AgentLoop::runTurn() {
             return;
         }
 
-        // 73-D1/D2/D4: a Completed response with no tool call and blank settled
-        // text is a non-action. The first one in a turn earns exactly one
+        // 73-D1/D2/D4/D9: a Completed response with no tool call is a non-action
+        // when its settled text is blank OR it repeats a prior turn's answer to a
+        // different prompt. The first non-action in a turn earns exactly one
         // bounded corrective nudge and re-enters the step loop; a second one
-        // stops recoverably instead of looping. Non-blank text (73-D5) and
-        // tool calls are untouched.
-        const bool non_action = response.tool_calls.empty() && is_blank(settled_text);
+        // stops recoverably instead of looping. A non-blank, non-repeated answer
+        // (73-D5) and tool calls are untouched.
+        const bool no_tool = response.tool_calls.empty();
+        const bool blank   = no_tool && is_blank(settled_text);
+        std::string answer_hash;
+        if (no_tool && !blank) {
+            answer_hash = sha256_hex(normalize_reply(settled_text));
+        }
+        // 73-D10: record at the turn's first no-tool decision, whatever its
+        // text; a blank first answer records nothing, but still consumes the
+        // turn's single observation so the post-nudge answer is never recorded.
+        if (no_tool && !answer_observed_for_turn) {
+            answer_observed_for_turn = true;
+            if (repetition_eligible && !answer_hash.empty()) {
+                note_answer_observation(current_prompt_hash, answer_hash);
+            }
+        }
+        const bool repeated =
+            no_tool && repetition_eligible && repeats_prior_answer(current_prompt_hash, answer_hash);
+        const bool non_action = no_tool && (blank || repeated);
         if (non_action && !nudge_emitted_for_turn) {
             if (usage.has_value()) {
                 session_.append(payload::TokenUsage{*usage, turn});
