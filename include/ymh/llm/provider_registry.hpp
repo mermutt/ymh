@@ -20,6 +20,8 @@
 
 namespace ymh {
 
+class LlmTranscript;  // 74-D7
+
 // Provider configuration (08 §5.1). `api_key_env` names the environment
 // variable; the secret value is read per request and never cached (decision
 // (m)). `model` is the default and may be empty — the effective model is
@@ -40,6 +42,9 @@ struct LLMProviderConfig {
     std::size_t  max_arguments_bytes = 1u << 20;  // tool-arg assembly cap (08 §4.2)
     std::size_t  sse_line_bytes = 1u << 20;       // max single SSE data line (L-F16)
     ModelProfile profile;                         // 47-D1/D9 (inert by default)
+    // 74-D7: opt-in wire transcript shared by all providers of a workspace;
+    // nullptr => disabled, one null check per attempt (74-I8).
+    std::shared_ptr<LlmTranscript> transcript;
 };
 
 using ProviderFactory =

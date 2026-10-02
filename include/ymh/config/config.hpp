@@ -200,10 +200,14 @@ struct PermissionDefaults {
     const PermissionDefaults& permissions, std::optional<std::string> preset_name);
 
 // [logging] — §40. `log_prompts` is off by default and must never be enabled
-// implicitly; prompt bodies are redacted even when it is on.
+// implicitly; prompt bodies are redacted even when it is on. `llm_transcript`
+// (74-D1) is a separate opt-in: the exact wire body/response as bounded JSONL,
+// global-layer only, never spdlog and never redacted.
 struct LoggingSettings {
     std::string level = "info";
     bool        log_prompts = false;
+    bool        llm_transcript = false;  // 74-D2/74-D3: opt-in, global-layer only
+    std::string transcript_dir;          // 74-D4, empty => <workspace>/.ymh/transcripts
 };
 
 struct RetrySettings {

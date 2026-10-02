@@ -226,6 +226,7 @@ add_library(ymh_llm STATIC
     src/llm/sse_parser.cpp
     src/llm/redaction.cpp
     src/llm/openai_adapter.cpp
+    src/llm/llm_transcript.cpp
     src/llm/fake_llm.cpp
 )
 add_library(ymh::llm ALIAS ymh_llm)

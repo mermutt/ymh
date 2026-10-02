@@ -33,6 +33,7 @@
 #include "ymh/jobs/job_registry.hpp"
 #include "ymh/jobs/job_wakeup.hpp"
 #include "ymh/llm/llm_runtime.hpp"
+#include "ymh/llm/llm_transcript.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -493,7 +494,8 @@ public:
         const ModelProfile* found = find_model_profile(key.second);
         static const ModelProfile kInertProfile{};
         const ModelProfile& profile = (found != nullptr) ? *found : kInertProfile;
-        const LLMProviderConfig config = to_provider_config(endpoint_it->second, profile);
+        LLMProviderConfig config = to_provider_config(endpoint_it->second, profile);
+        config.transcript = provider_config_.transcript;
 
         std::unique_ptr<LLMProvider> created;
         if (provider_factory_) {
@@ -620,6 +622,15 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
 
     ProviderRegistry   providers       = make_default_provider_registry();
     LLMProviderConfig  provider_config = to_provider_config(options.config);
+    if (options.config.logging.llm_transcript) {
+        LlmTranscriptOptions transcript_options;
+        transcript_options.directory = options.config.logging.transcript_dir.empty()
+                                           ? options.root / ".ymh" / "transcripts"
+                                           : std::filesystem::path{
+                                                 options.config.logging.transcript_dir};
+        provider_config.transcript =
+            std::make_shared<LlmTranscript>(std::move(transcript_options));
+    }
     std::unique_ptr<LLMProvider> provider;
     try {
         if (options.provider_factory) {

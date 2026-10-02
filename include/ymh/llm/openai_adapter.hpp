@@ -107,6 +107,7 @@ private:
     ProviderCapabilities           capabilities_;
     std::shared_ptr<HttpTransport> transport_;
     SteadyNow                      now_;
+    std::shared_ptr<LlmTranscript> transcript_;  // 74-D7 (null => disabled)
 };
 
 // Builds the OpenAI chat-completions request body (exposed for golden tests).

@@ -539,11 +539,21 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
     }
 }
 
-void apply_logging(Config& config, const Json& table, const std::filesystem::path& source) {
-    reject_unknown(table, "logging", {"level", "log_prompts"}, source);
+void apply_logging(Config& config, const Json& table, const std::filesystem::path& source,
+                   bool global_layer) {
+    reject_unknown(table, "logging", {"level", "log_prompts", "llm_transcript", "transcript_dir"},
+                   source);
     config.logging.level = read_string(table, "level", "logging", config.logging.level, source);
     config.logging.log_prompts =
         read_bool(table, "log_prompts", "logging", config.logging.log_prompts, source);
+    if ((table.contains("llm_transcript") || table.contains("transcript_dir")) && !global_layer) {
+        fail(source,
+             "'logging.llm_transcript' and 'logging.transcript_dir' are global-layer only");
+    }
+    config.logging.llm_transcript = read_bool(table, "llm_transcript", "logging",
+                                              config.logging.llm_transcript, source);
+    config.logging.transcript_dir = read_string(table, "transcript_dir", "logging",
+                                                config.logging.transcript_dir, source);
 }
 
 void apply_session(Config& config, const Json& table, const std::filesystem::path& source) {
@@ -1352,7 +1362,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         apply_permissions(config, *permissions, source, global_layer);
     }
     if (const Json* logging = section("logging"); logging != nullptr) {
-        apply_logging(config, *logging, source);
+        apply_logging(config, *logging, source, global_layer);
     }
     if (const Json* llm = section("llm"); llm != nullptr) {
         apply_llm(config, *llm, source, global_layer);
@@ -1451,7 +1461,10 @@ constexpr std::string_view kDefaultConfigJsonc =
   },
   "logging": {
     "level": "info",             // "debug" | "info" | "warn" | "error"
-    "log_prompts": false         // never enable implicitly; prompt bodies are redacted
+    "log_prompts": false,        // never enable implicitly; prompt bodies are redacted
+    // opt-in exact LLM wire transcript (global layer only; may contain full prompts):
+    "llm_transcript": false,
+    "transcript_dir": ""         // "" => <workspace>/.ymh/transcripts
   },
   "llm": {
     "default": {
@@ -1862,6 +1875,12 @@ void apply_env_overrides(Config& config) {
     }
     if (const auto value = env_value("YMH_LLM_LOG_PROMPTS")) {
         config.logging.log_prompts = truthy(*value);
+    }
+    if (const auto value = env_value("YMH_LLM_TRANSCRIPT")) {
+        config.logging.llm_transcript = truthy(*value);
+    }
+    if (const auto value = env_value("YMH_LLM_TRANSCRIPT_DIR")) {
+        config.logging.transcript_dir = *value;
     }
     if (const auto value = env_value("YMH_SKILLS_ENABLED")) {
         config.skills.enabled = truthy(*value);

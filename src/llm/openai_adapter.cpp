@@ -16,11 +16,13 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <curl/curl.h>
 
 #include "ymh/llm/leaked_call_detector.hpp"
+#include "ymh/llm/llm_transcript.hpp"
 #include "ymh/llm/redaction.hpp"
 #include "ymh/llm/sse_parser.hpp"
 #include "ymh/llm/tool_call_assembler.hpp"
@@ -72,6 +74,86 @@ std::string join_url(std::string_view base, std::string_view path) {
     }
     url.append(path);
     return url;
+}
+
+std::string endpoint_host_from_url(std::string_view url) {
+    const std::size_t scheme = url.find("://");
+    const std::size_t start  = scheme == std::string_view::npos ? 0 : scheme + 3;
+    std::size_t       end    = url.find_first_of("/?#", start);
+    if (end == std::string_view::npos) {
+        end = url.size();
+    }
+    std::string_view authority = url.substr(start, end - start);
+    // 74-D9: never record credentials a user may have embedded in `base_url`.
+    const std::size_t at = authority.rfind('@');
+    if (at != std::string_view::npos) {
+        authority = authority.substr(at + 1);
+    }
+    return std::string{authority};
+}
+
+nlohmann::json usage_to_json(const Usage& usage) {
+    return nlohmann::json{{"input_tokens", usage.input_tokens},
+                          {"output_tokens", usage.output_tokens},
+                          {"cached_tokens", usage.cached_tokens},
+                          {"reasoning_tokens", usage.reasoning_tokens}};
+}
+
+nlohmann::json tool_calls_to_json(const std::vector<ToolCallAssembled>& calls) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const ToolCallAssembled& call : calls) {
+        out.push_back(nlohmann::json{
+            {"id", call.id}, {"name", call.name}, {"arguments", call.arguments}});
+    }
+    return out;
+}
+
+// 74-D8: streaming view from the decoder's own events, with a best-effort
+// non-stream fallback for a backend that returns one JSON body.
+nlohmann::json assembled_response_json(const LLMResponse& response,
+                                       std::string_view text,
+                                       std::string_view reasoning,
+                                       std::string_view raw) {
+    nlohmann::json assembled;
+    assembled["content"]     = std::string{text};
+    assembled["reasoning"]   = std::string{reasoning};
+    assembled["tool_calls"]  = tool_calls_to_json(response.tool_calls);
+    assembled["finish_reason"] = std::string{to_string(response.finish)};
+    assembled["usage"] = response.usage ? usage_to_json(*response.usage) : nlohmann::json(nullptr);
+
+    if (!text.empty() || !reasoning.empty() || !response.tool_calls.empty()) {
+        return assembled;
+    }
+    const nlohmann::json parsed = nlohmann::json::parse(raw, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("choices") ||
+        !parsed["choices"].is_array() || parsed["choices"].empty()) {
+        return assembled;
+    }
+    const auto& choice = parsed["choices"][0];
+    if (!choice.is_object()) {
+        return assembled;
+    }
+    const auto message = choice.contains("message") && choice["message"].is_object()
+                             ? choice["message"]
+                             : (choice.contains("delta") && choice["delta"].is_object()
+                                    ? choice["delta"]
+                                    : nlohmann::json::object());
+    if (message.contains("content") && message["content"].is_string()) {
+        assembled["content"] = message["content"];
+    }
+    if (message.contains("reasoning_content") && message["reasoning_content"].is_string()) {
+        assembled["reasoning"] = message["reasoning_content"];
+    }
+    if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
+        assembled["tool_calls"] = message["tool_calls"];
+    }
+    if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+        assembled["finish_reason"] = choice["finish_reason"];
+    }
+    if (parsed.contains("usage") && parsed["usage"].is_object()) {
+        assembled["usage"] = parsed["usage"];
+    }
+    return assembled;
 }
 
 LLMError make_error(LLMErrorCode code, std::string detail) {
@@ -1040,7 +1122,8 @@ OpenAICompatibleProvider::OpenAICompatibleProvider(LLMProviderConfig config,
     : config_(std::move(config)),
       capabilities_(capabilities),
       transport_(std::move(transport)),
-      now_(std::move(now)) {}
+      now_(std::move(now)),
+      transcript_(config_.transcript) {}
 
 ProviderId OpenAICompatibleProvider::id() const {
     return "openai-compatible";
@@ -1121,6 +1204,7 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
     const nlohmann::json body = build_chat_completions_body(request, capabilities_);
     const std::string payload = body.dump();
     const std::string url = join_url(config_.base_url, "/chat/completions");
+    const std::string endpoint_host = endpoint_host_from_url(url);
 
     std::vector<std::pair<std::string, std::string>> headers;
     headers.emplace_back("Content-Type", "application/json");
@@ -1165,8 +1249,26 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
             return failed(make_error(LLMErrorCode::Timeout, "request deadline exceeded"));
         }
 
-        OpenAiStreamDecoder decoder(sink, capabilities_, policy, config_.max_arguments_bytes,
-                                    config_.sse_line_bytes);
+        const bool  recording = static_cast<bool>(transcript_);
+        std::string raw_body;
+        std::string assistant_text;
+        std::string assistant_reasoning;
+        StreamSink  recording_sink;
+        StreamSink* decoder_sink = &sink;
+        if (recording) {
+            recording_sink = [&sink, &assistant_text,
+                              &assistant_reasoning](const StreamEvent& event) -> SinkFlow {
+                if (const auto* text = std::get_if<TextDelta>(&event)) {
+                    assistant_text.append(text->text);
+                } else if (const auto* reasoning = std::get_if<ReasoningDelta>(&event)) {
+                    assistant_reasoning.append(reasoning->text);
+                }
+                return sink(event);
+            };
+            decoder_sink = &recording_sink;
+        }
+        OpenAiStreamDecoder decoder(*decoder_sink, capabilities_, policy,
+                                    config_.max_arguments_bytes, config_.sse_line_bytes);
 
         HttpRequest http;
         http.method = "POST";
@@ -1177,14 +1279,23 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
         http.idle_timeout = config_.idle_timeout;
         http.total_timeout = call_budget.count() > 0 ? budget : call_budget;
 
-        HttpResponse response = transport_
-                                    ->postStream(
-                                        http,
-                                        [&decoder](const char* data, std::size_t len) {
-                                            return decoder.on_bytes(data, len);
-                                        },
-                                        cancel)
-                                    .get();
+        if (transcript_) {
+            transcript_->record_request(request.request_id, attempt, request.model, endpoint_host,
+                                        payload);
+        }
+
+        HttpResponse response =
+            transport_
+                ->postStream(
+                    http,
+                    [&decoder, &raw_body, recording](const char* data, std::size_t len) {
+                        if (recording) {
+                            raw_body.append(data, len);
+                        }
+                        return decoder.on_bytes(data, len);
+                    },
+                    cancel)
+                .get();
 
         if (cancel.cancelled() || decoder.stop_requested()) {
             return cancelled();
@@ -1209,8 +1320,20 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                 LLMResponse decoded = decoder.finalize();
                 decoded.request_id = request.request_id;
                 decoded.latency = elapsed();
+                if (transcript_) {
+                    transcript_->record_response(
+                        request.request_id, attempt, request.model, endpoint_host, response.status,
+                        raw_body,
+                        assembled_response_json(decoded, assistant_text, assistant_reasoning,
+                                                raw_body));
+                }
                 return Task<LLMResponse>{std::move(decoded)};
             }
+        }
+
+        if (transcript_) {
+            transcript_->record_response(request.request_id, attempt, request.model, endpoint_host,
+                                         response.status, raw_body, nlohmann::json::object());
         }
 
         if (!have_error) {
