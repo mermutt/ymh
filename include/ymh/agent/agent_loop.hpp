@@ -210,6 +210,12 @@ private:
     // `kRepeatOccurrences` distinct normalized prompts (current turn included).
     [[nodiscard]] bool repeats_prior_answer(const std::string& prompt_hash,
                                             const std::string& answer_hash) const;
+    // 73-D11: true iff the exact normalized `(prompt_hash, answer_hash)` pair
+    // has been observed for `kSamePromptRepeatOccurrences` turns, counting raw
+    // occurrences (the current turn's just-recorded observation included); the
+    // verbatim-prompt case the distinct-prompt arm deliberately excludes.
+    [[nodiscard]] bool repeats_same_prompt_answer(const std::string& prompt_hash,
+                                                  const std::string& answer_hash) const;
 
     // 40 §2.4: the per-call body split so the scheduler can overlap only the
     // execution while the loop thread keeps the durable appends (40-I4).

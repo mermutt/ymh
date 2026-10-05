@@ -105,6 +105,11 @@ std::string normalize_reply(std::string_view text) {
 constexpr std::size_t kRepeatOccurrences = 3;
 // 73-D10: fixed bound on the per-session observation ring.
 constexpr std::size_t kAnswerLogCapacity = 8;
+// 73-D11: how many completed turns must carry the exact same normalized
+// `(prompt, answer)` pair before the same-prompt repetition arm fires. The
+// current turn's just-recorded observation counts, so the predicate needs
+// `kSamePromptRepeatOccurrences - 1` prior identical pairs.
+constexpr std::size_t kSamePromptRepeatOccurrences = 3;
 
 // 73-D2: the single bounded corrective nudge. It is a user-role message so the
 // provider presents it as the latest instruction; its Plugin source keeps it out
@@ -1117,6 +1122,20 @@ bool AgentLoop::repeats_prior_answer(const std::string& prompt_hash,
     return distinct_prompts.size() >= kRepeatOccurrences;
 }
 
+bool AgentLoop::repeats_same_prompt_answer(const std::string& prompt_hash,
+                                           const std::string& answer_hash) const {
+    if (answer_hash.empty()) {
+        return false;
+    }
+    std::size_t occurrences = 0;
+    for (const AnswerObservation& observation : recent_answers_) {
+        if (observation.prompt_hash == prompt_hash && observation.answer_hash == answer_hash) {
+            ++occurrences;
+        }
+    }
+    return occurrences >= kSamePromptRepeatOccurrences;
+}
+
 void AgentLoop::runTurn() {
     drainFoldedItems();
     InboxItem trigger;
@@ -1434,12 +1453,13 @@ void AgentLoop::runTurn() {
             return;
         }
 
-        // 73-D1/D2/D4/D9: a Completed response with no tool call is a non-action
-        // when its settled text is blank OR it repeats a prior turn's answer to a
-        // different prompt. The first non-action in a turn earns exactly one
-        // bounded corrective nudge and re-enters the step loop; a second one
-        // stops recoverably instead of looping. A non-blank, non-repeated answer
-        // (73-D5) and tool calls are untouched.
+        // 73-D1/D2/D4/D9/D11: a Completed response with no tool call is a
+        // non-action when its settled text is blank, OR it repeats a prior turn's
+        // answer to a different prompt (73-D9), OR the exact same normalized
+        // `(prompt, answer)` pair has recurred (73-D11). The first non-action in
+        // a turn earns exactly one bounded corrective nudge and re-enters the
+        // step loop; a second one stops recoverably instead of looping. A
+        // non-blank, non-repeated answer (73-D5) and tool calls are untouched.
         const bool no_tool = response.tool_calls.empty();
         const bool blank   = no_tool && is_blank(settled_text);
         std::string answer_hash;
@@ -1455,9 +1475,14 @@ void AgentLoop::runTurn() {
                 note_answer_observation(current_prompt_hash, answer_hash);
             }
         }
-        const bool repeated =
+        const bool repeated_distinct =
             no_tool && repetition_eligible && repeats_prior_answer(current_prompt_hash, answer_hash);
-        const bool non_action = no_tool && (blank || repeated);
+        // 73-D11: the same normalized `(prompt, answer)` pair repeated across
+        // turns is also a non-action; this is the verbatim-prompt case the
+        // distinct-prompt arm above deliberately excludes.
+        const bool repeated_same = no_tool && repetition_eligible &&
+                                   repeats_same_prompt_answer(current_prompt_hash, answer_hash);
+        const bool non_action = no_tool && (blank || repeated_distinct || repeated_same);
         if (non_action && !nudge_emitted_for_turn) {
             if (usage.has_value()) {
                 session_.append(payload::TokenUsage{*usage, turn});
