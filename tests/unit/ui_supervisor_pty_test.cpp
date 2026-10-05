@@ -1069,7 +1069,7 @@ TEST(UiSupervisorPty, ContextOverlayOpensAndCloses) {
     EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
 }
 
-TEST(UiSupervisorPty, ContextOverlayShowsNote) {
+TEST(UiSupervisorPty, ContextOverlayShowsDefaultWindow) {
     ShortTempRoot root("ymh_pty_context_note");
     const std::filesystem::path state = root.state_dir();
     const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
@@ -1101,8 +1101,9 @@ TEST(UiSupervisorPty, ContextOverlayShowsNote) {
 
     const std::size_t mark = child.raw_size();
     child.write("/context\r");
-    ASSERT_TRUE(child.wait_for_since(mark, "budget unknown", 15s)) << child.text();
-    EXPECT_NE(child.text().find("used tokens (budget unknown)  @"), std::string::npos);
+    ASSERT_TRUE(child.wait_for_since(mark, "window 32,768", 15s)) << child.text();
+    EXPECT_NE(child.text().find("threshold 22,937  reserve 4,096"), std::string::npos);
+    EXPECT_EQ(child.text().find("budget unknown"), std::string::npos);
 
     child.terminate();
     guard.stop();

@@ -1337,6 +1337,25 @@ TEST(UiRenderGolden, ContextOverlayGridGolden) {
               render_to_ansi(model, TerminalSize{66, 20}, Theme{false}));
 }
 
+TEST(UiRenderGolden, ContextOverlayDefaultAndBoundedBudget) {
+    ContextSnapshot defaults = context_fixture();
+    defaults.used_tokens = 0;
+    defaults.budget      = ContextBudget{32'768, 4'096, 22'937};
+    const std::string first =
+        normalize(render_to_ansi(context_model(defaults), TerminalSize{66, 20}, Theme{false}));
+    SCOPED_TRACE(first);
+    EXPECT_NE(first.find("used 0 / window 32,768 (0.0%)"), std::string::npos);
+    EXPECT_NE(first.find("threshold 22,937  reserve 4,096"), std::string::npos);
+
+    ContextSnapshot bounded = context_fixture();
+    bounded.used_tokens = 0;
+    bounded.budget      = ContextBudget{32'768, 16'384, 13'107};
+    const std::string second =
+        normalize(render_to_ansi(context_model(bounded), TerminalSize{66, 20}, Theme{false}));
+    SCOPED_TRACE(second);
+    EXPECT_NE(second.find("threshold 13,107  reserve 16,384"), std::string::npos);
+}
+
 TEST(UiRenderGolden, ContextOverlayMonochrome) {
     const UiModel model = context_model(context_fixture());
     const std::string raw = render_to_ansi(model, TerminalSize{66, 20}, Theme{false});

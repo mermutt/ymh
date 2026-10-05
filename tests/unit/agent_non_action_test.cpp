@@ -191,10 +191,10 @@ TEST(AgentLoopNonActionGuard, RepeatedAnswerToDifferentPromptsNudgesThenEscalate
     EXPECT_TRUE(saw_recoverable_stop);
 }
 
-TEST(AgentLoopNonActionGuard, SamePromptSameAnswerNeverFires) {
+TEST(AgentLoopNonActionGuard, SamePromptSameAnswerFiresSamePromptArm) {
     AgentEnv env("agent_non_action_same_prompt",
-                 std::make_unique<FakeLLM>(
-                     script_of({text_step("Done."), text_step("Done."), text_step("Done.")})));
+                 std::make_unique<FakeLLM>(script_of({text_step("Done."), text_step("Done."),
+                                                      text_step("Done."), text_step("Done.")})));
     auto   agent_owner = env.createAgent();
     Agent& agent       = *agent_owner;
 
@@ -206,11 +206,20 @@ TEST(AgentLoopNonActionGuard, SamePromptSameAnswerNeverFires) {
     auto             session_owner = env.sessionOf(agent);
     const EventRange events        = session_owner->events();
 
-    EXPECT_EQ(nudge_count(events), 0u);
-    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 3u);
-    EXPECT_EQ(count_type(events, EventType::TurnEnded), 3u);
-    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+    EXPECT_EQ(nudge_count(events), 1u);
+    EXPECT_EQ(count_type(events, EventType::AssistantMessage), 4u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 2u);
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 1u);
     EXPECT_EQ(terminal_count(events), 3u);
+
+    bool saw_recoverable_stop = false;
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::TurnFailed) {
+            saw_recoverable_stop =
+                record.event.payload.get<payload::TurnFailed>().code == "StepLimitExceeded";
+        }
+    }
+    EXPECT_TRUE(saw_recoverable_stop);
 }
 
 TEST(AgentLoopNonActionGuard, TwoRepeatsThenDistinctAnswerDoesNotFire) {
@@ -322,6 +331,121 @@ TEST(AgentLoopNonActionGuard, VariedRepliesNoToolNoNudge) {
     const EventRange events        = session_owner->events();
 
     EXPECT_EQ(nudge_count(events), 0u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 3u);
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+}
+
+TEST(AgentLoopNonActionGuard, SamePromptSameAnswerBelowThresholdNoNudge) {
+    AgentEnv env("agent_non_action_same_prompt_below",
+                 std::make_unique<FakeLLM>(script_of({text_step("Done."), text_step("Done.")})));
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+
+    auto             session_owner = env.sessionOf(agent);
+    const EventRange events        = session_owner->events();
+
+    EXPECT_EQ(nudge_count(events), 0u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 2u);
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+}
+
+TEST(AgentLoopNonActionGuard, SamePromptDifferentAnswersNeverFiresSamePromptArm) {
+    AgentEnv env("agent_non_action_same_prompt_varied",
+                 std::make_unique<FakeLLM>(script_of({text_step("Hello there."),
+                                                      text_step("The answer is 4."),
+                                                      text_step("Goodbye.")})));
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+
+    auto             session_owner = env.sessionOf(agent);
+    const EventRange events        = session_owner->events();
+
+    EXPECT_EQ(nudge_count(events), 0u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 3u);
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+}
+
+TEST(AgentLoopNonActionGuard, SamePromptRepetitionMatchesAfterNormalization) {
+    AgentEnv env("agent_non_action_same_prompt_norm",
+                 std::make_unique<FakeLLM>(script_of(
+                     {text_step("I am stuck."), text_step("i AM   stuck."),
+                      text_step("  I am stuck.  "), text_step("I Am Stuck.")})));
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+
+    auto             session_owner = env.sessionOf(agent);
+    const EventRange events        = session_owner->events();
+
+    EXPECT_EQ(nudge_count(events), 1u);
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 1u);
+
+    bool saw_recoverable_stop = false;
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::TurnFailed) {
+            saw_recoverable_stop =
+                record.event.payload.get<payload::TurnFailed>().code == "StepLimitExceeded";
+        }
+    }
+    EXPECT_TRUE(saw_recoverable_stop);
+}
+
+TEST(AgentLoopNonActionGuard, InjectionTurnDoesNotParticipateInSamePromptRepetition) {
+    const std::string repeated = "A";
+    AgentEnv          env("agent_non_action_inject_same_prompt",
+                          std::make_unique<FakeLLM>(
+                              script_of({text_step(repeated), text_step(repeated),
+                                         text_step(repeated)})));
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+
+    ContextMessage context;
+    context.role       = Role::User;
+    context.text       = "caller context";
+    context.startsTurn = true;
+    ASSERT_EQ(agent.inject(context), InboxResult::Accepted);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+
+    auto             session_owner = env.sessionOf(agent);
+    const EventRange events        = session_owner->events();
+
+    EXPECT_EQ(nudge_count(events), 0u);
+    EXPECT_EQ(count_type(events, EventType::TurnEnded), 3u);
+    EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
+}
+
+TEST(AgentLoopNonActionGuard, SamePromptSecondRepeatIsPostNudgeResponse) {
+    AgentEnv env("agent_non_action_same_prompt_post_nudge",
+                 std::make_unique<FakeLLM>(script_of({text_step("A"), text_step("A"),
+                                                      text_step("A"), text_step("B")})));
+    auto   agent_owner = env.createAgent();
+    Agent& agent       = *agent_owner;
+
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    ASSERT_EQ(agent.send(user_message("status?")), InboxResult::Accepted);
+    EXPECT_EQ(agent.state(), AgentState::Idle);
+
+    auto             session_owner = env.sessionOf(agent);
+    const EventRange events        = session_owner->events();
+
+    EXPECT_EQ(nudge_count(events), 1u);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 3u);
     EXPECT_EQ(count_type(events, EventType::TurnFailed), 0u);
 }

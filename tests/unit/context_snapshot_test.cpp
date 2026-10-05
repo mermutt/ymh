@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -94,9 +95,21 @@ TEST(ContextSnapshot, SchemaEstimateMatchesPinnedFixture) {
     const std::size_t bytes =
         tool.name.value.size() + tool.description.size() + tool.input_schema.dump().size();
     EXPECT_EQ(bytes, 97u);
-    EXPECT_EQ(estimate_tool_schema_tokens(tool), 32u);
-    EXPECT_EQ(estimate_tool_schema_tokens(tool), bytes / 4 + 8);
+    EXPECT_EQ(estimate_tool_schema_tokens(tool), 40u);
+    EXPECT_EQ(estimate_tool_schema_tokens(tool), bytes / 3 + 8);
     EXPECT_EQ(estimate_tool_schema_tokens(tool), estimate_tool_schema_tokens(tool));
+}
+
+TEST(ContextSnapshot, DefaultTokenEstimatorUsesDivisorThree) {
+    Message message;
+    message.role = Role::User;
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = std::string(399u, 'x');
+    message.content.push_back(std::move(block));
+
+    const std::vector<Message> messages{std::move(message)};
+    EXPECT_EQ(estimator.estimate(messages), 399u / 3u + 4u);
 }
 
 TEST(ContextSnapshot, SchemaPartitionAndToolList) {
@@ -113,7 +126,7 @@ TEST(ContextSnapshot, SchemaPartitionAndToolList) {
     EXPECT_EQ(snapshot.tools[2].name, "mcp.alpha.x");
     EXPECT_EQ(snapshot.tools[2].provenance, "mcp");
     EXPECT_EQ(snapshot.tools[3].provenance, "mcp");
-    EXPECT_EQ(snapshot.tools[0].schema_tokens, 32u);
+    EXPECT_EQ(snapshot.tools[0].schema_tokens, 40u);
     for (const ContextToolEntry& entry : snapshot.tools) {
         EXPECT_FALSE(entry.name.empty());
     }

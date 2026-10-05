@@ -1975,17 +1975,23 @@ TEST_F(HostRuntimeTest, ShowContextProjectsAssembledStateReadOnly) {
         }
     }
     EXPECT_TRUE(saw_conversation);
-    EXPECT_EQ(snapshot.at("budget").at("window_tokens").get<std::uint64_t>(), 0u);
-    EXPECT_NE(snapshot.at("note").get<std::string>().find("budget unknown"), std::string::npos);
+    EXPECT_EQ(snapshot.at("budget").at("window_tokens").get<std::uint64_t>(), 32'768u);
+    EXPECT_EQ(snapshot.at("budget").at("reserve_output_tokens").get<std::uint64_t>(), 4'096u);
+    EXPECT_EQ(snapshot.at("budget").at("effective_threshold_tokens").get<std::uint64_t>(),
+              22'937u);
+    EXPECT_EQ(snapshot.at("note").get<std::string>().find("budget unknown"), std::string::npos);
 }
 
-TEST_F(HostRuntimeTest, ShowContextStaysUnknownWhenNoWindowSourceIsKnown) {
+TEST_F(HostRuntimeTest, ShowContextDefaultsWindowWhenNoWindowSourceIsKnown) {
     Bridge bridge("hr_context_no_window");
     const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
 
     const nlohmann::json snapshot = bridge.host().showContext(created.session);
-    EXPECT_EQ(snapshot.at("budget").at("window_tokens").get<std::uint64_t>(), 0u);
-    EXPECT_NE(snapshot.at("note").get<std::string>().find("budget unknown"), std::string::npos);
+    EXPECT_EQ(snapshot.at("budget").at("window_tokens").get<std::uint64_t>(), 32'768u);
+    EXPECT_EQ(snapshot.at("budget").at("reserve_output_tokens").get<std::uint64_t>(), 4'096u);
+    EXPECT_EQ(snapshot.at("budget").at("effective_threshold_tokens").get<std::uint64_t>(),
+              22'937u);
+    EXPECT_EQ(snapshot.at("note").get<std::string>().find("budget unknown"), std::string::npos);
 }
 
 TEST_F(HostRuntimeTest, ShowContextUnknownSessionIsTypedError) {

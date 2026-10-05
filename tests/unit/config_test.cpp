@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -383,6 +384,62 @@ TEST(Config, CompactionOversizedSummaryBytesRejected) {
     Config config;
     config.agent.compaction.max_summary_bytes = PersistenceConfig{}.max_payload_bytes + 1;
     EXPECT_THROW((void)to_compaction_policy(config), ConfigError);
+}
+
+TEST(Config, CompactionPolicyDefaultsWindowWhenUnset) {
+    Config config;
+    const CompactionPolicy policy = to_compaction_policy(config);
+    EXPECT_EQ(policy.context_window_tokens, kDefaultContextWindowTokens);
+    EXPECT_EQ(policy.reserve_output_tokens, 4'096u);
+    EXPECT_EQ(policy.effective_threshold_tokens(), 22'937u);
+    EXPECT_TRUE(policy.is_enabled());
+    EXPECT_TRUE(policy.context_budget_consistent());
+}
+
+TEST(Config, CompactionPolicyReserveCoversMaxTokensAndIsBoundedByWindow) {
+    Config config;
+    config.llm.model      = "test-model";
+    config.llm.max_tokens = 32'768;
+    const CompactionPolicy policy = to_compaction_policy(config);
+    EXPECT_EQ(policy.context_window_tokens, kDefaultContextWindowTokens);
+    EXPECT_EQ(policy.reserve_output_tokens, 16'384u);
+    EXPECT_EQ(policy.effective_threshold_tokens(), 13'107u);
+    EXPECT_TRUE(policy.is_enabled());
+}
+
+TEST(Config, CompactionPolicyClampsUnusableWindowAndRejectsSubMinimum) {
+    Config clamped;
+    clamped.agent.compaction.context_window_tokens = 4'096;
+    clamped.agent.compaction.reserve_output_tokens = 8'192;
+    const CompactionPolicy policy = to_compaction_policy(clamped);
+    EXPECT_EQ(policy.context_window_tokens, 4'096u);
+    EXPECT_EQ(policy.reserve_output_tokens, 2'048u);
+    EXPECT_EQ(policy.effective_threshold_tokens(), 1'638u);
+    EXPECT_TRUE(policy.is_enabled());
+
+    Config tiny;
+    tiny.agent.compaction.context_window_tokens = 2'048;
+    EXPECT_THROW((void)to_compaction_policy(tiny), ConfigError);
+}
+
+TEST(Config, CompactionPolicyRejectsInvalidThresholdRatio) {
+    for (const double ratio : {-1.0, 0.0, 1.5}) {
+        SCOPED_TRACE(ratio);
+        Config config;
+        config.agent.compaction.threshold_ratio = ratio;
+        EXPECT_THROW((void)to_compaction_policy(config), ConfigError);
+    }
+    Config nan_config;
+    nan_config.agent.compaction.threshold_ratio = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW((void)to_compaction_policy(nan_config), ConfigError);
+}
+
+TEST(Config, CompactionPolicyClampsRatioOneBelowWindow) {
+    Config config;
+    config.agent.compaction.threshold_ratio     = 1.0;
+    config.agent.compaction.reserve_output_tokens = 0;
+    const CompactionPolicy policy = to_compaction_policy(config);
+    EXPECT_EQ(policy.effective_threshold_tokens(), kDefaultContextWindowTokens - 1);
 }
 
 TEST(Config, JsoncCommentsAccepted) {

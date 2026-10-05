@@ -1068,4 +1068,127 @@ TEST_F(LlmTranscriptTest, NonStreamingJsonBodyIsRecordedVerbatim) {
     EXPECT_EQ(records[1]["assembled"]["finish_reason"], "stop");
 }
 
+TEST_F(LlmTranscriptTest, DistinctRequestIdsPerInvocation) {
+    ymh::test::ShortTempRoot root("ymh_tx_distinct_ids");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path()});
+    auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+        {.response = http_ok(sse_body({text_frame("a"), finish_frame("stop")}))},
+        {.response = http_ok(sse_body({text_frame("b"), finish_frame("stop")}))}});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+
+    (void)run(provider, text_request());
+    (void)run(provider, text_request());
+
+    const auto records = read_records(transcript->path());
+    ASSERT_EQ(records.size(), 4u);
+    const auto first_id  = records[0]["request_id"].get<std::uint64_t>();
+    const auto second_id = records[2]["request_id"].get<std::uint64_t>();
+    EXPECT_NE(first_id, 0u);
+    EXPECT_NE(second_id, 0u);
+    EXPECT_NE(first_id, second_id);
+    EXPECT_EQ(records[1]["request_id"].get<std::uint64_t>(), first_id);
+    EXPECT_EQ(records[3]["request_id"].get<std::uint64_t>(), second_id);
+}
+
+TEST_F(LlmTranscriptTest, RetriedRequestSharesOneIdAcrossAttempts) {
+    ymh::test::ShortTempRoot root("ymh_tx_retry_id");
+    auto transcript = std::make_shared<ymh::LlmTranscript>(
+        ymh::LlmTranscriptOptions{.directory = root.path()});
+
+    FakeTransport::Script first;
+    first.response.status = 429;
+    first.response.body = "{}";
+    FakeTransport::Script second;
+    second.response.status = 200;
+    second.response.body = sse_body({text_frame("ok"), finish_frame("stop")});
+
+    auto transport = std::make_shared<FakeTransport>(std::vector{first, second});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+    const auto result = run(provider, text_request());
+    ASSERT_EQ(result.response.outcome, ymh::StreamOutcome::Completed);
+    ASSERT_EQ(transport->requests.size(), 2u);
+
+    const auto records = read_records(transcript->path());
+    ASSERT_EQ(records.size(), 4u);
+    EXPECT_EQ(records[0]["direction"], "request");
+    EXPECT_EQ(records[1]["direction"], "response");
+    EXPECT_EQ(records[2]["direction"], "request");
+    EXPECT_EQ(records[3]["direction"], "response");
+
+    const auto id = records[0]["request_id"].get<std::uint64_t>();
+    EXPECT_NE(id, 0u);
+    for (const auto& record : records) {
+        EXPECT_EQ(record["request_id"].get<std::uint64_t>(), id);
+    }
+    EXPECT_EQ(records[0]["attempt"], 1);
+    EXPECT_EQ(records[1]["attempt"], 1);
+    EXPECT_EQ(records[2]["attempt"], 2);
+    EXPECT_EQ(records[3]["attempt"], 2);
+    EXPECT_EQ(result.response.request_id, id);
+}
+
+TEST_F(LlmTranscriptTest, UsageMissingDistinguishesAbsentFromZero) {
+    {
+        ymh::test::ShortTempRoot root("ymh_tx_usage_absent");
+        auto transcript = std::make_shared<ymh::LlmTranscript>(
+            ymh::LlmTranscriptOptions{.directory = root.path()});
+        auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+            {.response = http_ok(sse_body({text_frame("x"), finish_frame("stop")}))}});
+        auto provider = make_provider(transport, Options{.transcript = transcript});
+        (void)run(provider, text_request());
+
+        const auto records = read_records(transcript->path());
+        ASSERT_EQ(records.size(), 2u);
+        EXPECT_TRUE(records[1]["usage_missing"].get<bool>());
+        EXPECT_TRUE(records[1]["assembled"]["usage"].is_null());
+    }
+    {
+        ymh::test::ShortTempRoot root("ymh_tx_usage_present");
+        auto transcript = std::make_shared<ymh::LlmTranscript>(
+            ymh::LlmTranscriptOptions{.directory = root.path()});
+        auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+            {.response = http_ok(
+                 sse_body({text_frame("x"), finish_frame("stop"), usage_frame(10, 5, 3, 2)}))}});
+        auto provider = make_provider(transport, Options{.transcript = transcript});
+        (void)run(provider, text_request());
+
+        const auto records = read_records(transcript->path());
+        ASSERT_EQ(records.size(), 2u);
+        EXPECT_FALSE(records[1]["usage_missing"].get<bool>());
+        EXPECT_TRUE(records[1]["assembled"]["usage"].is_object());
+        EXPECT_EQ(records[1]["assembled"]["usage"]["input_tokens"], 10);
+    }
+}
+
+TEST_F(LlmTranscriptTest, OversizedMarkerCarriesNoUsageFields) {
+    ymh::test::ShortTempRoot root("ymh_tx_marker");
+    const std::size_t      cap = 2000;
+    ymh::LlmTranscriptOptions options;
+    options.directory          = root.path();
+    options.max_bytes_per_file = cap;
+    auto transcript = std::make_shared<ymh::LlmTranscript>(std::move(options));
+
+    ymh::LLMRequest request = text_request();
+    request.messages.front().content.front().text = std::string(6000, 'x');
+
+    auto transport = std::make_shared<FakeTransport>(std::vector<FakeTransport::Script>{
+        {.response = http_ok(sse_body({text_frame("ok"), finish_frame("stop")}))}});
+    auto provider = make_provider(transport, Options{.transcript = transcript});
+    (void)run(provider, request);
+
+    const auto records = read_records(transcript->path());
+    ASSERT_EQ(records.size(), 2u);
+    ASSERT_TRUE(records[0]["truncated"].get<bool>());
+    EXPECT_EQ(records[0]["direction"], "request");
+    EXPECT_EQ(records[0].size(), 6u);
+    EXPECT_FALSE(records[0].contains("assembled"));
+    EXPECT_FALSE(records[0].contains("usage_missing"));
+    EXPECT_FALSE(records[0].contains("request_id"));
+    EXPECT_FALSE(records[0].contains("attempt"));
+    EXPECT_GT(records[0]["original_bytes"].get<std::size_t>(), cap);
+    EXPECT_EQ(records[1]["direction"], "response");
+    EXPECT_TRUE(records[1].contains("usage_missing"));
+}
+
 } // namespace

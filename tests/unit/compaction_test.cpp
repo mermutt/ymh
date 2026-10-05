@@ -148,6 +148,26 @@ TEST(CompactionPolicyTest, WindowAtReserveBoundaryIsDisabled) {
     EXPECT_EQ(policy.effective_threshold_tokens(), 0u);
 }
 
+TEST(CompactionPolicyTest, ContextBudgetConsistency) {
+    CompactionPolicy ratio;
+    ratio.context_window_tokens = 10'000;
+    ratio.reserve_output_tokens = 1'000;
+    ratio.threshold_ratio       = 0.80;
+    EXPECT_EQ(ratio.effective_threshold_tokens(), 7'200u);
+    EXPECT_TRUE(ratio.context_budget_consistent());
+
+    CompactionPolicy tiny_window;
+    tiny_window.context_window_tokens = 1;
+    tiny_window.reserve_output_tokens = 0;
+    EXPECT_EQ(tiny_window.effective_threshold_tokens(), 0u);
+    EXPECT_FALSE(tiny_window.context_budget_consistent());
+
+    CompactionPolicy at_boundary;
+    at_boundary.context_window_tokens = 4'096;
+    at_boundary.reserve_output_tokens = 4'096;
+    EXPECT_FALSE(at_boundary.context_budget_consistent());
+}
+
 // ---------------------------------------------------------------------------
 // Boundary selection (13 §3.3)
 // ---------------------------------------------------------------------------
@@ -332,8 +352,8 @@ TEST(ContextCompactorTest, TruncatesSummaryAtTokenBound) {
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
     ASSERT_EQ(result.outcome, CompactionOutcome::Compacted);
     ASSERT_TRUE(result.compaction.has_value());
-    EXPECT_EQ(result.compaction->summary.size(), 4u);
-    EXPECT_EQ(result.compaction->summary, "abcd");
+    EXPECT_EQ(result.compaction->summary.size(), 3u);
+    EXPECT_EQ(result.compaction->summary, "abc");
 }
 
 TEST(ContextCompactorTest, OversizedSummaryBytesFails) {
