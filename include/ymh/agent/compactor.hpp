@@ -28,6 +28,15 @@ namespace ymh {
 
 class ModelCatalog;
 
+// 75-context-budget-errata.md: the window assumed when neither the resolved
+// model nor [agent.compaction] names one, and the bounds a wired policy is
+// clamped to. kDefaultContextWindowTokens is deliberately the smallest context
+// class ymh targets for code, so a wrong guess compacts early rather than
+// truncating the request head.
+inline constexpr std::size_t kDefaultContextWindowTokens = 32'768;
+inline constexpr std::size_t kMinContextWindowTokens = 4'096;
+inline constexpr std::size_t kMinEffectiveThresholdTokens = 1;
+
 // The compaction tunables (13 §3.2). The daemon builds one from the layered
 // config (§37) and injects it into the `ContextCompactor`; nothing reads
 // global state.
@@ -61,6 +70,16 @@ struct CompactionPolicy {
             return static_cast<std::size_t>(threshold_ratio * static_cast<double>(window));
         }
         return 0;
+    }
+
+    // 75-D5: the wired-policy invariant as a predicate. A zero window is
+    // "unknown" and vacuously consistent; a positive window must exceed the
+    // reserve and carry a positive threshold strictly below the window.
+    [[nodiscard]] bool context_budget_consistent() const noexcept {
+        return context_window_tokens == 0 ||
+               (context_window_tokens > reserve_output_tokens &&
+                effective_threshold_tokens() > 0 &&
+                effective_threshold_tokens() < context_window_tokens);
     }
 };
 

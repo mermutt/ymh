@@ -27,7 +27,9 @@ std::size_t text_bytes(const std::vector<Message>& messages) {
 } // namespace
 
 std::size_t DefaultTokenEstimator::estimate(const std::vector<Message>& messages) const {
-    constexpr std::size_t kBytesPerToken = 4;
+    // 75-D3: dense code/JSON/tool output runs ~2.7 bytes/token; divisor 3
+    // narrows the old divisor-4 under-count rather than eliminating it.
+    constexpr std::size_t kBytesPerToken = 3;
     constexpr std::size_t kPerMessageOverhead = 4;
     return text_bytes(messages) / kBytesPerToken + messages.size() * kPerMessageOverhead;
 }

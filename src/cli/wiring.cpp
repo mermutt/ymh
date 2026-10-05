@@ -1,8 +1,13 @@
 #include "ymh/cli/wiring.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "ymh/core/logging.hpp"
 
 namespace ymh {
 namespace {
@@ -31,6 +36,19 @@ void add_rule(PermissionConfig& config,
     rule.layer  = PolicyRule::Layer::Global;
     rule.id     = std::string{id};
     config.rules.push_back(std::move(rule));
+}
+
+// 75-D1: emit the assumed-window WARN exactly once per process. `warned` is a
+// function-local static, thread-safe via std::call_once; each daemon is its own
+// process, so this fires once per daemon and not on a config reload.
+void warn_assumed_window_once(std::size_t assumed) {
+    static std::once_flag warned;
+    std::call_once(warned, [assumed]() {
+        category_logger(LogCategory::Agent)
+            .warn("context window unknown; assuming " + std::to_string(assumed) +
+                  " tokens (override via llm.models.<name>.context_window or "
+                  "agent.compaction.context_window_tokens)");
+    });
 }
 
 } // namespace
@@ -302,11 +320,85 @@ CompactionPolicy to_compaction_policy(const Config& config) {
     policy.summarizer_model        = settings.summarizer_model;
     policy.max_compactions_per_turn = settings.max_compactions_per_turn;
     policy.retry_on_context_length = settings.retry_on_context_length;
-    policy.enabled = settings.enabled || policy.threshold_tokens > 0 ||
-                     policy.context_window_tokens > 0;
+
     if (policy.max_summary_bytes > PersistenceConfig{}.max_payload_bytes) {
         throw ConfigError(
             "[agent.compaction].max_summary_bytes must be <= PersistenceConfig::max_payload_bytes");
+    }
+
+    // 75-D1: default the window; warn once, naming both override sites.
+    if (policy.context_window_tokens == 0) {
+        policy.context_window_tokens = kDefaultContextWindowTokens;
+        warn_assumed_window_once(policy.context_window_tokens);
+    }
+    // 75-D2: the reserve must cover the advertised generation cap.
+    if (resolved.max_tokens.has_value() && *resolved.max_tokens > 0) {
+        policy.reserve_output_tokens = std::max(
+            policy.reserve_output_tokens, static_cast<std::size_t>(*resolved.max_tokens));
+    }
+    // 75-D4 (3): threshold_ratio is read without a range check; reject garbage
+    // before it reaches effective_threshold_tokens().
+    if (!std::isfinite(policy.threshold_ratio) || policy.threshold_ratio <= 0.0 ||
+        policy.threshold_ratio > 1.0) {
+        throw ConfigError("agent.compaction.threshold_ratio (" +
+                          std::to_string(policy.threshold_ratio) +
+                          ") must be finite and in (0, 1]");
+    }
+    // 75-D4 (4): a window below the hard minimum fails loudly, never silently.
+    if (policy.context_window_tokens < kMinContextWindowTokens) {
+        throw ConfigError("agent.compaction.context_window_tokens (" +
+                          std::to_string(policy.context_window_tokens) +
+                          ") is below the minimum " +
+                          std::to_string(kMinContextWindowTokens));
+    }
+    // 75-D4 (5): bound the reserve to half the window; keep compaction enabled.
+    if (policy.context_window_tokens <= policy.reserve_output_tokens) {
+        std::string warning = "compaction reserve clamped: reserve_output_tokens (" +
+                              std::to_string(policy.reserve_output_tokens) +
+                              ") >= context_window_tokens (" +
+                              std::to_string(policy.context_window_tokens) + "); using " +
+                              std::to_string(policy.context_window_tokens / 2);
+        if (resolved.max_tokens.has_value() &&
+            static_cast<std::size_t>(*resolved.max_tokens) >= policy.context_window_tokens) {
+            warning += "; the clamped reserve no longer covers max_tokens (" +
+                       std::to_string(*resolved.max_tokens) +
+                       "): raise context_window_tokens or lower max_tokens";
+        }
+        category_logger(LogCategory::Agent).warn(warning);
+        policy.reserve_output_tokens = policy.context_window_tokens / 2;
+    }
+    // 75-D4 (6): an absolute threshold stays strictly below the window.
+    if (policy.threshold_tokens >= policy.context_window_tokens) {
+        category_logger(LogCategory::Agent)
+            .warn("compaction threshold_tokens (" + std::to_string(policy.threshold_tokens) +
+                  ") clamped below context_window_tokens (" +
+                  std::to_string(policy.context_window_tokens) + ")");
+        policy.threshold_tokens = policy.context_window_tokens - 1;
+    }
+    // 75-D4 (7) / 75-D5: materialize the ratio trigger and clamp it into
+    // [kMinEffectiveThresholdTokens, window - 1] by construction, so the wired
+    // policy's effective threshold cannot be 0 or reach the window.
+    if (policy.threshold_tokens == 0) {
+        const std::size_t span = policy.context_window_tokens - policy.reserve_output_tokens;
+        const std::size_t candidate =
+            static_cast<std::size_t>(policy.threshold_ratio * static_cast<double>(span));
+        const std::size_t bounded =
+            std::min(std::max(candidate, kMinEffectiveThresholdTokens),
+                     policy.context_window_tokens - 1);
+        if (bounded != candidate) {
+            category_logger(LogCategory::Agent)
+                .warn("compaction threshold_ratio produced " + std::to_string(candidate) +
+                      "; clamped to " + std::to_string(bounded));
+        }
+        policy.threshold_tokens = bounded;
+    }
+    policy.enabled = settings.enabled || policy.threshold_tokens > 0 ||
+                     policy.context_window_tokens > 0;
+
+    // 75-D5: construction-guaranteed defensive check; unreachable if the
+    // normalization above is correct.
+    if (policy.context_window_tokens > 0 && !policy.context_budget_consistent()) {
+        throw ConfigError("internal: compaction budget policy is inconsistent");
     }
     return policy;
 }
