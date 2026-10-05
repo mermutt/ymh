@@ -118,6 +118,9 @@ void LlmTranscript::record_response(std::uint64_t request_id,
         return;
     }
     try {
+        // 74-D12: absent usage is not the same as zero usage.
+        const bool usage_missing =
+            !(assembled.contains("usage") && assembled["usage"].is_object());
         nlohmann::json record{
             {"ts", now_rfc3339_ms()},
             {"direction", "response"},
@@ -130,6 +133,7 @@ void LlmTranscript::record_response(std::uint64_t request_id,
             {"raw_bytes", raw.size()},
             {"raw", std::string{raw}},
             {"assembled", assembled},
+            {"usage_missing", usage_missing},
             {"truncated", false},
         };
         append(std::move(record));

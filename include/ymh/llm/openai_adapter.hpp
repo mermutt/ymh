@@ -5,6 +5,7 @@
 // bounded LLMPool worker); the adapter owns no thread and no `io_context`
 // (L13). TLS verification is never disabled (L-F18).
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -108,6 +109,11 @@ private:
     std::shared_ptr<HttpTransport> transport_;
     SteadyNow                      now_;
     std::shared_ptr<LlmTranscript> transcript_;  // 74-D7 (null => disabled)
+
+    // 74-D11: process-local monotonic correlation id source. One per daemon
+    // process, shared by every provider instance, so ids are unique within the
+    // workspace transcript file. 0 is reserved and is never minted.
+    static std::atomic<std::uint64_t> request_seq_;
 };
 
 // Builds the OpenAI chat-completions request body (exposed for golden tests).

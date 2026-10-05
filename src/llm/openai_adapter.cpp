@@ -1115,6 +1115,8 @@ Task<HttpResponse> CurlHttpTransport::postStream(const HttpRequest& request,
 // OpenAICompatibleProvider
 // ---------------------------------------------------------------------------
 
+std::atomic<std::uint64_t> OpenAICompatibleProvider::request_seq_{0};
+
 OpenAICompatibleProvider::OpenAICompatibleProvider(LLMProviderConfig config,
                                                    ProviderCapabilities capabilities,
                                                    std::shared_ptr<HttpTransport> transport,
@@ -1143,28 +1145,31 @@ std::vector<ModelInfo> OpenAICompatibleProvider::models() const {
 Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                                                    StreamSink sink,
                                                    CancellationToken cancel) {
+    const std::uint64_t request_id =
+        OpenAICompatibleProvider::request_seq_.fetch_add(1, std::memory_order_relaxed) + 1;
+
     const auto start_time = now_();
     const auto elapsed = [this, &start_time] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(now_() - start_time);
     };
 
-    const auto failed = [&](LLMError error) -> Task<LLMResponse> {
+    const auto failed = [&, request_id](LLMError error) -> Task<LLMResponse> {
         error.retryable = is_retryable_code(error.code);
         sink(StreamEvent{StreamError{error}});
         LLMResponse response;
         response.outcome = StreamOutcome::Failed;
         response.finish = FinishReason::Error;
         response.error = error;
-        response.request_id = request.request_id;
+        response.request_id = request_id;
         response.latency = elapsed();
         return Task<LLMResponse>{std::move(response)};
     };
 
-    const auto cancelled = [&]() -> Task<LLMResponse> {
+    const auto cancelled = [&, request_id]() -> Task<LLMResponse> {
         LLMResponse response;
         response.outcome = StreamOutcome::Cancelled;
         response.finish = FinishReason::Other;
-        response.request_id = request.request_id;
+        response.request_id = request_id;
         response.latency = elapsed();
         return Task<LLMResponse>{std::move(response)};
     };
@@ -1280,7 +1285,7 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
         http.total_timeout = call_budget.count() > 0 ? budget : call_budget;
 
         if (transcript_) {
-            transcript_->record_request(request.request_id, attempt, request.model, endpoint_host,
+            transcript_->record_request(request_id, attempt, request.model, endpoint_host,
                                         payload);
         }
 
@@ -1318,11 +1323,11 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                 have_error = true;
             } else {
                 LLMResponse decoded = decoder.finalize();
-                decoded.request_id = request.request_id;
+                decoded.request_id = request_id;
                 decoded.latency = elapsed();
                 if (transcript_) {
                     transcript_->record_response(
-                        request.request_id, attempt, request.model, endpoint_host, response.status,
+                        request_id, attempt, request.model, endpoint_host, response.status,
                         raw_body,
                         assembled_response_json(decoded, assistant_text, assistant_reasoning,
                                                 raw_body));
@@ -1332,7 +1337,7 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
         }
 
         if (transcript_) {
-            transcript_->record_response(request.request_id, attempt, request.model, endpoint_host,
+            transcript_->record_response(request_id, attempt, request.model, endpoint_host,
                                          response.status, raw_body, nlohmann::json::object());
         }
 
