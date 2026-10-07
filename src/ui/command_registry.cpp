@@ -282,6 +282,13 @@ CommandRegistry CommandRegistry::builtin() {
             }
         },
         {"quit"}});
+    registry.add(Command{
+        "fork", "branch the current session into a new independent session",
+        [](CommandContext& context, const std::string& args) {
+            if (context.fork) {
+                context.fork(args);
+            }
+        }});
     std::vector<std::pair<std::string, std::string>> listed{{"help", "list slash commands"}};
     for (const Command& command : registry.commands()) {
         listed.emplace_back(command_display_name(command), command.description);

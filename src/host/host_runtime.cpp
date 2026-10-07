@@ -825,16 +825,21 @@ protocol::SessionResumed HostRuntime::resumeSession(const SessionId& id) {
 }
 
 protocol::SessionCreated HostRuntime::forkSession(const SessionId& id,
-                                                  std::int64_t seed_length) {
+                                                  std::optional<std::int64_t> seed_length) {
     return translate([&]() -> protocol::SessionCreated {
-        if (seed_length < 0) {
+        if (seed_length.has_value() && *seed_length < 0) {
             throw_mapped(WireError{protocol::code_value(protocol::AppCode::InvalidForkBoundary),
                                    "InvalidForkBoundary"});
         }
-        // S3: hold an owning parent handle across the manager call.
+        // S3: hold an owning parent handle across the manager call. Its resolved
+        // view length is the default boundary when `seed_length` is absent.
         std::shared_ptr<Session> parent = runtime_.sessions().sessionPtr(id);
+        const std::int64_t resolved =
+            seed_length.has_value()
+                ? *seed_length
+                : static_cast<std::int64_t>(parent->events().size());
         const SessionId child =
-            runtime_.sessions().forkSession(id, static_cast<std::size_t>(seed_length));
+            runtime_.sessions().forkSession(id, static_cast<std::size_t>(resolved));
         acquireLeaseOrThrow(child);
         std::expected<AgentId, AgentError> resumed = runtime_.agents().resume(child);
         if (!resumed.has_value()) {

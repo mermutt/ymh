@@ -106,7 +106,11 @@ public:
 
     virtual SessionCreated createSession(const nlohmann::json& params) = 0;
     virtual SessionResumed resumeSession(const SessionId& id) = 0;
-    virtual SessionCreated forkSession(const SessionId& id, std::int64_t seed_length) = 0;
+    // 78-D2/D7: the seed is optional; `nullopt` means "the parent's current
+    // resolved-view length". A present integer `N` is an explicit resolved-view
+    // index (`N < 0` rejected; `N > view length` => InvalidForkBoundary).
+    virtual SessionCreated forkSession(const SessionId& id,
+                                       std::optional<std::int64_t> seed_length) = 0;
     virtual SessionRenamedResult renameSession(const nlohmann::json& params) = 0;
     virtual void closeSession(const SessionId& id) = 0;
     virtual void deleteSession(const SessionId& id, bool only_if_empty, bool force) = 0;

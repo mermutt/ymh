@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -1830,6 +1831,77 @@ private:
         sync_subagent_subscriptions();
     }
 
+    // 78-D1/D9: the `/fork` caller. Branches the focused session in the same
+    // workspace daemon; the parent keeps running (78-D6).
+    void fork_session(const std::string& args) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
+            push_notice("no active session to fork");
+            return;
+        }
+        const SessionUiState* focused = model_.activeSession();
+        if (focused != nullptr && focused->subagent) {
+            push_notice("subagent sessions are not forkable (/subagents)");
+            return;
+        }
+        std::optional<std::int64_t> seed;
+        if (!args.empty()) {
+            std::int64_t n = 0;
+            const auto [ptr, ec] =
+                std::from_chars(args.data(), args.data() + args.size(), n);
+            if (ec != std::errc{} || ptr != args.data() + args.size() || n < 0) {
+                push_notice("usage: /fork [<resolved-view-index>]");
+                return;
+            }
+            seed = n;
+        }
+        const WorkspaceId id = workspace->id;
+        const SessionId   parent = workspace->activeSessionId();
+        nlohmann::json params{{"session", parent.value}};
+        if (seed.has_value()) {
+            params["seed_length"] = *seed;
+        }
+        submit_to(id, std::string(protocol::method::kSessionFork), std::move(params),
+                  [this, id, parent](SupervisorReply reply) {
+                      enqueue([this, id, parent, reply = std::move(reply)]() mutable {
+                          if (!reply.ok) {
+                              surface_notice(id, parent, "fork failed: " + reply.error);
+                              return;
+                          }
+                          const std::string child =
+                              reply.result.value("session", std::string{});
+                          if (child.empty()) {
+                              surface_notice(id, parent, "fork failed: empty reply");
+                              return;
+                          }
+                          apply_fork_success(id, SessionId{child});
+                      });
+                  });
+    }
+
+    // 78-D5: the child is already live in the daemon (lease + agent + junction),
+    // so no resume is issued. Mirrors `apply_resume_success`'s focus-only shape.
+    void apply_fork_success(const WorkspaceId& workspace, const SessionId& child) {
+        if (model_.workspaces.count(workspace) == 0) {
+            surface_notice(workspace, child,
+                           "forked session in a workspace that is no longer open");
+            return;
+        }
+        SessionUiState& state = model_.ensureSessionIn(workspace, child);
+        if (state.status.model.empty()) {
+            state.status.model =
+                display_model(options_.config, stored_session_model(workspace, child));
+        }
+        model_.ensureCellIn(workspace, child);
+        if (const auto connection = connections_.find(workspace);
+            connection != connections_.end()) {
+            connection->second->track(child);
+        }
+        model_.focusSession(child);
+        sync_subagent_subscriptions();
+        push_notice("forked -> " + child.value);
+    }
+
     // 45-D10.8 (45-F23): drop a daemon-rejected session (which clears the focus
     // through the single mutator), report it, then focus the workspace's first
     // remaining session or create one when none remain, so the focus never
@@ -2905,6 +2977,7 @@ private:
         };
         context.context = [this] { open_context(); };
         context.sessions = [this] { open_sessions(); };
+        context.fork = [this](const std::string& args) { fork_session(args); };
         context.subagents = [this] { open_subagents(); };
         context.mcp = [this] { request_mcp(); };
         context.status = [this] { request_status(); };

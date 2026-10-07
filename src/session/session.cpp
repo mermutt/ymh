@@ -780,11 +780,14 @@ Session Session::fork(const Session& parent, std::size_t seedLength, SessionStor
     child.title         = "";
     child.model         = parent.header().model;
     child.model_name    = parent.header().model_name;
+    child.endpoint      = parent.header().endpoint;
+    child.profile_id    = parent.header().profile_id;
     child.serverProfile = parent.header().serverProfile;
     child.kind          = SessionKind::Fork;
     child.parentSession = parent.id();
     child.seedLength    = seedLength;
     child.depth         = parent.header().depth;
+    child.agent_preset  = parent.header().agent_preset;
     child.permission_preset = parent.header().permission_preset;
     validateHeader(child);
 

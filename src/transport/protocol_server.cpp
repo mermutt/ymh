@@ -424,11 +424,17 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
         } else if (method_name == method::kSessionFork) {
             const SessionId session = session_param(request.params);
             const auto seed = object_params(request.params).find("seed_length");
-            if (seed == request.params.end() || !seed->is_number_integer()) {
+            // 78-D2/D7: `seed_length` is optional; absent => the parent's current
+            // resolved-view length. A present value must still be an integer.
+            if (seed != request.params.end() && !seed->is_number_integer()) {
                 throw RpcException(code_value(RpcCode::InvalidParams),
                                    "seed_length must be an integer");
             }
-            const SessionCreated created = host_.forkSession(session, seed->get<std::int64_t>());
+            const std::optional<std::int64_t> boundary =
+                seed == request.params.end()
+                    ? std::nullopt
+                    : std::optional<std::int64_t>{seed->get<std::int64_t>()};
+            const SessionCreated created = host_.forkSession(session, boundary);
             respond(conn, request.id,
                     nlohmann::json{{"session", created.session.value}, {"header", created.header}});
             onSessionCreated(created.session);

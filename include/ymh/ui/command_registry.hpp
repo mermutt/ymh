@@ -40,6 +40,10 @@ struct CommandContext {
     std::function<void()> context;
     // 22 §4.3/§4.6 (S2): opens the History catalog overlay (`/sessions`).
     std::function<void()> sessions;
+    // 78-D1/D2: branches the focused session into a new independent session in
+    // the same workspace daemon. `args` is the trimmed command-line tail: empty,
+    // or a non-negative integer resolved-view boundary.
+    std::function<void(const std::string&)> fork;
     // 58-D1/E11: opens the Subagents picker for the viewed session (`/subagents`).
     std::function<void()> subagents;
     // 45-D6/45-D7: read-only informational surfaces. Both are session-less: the
