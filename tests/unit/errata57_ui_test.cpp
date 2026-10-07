@@ -151,13 +151,13 @@ TEST(Errata57, CtrlQInSwitcherDoesNotExit) {
     SwitcherFixture fixture("ymh_57_ctrlq");
     fixture.harness->open_switcher();
     drain_fully(*fixture.harness);
-    ASSERT_EQ(fixture.harness->model().mode, UiMode::Switcher);
+    ASSERT_EQ(fixture.harness->model().mode, UiMode::Dashboard);
     ASSERT_FALSE(fixture.harness->model().switcher.workspaces.empty());
 
     EXPECT_TRUE(fixture.harness->dispatch_key("ctrl-q"));
     EXPECT_FALSE(fixture.harness->quit_requested());
     EXPECT_FALSE(fixture.harness->model().exitConfirm.open);
-    EXPECT_EQ(fixture.harness->model().mode, UiMode::Switcher);
+    EXPECT_EQ(fixture.harness->model().mode, UiMode::Dashboard);
     EXPECT_FALSE(fixture.harness->model().switcher.workspaces.empty());
 
     EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
@@ -188,7 +188,8 @@ TEST(Errata57, CtrlQNoPopupStillExits) {
 // never deletes, a same-target second press deletes, and the 3 s tick disarms.
 TEST(Errata57, ArmInlineDisarmTable) {
     SwitcherFixture fixture("ymh_57_arm");
-    fixture.harness->open_switcher();
+    fixture.harness->mutable_model().switcher.open(fixture.harness->model());
+    fixture.harness->mutable_model().mode = UiMode::Switcher;
     drain_fully(*fixture.harness);
     fixture.harness->install_method_reply(std::string(protocol::method::kSessionDelete),
                                           nlohmann::json::object(), 0);
@@ -224,14 +225,6 @@ TEST(Errata57, CtrlQSwallowedByEveryPopup) {
     SwitcherFixture fixture("ymh_57_guards");
     UiModel& model = fixture.harness->mutable_model();
 
-    model.message.open = true;
-    model.message.text = "notice";
-    model.mode         = UiMode::Notice;
-    EXPECT_TRUE(fixture.harness->dispatch_key("ctrl-q"));
-    EXPECT_FALSE(fixture.harness->quit_requested());
-    EXPECT_FALSE(model.exitConfirm.open);
-
-    model.message.open = false;
     model.context.open = true;
     model.mode         = UiMode::Context;
     EXPECT_TRUE(fixture.harness->dispatch_key("ctrl-q"));

@@ -443,6 +443,17 @@ private:
     std::string buffer_;
 };
 
+// Forward declarations for the session-seeding helpers defined later in this TU;
+// `AttachesSpawnsAndSwitches` needs a live peer session so the dashboard lists
+// the other workspace (81-D7).
+SessionId write_stored_session(const std::filesystem::path& workspace,
+                               const std::string& title, const std::string& marker,
+                               const std::string& model = "deepseek-flash",
+                               bool               close_turn = false,
+                               std::optional<std::int64_t> updated_at_ms = std::nullopt);
+void resume_session_via_daemon(const std::filesystem::path& socket,
+                               const std::string& session);
+
 // 53-D1: a bare `ymh` eagerly spawns its cwd daemon, so `--new` is no longer
 // required to have a workspace+session before interacting; these tests keep
 // using it as an explicit activation where that is what they exercise.
@@ -472,6 +483,8 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
         beta_id = registry->registerWorkspace(workspace_b, "beta").id.value;
     }
 
+    const SessionId beta_session = write_stored_session(workspace_b, "zzbetalive", "zzbetamarker");
+
     HostHarnessOptions beta_options;
     beta_options.binary = resolve_ymh_binary();
     beta_options.workspace_root = workspace_b;
@@ -483,6 +496,7 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
     HostHarness beta(std::move(beta_options));
     beta.start();
     ASSERT_TRUE(beta.wait_ready(20s)) << beta.read_log();
+    resume_session_via_daemon(workspace_b / ".ymh" / "host.sock", beta_session.value);
 
     HostDaemonGuard alpha_guard(alpha_id.value);
 
@@ -503,6 +517,7 @@ TEST(UiSupervisorPty, AttachesSpawnsAndSwitches) {
 
     child.write("\x13");
     ASSERT_TRUE(child.wait_for("beta", 10s));
+    ASSERT_TRUE(child.wait_for("zzbetalive", 10s));
 
     child.write("j");
     std::this_thread::sleep_for(300ms);
@@ -1217,9 +1232,9 @@ TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
 // replay once the session is resumed.
 SessionId write_stored_session(const std::filesystem::path& workspace,
                                const std::string& title, const std::string& marker,
-                               const std::string& model = "deepseek-flash",
-                               bool               close_turn = false,
-                               std::optional<std::int64_t> updated_at_ms = std::nullopt) {
+                               const std::string& model,
+                               bool               close_turn,
+                               std::optional<std::int64_t> updated_at_ms) {
     const std::filesystem::path ymh_dir = workspace / ".ymh";
     std::filesystem::create_directories(ymh_dir);
     PersistenceConfig config;
@@ -1354,9 +1369,9 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
         registry->registerWorkspace(beta, "beta");
     }
     // A prompted root is required for `/sessions` to list it under spec 23 §6.1
-    // (the catalog hides unprompted roots). 46-D3: the lone live workspace has
-    // no target, so Ctrl-S shows the notice instead of the switcher; the stopped
-    // workspace's session is hidden either way.
+    // (the catalog hides unprompted roots). 81-D4/D9: the lone live workspace has
+    // no live session row, so Ctrl-S shows the dashboard's inline empty state;
+    // the stopped workspace's stored session is hidden either way.
     write_stored_session(beta, "beta-stored", "zzswp4markerzz");
 
     HostDaemonGuard alpha_guard(alpha_id.value);
@@ -1365,13 +1380,13 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
-    ASSERT_TRUE(child.wait_for("No other workspaces available", 10s)) << child.text();
+    ASSERT_TRUE(child.wait_for("No live sessions.", 10s)) << child.text();
     EXPECT_EQ(child.text().find("beta-stored"), std::string::npos)
         << "the Live surface showed a stopped workspace's stored session";
 
     child.write("\x1b");
-    ASSERT_TRUE(child.wait_for_frame_absent("No other workspaces available", 10s))
-        << "notice did not close\n" << child.text();
+    ASSERT_TRUE(child.wait_for_frame_absent("No live sessions.", 10s))
+        << "dashboard did not close\n" << child.text();
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("beta-stored", 20s)) << child.text();
 
@@ -1382,8 +1397,9 @@ TEST(UiSupervisorPty, SwP4_LiveSwitcherHidesStoppedWorkspaceHistoryShowsIt) {
 
 // Bug regression (Live source = daemon OPEN sessions): a LIVE workspace whose
 // daemon has no open session but holds stored-but-closed history must not leak
-// those rows into the Ctrl-S Live surface. 46-D3: the lone live workspace has no
-// target, so Ctrl-S shows the notice instead of the switcher; `/sessions` still
+// those rows into the Ctrl-S Live surface. 81-D4/D9: the lone live workspace has
+// no live session row, so Ctrl-S shows the dashboard's inline empty state;
+// `/sessions` still
 // lists every stored session.
 TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
     ShortTempRoot root("ymh_pty_live_hide");
@@ -1410,8 +1426,8 @@ TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
     ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
 
     child.write("\x13");
-    ASSERT_TRUE(child.wait_for("No other workspaces available", 20s))
-        << "a lone live workspace with a hidden focused session must show the notice: "
+    ASSERT_TRUE(child.wait_for("No live sessions.", 20s))
+        << "a lone live workspace with a hidden focused session must show the dashboard empty state: "
         << child.text();
     EXPECT_EQ(child.text().find("[zzstoredone"), std::string::npos)
         << "the Live surface leaked a stored-but-closed session: " << child.text();
@@ -1419,7 +1435,7 @@ TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
         << "the Live surface leaked a stored-but-closed session: " << child.text();
 
     child.write("\x1b");
-    ASSERT_TRUE(child.wait_for_frame_absent("No other workspaces available", 10s))
+    ASSERT_TRUE(child.wait_for_frame_absent("No live sessions.", 10s))
         << child.text();
     child.write("/sessions\r");
     ASSERT_TRUE(child.wait_for("zzstoredone", 20s)) << child.text();
@@ -1432,7 +1448,7 @@ TEST(UiSupervisorPty, SwLive_HidesStoredClosedSessionsOnLiveWorkspace) {
 
 // Bug regression (Live source = daemon OPEN sessions): with two live workspaces,
 // the other workspace's OPEN session appears in Ctrl-S while the viewer's own
-// focused session stays hidden.
+// focused session is ALSO present (81-I8: the dashboard includes it).
 TEST(UiSupervisorPty, SwLive_ShowsOtherWorkspaceLiveSession) {
     ShortTempRoot root("ymh_pty_live_peer");
     const std::filesystem::path state = root.state_dir();
@@ -1477,8 +1493,66 @@ TEST(UiSupervisorPty, SwLive_ShowsOtherWorkspaceLiveSession) {
     child.write("\x13");
     ASSERT_TRUE(child.wait_for("zzbetalive", 20s))
         << "the other live workspace's open session must appear: " << child.text();
-    EXPECT_NE(child.last_frame().find("(current session hidden)"), std::string::npos)
-        << "the viewer's own focused session must stay hidden: " << child.last_frame();
+    ASSERT_TRUE(child.wait_for("Sessions", 10s)) << child.last_frame();
+    EXPECT_EQ(child.last_frame().find("(current session hidden)"), std::string::npos)
+        << "the dashboard includes the focused session (81-I8): " << child.last_frame();
+
+    child.terminate();
+    alpha_guard.stop();
+    beta_host.stop();
+    EXPECT_TRUE(host_processes_under_root(root.path()).empty()) << "leaked ymh --host daemon(s)";
+}
+
+// 81-D3 (10.4): ArrowLeft on an empty composer opens the dashboard; Esc returns
+// to the conversation with the same focused session. No LLM is needed.
+TEST(UiSupervisorPty, DashboardArrowLeftOpensAndEscReturns) {
+    ShortTempRoot root("ymh_pty_dash_left");
+    const std::filesystem::path state = root.state_dir();
+    const ScopedEnvVar state_env("XDG_STATE_HOME", state.string());
+    const ScopedEnvVar home_env("HOME", root.path().string());
+    const ScopedEnvVar config_env("XDG_CONFIG_HOME", (root.path() / ".config").string());
+
+    const std::filesystem::path alpha = root.path() / "alpha";
+    const std::filesystem::path beta  = root.path() / "beta";
+    std::filesystem::create_directories(alpha);
+    std::filesystem::create_directories(beta);
+
+    WorkspaceId alpha_id;
+    std::string beta_id;
+    {
+        std::unique_ptr<WorkspaceRegistry> registry =
+            WorkspaceRegistry::open(pty_registry_config(state));
+        alpha_id = registry->registerWorkspace(alpha, "alpha").id;
+        beta_id  = registry->registerWorkspace(beta, "beta").id.value;
+    }
+    const SessionId beta_session = write_stored_session(beta, "zzbetalive", "zzbetamarker");
+
+    HostHarnessOptions beta_options;
+    beta_options.binary                = resolve_ymh_binary();
+    beta_options.workspace_root        = beta;
+    beta_options.workspace_id          = beta_id;
+    beta_options.socket_path           = beta / ".ymh" / "host.sock";
+    beta_options.log_sink              = beta / ".ymh" / "host.log";
+    beta_options.env["XDG_STATE_HOME"] = state.string();
+    beta_options.env["HOME"]           = root.path().string();
+    HostHarness beta_host(std::move(beta_options));
+    beta_host.start();
+    ASSERT_TRUE(beta_host.wait_ready(20s)) << beta_host.read_log();
+    resume_session_via_daemon(beta / ".ymh" / "host.sock", beta_session.value);
+
+    HostDaemonGuard alpha_guard(alpha_id.value);
+    PtyChild        child;
+    ASSERT_TRUE(child.spawn(resolve_ymh_binary(), alpha, pty_env(root.path(), state), {"--new"}));
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 25s)) << child.text();
+
+    child.write("\x1b[D");
+    ASSERT_TRUE(child.wait_for("Sessions", 15s))
+        << "ArrowLeft on the empty composer must open the dashboard: " << child.text();
+    ASSERT_TRUE(child.wait_for("zzbetalive", 15s)) << child.text();
+
+    child.write("\x1b");
+    ASSERT_TRUE(child.wait_for("Type a message and press Enter", 15s))
+        << "Esc must return to the conversation: " << child.text();
 
     child.terminate();
     alpha_guard.stop();
@@ -1935,8 +2009,8 @@ TEST(UiSupervisorPty, UI53_P1_EagerCwdThenCtrlSShowsSwitcher) {
     ASSERT_TRUE(child.wait_for(marker, 25s)) << child.text();
 
     child.write("\x13");
-    ASSERT_TRUE(child.wait_for("Switcher", 10s))
-        << "two live workspaces must render the switcher: " << child.text();
+    ASSERT_TRUE(child.wait_for("Sessions", 10s))
+        << "two live workspaces must render the dashboard: " << child.text();
 
     child.terminate();
     alpha_guard.stop();
@@ -2043,18 +2117,15 @@ TEST(UiSupervisorPty, UI49_P2_TwoWorkspacesWithSessionsShowsSwitcher) {
         << child.last_frame();
 
     // 49-F6: the first Ctrl-S after the state change may still see the stale
-    // catalog snapshot; its refreshNow lands before the next Ctrl-S.
+    // catalog snapshot; its refreshNow lands before the next Ctrl-S. 81-D9: the
+    // dashboard always opens, so there is no empty-target notice fallback.
     bool switcher_open = false;
     for (int attempt = 0; attempt < 6 && !switcher_open; ++attempt) {
         const std::size_t mark = child.raw_size();
         child.write("\x13");
-        if (child.wait_for_since(mark, "Switcher", 4s)) {
+        if (child.wait_for_since(mark, "Sessions", 4s)) {
             switcher_open = true;
             break;
-        }
-        if (child.wait_for_since(mark, "No other sessions available", 4s)) {
-            child.write("\x1b");
-            child.wait_for_frame_absent("No other sessions available", 5s);
         }
     }
     ASSERT_TRUE(switcher_open) << child.last_frame();

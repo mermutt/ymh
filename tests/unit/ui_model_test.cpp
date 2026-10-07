@@ -422,7 +422,8 @@ TEST(UiModel, SwitcherNavigatesAcrossWorkspaces) {
     add_catalog_sessions(model, WorkspaceId{"workspace"}, {kSession});
     add_catalog_sessions(model, WorkspaceId{"workspace-2"}, {second});
 
-    model.openSwitcher();
+    model.openDashboard();
+    ASSERT_EQ(model.mode, UiMode::Dashboard);
     ASSERT_EQ(model.switcher.workspaces.size(), 2u);
     EXPECT_EQ(model.switcher.cursor.workspace, model.activeWorkspaceId);
 
@@ -447,7 +448,8 @@ TEST(UiModel, SwitcherCollapseHidesSessions) {
     cell.title = "one";
     model.workspaces[model.activeWorkspaceId].sessions.push_back(cell);
 
-    model.openSwitcher();
+    model.openDashboard();
+    ASSERT_EQ(model.mode, UiMode::Dashboard);
     model.switcher.toggleExpand();
     EXPECT_NE(model.switcher.collapsed.find(model.activeWorkspaceId),
               model.switcher.collapsed.end());
@@ -1100,7 +1102,8 @@ TEST(UiModel, SwitcherNodesCarryOwnershipMark) {
     dead.live = true;
     model.workspaces.emplace(dead.id, std::move(dead));
 
-    model.openSwitcher();
+    model.openDashboard();
+    ASSERT_EQ(model.mode, UiMode::Dashboard);
     ASSERT_EQ(model.switcher.workspaces.size(), 2u);
     for (const WorkspaceNode& node : model.switcher.workspaces) {
         EXPECT_EQ(node.mark, OwnershipMark::Owned);
@@ -1128,7 +1131,8 @@ TEST(UiModel, SwitcherOpenIsLiveOnly) {
     add("ws-notrunning", "notrunning", DaemonStatus::NotRunning, true);
     add("ws-hidden", "hidden", DaemonStatus::Attached, false);
 
-    model.openSwitcher();
+    model.openDashboard();
+    ASSERT_EQ(model.mode, UiMode::Dashboard);
     std::set<WorkspaceId> ids;
     for (const WorkspaceNode& node : model.switcher.workspaces) {
         ids.insert(node.id);
@@ -1213,7 +1217,8 @@ TEST(UiModel, DaemonDeathHidesWorkspace) {
     died.workspace = model.activeWorkspaceId;
     died.kind = WorkspaceEventKind::DaemonDied;
     model.apply(died);
-    model.openSwitcher();
+    model.openDashboard();
+    ASSERT_EQ(model.mode, UiMode::Dashboard);
     EXPECT_TRUE(model.switcher.workspaces.empty());
 }
 
@@ -1274,7 +1279,8 @@ TEST(UiModel, SwitcherOrderingAndSessionOrder) {
     add_live_history("ws-beta", "/beta", 4000);
     model.cwdWorkspacePath = "/g";
 
-    model.openSwitcher();
+    model.openDashboard();
+    ASSERT_EQ(model.mode, UiMode::Dashboard);
     ASSERT_EQ(model.switcher.workspaces.size(), 4u);
     EXPECT_EQ(model.switcher.workspaces[0].id, WorkspaceId{"ws-g"});
     EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-a"});
@@ -1510,15 +1516,16 @@ TEST(UiModel, SwitcherEffectiveRootRuleWhenCatalogUnloaded) {
     EXPECT_EQ(model.switcher.workspaces[1].id, WorkspaceId{"ws-alpha"});
 }
 
-// SW-U16 (22 §3.6, L1): openSwitcher resets the source to Live; close leaves it.
+// SW-U16 (22 §3.6, L1): openDashboard resets the source to Live; close leaves it.
 TEST(UiModel, SwitcherSourceResetsToLive) {
     UiModel model = make_model();
-    model.openSwitcher();
+    model.openDashboard();
+    EXPECT_EQ(model.mode, UiMode::Dashboard);
     EXPECT_EQ(model.switcher.source, SwitcherSource::Live);
     model.switcher.source = SwitcherSource::History;
     model.switcher.close();
     EXPECT_EQ(model.switcher.source, SwitcherSource::History);
-    model.openSwitcher();
+    model.openDashboard();
     EXPECT_EQ(model.switcher.source, SwitcherSource::Live);
 }
 
@@ -1765,7 +1772,8 @@ TEST(UiModel, UI45_D4_LiveEmptyNodeRendered) {
     UiModel model = make_model();
     add_catalog_sessions(model, model.activeWorkspaceId, {kSession});
 
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     ASSERT_EQ(model.switcher.workspaces.size(), 1u) << "the node must not be suppressed";
     EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
     EXPECT_TRUE(model.switcher.workspaces[0].sessions_hidden_by_focus);
@@ -1786,7 +1794,8 @@ TEST(UiModel, UI45_D4_LivePlaceholderLeaf) {
     model.workspaces.emplace(workspace.id, workspace);
     add_catalog_sessions(model, workspace.id, {});
 
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     ASSERT_EQ(model.switcher.workspaces.size(), 1u);
     EXPECT_TRUE(model.switcher.workspaces[0].sessions.empty());
     EXPECT_FALSE(model.switcher.workspaces[0].sessions_hidden_by_focus);
@@ -1798,7 +1807,8 @@ TEST(UiModel, UI45_D4_LivePlaceholderLeaf) {
 
 TEST(UiModel, UI45_D4_LiveCatalogPendingPlaceholder) {
     UiModel model = make_model();
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     ASSERT_EQ(model.switcher.workspaces.size(), 1u);
     EXPECT_TRUE(model.switcher.workspaces[0].catalog_pending);
 
@@ -1819,7 +1829,8 @@ TEST(UiModel, UI45_D4_LiveCatalogNotePlaceholder) {
     model.catalog.loaded = true;
     model.catalog.generation = 1;
 
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     ASSERT_EQ(model.switcher.workspaces.size(), 1u);
     ASSERT_TRUE(model.switcher.workspaces[0].note.has_value());
     EXPECT_FALSE(model.switcher.workspaces[0].catalog_pending);
@@ -2213,9 +2224,9 @@ TEST(UiModel, UI58_U17_HistoryFiltersSubagents) {
 TEST(UiModel, UI58_U21_SwitcherPolicyTable) {
     const SwitcherSourcePolicy& live = switcher_policy(SwitcherSource::Live);
     EXPECT_EQ(live.window_title, "workspaces");
-    EXPECT_EQ(live.heading, "Switcher");
-    EXPECT_EQ(live.footer, "j/k move · Tab expand · Ctrl+D delete · Enter focus · Esc close");
-    EXPECT_EQ(live.empty_state, "(no workspaces)");
+    EXPECT_EQ(live.heading, "Sessions");
+    EXPECT_EQ(live.footer, "Up/Down move | Enter attach | Esc close | Ctrl+C twice quit");
+    EXPECT_EQ(live.empty_state, "No live sessions.");
     EXPECT_EQ(live.enter, SwitcherEnter::Focus);
     EXPECT_TRUE(live.ctrl_d_enabled);
     EXPECT_TRUE(live.tab_expands);

@@ -176,7 +176,8 @@ struct D4Fixture {
     }
 
     void open_live_switcher() {
-        harness->open_switcher();
+        harness->mutable_model().switcher.open(harness->model());
+        harness->mutable_model().mode = UiMode::Switcher;
         drain_fully(*harness);
     }
 

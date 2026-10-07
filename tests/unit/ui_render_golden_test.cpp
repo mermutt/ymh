@@ -402,11 +402,12 @@ TEST(UiRenderGolden, MultiWorkspaceSwitcherTree) {
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
-    model.openSwitcher();
+    seed_catalog_session(model, model.activeWorkspaceId, kSession);
+    model.openDashboard();
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
-    EXPECT_NE(rendered.find("Switcher"), std::string::npos) << rendered;
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos) << rendered;
     EXPECT_NE(rendered.find("alpha"), std::string::npos) << rendered;
     EXPECT_NE(rendered.find("beta"), std::string::npos) << rendered;
     EXPECT_NE(rendered.find("notes"), std::string::npos) << rendered;
@@ -993,7 +994,8 @@ TEST(UiRenderGolden, SwitcherShowsShortIdForPlaceholderTitle) {
     model.ensureSessionIn(model.activeWorkspaceId, other);
     model.setCellTitle(model.activeWorkspaceId, other, "tui");
     seed_catalog_session(model, model.activeWorkspaceId, other);
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
@@ -1024,7 +1026,8 @@ TEST(UiRenderGolden, SwitcherShowsRenamedSessionTitle) {
     model.catalog.workspaces.push_back(std::move(history));
     model.catalog.loaded     = true;
     model.catalog.generation = 1;
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
@@ -1058,7 +1061,8 @@ TEST(UiRenderGolden, SwitcherAttentionBadgeStillRenders) {
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
@@ -1305,12 +1309,13 @@ TEST(UiRenderGolden, SwitcherShowsOwnershipMarks) {
     unreachable.live = true;
     model.workspaces.emplace(unreachable.id, unreachable);
 
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("workspaces"), std::string::npos);
-    EXPECT_NE(rendered.find("Switcher"), std::string::npos);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
     EXPECT_NE(rendered.find("[owned]"), std::string::npos);
     EXPECT_NE(rendered.find("[stopping]"), std::string::npos);
     EXPECT_EQ(rendered.find("[not running]"), std::string::npos);
@@ -1602,7 +1607,8 @@ UiModel armed_session_model() {
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
 
     SwitcherCursor cursor;
     cursor.workspace             = WorkspaceId{"workspace-beta"};
@@ -1885,7 +1891,8 @@ TEST(UiRenderGolden, UI45_G4_LiveNoSuppression) {
     model.catalog.workspaces = {alpha_history};
     model.catalog.loaded     = true;
     model.catalog.generation = 1;
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
@@ -1918,7 +1925,8 @@ TEST(UiRenderGolden, UI45_G4_LiveNoSuppression) {
     only.catalog.workspaces = {only_history};
     only.catalog.loaded     = true;
     only.catalog.generation = 1;
-    only.openSwitcher();
+    only.switcher.open(only);
+    only.mode = UiMode::Switcher;
 
     const std::string hidden =
         normalize(render_to_ansi(only, TerminalSize{90, 24}, Theme{false}));
@@ -1927,7 +1935,8 @@ TEST(UiRenderGolden, UI45_G4_LiveNoSuppression) {
     EXPECT_NE(hidden.find("(current session hidden)"), std::string::npos);
 
     UiModel pending = build_model();
-    pending.openSwitcher();
+    pending.switcher.open(pending);
+    pending.mode = UiMode::Switcher;
     const std::string loading =
         normalize(render_to_ansi(pending, TerminalSize{90, 24}, Theme{false}));
     SCOPED_TRACE(loading);
@@ -1944,7 +1953,8 @@ TEST(UiRenderGolden, UI45_G4_LiveNoSuppression) {
     noted.catalog.workspaces    = {noted_history};
     noted.catalog.loaded        = true;
     noted.catalog.generation    = 1;
-    noted.openSwitcher();
+    noted.switcher.open(noted);
+    noted.mode = UiMode::Switcher;
     const std::string failed =
         normalize(render_to_ansi(noted, TerminalSize{90, 24}, Theme{false}));
     SCOPED_TRACE(failed);
@@ -2007,11 +2017,12 @@ TEST(UiRenderGolden, UI45_G5_HistoryDistinctHiddenLabel) {
 
 TEST(UiRenderGolden, UI45_D4_WholeListPlaceholder) {
     UiModel live;
-    live.openSwitcher();
+    live.switcher.open(live);
+    live.mode = UiMode::Switcher;
     const std::string live_rendered =
         normalize(render_to_ansi(live, TerminalSize{90, 24}, Theme{false}));
     SCOPED_TRACE(live_rendered);
-    EXPECT_NE(live_rendered.find("(no workspaces)"), std::string::npos);
+    EXPECT_NE(live_rendered.find("No live sessions."), std::string::npos);
 
     UiModel stored;
     stored.catalog.loaded     = true;
@@ -2077,38 +2088,6 @@ void expect_opaque_row(const std::string& rendered, const std::string& row_text,
 // 46-G1 (46-I8): Ctrl+S with a single live workspace renders exactly the notice
 // window — the message plus one `[ OK ]` row, no workspace rows and no
 // `(current session hidden)` leaf.
-TEST(UiRenderGolden, UI46_G1_NoticePopup) {
-    UiModel model = build_model();
-    model.message.open = true;
-    model.message.text = "No other workspaces available";
-    model.mode         = UiMode::Notice;
-
-    const std::string rendered =
-        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
-    SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("No other workspaces available"), std::string::npos);
-    EXPECT_NE(rendered.find("[ OK ]"), std::string::npos);
-    EXPECT_EQ(rendered.find("(current session hidden)"), std::string::npos);
-    EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
-}
-
-// 49-G1 (49-D6/49-I9): the sessionless-other-workspace notice renders the
-// message plus exactly one `[ OK ]` row, with no workspace/session rows.
-TEST(UiRenderGolden, UI49_G1_NoticeNoOtherSessions) {
-    UiModel model = build_model();
-    model.message.open = true;
-    model.message.text = "No other sessions available";
-    model.mode         = UiMode::Notice;
-
-    const std::string rendered =
-        normalize(render_to_ansi(model, TerminalSize{72, 24}, Theme{false}));
-    SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("No other sessions available"), std::string::npos);
-    EXPECT_NE(rendered.find("[ OK ]"), std::string::npos);
-    EXPECT_EQ(rendered.find("(current session hidden)"), std::string::npos);
-    EXPECT_EQ(rendered.find("Switcher"), std::string::npos);
-}
-
 // 49-G2 (regression guard): two live workspaces each with a catalogued session
 // still render the normal switcher tree, not a notice.
 TEST(UiRenderGolden, UI49_G2_MultiWorkspaceSwitcherUnchanged) {
@@ -2127,12 +2106,12 @@ TEST(UiRenderGolden, UI49_G2_MultiWorkspaceSwitcherUnchanged) {
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, model.activeWorkspaceId, kSession);
-    model.openSwitcher();
+    model.openDashboard();
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("Switcher"), std::string::npos);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
     EXPECT_NE(rendered.find("alpha"), std::string::npos);
     EXPECT_NE(rendered.find("beta"), std::string::npos);
     EXPECT_EQ(rendered.find("[ OK ]"), std::string::npos);
@@ -2285,13 +2264,15 @@ TEST(UiRenderGolden, UI46_G4_SwitcherOpaque) {
     UiModel model = build_model();
     seed_marker_conversation(model, "BLEEDMARK");
     model.workspaces[model.activeWorkspaceId].title = std::string(70, 'T');
-    model.openSwitcher();
+    model.openDashboard();
 
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
     SCOPED_TRACE(rendered);
-    ASSERT_NE(rendered.find("BLEEDMARK"), std::string::npos);
-    expect_opaque_row(rendered, "j/k move", "BLEEDMARK");
+    // 81-D1: the dashboard is the full-screen base, so the underlying
+    // conversation never shows through it (stronger than an opaque popup).
+    EXPECT_EQ(rendered.find("BLEEDMARK"), std::string::npos);
+    EXPECT_NE(rendered.find("Up/Down move"), std::string::npos);
 }
 
 // 46-G6 (46-D9.4): a turn-active status line renders the spinner glyph as the
@@ -3213,7 +3194,8 @@ TEST(UiRenderGolden, SwitcherDeleteConfirmInvariants) {
     model.workspaces.emplace(beta.id, std::move(beta));
     model.ensureSessionIn(WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
     seed_catalog_session(model, WorkspaceId{"workspace-beta"}, SessionId{"beta-session"});
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
 
     SwitcherCursor cursor;
     cursor.workspace      = WorkspaceId{"workspace-beta"};
@@ -3339,7 +3321,8 @@ TEST(UiRenderGolden, SwitcherRowStyleAlignment) {
     model.catalog.loaded     = true;
     model.catalog.generation = 1;
 
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     SwitcherCursor session_cursor;
     session_cursor.workspace = alpha.id;
     session_cursor.session   = two.id;
@@ -3550,6 +3533,272 @@ TEST(UiRenderGolden, UI69_MultiLineStartupNoticeRendersWithActiveSession) {
     const std::size_t newline = rendered.find('\n', first);
     ASSERT_NE(newline, std::string::npos) << rendered;
     EXPECT_GT(second, newline) << rendered;
+}
+
+// 81-D5/D6/D7: a dashboard fixture with one Need-input, one Working and one
+// Completed(idle) row, plus a catalog giving each a relative age.
+UiModel dashboard_model() {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws-alpha"};
+    WorkspaceModel alpha;
+    alpha.id           = WorkspaceId{"ws-alpha"};
+    alpha.title        = "alpha";
+    alpha.cwd          = "/alpha";
+    alpha.daemonStatus = DaemonStatus::Attached;
+    alpha.live         = true;
+    SessionCell working;
+    working.id    = SessionId{"s-work"};
+    working.title = "fix build";
+    working.state = AgentState::Thinking;
+    SessionCell waiting;
+    waiting.id        = SessionId{"s-wait"};
+    waiting.title     = "deploy";
+    waiting.state     = AgentState::WaitingForInput;
+    waiting.attention = true;
+    SessionCell done;
+    done.id    = SessionId{"s-done"};
+    done.title = "release";
+    alpha.sessions = {working, waiting, done};
+    model.workspaces.emplace(alpha.id, alpha);
+    model.focusSessionIn(alpha.id, SessionId{"s-work"});
+    WorkspaceHistory history;
+    history.id            = alpha.id;
+    history.title         = "alpha";
+    history.canonicalPath = "/alpha";
+    history.live          = true;
+    history.sessions = {history_session("s-work", "fix build", 3000, "root", "m"),
+                        history_session("s-wait", "deploy", 2000, "root", "m"),
+                        history_session("s-done", "release", 1000, "root", "m")};
+    model.catalog.workspaces = {history};
+    model.catalog.loaded     = true;
+    model.catalog.generation = 1;
+    model.catalog.nowMs      = 10'000;
+    return model;
+}
+
+TEST(UiRenderGolden, DashboardGroupedList) {
+    UiModel model = dashboard_model();
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
+    EXPECT_NE(rendered.find("Needs input (1)"), std::string::npos);
+    EXPECT_NE(rendered.find("Working (1)"), std::string::npos);
+    EXPECT_NE(rendered.find("Completed (1)"), std::string::npos);
+    EXPECT_NE(rendered.find("deploy"), std::string::npos);
+    EXPECT_NE(rendered.find("fix build"), std::string::npos);
+    EXPECT_NE(rendered.find("release"), std::string::npos);
+    EXPECT_NE(rendered.find("alpha"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardCountsLine) {
+    UiModel model = dashboard_model();
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("1 awaiting input - 1 working - 1 completed"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardEmptyState) {
+    UiModel model;
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("No live sessions."), std::string::npos);
+    EXPECT_EQ(rendered.find("[ OK ]"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardNarrowDegrades) {
+    UiModel model = dashboard_model();
+    model.openDashboard();
+    const std::string narrowed =
+        normalize(render_to_ansi(model, TerminalSize{50, 20}, Theme{false}));
+    SCOPED_TRACE(narrowed);
+    EXPECT_EQ(narrowed.find("alpha"), std::string::npos);
+    EXPECT_EQ(narrowed.find("7s"), std::string::npos);
+    EXPECT_NE(narrowed.find("Enter attach | Esc close"), std::string::npos);
+    EXPECT_NE(narrowed.find("deploy"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardLongListWindow) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws"};
+    WorkspaceModel workspace;
+    workspace.id           = WorkspaceId{"ws"};
+    workspace.title        = "ws";
+    workspace.cwd          = "/ws";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live         = true;
+    for (int index = 0; index < 40; ++index) {
+        SessionCell cell;
+        cell.id    = SessionId{"s" + std::to_string(index)};
+        cell.title = "session-" + std::to_string(index);
+        workspace.sessions.push_back(cell);
+    }
+    model.workspaces.emplace(workspace.id, workspace);
+    model.focusSessionIn(workspace.id, SessionId{"s0"});
+    WorkspaceHistory history;
+    history.id            = workspace.id;
+    history.title         = "ws";
+    history.canonicalPath = "/ws";
+    history.live          = true;
+    for (int index = 0; index < 40; ++index) {
+        history.sessions.push_back(history_session(("s" + std::to_string(index)).c_str(),
+                                                   ("session-" + std::to_string(index)).c_str(),
+                                                   index, "root", "m"));
+    }
+    model.catalog.workspaces = {history};
+    model.catalog.loaded     = true;
+    model.catalog.generation = 1;
+    model.catalog.nowMs      = 1000;
+    model.openDashboard();
+    model.dashboard.cursor = model.dashboard.rows.size() - 5;
+    const std::string cursor_title = model.dashboard.rows[model.dashboard.cursor].title;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 12}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find(" more"), std::string::npos);
+    EXPECT_NE(rendered.find(cursor_title), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardNoClearUnder) {
+    UiModel model = build_model();
+    seed_marker_conversation(model, "BLEEDMARK");
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered.find("BLEEDMARK"), std::string::npos);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardOverlayPrecedence) {
+    UiModel model = dashboard_model();
+    model.openDashboard();
+    model.exitConfirm.open = true;
+    model.exitConfirm.orphaning = {WorkspaceId{"ws-alpha"}};
+    model.exitConfirm.sessions = 1;
+    model.mode = UiMode::ExitConfirm;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
+    EXPECT_NE(rendered.find("Terminate and exit"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardUnderExitConfirm) {
+    UiModel model = build_model();
+    seed_marker_conversation(model, "BLEEDMARK");
+    model.openDashboard();
+    model.exitConfirm.open = true;
+    model.mode = UiMode::ExitConfirm;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered.find("BLEEDMARK"), std::string::npos);
+    EXPECT_NE(rendered.find("Terminate and exit"), std::string::npos);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardUnderPermissionDialog) {
+    UiModel model = dashboard_model();
+    model.openDashboard();
+    model.dialog.open    = true;
+    model.dialog.session = SessionId{"s-work"};
+    model.dialog.tool    = "shell";
+    model.dialog.summary = "rm -rf build";
+    model.dialog.prev_mode = UiMode::Dashboard;
+    model.mode           = UiMode::Dialog;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{90, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
+    EXPECT_NE(rendered.find("Permission required"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardCancellingIsWorking) {
+    UiModel model = dashboard_model();
+    model.workspaces[WorkspaceId{"ws-alpha"}].sessions[0].state = AgentState::Cancelling;
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("* working"), std::string::npos);
+    EXPECT_EQ(rendered.find("- cancelling"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardStatusGlyphs) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"ws"};
+    WorkspaceModel workspace;
+    workspace.id           = WorkspaceId{"ws"};
+    workspace.title        = "ws";
+    workspace.cwd          = "/ws";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live         = true;
+    model.workspaces.emplace(workspace.id, workspace);
+    WorkspaceModel& target = model.workspaces[workspace.id];
+    const auto add_cell = [&](const char* id, AgentState state, bool attention) {
+        SessionCell cell;
+        cell.id        = SessionId{id};
+        cell.title     = id;
+        cell.state     = state;
+        cell.attention = attention;
+        target.sessions.push_back(cell);
+        model.ensureSessionIn(target.id, SessionId{id});
+    };
+    add_cell("work", AgentState::Thinking, false);
+    add_cell("wait", AgentState::WaitingForInput, true);
+    add_cell("done", AgentState::Idle, false);
+    add_cell("flat", AgentState::Idle, false);
+    add_cell("fail", AgentState::Error, true);
+    model.session(SessionId{"done"})->attention.completed = true;
+    model.focusSessionIn(target.id, SessionId{"work"});
+    WorkspaceHistory history;
+    history.id            = target.id;
+    history.title         = "ws";
+    history.canonicalPath = "/ws";
+    history.live          = true;
+    for (const char* id : {"work", "wait", "done", "flat", "fail"}) {
+        history.sessions.push_back(history_session(id, id, 1, "root", "m"));
+    }
+    model.catalog.workspaces = {history};
+    model.catalog.loaded     = true;
+    model.catalog.generation = 1;
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("* working"), std::string::npos);
+    EXPECT_NE(rendered.find("! needs input"), std::string::npos);
+    EXPECT_NE(rendered.find("x failed"), std::string::npos);
+    EXPECT_NE(rendered.find("+ completed"), std::string::npos);
+    EXPECT_NE(rendered.find("o idle"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardStatusGlyphNotStateGlyph) {
+    UiModel model = dashboard_model();
+    model.workspaces[WorkspaceId{"ws-alpha"}].sessions[0].state = AgentState::CallingTool;
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("* working"), std::string::npos);
+    EXPECT_EQ(rendered.find(">"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DashboardStoppingBadge) {
+    UiModel model = dashboard_model();
+    model.workspaces[WorkspaceId{"ws-alpha"}].daemonStatus = DaemonStatus::Stopping;
+    model.openDashboard();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("[stopping]"), std::string::npos);
 }
 
 } // namespace

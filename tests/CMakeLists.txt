@@ -72,6 +72,7 @@ add_executable(ymh_tests
     unit/errata77_subscribe_seed_test.cpp
     unit/errata77_replay_complete_test.cpp
     unit/errata78_ui_test.cpp
+    unit/errata81_ui_test.cpp
     unit/config_test.cpp
     unit/spec52_endpoints_test.cpp
     unit/spec52_presets_test.cpp

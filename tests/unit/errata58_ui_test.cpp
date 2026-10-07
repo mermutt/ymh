@@ -289,7 +289,7 @@ TEST(Errata58, UI60_ShiftPageKeysActOnViewedChild) {
 // 60-U5 (60-I6/57-I15): an open popup consumes the new binding.
 TEST(Errata58, UI60_ShiftPageConsumedByPopup) {
     SubagentFixture fixture("ymh_60_shift_page_popup");
-    fixture.harness->open_switcher();
+    ASSERT_TRUE(fixture.harness->dispatch_command_line("/sessions"));
     drain_fully(*fixture.harness);
     ASSERT_EQ(fixture.model().mode, UiMode::Switcher);
     SessionUiState* state = fixture.model().session(kS1);
@@ -337,14 +337,12 @@ TEST(Errata58, UI58_H7_ChildNotInLiveSwitcher) {
     // The child state must still exist when the Live switcher is built, else the
     // absence assertion below cannot fail.
     ASSERT_EQ(fixture.model().subagent_path.size(), 1u);
-
     fixture.harness->open_switcher();
     drain_fully(*fixture.harness);
-    ASSERT_EQ(fixture.model().mode, UiMode::Switcher);
-    for (const WorkspaceNode& node : fixture.model().switcher.workspaces) {
-        for (const SessionNode& session : node.sessions) {
-            EXPECT_NE(session.id, kChild);
-        }
+
+    ASSERT_EQ(fixture.model().mode, UiMode::Dashboard);
+    for (const DashboardRow& row : fixture.model().dashboard.rows) {
+        EXPECT_NE(row.session, kChild);
     }
 }
 
@@ -569,12 +567,12 @@ TEST(Errata58, UI58_H19_CtrlTDoesNotCloseCatalogSwitchers) {
     SubagentFixture fixture("ymh_58_h19");
     fixture.seed_child(kS1, kChild, "task");
 
-    fixture.harness->open_switcher();
+    ASSERT_TRUE(fixture.harness->dispatch_command_line("/sessions"));
     drain_fully(*fixture.harness);
-    ASSERT_EQ(fixture.model().switcher.source, SwitcherSource::Live);
+    ASSERT_EQ(fixture.model().switcher.source, SwitcherSource::History);
     EXPECT_TRUE(fixture.harness->dispatch_key("ctrl-t"));
     EXPECT_EQ(fixture.model().mode, UiMode::Switcher);
-    EXPECT_EQ(fixture.model().switcher.source, SwitcherSource::Live);
+    EXPECT_EQ(fixture.model().switcher.source, SwitcherSource::History);
 
     EXPECT_TRUE(fixture.harness->dispatch_key("escape"));
     EXPECT_TRUE(fixture.harness->dispatch_command_line("/sessions"));
@@ -669,7 +667,8 @@ TEST(Errata58, UI58_H23_DeleteViewedChildReconciles) {
 
     // The unreachable E44 path is refused: Ctrl+D on the live workspace.
     SubagentFixture live("ymh_58_h23_live");
-    live.harness->open_switcher();
+    live.harness->mutable_model().switcher.open(live.harness->model());
+    live.harness->mutable_model().mode = UiMode::Switcher;
     drain_fully(*live.harness);
     ASSERT_EQ(live.model().switcher.source, SwitcherSource::Live);
     live.harness->dispatch_key("ctrl-d");

@@ -121,26 +121,6 @@ bool wait_for_notice(SupervisorHarness& harness, std::chrono::milliseconds timeo
 
 // ── 49-D5 / 49-D6 ───────────────────────────────────────────────────────────
 
-TEST(Errata49, UI49_D5_OtherLiveWorkspaceWithoutSessionsShowsNotice) {
-    SupervisorRunOptions options;
-    options.identity = test_identity();
-    const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-
-    const WorkspaceId active{"ws-a"};
-    harness->seed_active_workspace(live_workspace(active, "alpha"));
-    harness->activate_session(active, SessionId{"s1"});
-    harness->seed_workspace(live_workspace(WorkspaceId{"ws-b"}, "beta"));
-    seed_loaded_catalog(harness->mutable_model(),
-                        {history(active, {SessionId{"s1"}}), history(WorkspaceId{"ws-b"}, {})});
-
-    harness->open_switcher();
-
-    EXPECT_EQ(harness->model().mode, UiMode::Notice);
-    EXPECT_TRUE(harness->model().message.open);
-    EXPECT_EQ(harness->model().message.text, "No other sessions available");
-    EXPECT_TRUE(harness->model().switcher.workspaces.empty());
-}
-
 TEST(Errata49, UI49_D5_OtherLiveWorkspaceWithSessionShowsSwitcher) {
     SupervisorRunOptions options;
     options.identity = test_identity();
@@ -158,8 +138,7 @@ TEST(Errata49, UI49_D5_OtherLiveWorkspaceWithSessionShowsSwitcher) {
 
     harness->open_switcher();
 
-    EXPECT_EQ(harness->model().mode, UiMode::Switcher);
-    EXPECT_FALSE(harness->model().message.open);
+    EXPECT_EQ(harness->model().mode, UiMode::Dashboard);
 }
 
 TEST(Errata49, UI49_D5_ActiveWorkspaceSecondSessionShowsSwitcher) {
@@ -178,22 +157,7 @@ TEST(Errata49, UI49_D5_ActiveWorkspaceSecondSessionShowsSwitcher) {
 
     harness->open_switcher();
 
-    EXPECT_EQ(harness->model().mode, UiMode::Switcher);
-}
-
-TEST(Errata49, UI49_D6_OnlyLiveWorkspaceNoticeText) {
-    SupervisorRunOptions options;
-    options.identity = test_identity();
-    const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-
-    const WorkspaceId active{"ws-a"};
-    harness->seed_active_workspace(live_workspace(active, "alpha"));
-    harness->activate_session(active, SessionId{"s1"});
-
-    harness->open_switcher();
-
-    EXPECT_EQ(harness->model().mode, UiMode::Notice);
-    EXPECT_EQ(harness->model().message.text, "No other workspaces available");
+    EXPECT_EQ(harness->model().mode, UiMode::Dashboard);
 }
 
 TEST(Errata49, UI49_D5_CatalogPendingFallsBackToSwitcher) {
@@ -208,7 +172,7 @@ TEST(Errata49, UI49_D5_CatalogPendingFallsBackToSwitcher) {
 
     harness->open_switcher();
 
-    EXPECT_EQ(harness->model().mode, UiMode::Switcher);
+    EXPECT_EQ(harness->model().mode, UiMode::Dashboard);
 }
 
 TEST(Errata49, UI49_D5_NoteWorkspaceFallsBackToSwitcher) {
@@ -226,7 +190,7 @@ TEST(Errata49, UI49_D5_NoteWorkspaceFallsBackToSwitcher) {
 
     harness->open_switcher();
 
-    EXPECT_EQ(harness->model().mode, UiMode::Switcher);
+    EXPECT_EQ(harness->model().mode, UiMode::Dashboard);
 }
 
 TEST(Errata49, UI49_D5_ActiveWorkspaceUnknownMembershipFallsBackToSwitcher) {
@@ -243,62 +207,7 @@ TEST(Errata49, UI49_D5_ActiveWorkspaceUnknownMembershipFallsBackToSwitcher) {
 
     harness->open_switcher();
 
-    EXPECT_EQ(harness->model().mode, UiMode::Switcher);
-}
-
-TEST(Errata49, UI49_D8_NoticeDismissal) {
-    for (const std::string key : {"enter", "escape", "ctrl-c"}) {
-        SupervisorRunOptions options;
-        options.identity = test_identity();
-        const std::unique_ptr<SupervisorHarness> harness =
-            make_supervisor_harness(std::move(options));
-        const WorkspaceId active{"ws-a"};
-        harness->seed_active_workspace(live_workspace(active, "alpha"));
-        harness->activate_session(active, SessionId{"s1"});
-        harness->open_switcher();
-        ASSERT_EQ(harness->model().mode, UiMode::Notice) << key;
-
-        EXPECT_TRUE(harness->dispatch_key(key)) << key;
-        EXPECT_EQ(harness->model().mode, UiMode::Conversation) << key;
-        EXPECT_FALSE(harness->model().message.open) << key;
-    }
-}
-
-TEST(Errata49, UI49_D8_NoticeSwallowsCtrlS) {
-    SupervisorRunOptions options;
-    options.identity = test_identity();
-    const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-    const WorkspaceId active{"ws-a"};
-    harness->seed_active_workspace(live_workspace(active, "alpha"));
-    harness->activate_session(active, SessionId{"s1"});
-    harness->open_switcher();
-    ASSERT_EQ(harness->model().mode, UiMode::Notice);
-
-    for (const std::string key : {"ctrl-s", "ctrl-p", "x"}) {
-        EXPECT_TRUE(harness->dispatch_key(key)) << key;
-        EXPECT_EQ(harness->model().mode, UiMode::Notice) << key;
-        EXPECT_TRUE(harness->model().message.open) << key;
-    }
-}
-
-TEST(Errata49, UI49_D8_NoticeBlocksComposer) {
-    SupervisorRunOptions options;
-    options.identity = test_identity();
-    const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-    const WorkspaceId active{"ws-a"};
-    const SessionId   session{"s1"};
-    harness->seed_active_workspace(live_workspace(active, "alpha"));
-    harness->activate_session(active, session);
-    ASSERT_TRUE(harness->dispatch_key("a"));
-
-    harness->open_switcher();
-    ASSERT_EQ(harness->model().mode, UiMode::Notice);
-
-    EXPECT_TRUE(harness->dispatch_key("b"));
-
-    ASSERT_NE(harness->model().session(session), nullptr);
-    EXPECT_EQ(harness->model().session(session)->input.draft, "a");
-    EXPECT_EQ(harness->model().mode, UiMode::Notice);
+    EXPECT_EQ(harness->model().mode, UiMode::Dashboard);
 }
 
 TEST(Errata49, UI49_I12_SessionsOpensHistory) {
@@ -324,17 +233,6 @@ TEST(Errata49, UI53_F1_DegradedStartNoWorkspace) {
     EXPECT_TRUE(harness->model().workspaces.empty());
     EXPECT_TRUE(harness->model().activeWorkspaceId.value.empty());
     EXPECT_EQ(harness->model().mode, UiMode::Conversation);
-}
-
-TEST(Errata49, UI53_F1_DegradedStartCtrlSNotice) {
-    SupervisorRunOptions options;
-    options.identity = test_identity();
-    const std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
-
-    EXPECT_TRUE(harness->dispatch_key("ctrl-s"));
-
-    EXPECT_EQ(harness->model().mode, UiMode::Notice);
-    EXPECT_EQ(harness->model().message.text, "No other workspaces available");
 }
 
 TEST(Errata49, UI53_F1_DegradedStartComposerTypeable) {

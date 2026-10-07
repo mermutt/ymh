@@ -229,8 +229,8 @@ TEST(RenderGolden, TuiExitConfirmOverlayCountsAndOwnershipMark) {
     EXPECT_NE(rendered.find("Terminate and exit"), std::string::npos);
 
     model.exitConfirm = ExitConfirmState{};
-    model.mode = UiMode::Conversation;
-    model.openSwitcher();
+    model.switcher.open(model);
+    model.mode = UiMode::Switcher;
     const std::string switcher =
         normalize(render_to_ansi(model, TerminalSize{80, 30}, Theme{false}));
     SCOPED_TRACE(switcher);
