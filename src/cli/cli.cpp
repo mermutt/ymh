@@ -519,7 +519,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
                                   protocol::ClientRole::Supervisor};
     std::optional<std::string> startup_notice;
     try {
-        const AttachResult attach = lifecycle.ensureRunning(row->id, identity);
+        const AttachResult attach = lifecycle.ensureRunning(row->id, identity, AttachBudget{});
         (void)attach;
     } catch (const std::exception& error) {
         // 53-D1 step 4: an explicit activation (`--resume`/`--new`) stays fatal;

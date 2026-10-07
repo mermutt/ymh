@@ -47,6 +47,7 @@
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
 #include "ymh/policy/permission_policy.hpp"
+#include "ymh/registry/liveness.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/transport/host_connection.hpp"
 #include "ymh/transport/protocol_server.hpp"
@@ -375,6 +376,16 @@ std::unique_ptr<HostConnection> connect_to(const std::filesystem::path& socket_p
     return connection;
 }
 
+// 76-D3: the per-step budget is capped by whatever remains of the overall
+// attach deadline, so a slow earlier phase cannot overflow the hard ceiling.
+std::chrono::milliseconds remaining_until(std::chrono::steady_clock::time_point deadline) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+        return std::chrono::milliseconds{0};
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+}
+
 // D20.7: never trust a socket just because it answers. The hello must name the
 // registry row's workspace and boot nonce; a reused/stale socket throws
 // `AttachRejected` so the caller re-enters discovery instead of binding a model
@@ -382,12 +393,15 @@ std::unique_ptr<HostConnection> connect_to(const std::filesystem::path& socket_p
 std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& socket_path,
                                                 const WorkspaceId&           workspace,
                                                 const HostBootId&            boot_id,
-                                                const AttachIdentity&        identity) {
+                                                const AttachIdentity&        identity,
+                                                const AttachBudget&          budget,
+                                                std::chrono::steady_clock::time_point deadline) {
     auto connection = std::make_unique<HostConnection>();
-    connection->connect(socket_path.string());
+    connection->connect(socket_path.string(), std::min(budget.connect, remaining_until(deadline)));
     const protocol::HelloResult hello =
         connection->handshake(protocol::profile_for_role(identity.role),
-                              identity.client_instance, identity.role);
+                              identity.client_instance, identity.role,
+                              std::min(budget.handshake, remaining_until(deadline)));
     if (hello.workspace.value != workspace.value || hello.boot_id.value != boot_id.value) {
         connection->close();
         throw HostError(protocol::HostErrorCode::AttachRejected,
@@ -1522,7 +1536,9 @@ ReapResult HostLifecycle::reapIfStale(const WorkspaceRecord& record) {
 }
 
 AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
-                                           const AttachIdentity&  identity) {
+                                           const AttachIdentity&  identity,
+                                           const AttachBudget&    budget,
+                                           std::chrono::steady_clock::time_point deadline) {
     const HostConfig                    config  = configFor(record);
     const HostLauncher::SpawnResult     spawned = launcher_.spawn(config);
     // 69-D5: the diagnostic pipe read end is parent-owned and single-consumer;
@@ -1536,11 +1552,12 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
             }
         }
     } close_diagnostic{spawned.diagnostic_fd};
-    const std::chrono::steady_clock::time_point deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    const std::chrono::steady_clock::time_point readiness_deadline =
+        std::chrono::steady_clock::now() + std::min(budget.spawn_readiness, remaining_until(deadline));
     std::optional<int> daemon_exit;
     std::string        last_error;
-    while (std::chrono::steady_clock::now() < deadline) {
+    std::string        phase = "spawn readiness";
+    while (std::chrono::steady_clock::now() < readiness_deadline) {
         // A zombie satisfies `isAlive` (kill(pid,0) succeeds), so reap first: an
         // exited daemon is authoritative and must end the wait at once instead
         // of spinning the whole budget into a misleading "not yet published".
@@ -1567,7 +1584,7 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
             }
             try {
                 return AttachResult{connect_checked(spawned.socketPath, record.id,
-                                                    spawned.bootId, identity),
+                                                    spawned.bootId, identity, budget, deadline),
                                     true};
             } catch (const std::exception& error) {
                 last_error = error.what();
@@ -1591,14 +1608,15 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
     const bool race_possible =
         !daemon_exit.has_value() ||
         *daemon_exit == static_cast<int>(HostExitCode::WorkspaceBusy);
+    phase = "winner attach";
     const std::chrono::steady_clock::time_point winner_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        std::chrono::steady_clock::now() + std::min(budget.winner, remaining_until(deadline));
     while (race_possible && std::chrono::steady_clock::now() < winner_deadline) {
         const std::optional<WorkspaceRecord> current = registry_.findById(record.id);
         if (current.has_value() && current->host.has_value()) {
             try {
                 return AttachResult{connect_checked(current->host->socketPath, current->id,
-                                                    current->host->bootId, identity),
+                                                    current->host->bootId, identity, budget, deadline),
                                     false};
             } catch (const std::exception& error) {
                 last_error = error.what();
@@ -1606,29 +1624,94 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{20});
     }
+    if (std::chrono::steady_clock::now() >= deadline) {
+        throw HostError(protocol::HostErrorCode::HostUnreachable,
+                        "startup exceeded " + std::to_string(budget.total.count()) +
+                            " ms during " + phase + ": " + last_error);
+    }
     throw HostError(protocol::HostErrorCode::HostUnreachable,
                     "daemon did not become ready: " + last_error);
 }
 
-AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace, AttachIdentity identity) {
+LiveProbe HostLifecycle::probeLive(const WorkspaceRecord& record,
+                                   const AttachIdentity&  identity,
+                                   const AttachBudget&    budget,
+                                   std::chrono::steady_clock::time_point deadline) {
+    LiveProbe probe;
+    const WorkspaceLockProbe lock = probeWorkspaceLock(record.canonicalPath);
+    probe.holder_pid = lock.pid;
+    if (!lock.held) {
+        probe.outcome = LiveProbeOutcome::NoHolder;
+        return probe;
+    }
+    try {
+        probe.connection = connect_checked(record.host->socketPath, record.id,
+                                           record.host->bootId, identity, budget, deadline);
+        probe.outcome = LiveProbeOutcome::Attached;
+        return probe;
+    } catch (const HostError& error) {
+        if (error.code() == protocol::HostErrorCode::AttachRejected) {
+            probe.outcome = LiveProbeOutcome::IdentityMismatch;
+            return probe;
+        }
+        throw;
+    } catch (const std::exception&) {
+        // Bounded connect/handshake failure: classify the holder below.
+    }
+    // 76-D5: the lock diagnostic is a hint, never an authorization to kill. A
+    // boot-id match with a not-provably-dead holder is our wedged daemon;
+    // otherwise the holder is foreign. `Unknown` is not proven dead.
+    const bool boot_matches = lock.bootId.has_value() &&
+                              lock.bootId.value() == record.host->bootId.value;
+    if (boot_matches && killHint(lock.pid.value_or(0)) != KillHint::Dead) {
+        probe.outcome = LiveProbeOutcome::OurDaemonUnresponsive;
+    } else {
+        probe.outcome = LiveProbeOutcome::ForeignLockHolder;
+    }
+    return probe;
+}
+
+AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace, AttachIdentity identity,
+                                          const AttachBudget& budget) {
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + budget.total;
     const std::optional<WorkspaceRecord> record = registry_.findById(workspace);
     if (!record.has_value()) {
         throw HostError(protocol::HostErrorCode::WorkspaceMissing,
                         "no workspace row for id " + workspace.value);
     }
     if (!record->host.has_value()) {
-        return spawnAndAttach(*record, identity);
+        return spawnAndAttach(*record, identity, budget, deadline);
     }
-    if (registry_.probeLiveness(workspace) == HostLiveness::Live) {
-        // H10/H11: a held sidecar flock always means live. Attach only if the
-        // hello identity matches; a mismatch is refused, never reaped, and a
-        // connection failure (e.g. SIGSTOP) never spawns a second daemon.
-        return AttachResult{connect_checked(record->host->socketPath, record->id,
-                                            record->host->bootId, identity),
-                            false};
+    LiveProbe probe = probeLive(*record, identity, budget, deadline);
+    const std::string lock_path =
+        (record->canonicalPath / ".ymh" / "sessions.lock").string();
+    switch (probe.outcome) {
+        case LiveProbeOutcome::Attached:
+            return AttachResult{std::move(probe.connection), false};
+        case LiveProbeOutcome::NoHolder:
+            reapIfStale(*record);
+            return spawnAndAttach(*record, identity, budget, deadline);
+        case LiveProbeOutcome::IdentityMismatch:
+            throw HostError(protocol::HostErrorCode::AttachRejected,
+                            "attach identity mismatch at " +
+                                record->host->socketPath.string());
+        case LiveProbeOutcome::OurDaemonUnresponsive:
+            throw HostError(
+                protocol::HostErrorCode::HostUnresponsive,
+                "host unresponsive: sidecar lock " + lock_path + " held by pid " +
+                    std::to_string(probe.holder_pid.value_or(0)) + " (boot " +
+                    record->host->bootId.value + ") did not answer host.hello within the probe deadline");
+        case LiveProbeOutcome::ForeignLockHolder:
+            throw HostError(
+                protocol::HostErrorCode::WorkspaceLockForeign,
+                "workspace lock " + lock_path + " is held by a process that is not this workspace's daemon (observed pid " +
+                    (probe.holder_pid.has_value() ? std::to_string(*probe.holder_pid)
+                                                  : std::string{"none"}) +
+                    ", registry claim boot " + record->host->bootId.value + ")");
     }
-    reapIfStale(*record);
-    return spawnAndAttach(*record, identity);
+    throw HostError(protocol::HostErrorCode::HostUnreachable,
+                    "ensureRunning: unclassified live-probe outcome");
 }
 
 void HostLifecycle::detach(WorkspaceId, protocol::ClientId) {}

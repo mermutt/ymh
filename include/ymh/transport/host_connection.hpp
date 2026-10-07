@@ -31,7 +31,10 @@ public:
     HostConnection(const HostConnection&) = delete;
     HostConnection& operator=(const HostConnection&) = delete;
 
-    void connect(const std::string& socket_path);
+    // 76-D1: bounded. `SOCK_NONBLOCK` + `poll(POLLOUT)` + `getsockopt(SO_ERROR)`;
+    // throws on the deadline ("connect: timed out after <n> ms") and on refusal.
+    void connect(const std::string& socket_path,
+                 std::chrono::milliseconds timeout = kHostConnectTimeout);
     [[nodiscard]] HelloResult handshake(ServerProfile profile,
                                         ClientInstanceId instance,
                                         std::chrono::milliseconds timeout = std::chrono::seconds{5});
@@ -52,7 +55,9 @@ public:
     [[nodiscard]] const HelloResult& hello() const noexcept { return hello_; }
 
 private:
-    void send_message(const nlohmann::json& message);
+    // 76-D2: the deadline is computed by `request` before the first byte.
+    void send_message(const nlohmann::json& message,
+                      std::chrono::steady_clock::time_point deadline);
     [[nodiscard]] bool wait_readable(std::chrono::milliseconds timeout) const;
     [[nodiscard]] bool fill_incoming(std::chrono::milliseconds timeout);
 

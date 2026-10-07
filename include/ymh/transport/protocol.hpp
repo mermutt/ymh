@@ -90,6 +90,12 @@ enum class HostState : std::uint8_t {
     Failed,
 };
 
+// 76-D1: the default bound for `HostConnection::connect` (and the daemon-side
+// reclaim probe's deadline). A full accept backlog on a non-blocking AF_UNIX
+// connect returns `EAGAIN`; without this bound the supervisor blocked forever
+// before the TUI rendered.
+inline constexpr std::chrono::milliseconds kHostConnectTimeout{5000};
+
 // Mirrors 04 §2.2. Mapped to AppCode by §7.1 (see `app_code_for_host_error`).
 enum class HostErrorCode : std::uint8_t {
     AlreadyRunning,
@@ -103,6 +109,12 @@ enum class HostErrorCode : std::uint8_t {
     ShutdownInProgress,
     AttachRejected,
     HostUnreachable,
+    // 76-D8 (additive). The sidecar lock is held by a process that is (probably)
+    // our daemon but did not answer `host.hello` within the budget.
+    HostUnresponsive,
+    // 76-D8 (additive). The sidecar lock is held by a live process that is not
+    // this workspace's daemon.
+    WorkspaceLockForeign,
 };
 
 // 16 §7.4 (16-D3). A client's declared role, asserted at hello. Self-asserted

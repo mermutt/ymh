@@ -38,9 +38,10 @@ HostConnection::HostConnection() = default;
 
 HostConnection::~HostConnection() { close(); }
 
-void HostConnection::connect(const std::string& socket_path) {
+void HostConnection::connect(const std::string& socket_path,
+                             std::chrono::milliseconds timeout) {
     close();
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) {
         throw connection_error(std::string("socket: ") + std::strerror(errno));
     }
@@ -53,25 +54,95 @@ void HostConnection::connect(const std::string& socket_path) {
     }
     std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
 
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     if (::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
-        const std::string reason = std::strerror(errno);
-        ::close(fd);
-        throw connection_error("connect: " + reason);
+        if (errno != EINPROGRESS && errno != EAGAIN && errno != EWOULDBLOCK) {
+            const int saved = errno;
+            ::close(fd);
+            errno = saved;
+            throw connection_error("connect: " + std::string(std::strerror(saved)));
+        }
+        pollfd descriptor{};
+        descriptor.fd = fd;
+        descriptor.events = POLLOUT;
+        int ready = -1;
+        for (;;) {
+            const auto remaining = remaining_until(deadline);
+            if (remaining.count() <= 0) {
+                ready = 0;
+                break;
+            }
+            ready = ::poll(&descriptor, 1, static_cast<int>(remaining.count()));
+            if (ready >= 0 || errno != EINTR) {
+                break;
+            }
+        }
+        if (ready <= 0) {
+            const int saved = (ready < 0) ? errno : ETIMEDOUT;
+            ::close(fd);
+            errno = saved;
+            if (ready < 0) {
+                throw connection_error("connect: " + std::string(std::strerror(saved)));
+            }
+            errno = ETIMEDOUT;
+            throw connection_error("connect: timed out after " +
+                                   std::to_string(timeout.count()) + " ms");
+        }
+        int so_error = 0;
+        socklen_t length = sizeof(so_error);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &length) != 0) {
+            const int saved = errno;
+            ::close(fd);
+            errno = saved;
+            throw connection_error("connect: " + std::string(std::strerror(saved)));
+        }
+        if (so_error != 0) {
+            ::close(fd);
+            errno = so_error;
+            throw connection_error("connect: " + std::string(std::strerror(so_error)));
+        }
+        if ((descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+            ::close(fd);
+            errno = ECONNRESET;
+            throw connection_error("connect: peer closed during connect");
+        }
     }
     fd_ = fd;
 }
 
-void HostConnection::send_message(const nlohmann::json& message) {
+void HostConnection::send_message(const nlohmann::json& message,
+                                  std::chrono::steady_clock::time_point deadline) {
     if (fd_ < 0) {
         throw connection_error("not connected");
     }
     const std::string frame = FrameCodec::encode(message.dump(), limits.max_frame_bytes);
     std::size_t written = 0;
     while (written < frame.size()) {
+        const auto remaining = remaining_until(deadline);
+        if (remaining.count() <= 0) {
+            throw connection_error("write: timed out after the deadline");
+        }
+        pollfd descriptor{};
+        descriptor.fd = fd_;
+        descriptor.events = POLLOUT;
+        const int ready = ::poll(&descriptor, 1, static_cast<int>(remaining.count()));
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw connection_error(std::string("poll: ") + std::strerror(errno));
+        }
+        if (ready == 0) {
+            throw connection_error("write: timed out after the deadline");
+        }
+        if ((descriptor.revents & POLLOUT) == 0 &&
+            (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            throw connection_error("write: peer closed the connection");
+        }
         const ssize_t count =
             ::send(fd_, frame.data() + written, frame.size() - written, MSG_NOSIGNAL);
         if (count < 0) {
-            if (errno == EINTR) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
             throw connection_error(std::string("write: ") + std::strerror(errno));
@@ -94,7 +165,12 @@ bool HostConnection::wait_readable(std::chrono::milliseconds timeout) const {
         }
         throw connection_error(std::string("poll: ") + std::strerror(errno));
     }
-    return ready > 0;
+    if (ready == 0) {
+        return false;
+    }
+    // 76-D12: readable data is serviced first (the caller reads before treating
+    // a hangup/error as terminal), so a readable wakeup is always reported.
+    return (descriptor.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0;
 }
 
 bool HostConnection::fill_incoming(std::chrono::milliseconds timeout) {
@@ -123,7 +199,7 @@ bool HostConnection::fill_incoming(std::chrono::milliseconds timeout) {
             throw connection_error("peer closed the connection");
         }
         if (count < 0) {
-            if (errno == EINTR) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
             throw connection_error(std::string("read: ") + std::strerror(errno));
@@ -157,9 +233,9 @@ nlohmann::json HostConnection::request(std::string_view method, nlohmann::json p
                                        std::chrono::milliseconds timeout) {
     const RequestId id{static_cast<std::int64_t>(++next_id_)};
     const std::string key = request_id_key(id);
-    send_message(encode(Request{id, std::string{method}, std::move(params)}));
-
     const auto deadline = std::chrono::steady_clock::now() + timeout;
+    send_message(encode(Request{id, std::string{method}, std::move(params)}), deadline);
+
     while (true) {
         if (!fill_incoming(remaining_until(deadline))) {
             throw RpcException(static_cast<int>(RpcCode::InternalError),

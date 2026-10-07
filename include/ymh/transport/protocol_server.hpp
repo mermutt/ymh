@@ -115,6 +115,10 @@ public:
     // drained. Never reads `connections_` off the io thread.
     bool waitForDrain(std::chrono::milliseconds grace);
 
+    // 76-A9 (gate H1): read-only accessor for the configured workspace. Caller:
+    // `TransportServer::start`, via `probe_existing_socket(path, server_.workspace(), ...)`.
+    [[nodiscard]] const WorkspaceId& workspace() const noexcept { return config_.workspace; }
+
 private:
     struct Subscription {
         SessionId session;

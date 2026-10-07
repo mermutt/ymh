@@ -10,6 +10,7 @@
 // The `ProtocolServer` must outlive the `TransportServer`.
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -42,6 +43,24 @@ public:
 private:
     HostErrorCode code_;
 };
+
+// 76-D6: the daemon-side stale-socket reclaim probe's outcome. The bind-time
+// sidecar flock makes `Residue` safe: any connectable node that does not speak
+// for this workspace is provably residue, not a live daemon.
+enum class SocketProbeResult : std::uint8_t {
+    Free,           // no inode at the path (or lstat failed); safe to bind
+    Refused,        // connect(2) => ECONNREFUSED; safe to unlink + bind
+    Residue,        // connected but no valid ymh hello for this workspace
+    LiveYmhDaemon,  // connected and a hello named this workspace
+};
+
+// 76-D6: bounded non-blocking connect + authenticated `host.hello` within
+// `deadline`. Mints a throwaway ClientInstanceId, uses
+// ServerProfile::Interactive, and compares HelloResult.workspace. Concrete
+// caller: TransportServer::start.
+[[nodiscard]] SocketProbeResult probe_existing_socket(
+    const std::string& socket_path, const WorkspaceId& workspace,
+    std::chrono::steady_clock::time_point deadline);
 
 class TransportServer {
 public:

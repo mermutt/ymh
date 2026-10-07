@@ -9,6 +9,7 @@
 // stale claim only when the sidecar lock is absent (never killing on `ps`
 // evidence, H11). The supervisor never `chdir()`s (E17).
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -111,6 +112,33 @@ enum class ReapResult : std::uint8_t {
     Absent,  // no claim was recorded; nothing to do
 };
 
+// 76-D3: the whole bare-`ymh` synchronous attach is bounded by `total`; each
+// sub-step is separately capped so one slow phase cannot consume the rest.
+inline constexpr std::chrono::milliseconds kAttachTotalBudget{25000};
+
+struct AttachBudget {
+    std::chrono::milliseconds connect{protocol::kHostConnectTimeout};  // 5 s (76-D1)
+    std::chrono::milliseconds handshake{5000};        // matches 05 handshake default
+    std::chrono::milliseconds spawn_readiness{10000}; // existing spawnAndAttach
+    std::chrono::milliseconds winner{5000};           // existing winner loop
+    std::chrono::milliseconds total{kAttachTotalBudget};  // hard ceiling (76-I4)
+};
+
+// 76-D4/76-D5: how a `Live` (held-lock) claim was corroborated.
+enum class LiveProbeOutcome : std::uint8_t {
+    Attached,               // authenticated hello matched the claim
+    NoHolder,               // the sidecar lock is free (claim is stale)
+    IdentityMismatch,       // hello answered, named a different workspace/boot
+    OurDaemonUnresponsive,  // lock diagnostic matches the claim, hello failed
+    ForeignLockHolder,      // lock diagnostic missing or names a different boot
+};
+
+struct LiveProbe {
+    LiveProbeOutcome                          outcome = LiveProbeOutcome::ForeignLockHolder;
+    std::unique_ptr<protocol::HostConnection> connection;  // set iff Attached
+    std::optional<std::int32_t>               holder_pid;  // diagnostic when known
+};
+
 class HostLifecycle {
 public:
     HostLifecycle(HostLauncher& launcher, WorkspaceRegistry& registry,
@@ -120,8 +148,10 @@ public:
     // Attach to a live daemon or spawn one. NEVER kills a process. May clear a
     // stale claim (lazy reap) under the D22 write lock (03 §6.4, H10, H11).
     // The supplied identity is sent verbatim at hello (C-H2); the profile is
-    // derived from `identity.role` (C-M6).
-    AttachResult ensureRunning(WorkspaceId workspace, AttachIdentity identity);
+    // derived from `identity.role` (C-M6). `budget` bounds the whole call
+    // (76-D3); the default is the production budget.
+    AttachResult ensureRunning(WorkspaceId workspace, AttachIdentity identity,
+                               const AttachBudget& budget = AttachBudget{});
 
     // Detach this supervisor. Does NOT terminate the daemon (H8, H9).
     void detach(WorkspaceId workspace, protocol::ClientId client);
@@ -133,7 +163,21 @@ private:
     // Clears a claim only when lock-absence holds, under the D22 write lock.
     ReapResult reapIfStale(const WorkspaceRecord& record);
 
-    AttachResult spawnAndAttach(const WorkspaceRecord& record, const AttachIdentity& identity);
+    // 76-D3: takes the budget + the overall deadline; the hardcoded 10 s / 5 s
+    // loop bounds now derive from `budget` and `remaining_until`.
+    AttachResult spawnAndAttach(const WorkspaceRecord& record,
+                                const AttachIdentity&   identity,
+                                const AttachBudget&     budget,
+                                std::chrono::steady_clock::time_point deadline);
+
+    // 76-D4/76-D5: re-probes the sidecar lock and only attaches after a bounded
+    // authenticated hello naming the claim's workspace and boot. Never reaps,
+    // never signals, never spawns.
+    [[nodiscard]] LiveProbe probeLive(const WorkspaceRecord& record,
+                                      const AttachIdentity&  identity,
+                                      const AttachBudget&    budget,
+                                      std::chrono::steady_clock::time_point deadline);
+
     [[nodiscard]] HostConfig configFor(const WorkspaceRecord& record) const;
 
     HostLauncher&      launcher_;

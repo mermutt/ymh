@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <fcntl.h>
@@ -21,7 +22,59 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
+#include "ymh/registry/registry.hpp"
+#include "ymh/transport/host_connection.hpp"
+
 namespace ymh::protocol {
+
+namespace {
+
+[[nodiscard]] std::chrono::milliseconds remaining_until(
+    std::chrono::steady_clock::time_point deadline) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+        return std::chrono::milliseconds{0};
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+}
+
+} // namespace
+
+SocketProbeResult probe_existing_socket(const std::string& socket_path,
+                                        const WorkspaceId& workspace,
+                                        std::chrono::steady_clock::time_point deadline) {
+    struct stat status {};
+    if (::lstat(socket_path.c_str(), &status) != 0) {
+        return SocketProbeResult::Free;
+    }
+    HostConnection probe;
+    try {
+        probe.connect(socket_path, remaining_until(deadline));
+    } catch (const std::exception& error) {
+        const std::string what = error.what();
+        if (what.find("socket:") != std::string::npos) {
+            throw TransportError(HostErrorCode::SocketUnavailable, what);
+        }
+        if (errno == ECONNREFUSED) {
+            return SocketProbeResult::Refused;
+        }
+        return SocketProbeResult::Residue;
+    }
+    try {
+        const HelloResult hello =
+            probe.handshake(ServerProfile::Interactive,
+                            ClientInstanceId{generate_uuid_v4()},
+                            remaining_until(deadline));
+        probe.close();
+        if (hello.workspace.value == workspace.value) {
+            return SocketProbeResult::LiveYmhDaemon;
+        }
+        return SocketProbeResult::Residue;
+    } catch (const std::exception&) {
+        probe.close();
+        return SocketProbeResult::Residue;
+    }
+}
 
 class SocketSession final : public std::enable_shared_from_this<SocketSession> {
 public:
@@ -205,32 +258,18 @@ void TransportServer::start() {
                              "transport: socket path too long: " + socket_path_);
     }
 
-    struct stat status {};
-    if (::lstat(socket_path_.c_str(), &status) == 0) {
-        const int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (probe < 0) {
-            throw TransportError(HostErrorCode::SocketUnavailable,
-                                 std::string("transport: probe socket: ") + std::strerror(errno));
-        }
-        ::fcntl(probe, F_SETFL, ::fcntl(probe, F_GETFL, 0) | O_NONBLOCK);
-        sockaddr_un address{};
-        address.sun_family = AF_UNIX;
-        std::memcpy(address.sun_path, socket_path_.c_str(), socket_path_.size() + 1);
-        const int connected =
-            ::connect(probe, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
-        const int probe_errno = errno;
-        ::close(probe);
-        if (connected == 0 || probe_errno == EINPROGRESS || probe_errno == EAGAIN) {
+    const std::chrono::steady_clock::time_point probe_deadline =
+        std::chrono::steady_clock::now() + kHostConnectTimeout;
+    switch (probe_existing_socket(socket_path_, server_.workspace(), probe_deadline)) {
+        case SocketProbeResult::Free:
+            break;
+        case SocketProbeResult::Refused:
+        case SocketProbeResult::Residue:
+            ::unlink(socket_path_.c_str());
+            break;
+        case SocketProbeResult::LiveYmhDaemon:
             throw TransportError(HostErrorCode::AlreadyRunning,
                                  "transport: another daemon is live at " + socket_path_);
-        }
-        if (probe_errno == ECONNREFUSED) {
-            ::unlink(socket_path_.c_str());
-        } else {
-            throw TransportError(HostErrorCode::SocketUnavailable,
-                                 std::string("transport: connect-probe: ") +
-                                     std::strerror(probe_errno));
-        }
     }
 
     std::error_code error;
@@ -260,6 +299,7 @@ void TransportServer::start() {
     }
 
     own_inode_.reset();
+    struct stat status {};
     if (::lstat(socket_path_.c_str(), &status) == 0) {
         own_inode_ = status.st_ino;
     }

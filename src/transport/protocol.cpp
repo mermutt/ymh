@@ -127,6 +127,8 @@ int rpc_code_for_host_error(HostErrorCode code) noexcept {
         case HostErrorCode::LogSinkUnwritable:
         case HostErrorCode::NotServing:
         case HostErrorCode::HostUnreachable:
+        case HostErrorCode::HostUnresponsive:
+        case HostErrorCode::WorkspaceLockForeign:
             return code_value(AppCode::NotServing);
         case HostErrorCode::ShutdownInProgress:
             return code_value(AppCode::ShutdownInProgress);
