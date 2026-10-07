@@ -1579,16 +1579,6 @@ Element render_model_picker(const UiModel& model, const Theme& theme) {
            ftxui::clear_under | ftxui::center;
 }
 
-Element render_notice(const UiModel& model, const Theme& theme) {
-    Elements rows;
-    rows.push_back(ftxui::text(model.message.text));
-    rows.push_back(ftxui::separator());
-    rows.push_back(ftxui::text("[ OK ]") | ftxui::inverted);
-    (void)theme;
-    return ftxui::window(ftxui::text("workspaces"), ftxui::vbox(std::move(rows))) |
-           ftxui::clear_under | ftxui::center;
-}
-
 // 67-D1: UTF-8-safe display-column truncation with a single-glyph ellipsis.
 // Returns `text` unchanged when it already fits `max_width` columns (or when the
 // budget is empty).
@@ -1962,6 +1952,182 @@ Element render_context_overlay(const UiModel& model, TerminalSize size, const Th
            ftxui::clear_under;
 }
 
+// 81-D9/81-I10: below this width the dashboard drops the workspace and age
+// columns and shortens its footer.
+constexpr int kDashboardNarrowWidth = 60;
+
+std::string dashboard_group_name(DashboardGroup group) {
+    switch (group) {
+        case DashboardGroup::NeedsInput:
+            return "Needs input";
+        case DashboardGroup::Working:
+            return "Working";
+        case DashboardGroup::Completed:
+            return "Completed";
+    }
+    return "Completed";
+}
+
+std::string dashboard_summary(const DashboardCounts& counts, bool narrow) {
+    const std::size_t completed_bucket = counts.completed;
+    if (!narrow) {
+        return std::to_string(counts.needs_input) + " awaiting input - " +
+               std::to_string(counts.working) + " working - " +
+               std::to_string(completed_bucket) + " completed";
+    }
+    std::vector<std::string> parts;
+    if (counts.needs_input > 0) {
+        parts.push_back(std::to_string(counts.needs_input) + " awaiting input");
+    }
+    if (counts.working > 0) {
+        parts.push_back(std::to_string(counts.working) + " working");
+    }
+    if (completed_bucket > 0 && parts.size() < 2) {
+        parts.push_back(std::to_string(completed_bucket) + " completed");
+    }
+    std::string joined;
+    for (std::size_t index = 0; index < parts.size(); ++index) {
+        if (index != 0) {
+            joined += " - ";
+        }
+        joined += parts[index];
+    }
+    return joined;
+}
+
+std::string dashboard_row_text(const UiModel& model, const DashboardRow& row, bool narrow) {
+    std::string text = dashboard_status_glyph(row.status);
+    text += " ";
+    text += dashboard_status_label(row.status);
+    text += "  ";
+    text += session_row_title(row.title, row.session);
+    if (narrow) {
+        return text;
+    }
+    text += "  ";
+    text += row.workspace_title;
+    if (row.workspace_stopping) {
+        text += " [stopping]";
+    }
+    text += "  ";
+    if (row.updatedAt.has_value() && model.catalog.nowMs > 0) {
+        text += relative_age_label(model.catalog.nowMs - *row.updatedAt);
+    } else {
+        text += "-";
+    }
+    return text;
+}
+
+struct DashboardLine {
+    std::string    text;
+    DashboardGroup group = DashboardGroup::Completed;
+    bool           header = false;
+    bool           cursor = false;
+};
+
+Element render_dashboard(const UiModel& model, TerminalSize size, const Theme& theme) {
+    const SwitcherSourcePolicy& policy = switcher_policy(SwitcherSource::Live);
+    const DashboardModel&       dashboard = model.dashboard;
+    const DashboardCounts       counts = dashboard.counts();
+    const bool                  narrow = size.width < kDashboardNarrowWidth;
+
+    Elements root;
+    root.push_back(ftxui::text(std::string(policy.heading)) | ftxui::bold);
+    root.push_back(ftxui::text(dashboard_summary(counts, narrow)) | ftxui::dim);
+
+    if (dashboard.rows.empty()) {
+        root.push_back(ftxui::text(std::string(policy.empty_state)) | ftxui::dim);
+        root.push_back(ftxui::text(narrow ? "Enter attach | Esc close"
+                                          : std::string(policy.footer)) |
+                       ftxui::dim);
+        return ftxui::vbox(std::move(root));
+    }
+
+    std::vector<DashboardLine> logical;
+    const std::array<DashboardGroup, 3> groups{DashboardGroup::NeedsInput,
+                                               DashboardGroup::Working,
+                                               DashboardGroup::Completed};
+    for (const DashboardGroup group : groups) {
+        std::vector<std::size_t> indices;
+        for (std::size_t index = 0; index < dashboard.rows.size(); ++index) {
+            if (dashboard.rows[index].group == group) {
+                indices.push_back(index);
+            }
+        }
+        if (indices.empty()) {
+            continue;
+        }
+        logical.push_back({dashboard_group_name(group) + " (" +
+                               std::to_string(indices.size()) + ")",
+                           group, true, false});
+        if (dashboard.collapsed.count(group) != 0) {
+            continue;
+        }
+        for (const std::size_t index : indices) {
+            logical.push_back({dashboard_row_text(model, dashboard.rows[index], narrow), group,
+                               false, index == dashboard.cursor});
+        }
+    }
+
+    const DashboardGroup cursor_group = dashboard.rows[dashboard.cursor].group;
+    std::size_t cursor_line = 0;
+    bool        cursor_found = false;
+    for (std::size_t index = 0; index < logical.size(); ++index) {
+        if (logical[index].cursor) {
+            cursor_line = index;
+            cursor_found = true;
+            break;
+        }
+    }
+    if (!cursor_found) {
+        for (std::size_t index = 0; index < logical.size(); ++index) {
+            if (logical[index].group == cursor_group) {
+                cursor_line = index;
+                break;
+            }
+        }
+    }
+
+    int list_space = size.height - 3;
+    if (list_space < 1) {
+        list_space = 1;
+    }
+    std::size_t       space = static_cast<std::size_t>(list_space);
+    bool              clipped = logical.size() > space;
+    const std::size_t content_space = clipped && space > 1 ? space - 1 : space;
+    std::size_t       start = 0;
+    if (cursor_line >= content_space) {
+        start = cursor_line - content_space + 1;
+    }
+    std::size_t end = std::min(logical.size(), start + content_space);
+    clipped = end < logical.size();
+
+    Elements list;
+    for (std::size_t index = start; index < end; ++index) {
+        Element line = ftxui::text(logical[index].text);
+        if (logical[index].header) {
+            line = std::move(line) | ftxui::bold;
+        }
+        if (logical[index].cursor) {
+            line = std::move(line) | ftxui::inverted;
+        }
+        list.push_back(std::move(line));
+    }
+    if (clipped) {
+        list.push_back(ftxui::text("... " + std::to_string(logical.size() - end) + " more") |
+                       ftxui::dim);
+    }
+    root.push_back(ftxui::vbox(std::move(list)) | ftxui::flex);
+
+    std::string footer = narrow ? "Enter attach | Esc close" : std::string(policy.footer);
+    if (dashboard.exit_arm == EscArm::Armed) {
+        footer = "press Ctrl+C again to quit";
+    }
+    root.push_back(ftxui::text(footer) | ftxui::dim);
+    (void)theme;
+    return ftxui::vbox(std::move(root));
+}
+
 } // namespace
 
 bool composer_move_cursor_vertical(std::string_view draft, std::size_t& cursor,
@@ -2199,25 +2365,27 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     rows.push_back(std::move(status));
 
     Element main = ftxui::vbox(std::move(rows)) | ftxui::border;
+    // 81-D1/81-I1: the base is selected by `dashboard.open` (not `mode`), so an
+    // overlay raised from the dashboard composes over the dashboard, never the
+    // conversation.
+    Element base =
+        model.dashboard.open ? render_dashboard(model, size, theme) : std::move(main);
     if (model.exitConfirm.open) {
-        return ftxui::dbox({main, render_exit_confirm(model, theme)});
+        return ftxui::dbox({base, render_exit_confirm(model, theme)});
     }
     if (model.dialog.open) {
-        return ftxui::dbox({main, render_dialog(model, theme)});
+        return ftxui::dbox({base, render_dialog(model, theme)});
     }
     if (model.mode == UiMode::Context && model.context.open) {
-        return ftxui::dbox({main, render_context_overlay(model, size, theme)});
-    }
-    if (model.mode == UiMode::Notice && model.message.open) {
-        return ftxui::dbox({main, render_notice(model, theme)});
+        return ftxui::dbox({base, render_context_overlay(model, size, theme)});
     }
     if (model.mode == UiMode::Switcher) {
-        return ftxui::dbox({main, render_switcher(model, theme, size.width)});
+        return ftxui::dbox({base, render_switcher(model, theme, size.width)});
     }
     if (model.mode == UiMode::ModelPicker && model.model_picker.visible) {
-        return ftxui::dbox({main, render_model_picker(model, theme)});
+        return ftxui::dbox({base, render_model_picker(model, theme)});
     }
-    return main;
+    return base;
 }
 
 std::string render_to_ansi(const UiModel& model, TerminalSize size, const Theme& theme) {

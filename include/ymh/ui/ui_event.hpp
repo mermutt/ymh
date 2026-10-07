@@ -48,10 +48,11 @@ enum class UiMode : std::uint8_t {
     Dialog,
     ExitConfirm,
     Context,
-    // 46-D3: the single-OK notice popup (the empty Live switcher's replacement).
-    Notice,
     // 53-D4: the `/model` picker overlay.
     ModelPicker,
+    // 81-D1: the full-screen session dashboard (the Ctrl-S surface). Replaces
+    // the former single-OK `Notice` mode (81-D4).
+    Dashboard,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {

@@ -27,11 +27,13 @@ std::string display_model(const ymh::Config& config, const std::string& model_id
 }
 
 // 58-A3.1 (P2): the pinned per-source policy table, indexed by `SwitcherSource`.
+// The Live row is repurposed by 81-D4 as the dashboard's heading/empty-state/
+// footer source; its popup-only fields stay live for the latent Live popup.
 constexpr SwitcherSourcePolicy kSwitcherPolicy[3] = {
     {.window_title = "workspaces",
-     .heading = "Switcher",
-     .footer = "j/k move · Tab expand · Ctrl+D delete · Enter focus · Esc close",
-     .empty_state = "(no workspaces)",
+     .heading = "Sessions",
+     .footer = "Up/Down move | Enter attach | Esc close | Ctrl+C twice quit",
+     .empty_state = "No live sessions.",
      .enter = SwitcherEnter::Focus,
      .ctrl_d_enabled = true,
      .tab_expands = true,
@@ -628,6 +630,318 @@ bool session_working(const SessionUiState& state) {
 }
 
 } // namespace
+
+DashboardStatus dashboard_status(const SessionCell& cell,
+                                 const SessionUiState* state) noexcept {
+    if (is_active_state(cell.state) || cell.state == AgentState::Cancelling ||
+        (state != nullptr && session_working(*state))) {
+        return DashboardStatus::Working;
+    }
+    if (cell.state == AgentState::Error) {
+        return DashboardStatus::Failed;
+    }
+    if (cell.attention) {
+        return DashboardStatus::NeedsInput;
+    }
+    if (state != nullptr && state->attention.completed) {
+        return DashboardStatus::Completed;
+    }
+    return DashboardStatus::Idle;
+}
+
+DashboardGroup dashboard_group(DashboardStatus status) noexcept {
+    switch (status) {
+        case DashboardStatus::NeedsInput:
+            return DashboardGroup::NeedsInput;
+        case DashboardStatus::Working:
+            return DashboardGroup::Working;
+        case DashboardStatus::Completed:
+        case DashboardStatus::Failed:
+        case DashboardStatus::Idle:
+        case DashboardStatus::Stopped:
+            return DashboardGroup::Completed;
+    }
+    return DashboardGroup::Completed;
+}
+
+const char* dashboard_status_glyph(DashboardStatus status) noexcept {
+    switch (status) {
+        case DashboardStatus::Working:
+            return "*";
+        case DashboardStatus::NeedsInput:
+            return "!";
+        case DashboardStatus::Idle:
+            return "o";
+        case DashboardStatus::Completed:
+            return "+";
+        case DashboardStatus::Failed:
+            return "x";
+        case DashboardStatus::Stopped:
+            return "-";
+    }
+    return "?";
+}
+
+const char* dashboard_status_label(DashboardStatus status) noexcept {
+    switch (status) {
+        case DashboardStatus::Working:
+            return "working";
+        case DashboardStatus::NeedsInput:
+            return "needs input";
+        case DashboardStatus::Idle:
+            return "idle";
+        case DashboardStatus::Completed:
+            return "completed";
+        case DashboardStatus::Failed:
+            return "failed";
+        case DashboardStatus::Stopped:
+            return "stopped";
+    }
+    return "unknown";
+}
+
+namespace {
+
+int ascii_ci_compare(const std::string& left, const std::string& right) {
+    const std::size_t size = std::min(left.size(), right.size());
+    for (std::size_t index = 0; index < size; ++index) {
+        const unsigned char a =
+            static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(left[index])));
+        const unsigned char b =
+            static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(right[index])));
+        if (a != b) {
+            return a < b ? -1 : 1;
+        }
+    }
+    if (left.size() == right.size()) {
+        return 0;
+    }
+    return left.size() < right.size() ? -1 : 1;
+}
+
+} // namespace
+
+bool dashboard_row_less(const DashboardRow& left, const DashboardRow& right,
+                        const std::string& cwd_path, const std::string& left_ws_path,
+                        const std::string& right_ws_path) {
+    const bool left_root = !cwd_path.empty() && left_ws_path == cwd_path;
+    const bool right_root = !cwd_path.empty() && right_ws_path == cwd_path;
+    if (left_root != right_root) {
+        return left_root;
+    }
+    if (left.workspace_last_used != right.workspace_last_used) {
+        return left.workspace_last_used > right.workspace_last_used;
+    }
+    if (const int by_title = ascii_ci_compare(left.workspace_title, right.workspace_title);
+        by_title != 0) {
+        return by_title < 0;
+    }
+    const std::int64_t left_updated = left.updatedAt.value_or(0);
+    const std::int64_t right_updated = right.updatedAt.value_or(0);
+    if (left_updated != right_updated) {
+        return left_updated > right_updated;
+    }
+    if (const int by_session_title = ascii_ci_compare(left.title, right.title);
+        by_session_title != 0) {
+        return by_session_title < 0;
+    }
+    return left.session.value < right.session.value;
+}
+
+void DashboardModel::begin_snapshot(const UiModel& model) {
+    prev_mode = model.mode;
+    open = true;
+    exit_arm = EscArm::Disarmed;
+    exit_armed_at.reset();
+    project(model);
+    cursor = 0;
+    SessionId focused;
+    const auto active_workspace = model.workspaces.find(model.activeWorkspaceId);
+    if (active_workspace != model.workspaces.end()) {
+        focused = active_workspace->second.activeSessionId();
+    }
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        if (rows[index].session == focused && !focused.value.empty()) {
+            cursor = index;
+            break;
+        }
+    }
+}
+
+void DashboardModel::rebuild(const UiModel& model) {
+    const bool had = cursor < rows.size();
+    const WorkspaceId previous_workspace = had ? rows[cursor].workspace : WorkspaceId{};
+    const SessionId previous_session = had ? rows[cursor].session : SessionId{};
+    project(model);
+    if (!had) {
+        clamp_cursor();
+        return;
+    }
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        if (rows[index].workspace == previous_workspace &&
+            rows[index].session == previous_session) {
+            cursor = index;
+            return;
+        }
+    }
+    clamp_cursor();
+}
+
+void DashboardModel::close() {
+    rows.clear();
+    cursor = 0;
+    collapsed.clear();
+    exit_arm = EscArm::Disarmed;
+    exit_armed_at.reset();
+    open = false;
+}
+
+void DashboardModel::moveDown() {
+    if (cursor + 1 < rows.size()) {
+        ++cursor;
+    }
+}
+
+void DashboardModel::moveUp() {
+    if (cursor > 0) {
+        --cursor;
+    }
+}
+
+void DashboardModel::pageDown() {
+    if (rows.empty()) {
+        return;
+    }
+    const std::size_t step = std::max<std::size_t>(1, rows.size() / 10);
+    cursor = std::min(rows.size() - 1, cursor + step);
+}
+
+void DashboardModel::pageUp() {
+    if (rows.empty()) {
+        return;
+    }
+    const std::size_t step = std::max<std::size_t>(1, rows.size() / 10);
+    cursor = cursor > step ? cursor - step : 0;
+}
+
+void DashboardModel::moveHome() { cursor = 0; }
+
+void DashboardModel::moveEnd() {
+    if (!rows.empty()) {
+        cursor = rows.size() - 1;
+    }
+}
+
+void DashboardModel::toggle_collapse() {
+    if (cursor >= rows.size()) {
+        return;
+    }
+    const DashboardGroup group = rows[cursor].group;
+    if (collapsed.count(group) != 0) {
+        collapsed.erase(group);
+    } else {
+        collapsed.insert(group);
+    }
+}
+
+DashboardCounts DashboardModel::counts() const {
+    DashboardCounts result;
+    for (const DashboardRow& row : rows) {
+        switch (row.status) {
+            case DashboardStatus::NeedsInput:
+                ++result.needs_input;
+                break;
+            case DashboardStatus::Working:
+                ++result.working;
+                break;
+            case DashboardStatus::Completed:
+                ++result.completed;
+                break;
+            case DashboardStatus::Failed:
+                ++result.failed;
+                ++result.completed;
+                break;
+            case DashboardStatus::Idle:
+                ++result.idle;
+                ++result.completed;
+                break;
+            case DashboardStatus::Stopped:
+                break;
+        }
+    }
+    return result;
+}
+
+void DashboardModel::clamp_cursor() {
+    if (rows.empty()) {
+        cursor = 0;
+    } else if (cursor >= rows.size()) {
+        cursor = rows.size() - 1;
+    }
+}
+
+void DashboardModel::project(const UiModel& model) {
+    rows.clear();
+    for (const WorkspaceNode& workspace : model.switcher.workspaces) {
+        const auto workspace_it = model.workspaces.find(workspace.id);
+        for (const SessionNode& node : workspace.sessions) {
+            DashboardRow row;
+            row.workspace = workspace.id;
+            row.session = node.id;
+            row.workspace_title = workspace.title;
+            row.workspace_last_used = workspace.lastUsedAt;
+            row.workspace_stopping = workspace.status == DaemonStatus::Stopping;
+            const SessionCell* cell = nullptr;
+            if (workspace_it != model.workspaces.end()) {
+                for (const SessionCell& candidate : workspace_it->second.sessions) {
+                    if (candidate.id == node.id) {
+                        cell = &candidate;
+                        break;
+                    }
+                }
+            }
+            const SessionUiState* state = model.session(node.id);
+            if (cell != nullptr) {
+                row.title = cell->title;
+                row.status = dashboard_status(*cell, state);
+            } else {
+                row.title = node.title;
+                SessionCell synthesized;
+                synthesized.id = node.id;
+                synthesized.state = node.state;
+                synthesized.attention = node.attention;
+                row.status = dashboard_status(synthesized, state);
+            }
+            row.group = dashboard_group(row.status);
+            for (const WorkspaceHistory& history : model.catalog.workspaces) {
+                if (history.id != workspace.id) {
+                    continue;
+                }
+                for (const SessionHistoryEntry& entry : history.sessions) {
+                    if (entry.id == node.id) {
+                        row.updatedAt = entry.updatedAt;
+                        break;
+                    }
+                }
+                break;
+            }
+            rows.push_back(std::move(row));
+        }
+    }
+
+    const auto path_of = [&model](const WorkspaceId& id) -> std::string {
+        const auto it = model.workspaces.find(id);
+        return it == model.workspaces.end() ? std::string{} : it->second.cwd;
+    };
+    std::stable_sort(rows.begin(), rows.end(), [&](const DashboardRow& left,
+                                                   const DashboardRow& right) {
+        if (left.group != right.group) {
+            return left.group < right.group;
+        }
+        return dashboard_row_less(left, right, model.cwdWorkspacePath,
+                                  path_of(left.workspace), path_of(right.workspace));
+    });
+}
 
 Presentation entry_presentation(const std::vector<ConversationEntry>& entries,
                                 std::size_t index, bool turn_active) noexcept {
@@ -1277,13 +1591,15 @@ void UiModel::apply(const UiEvent& event) {
                 dialog.summary = e.summary;
                 dialog.force_ask = e.force_ask;
                 dialog.selected = e.force_ask ? 1 : 0;
+                dialog.prev_mode = mode;
                 state.attention.needsInput = true;
                 mode = UiMode::Dialog;
                 dirty.mark(e.session, UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, PermissionResolved>) {
                 if (dialog.request == e.request) {
+                    const UiMode prev = dialog.prev_mode;
                     dialog.open = false;
-                    mode = UiMode::Conversation;
+                    mode = prev;
                 }
                 state.attention.needsInput = false;
                 dirty.mark(e.session, UiDirtyFlag::Attention);
@@ -1446,10 +1762,17 @@ void UiModel::apply(const WorkspaceEvent& event) {
     dirty.markAggregate();
 }
 
-void UiModel::openSwitcher() {
+void UiModel::openDashboard() {
     switcher.source = SwitcherSource::Live;
-    switcher.open(*this);
-    mode = UiMode::Switcher;
+    switcher.openLive(*this, /*include_focused=*/true);
+    dashboard.begin_snapshot(*this);
+    mode = UiMode::Dashboard;
+    dirty.markAggregate();
+}
+
+void UiModel::closeDashboard() {
+    dashboard.close();
+    mode = dashboard.prev_mode;
     dirty.markAggregate();
 }
 
@@ -1502,6 +1825,10 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
 }
 
 void SwitcherOverlayModel::open(const UiModel& model) {
+    openLive(model, /*include_focused=*/false);
+}
+
+void SwitcherOverlayModel::openLive(const UiModel& model, bool include_focused) {
     workspaces.clear();
     disarm_delete();
     source = SwitcherSource::Live;
@@ -1534,15 +1861,14 @@ void SwitcherOverlayModel::open(const UiModel& model) {
         }
         std::size_t hidden_by_focus = 0;
         for (const SessionCell& cell : workspace.sessions) {
+            const bool is_focused = cell.id == focused && !focused.value.empty();
+            if (is_focused && !include_focused) {
+                ++hidden_by_focus;
+                continue;
+            }
             const bool matches =
                 !filtering || cell.title.find(*filter) != std::string::npos ||
                 cell.id.value.find(*filter) != std::string::npos;
-            if (cell.id == focused && !focused.value.empty()) {
-                if (matches) {
-                    ++hidden_by_focus;
-                }
-                continue;
-            }
             if (!matches) {
                 continue;
             }

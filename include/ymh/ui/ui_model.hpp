@@ -378,6 +378,47 @@ struct SessionCell {
     bool        readOnly = false;
 };
 
+// 81-D5: the dashboard's per-row status. `Stopped` is a vocabulary member only;
+// `dashboard_status` never produces it (no durable per-session stop flag exists).
+enum class DashboardStatus : std::uint8_t {
+    Working,
+    NeedsInput,
+    Idle,
+    Completed,
+    Failed,
+    Stopped,
+};
+
+// 81-D6: render order (NeedsInput > Working > Completed); enum order is normative.
+enum class DashboardGroup : std::uint8_t {
+    NeedsInput,
+    Working,
+    Completed,
+};
+
+// 81-D2/81-D7: one projected live session row. `status`/`group` are derived on
+// every project and stored so the renderer never re-derives (81-I6).
+struct DashboardRow {
+    WorkspaceId                 workspace;
+    SessionId                   session;
+    std::string                 title;
+    std::string                 workspace_title;
+    std::int64_t                workspace_last_used = 0;   // WorkspaceNode::lastUsedAt
+    DashboardStatus             status = DashboardStatus::Idle;
+    DashboardGroup              group  = DashboardGroup::Completed;
+    std::optional<std::int64_t> updatedAt;                 // catalog join; nullopt == unknown
+    bool                        workspace_stopping = false;
+};
+
+// 81-D7: the summary counts; `Completed` folds Completed+Failed+Idle (81-D6).
+struct DashboardCounts {
+    std::size_t needs_input = 0;
+    std::size_t working = 0;
+    std::size_t completed = 0;
+    std::size_t idle = 0;
+    std::size_t failed = 0;
+};
+
 class WorkspaceModel {
 public:
     WorkspaceId              id;
@@ -530,6 +571,11 @@ public:
     std::size_t                                delete_target_session_count = 0;
 
     void open(const UiModel& model);
+    // 81-D2: the Live projection with the focused-session exclusion made
+    // optional. `open(model)` delegates with `include_focused == false` (the
+    // popup behaviour); the dashboard calls it with `true` so the focused
+    // session is a row (81-I8).
+    void openLive(const UiModel& model, bool include_focused);
     // 22 §3.6/§4.3 (S2): History source — builds nodes from `model.catalog`
     // (every registered workspace, live or not). Sets `source = History`.
     void openHistory(const UiModel& model);
@@ -546,6 +592,38 @@ public:
     // delete_target_session_count. Called by open(), openHistory() and close().
     void disarm_delete();
     // 51-D4.10 (51-M4): re-clamp `cursor` to a still-valid node after a delete.
+    void clamp_cursor();
+};
+
+// 81-D2: the dashboard is a pure snapshot rebuilt on open and on every catalog
+// delivery. All fields are UI-only and process-local (81-I18). `open()` saves
+// `prev_mode` from the outgoing mode before the caller sets `UiMode::Dashboard`.
+struct DashboardModel {
+    bool                      open = false;
+    std::vector<DashboardRow> rows;
+    std::size_t               cursor = 0;
+    UiMode                    prev_mode = UiMode::Conversation;
+    EscArm                    exit_arm = EscArm::Disarmed;
+    std::optional<std::chrono::steady_clock::time_point> exit_armed_at;
+    std::set<DashboardGroup>  collapsed;
+
+    // 81-D2: `open` is the public base-selector flag (chain R). The snapshot
+    // initializer is `begin_snapshot` -- C++ forbids a data member and a member
+    // function sharing the name `open`.
+    void begin_snapshot(const UiModel& model);
+    void rebuild(const UiModel& model);
+    void close();
+    void moveDown();
+    void moveUp();
+    void pageDown();
+    void pageUp();
+    void moveHome();
+    void moveEnd();
+    void toggle_collapse();
+    [[nodiscard]] DashboardCounts counts() const;
+
+private:
+    void project(const UiModel& model);
     void clamp_cursor();
 };
 
@@ -582,12 +660,6 @@ public:
     void armOnEdge(AgentState oldState, AgentState newState);
 };
 
-// 46-D3: the single-OK notice popup shown instead of an empty Live switcher.
-struct MessageDialogModel {
-    bool        open = false;
-    std::string text;
-};
-
 // 53-D4: the `/model` picker overlay. Rows are the `llm.models` entries plus a
 // synthetic row for the current literal id when no named entry is active.
 struct ModelPickerRow {
@@ -616,6 +688,10 @@ struct PermissionDialogModel {
     int                 selected = 0;   // 0=Once 1=Session 2=Always 3=Deny
     // 25-D4 (NEW-3 Rev 5): true => only {Allow once, Deny}; default Deny.
     bool                force_ask = false;
+    // 81-D13: the mode the dialog interrupted, restored on `PermissionResolved`
+    // so a dialog raised over the dashboard returns to it. Defaults to
+    // `Conversation`, the only value the conversation path ever records.
+    UiMode              prev_mode = UiMode::Conversation;
 };
 
 // 16 §7.6 / §4.2: the last-supervisor exit confirmation. Counts and workspace
@@ -631,6 +707,9 @@ struct ExitConfirmState {
     int                      sessions = 0;
     int                      running = 0;
     int                      selected = 0;
+    // 81-D13: the mode the confirm interrupted, restored on cancel so a confirm
+    // raised from the dashboard returns to it. Defaults to `Conversation`.
+    UiMode                   prev_mode = UiMode::Conversation;
 };
 
 // 18 §4.2 (CX-04): the read-only `/context` overlay state. Purely
@@ -694,12 +773,13 @@ struct UiModel {
     AggregateStatusModel                  aggregate;
     SwitcherOverlayModel                  switcher;
     PermissionDialogModel                 dialog;
-    MessageDialogModel                    message;
     ExitConfirmState                      exitConfirm;
     ContextOverlayModel                   context;
     SessionCatalogModel                   catalog;
     ReasoningSpinnerState                 spinner;
     ModelPickerModel                      model_picker;
+    // 81-D2: the full-screen dashboard snapshot (81-D1).
+    DashboardModel                        dashboard;
     UiMode                                mode = UiMode::Conversation;
     // 53-D3.1: the resolved model for the no-session fallback segment (entry
     // name when named, else the wire id). Never persisted.
@@ -769,9 +849,12 @@ struct UiModel {
     // Live switcher whose cursor targeted it.
     void            eraseWorkspace(const WorkspaceId& workspace);
 
-    // Builds (or refreshes) the switcher node tree from the current workspaces
-    // and sessions (10 §7.1). Pure model work; no registry/daemon access.
-    void            openSwitcher();
+    // 81-D2: opens the full-screen dashboard over the available Live
+    // projection. Saves the outgoing mode into `dashboard.prev_mode`, then sets
+    // `UiMode::Dashboard`. Pure model work; no registry/daemon access.
+    void            openDashboard();
+    // 81-D2: closes the dashboard, restoring `dashboard.prev_mode`.
+    void            closeDashboard();
     void            focusWorkspace(const WorkspaceId& workspace);
     void            focusSession(const SessionId& id);
     // 45-D10.7: THE single mutator of WorkspaceModel's private focus. Models the
@@ -827,6 +910,22 @@ struct UiModel {
 
 [[nodiscard]] bool is_active_state(AgentState state) noexcept;
 [[nodiscard]] bool is_waiting_state(AgentState state) noexcept;
+
+// 81-D5/81-D6: the dashboard's status/group/glyph/label derivation. `status` is
+// total over `(SessionCell, SessionUiState*)`; the renderer and model share it
+// so they cannot disagree (81-I6).
+[[nodiscard]] DashboardStatus dashboard_status(const SessionCell& cell,
+                                               const SessionUiState* state) noexcept;
+[[nodiscard]] DashboardGroup dashboard_group(DashboardStatus status) noexcept;
+[[nodiscard]] const char* dashboard_status_glyph(DashboardStatus status) noexcept;
+[[nodiscard]] const char* dashboard_status_label(DashboardStatus status) noexcept;
+// 81-D6: the dashboard row order within a group. The two workspace paths are
+// supplied by the caller so the rule is evaluable from its arguments.
+[[nodiscard]] bool dashboard_row_less(const DashboardRow& left,
+                                      const DashboardRow& right,
+                                      const std::string& cwd_path,
+                                      const std::string& left_ws_path,
+                                      const std::string& right_ws_path);
 
 // 48-D6.2: the derived styling level. Never stored on ConversationEntry.
 enum class Presentation : std::uint8_t {

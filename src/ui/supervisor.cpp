@@ -753,6 +753,9 @@ private:
         model_.exitConfirm.sessions = count_sessions(orphaning);
         model_.exitConfirm.running = count_running(orphaning);
         model_.exitConfirm.selected = 0;
+        // 81-D13: record the interrupted mode before raising the confirm so a
+        // cancel returns to it (the dashboard's own double Ctrl+C).
+        model_.exitConfirm.prev_mode = model_.mode;
         model_.mode = UiMode::ExitConfirm;
         model_.dirty.markAggregate();
     }
@@ -786,8 +789,10 @@ private:
     // Cancel (n/N/Esc/Ctrl+C): no registry write, still registered, stay in the
     // TUI (16 §4.2). No path may leave a live supervisor deregistered.
     void cancel_exit() {
+        // 81-D13: capture the interrupted mode before the state reset clobbers it.
+        const UiMode prev = model_.exitConfirm.prev_mode;
         model_.exitConfirm = ExitConfirmState{};
-        model_.mode = UiMode::Conversation;
+        model_.mode = prev;
         model_.dirty.markAggregate();
     }
 
@@ -1042,6 +1047,13 @@ private:
                    model_.switcher.source == SwitcherSource::Live) {
             resnapshot_switcher();
         }
+        // 81-D12: refresh an open dashboard on every delivery, including while an
+        // overlay is raised over it (`dashboard.open`, not `mode`). The Live
+        // projection is re-run first so catalog-membership changes are visible;
+        // `rebuild` then preserves the cursor.
+        if (model_.dashboard.open) {
+            refresh_dashboard();
+        }
         model_.dirty.markAggregate();
     }
 
@@ -1201,69 +1213,99 @@ private:
         return false;
     }
 
-    [[nodiscard]] bool other_live_workspace_exists() const {
-        for (const auto& [id, workspace] : model_.workspaces) {
-            if (id != model_.activeWorkspaceId && live_switcher_renderable(workspace)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // 49-D5/46-D3: true when the Live switcher has at least one actionable target:
-    // another live-renderable workspace with a known-visible or unknown session,
-    // or a non-focused visible leaf in the active workspace.
-    [[nodiscard]] bool switcher_has_targets() const {
-        for (const auto& [id, workspace] : model_.workspaces) {
-            if (id == model_.activeWorkspaceId || !live_switcher_renderable(workspace)) {
-                continue;
-            }
-            if (catalog_membership_unknown(id) || has_visible_leaf(id)) {
-                return true;
-            }
-        }
-        const auto active = model_.workspaces.find(model_.activeWorkspaceId);
-        if (active == model_.workspaces.end()) {
-            return false;
-        }
-        const SessionId focused = active->second.activeSessionId();
-        const bool unknown = catalog_membership_unknown(active->first);
-        for (const SessionCell& cell : active->second.sessions) {
-            if (!focused.value.empty() && cell.id == focused) {
-                continue;
-            }
-            if (unknown || model_.catalog_has_session(active->first, cell.id)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // 49-D6/46-D3: opens the notice instead of the switcher when there is no
-    // target. The text distinguishes "another live workspace exists but has no
-    // switchable session" from "nothing else to switch to".
-    void openSwitcher() {
+    // 81-D4: opens the full-screen dashboard (the renamed openSwitcher). The
+    // empty-target Notice branch is gone: the dashboard always opens and renders
+    // its own inline empty state (81-D9).
+    void open_dashboard() {
         disarm_esc();
-        if (!switcher_has_targets()) {
-            model_.message.text = other_live_workspace_exists()
-                                      ? "No other sessions available"
-                                      : "No other workspaces available";
-            model_.message.open = true;
-            model_.mode = UiMode::Notice;
-            model_.dirty.markAggregate();
-            return;
-        }
-        model_.openSwitcher();
+        model_.openDashboard();
+        model_.dirty.markAggregate();
     }
 
-    // 46-D3: Enter/Esc/Ctrl+C dismiss; every other key is swallowed.
-    bool handle_notice(const ftxui::Event& event) {
-        if (event == ftxui::Event::Return || event == ftxui::Event::Escape ||
-            event == ftxui::Event::CtrlC) {
-            model_.message.open = false;
-            model_.mode = UiMode::Conversation;
-            model_.dirty.markAggregate();
+    // 81-D8/81-D13: closes the dashboard and reconciles the modal composer
+    // snapshot (RB-12). `closeDashboard` restores `dashboard.prev_mode`.
+    void close_dashboard() {
+        model_.closeDashboard();
+        catalog_visible_.store(false);
+        model_.dirty.markAggregate();
+    }
+
+    void disarm_dashboard_exit() {
+        model_.dashboard.exit_arm = EscArm::Disarmed;
+        model_.dashboard.exit_armed_at.reset();
+    }
+
+    // 81-D8.1: Enter/Right attach focus-only (never `session.activate`), then
+    // close. A non-session/no-row cursor just closes.
+    void attach_dashboard_row() {
+        const DashboardModel& dashboard = model_.dashboard;
+        if (dashboard.cursor < dashboard.rows.size()) {
+            const DashboardRow& row = dashboard.rows[dashboard.cursor];
+            model_.focusSessionIn(row.workspace, row.session);
+            model_.focusWorkspace(row.workspace);
+            sync_subagent_subscriptions();
         }
+        close_dashboard();
+    }
+
+    // 81-D8: the dashboard consumes every key while it is the top focus owner.
+    // The double Ctrl+C exit arm reuses `kEscArmTimeout` (81-D8.2); any other
+    // key, cursor move, close, or the timeout disarms (81-I13).
+    bool handle_dashboard(const ftxui::Event& event) {
+        DashboardModel&    dashboard = model_.dashboard;
+        const auto         now = std::chrono::steady_clock::now();
+        if (dashboard.exit_arm == EscArm::Armed && dashboard.exit_armed_at.has_value() &&
+            now - *dashboard.exit_armed_at >= kEscArmTimeout) {
+            disarm_dashboard_exit();
+        }
+        if (event == ftxui::Event::Escape) {
+            close_dashboard();
+            return true;
+        }
+        if (event == ftxui::Event::CtrlC) {
+            if (dashboard.exit_arm == EscArm::Armed) {
+                disarm_dashboard_exit();
+                model_.dirty.markAggregate();
+                begin_exit(/*allow_prompt=*/true);
+                return true;
+            }
+            dashboard.exit_arm = EscArm::Armed;
+            dashboard.exit_armed_at = now;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::Return || event == ftxui::Event::ArrowRight) {
+            attach_dashboard_row();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowUp ||
+            (event.is_character() && event.character() == "k")) {
+            disarm_dashboard_exit();
+            dashboard.moveUp();
+        } else if (event == ftxui::Event::ArrowDown ||
+                   (event.is_character() && event.character() == "j")) {
+            disarm_dashboard_exit();
+            dashboard.moveDown();
+        } else if (event == ftxui::Event::PageUp) {
+            disarm_dashboard_exit();
+            dashboard.pageUp();
+        } else if (event == ftxui::Event::PageDown) {
+            disarm_dashboard_exit();
+            dashboard.pageDown();
+        } else if (event == ftxui::Event::Home) {
+            disarm_dashboard_exit();
+            dashboard.moveHome();
+        } else if (event == ftxui::Event::End) {
+            disarm_dashboard_exit();
+            dashboard.moveEnd();
+        } else if (event == ftxui::Event::Tab) {
+            disarm_dashboard_exit();
+            dashboard.toggle_collapse();
+        } else {
+            // 57-I10 parity: Ctrl+Q (and every other key) is a consumed no-op.
+            disarm_dashboard_exit();
+        }
+        model_.dirty.markAggregate();
         return true;
     }
 
@@ -1424,12 +1466,26 @@ private:
     }
 
     // 22 §3.3: the switcher overlay is a snapshot. Rebuild it in place (not via
-    // `openSwitcher()`, so `mode`/`source` survive) whenever the live set
+    // `open_dashboard()`, so `mode`/`source` survive) whenever the live set
     // changes while a Live-source switcher is open.
+    // 81-D12: re-run the Live projection for the dashboard, then rebuild rows in
+    // place. Split from `dashboard.rebuild` so the projection sees catalog/live
+    // changes; `rebuild` preserves the cursor (81-D2).
+    void refresh_dashboard() {
+        model_.switcher.openLive(model_, /*include_focused=*/true);
+        model_.dashboard.rebuild(model_);
+    }
+
     void resnapshot_switcher() {
         if (model_.mode == UiMode::Switcher &&
             model_.switcher.source == SwitcherSource::Live) {
             model_.switcher.open(model_);
+        }
+        // 81-D12: a live-set change re-projects an open dashboard in place,
+        // preserving the cursor; `dashboard.open` (not `mode`) so it also
+        // refreshes under a raised overlay.
+        if (model_.dashboard.open) {
+            refresh_dashboard();
         }
     }
 
@@ -2412,7 +2468,7 @@ private:
     [[nodiscard]] bool modal_owns_input() const {
         return model_.exitConfirm.open || model_.dialog.open ||
                (model_.mode == UiMode::Context && model_.context.open) ||
-               model_.message.open || model_.mode == UiMode::Switcher ||
+               model_.mode == UiMode::Dashboard || model_.mode == UiMode::Switcher ||
                (model_.mode == UiMode::ModelPicker && model_.model_picker.visible);
     }
 
@@ -3595,6 +3651,12 @@ private:
             }
             return true;
         }
+        // 81-D3/81-I4: ArrowLeft on an empty composer opens the dashboard. A
+        // non-empty draft falls through to `cursor_left` below.
+        if (event == ftxui::Event::ArrowLeft && state->input.draft.empty()) {
+            open_dashboard();
+            return true;
+        }
         InputModel& input = state->input;
         if (event.is_character() && modal_tail_suppression_active()) {
             return true;
@@ -4063,14 +4125,16 @@ private:
         if (model_.mode == UiMode::Context && model_.context.open) {
             return handle_context(event);
         }
-        if (model_.mode == UiMode::Notice && model_.message.open) {
-            return handle_notice(event);
-        }
         if (model_.mode == UiMode::Switcher) {
             return handle_switcher(event);
         }
         if (model_.mode == UiMode::ModelPicker && model_.model_picker.visible) {
             return handle_model_picker(event);
+        }
+        // 81-D1/81-I19: the dashboard guard precedes the globals, so every key
+        // reaches `handle_dashboard` while it is the top focus owner.
+        if (model_.mode == UiMode::Dashboard) {
+            return handle_dashboard(event);
         }
         // 58-E6: Ctrl+C is suppressed while a child is viewed (it must never
         // cancel the parent turn).
@@ -4083,7 +4147,7 @@ private:
             return true;
         }
         if (event == ftxui::Event::CtrlS || event == ftxui::Event::CtrlP) {
-            openSwitcher();
+            open_dashboard();
             catalog_visible_.store(false);
             if (catalog_ != nullptr) {
                 catalog_->refreshNow();
@@ -4418,7 +4482,8 @@ public:
 
     void drain_actions() override { app_.drain(); }
 
-    void open_switcher() override { app_.openSwitcher(); }
+    // 81-D4: the hook name is retained; its body now opens the dashboard.
+    void open_switcher() override { app_.open_dashboard(); }
 
     void submit(std::string text) override { app_.submit(text); }
 
@@ -4562,6 +4627,8 @@ public:
         app_.model_.dialog.tool    = std::move(tool);
         app_.model_.dialog.summary = std::move(summary);
         app_.model_.dialog.selected = 0;
+        // 81-D13: record the interrupted mode so the resolve restores it.
+        app_.model_.dialog.prev_mode = app_.model_.mode;
         app_.model_.mode = UiMode::Dialog;
     }
 
