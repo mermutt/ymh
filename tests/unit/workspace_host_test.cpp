@@ -325,19 +325,21 @@ TEST(WorkspaceHostStartup, StaleSocketIsReplaced) {
     EXPECT_EQ(daemon.stopAndJoin(), HostExitCode::Ok);
 }
 
-TEST(WorkspaceHostStartup, LiveSocketProbeIsWorkspaceBusy) {
+// 76-D6 supersedes the old raw-connect probe (04 §5.2 / H7): a connectable but
+// unauthenticated socket is residue, reclaimed by the daemon, not WorkspaceBusy.
+TEST(WorkspaceHostStartup, UnauthenticatedLiveSocketIsReclaimed) {
     ShortTempRoot root("ymh-host-live");
     const std::filesystem::path canonical = std::filesystem::canonical(root.path());
     std::filesystem::create_directories(canonical / ".ymh");
     const int listener = bind_unix_socket(canonical / ".ymh" / "host.sock");
     ASSERT_GE(listener, 0);
 
-    HostConfig config = base_config(canonical);
-    std::unique_ptr<WorkspaceHost> host = WorkspaceHost::create(std::move(config));
-    EXPECT_EQ(host->run(), HostExitCode::WorkspaceBusy);
+    ForegroundHost daemon(base_config(canonical));
+    daemon.start();
+    ASSERT_TRUE(daemon.waitReady(15s));
+    EXPECT_EQ(daemon.stopAndJoin(), HostExitCode::Ok);
 
     ::close(listener);
-    std::filesystem::remove(canonical / ".ymh" / "host.sock");
 }
 
 TEST(WorkspaceHostStartup, WorkspaceBusyOnHeldFlock) {
