@@ -655,7 +655,8 @@ TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {
 
     EnvelopeCollector  collector;
     ui::SupervisorSink sink;
-    sink.on_envelope = [&collector](const protocol::SessionEnvelope& envelope) {
+    sink.on_envelope = [&collector](const protocol::SessionEnvelope& envelope, bool,
+                                    std::optional<protocol::EventCursor>) {
         collector.push(envelope);
     };
 
@@ -1018,7 +1019,8 @@ TEST_F(TwoProcess, AttachIdentityCrossCheck) {
     EnvelopeCollector collector;
     auto              sink_for = [&collector]() {
         ui::SupervisorSink sink;
-        sink.on_envelope = [&collector](const protocol::SessionEnvelope& envelope) {
+        sink.on_envelope = [&collector](const protocol::SessionEnvelope& envelope, bool,
+                                        std::optional<protocol::EventCursor>) {
             collector.push(envelope);
         };
         return sink;
@@ -1153,7 +1155,8 @@ TEST_F(TwoProcess, MultiSupervisorFanOutPermissionFirstWins) {
     auto make_sink = [](EnvelopeCollector& events, std::mutex& mutex,
                         std::vector<protocol::PermissionRequest>& permissions) {
         ui::SupervisorSink sink;
-        sink.on_envelope = [&events](const protocol::SessionEnvelope& envelope) {
+        sink.on_envelope = [&events](const protocol::SessionEnvelope& envelope, bool,
+                                     std::optional<protocol::EventCursor>) {
             events.push(envelope);
         };
         sink.on_permission = [&mutex, &permissions](const protocol::PermissionRequest& request) {

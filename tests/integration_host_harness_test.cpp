@@ -205,7 +205,8 @@ TEST_F(HostIntegration, SupervisorConnectionStreamsFromRealDaemon) {
     std::condition_variable cv;
     std::vector<ymh::protocol::SessionEnvelope> envelopes;
     ymh::ui::SupervisorSink sink;
-    sink.on_envelope = [&](const ymh::protocol::SessionEnvelope& envelope) {
+    sink.on_envelope = [&](const ymh::protocol::SessionEnvelope& envelope, bool,
+                           std::optional<ymh::protocol::EventCursor>) {
         const std::lock_guard lock(mutex);
         envelopes.push_back(envelope);
         cv.notify_all();

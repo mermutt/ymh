@@ -1,12 +1,9 @@
 # 79 - Rewind Command Errata: a conversation-only TUI `/rewind`
 
 ```
-Status: draft - reviewer: (none yet) - gate: not yet run
-Revision: 1
-Verification status: draft (Rev 1) -- NOT verified. On promotion, add/update the
-           `DESIGN_STATUS.md` row 79 so its Status/Revision match this header,
-           per AGENTS.md and the `design_status_drift` ctest. The tracker row is
-           orchestrator-owned; this spec does not edit it.
+Status: verified (Rev 2)
+Revision: 2
+Verification status: adversarial reviewer (independent, Rev 2): GATE PASS (0 HIGH / 0 MEDIUM, 3 LOW); Oracle confirm PASS
 Component: 79 (errata) - adds a supervisor-local `/rewind` command surface to
            the `ui::run_supervisor` path. `/rewind` opens a turn picker; choosing
            a turn branches the focused session into a new `kind='fork'` child at
@@ -33,11 +30,14 @@ Depends on: 00-architecture.md (verified; sec 9.2/sec 9.9/sec 20.24/sec 44/sec
             55-multi-agent-delegation-errata.md (verified; sec 3.4),
             57-switcher-sessions-popup-errata.md (verified; key ownership),
             60-scroll-keybindings-errata.md (verified),
-            78-fork-command-errata.md (the fork surface: `CommandContext::fork`,
-            `SupervisorApp::fork_session`/`apply_fork_success`, the
-            `std::optional<std::int64_t> seed_length` form, FK1-FK11),
-            81-session-dashboard-errata.md (verified; sec 2.1/sec 2.2 chain A/R,
-            81-D1 base selector, 81-D8 keys, 81-D13 overlay save/restore).
+            78-fork-command-errata.md (verified, Rev 4; the fork surface:
+            `CommandContext::fork`, `SupervisorApp::fork_session`/
+            `apply_fork_success`, the `std::optional<std::int64_t> seed_length`
+            form 78 sec.4.3 pins -- the shipped tree still declares
+            `std::int64_t`, `include/ymh/transport/host.hpp:109`; FK1-FK11),
+            81-session-dashboard-errata.md (verified, Rev 6; sec 2.1/sec 2.2
+            chain A/R, 81-D1 base selector, 81-D8 keys, 81-D13 overlay
+            save/restore).
 Scope: one user-requested feature: a TUI slash command `/rewind` that rewinds
        the CONVERSATION of the focused session. The mechanism is a branch: fork
        the focused session at the chosen turn's resolved-view boundary
@@ -92,7 +92,7 @@ the substrate:
 | Pure projection | `Session::deriveMessages(header, events)` | `src/session/session.cpp:397-560` |
 | Fork (branch) | `Session::fork(parent, seedLength, store, bus)` | `src/session/session.cpp:766-801` |
 | Manager | `SessionManager::forkSession(const SessionId&, std::size_t)` | `src/session/session_manager.cpp:98-116` |
-| Daemon | `HostRuntime::forkSession(const SessionId&, std::optional<std::int64_t>)` | `src/host/host_runtime.cpp:827-852` (post-78) |
+| Daemon | `HostRuntime::forkSession(const SessionId&, std::int64_t)` (78 sec.4.3 widens it to `std::optional<std::int64_t>`) | `src/host/host_runtime.cpp:827-852`; `include/ymh/transport/host.hpp:109` |
 | Wire | `method::kSessionFork = "session.fork"` | `include/ymh/transport/protocol.hpp:532`; `src/transport/protocol_server.cpp:424-434` |
 | Resolved view | `resolve_after_locked` (prefix + own) | `src/session/session_persistence.cpp:477-517`; `readAfter` `:1044-1050` |
 | UI command surface | `CommandRegistry::builtin()` | `src/ui/command_registry.cpp:147-298` |
@@ -137,6 +137,13 @@ local computations at `:1170-1178` append no events. Therefore, for every
 prompt-bearing (non-`Inject`) turn, the turn's `UserMessage` is the event
 **immediately preceding** its `TurnStarted`. This is the load-bearing fact for
 the boundary rule in sec.5: the `TurnStarted` index is one *past* the prompt.
+The rule survives the other `UserMessage` producers: a `Steer` message
+(`agent_loop.cpp:833`) precedes a `Steer`-origin `TurnStarted` (excluded by
+79-D8), and the mid-turn non-action nudge (`agent_loop.cpp:1492`) is appended
+inside an already-open turn, never immediately before a `User`-origin
+`TurnStarted`. Only the prologue prompt at `:1169` sits at `view[i-1]`, so the
+origin filter *and* the `view[i-1].event.type` check (sec.5/RW3) are both
+required; an implementer must not drop either.
 
 **2.3 The resolved view is an ordered event array, not the DB `Sequence`.** The
 subscription/replay stream is `host_.readEvents(session, after, batch)`
@@ -152,8 +159,9 @@ array index from arrival order (spec 77 changes the subscribe start cursor), and
 the UI adapter discards raw event records (`src/ui/ui_event_adapter.cpp:225-232`).
 
 **2.4 The UI already has a focus-only selection primitive.** `apply_fork_success`
-models the child, subscribes it (`track`), and calls `focusSession(child)` --
-never `session.activate` (`78 sec.4.4`; `src/ui/supervisor.cpp:1661-1672`). This
+(78 sec.4.4) models the child, subscribes it (`track`), and calls
+`focusSession(child)` -- never `session.activate`; the equivalent shipped
+focus-only shape is the resume path at `src/ui/supervisor.cpp:1661-1672`. This
 spec reuses that shape.
 
 **2.5 Overlays are `clear_under` windows in a fixed precedence.** `UiMode` is
@@ -225,8 +233,8 @@ read(child)` (78 FK2/FK4). No new fork semantics are invented; spec 78's
 After focus, `apply_rewind_success` writes the prompt text into the **child's**
 `SessionUiState::input.draft` (`include/ymh/ui/ui_model.hpp:207-213,312-319`) and
 sets `input.cursor = draft.size()`. The text is the projection of the
-`UserMessage` content blocks (the same text projection used by
-`text_of_blocks`, `src/agent/agent_loop.cpp:1176`). It overwrites any existing
+`UserMessage` content blocks (the shared `text_of_blocks`,
+`include/ymh/session/text.hpp`; sec.4.2.1). It overwrites any existing
 draft in the child (the user chose to rewind). A prompt with no text blocks
 leaves the draft empty and surfaces a notice (79-F9). The prompt is **not**
 auto-sent; the user edits and sends, exactly as CC restores into the input field
@@ -383,14 +391,17 @@ protocol::RewindTargets HostRuntime::rewindTargets(const SessionId& id) {
             target.session          = id;
             target.turn             = started.turn;
             target.boundary_index   = static_cast<std::int64_t>(i - 1);
-            target.started_at_ms    = view[i].timestamp;
-            target.prompt           = text_of_blocks(prompt.content);   // 79-D4 projection
+            target.started_at_ms    = epoch_ms(view[i].event.timestamp);
+            target.prompt           = text_of_blocks(prompt.content);   // 79-D4; sec.4.2.1
             result.targets.push_back(std::move(target));
         }
         return result;
     });
 }
 ```
+
+`epoch_ms` is declared in `include/ymh/core/clock.hpp:28`; the daemon TU adds the
+include. The `text_of_blocks` include is `ymh/session/text.hpp` (sec.4.2.1).
 
 Test-double override - `tests/support/fake_transport_host.hpp` (beside the 78
 `forkSession` at `:150`): `rewindTargets` computes the same projection from the
@@ -402,6 +413,51 @@ sec.4.3): `HostRuntime` (`include/ymh/host/host_runtime.hpp`; production) and
 `FakeTransportHost` (`tests/support/fake_transport_host.hpp:19`). Because the base
 is a frozen interface, both must be updated in the same change set or the tree
 does not build.
+
+### 4.2.1 Shared `text_of_blocks` (new linkable helper)
+
+`text_of_blocks` is today file-local to `src/agent/agent_loop.cpp` (anonymous
+namespace, defined at `:54-65`), so the daemon body in
+`src/host/host_runtime.cpp` cannot call it from another translation unit.
+79-D4 needs the identical Text-block projection on both sides, so the helper is
+promoted to a shared header; the file-local copy is deleted.
+
+```cpp
+// include/ymh/session/text.hpp (new)
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "ymh/agent/message.hpp"   // ContentBlock / ContentBlockKind
+
+namespace ymh {
+
+// 73-D1/79-D4: the concatenation of every `Text` content block, in order;
+// reasoning/tool/image blocks are excluded. The agent loop uses it to normalize
+// the turn prompt; the daemon uses the identical projection to fill
+// `protocol::RewindTarget::prompt`, so a restored prompt round-trips unchanged.
+[[nodiscard]] inline std::string text_of_blocks(const std::vector<ContentBlock>& blocks) {
+    std::string text;
+    for (const ContentBlock& block : blocks) {
+        if (block.kind == ContentBlockKind::Text) {
+            text += block.text;
+        }
+    }
+    return text;
+}
+
+} // namespace ymh
+```
+
+Callers (both must include `ymh/session/text.hpp`):
+
+- `src/agent/agent_loop.cpp:1176` (`normalize_reply(text_of_blocks(...))`) and
+  `:1392` (`settled_text = text_of_blocks(...)`) - the anonymous-namespace
+  definition at `:54-65` is removed and the include is added, so behaviour is
+  byte-identical.
+- `HostRuntime::rewindTargets` (`src/host/host_runtime.cpp`; sec.5) - the new
+  daemon caller.
 
 ### 4.3 Wire method and DTOs
 
@@ -498,6 +554,10 @@ void rewind_to(const RewindTargetView& target);
 // The fork reply: model/track/focus the child, then restore the prompt (79-D4).
 void apply_rewind_success(const WorkspaceId& workspace, const SessionId& child,
                           const std::string& prompt);
+
+// 79-F11: the session whose `session.rewind_targets` read is in flight; guards a
+// stale reply after a focus change (sec.10).
+std::optional<SessionId> rewind_query_;
 ```
 
 Body sketch - `open_rewind`:
@@ -559,6 +619,38 @@ void open_rewind_overlay(const WorkspaceId& workspace, const SessionId& session,
 }
 ```
 
+Body sketch - `make_rewind_summary` (file-local free function in
+`src/ui/supervisor.cpp`; the only caller is `open_rewind_overlay` above):
+
+```cpp
+// 79-D4: one-line picker excerpt = relative age + a bounded, newline-free prompt
+// preview. File-local (anonymous namespace); tested by RW-U8.
+std::string make_rewind_summary(std::int64_t started_at_ms, const std::string& prompt) {
+    const std::int64_t now_ms = epoch_ms(std::chrono::system_clock::now());
+    const std::int64_t age_s  = std::max<std::int64_t>(0, now_ms - started_at_ms) / 1000;
+    std::string age;
+    if (age_s < 60) {
+        age = std::to_string(age_s) + "s ago";
+    } else if (age_s < 3600) {
+        age = std::to_string(age_s / 60) + "m ago";
+    } else if (age_s < 86400) {
+        age = std::to_string(age_s / 3600) + "h ago";
+    } else {
+        age = std::to_string(age_s / 86400) + "d ago";
+    }
+    std::string preview = prompt;
+    std::replace(preview.begin(), preview.end(), '\n', ' ');
+    constexpr std::size_t kMaxPreview = 72;
+    if (preview.size() > kMaxPreview) {
+        preview = preview.substr(0, kMaxPreview - 3) + "...";
+    }
+    return age + " | " + preview;
+}
+```
+
+`epoch_ms` comes from `include/ymh/core/clock.hpp:28` (`<algorithm>`, `<chrono>`
+and `<string>` are already included by `src/ui/supervisor.cpp`).
+
 Body sketch - `handle_rewind`:
 
 ```cpp
@@ -610,7 +702,7 @@ void rewind_to(const RewindTargetView& target) {
     const std::string prompt = target.prompt;
     const std::int64_t seed  = target.boundary_index;
     model_.rewind.close();
-    model_.mode = UiMode::Conversation;         // restore prev_mode (81-D13)
+    model_.mode = model_.rewind.prev_mode;      // restore prev_mode (81-D13)
     nlohmann::json params{{"session", parent.value}, {"seed_length", seed}};
     submit_to(id, std::string(protocol::method::kSessionFork), std::move(params),
               [this, id, parent, prompt](SupervisorReply reply) {
@@ -704,8 +796,8 @@ For such an `i`, the target is:
 |---|---|---|
 | `turn` | `payload::TurnStarted::turn` | identity, monotone (`ids.hpp:14`) |
 | `boundary_index` | `i - 1` | resolved-view index of the prompt `UserMessage` |
-| `started_at_ms` | `view[i].timestamp` | event timestamp |
-| `prompt` | text projection of `payload::UserMessage::content` | `text_of_blocks` (`agent_loop.cpp:1176`) |
+| `started_at_ms` | `epoch_ms(view[i].event.timestamp)` | `Event::timestamp` (`event.hpp:102`) as epoch ms |
+| `prompt` | text projection of `payload::UserMessage::content` | `text_of_blocks` (`include/ymh/session/text.hpp`; sec.4.2.1) |
 
 **Ordering.** Targets are emitted in ascending `i` (oldest first). The picker
 opens with the cursor on the last row (most recent), matching the
@@ -728,9 +820,12 @@ child inherits the prefix's compaction events and folds them exactly as the
 parent does (78 sec.5; `13 sec.4.4`). The `deriveMessages` shadow folding happens
 only when projecting messages, and never renumbers `view` (sec.2.3).
 
-**First turn.** `i` may be as small as 1; `boundary_index` may be `0`. A fork at
-`0` yields a child with only its own `SessionStarted` and the prompt restored;
-this is valid (78 FK2/FK3).
+**First turn.** Every resolved view begins with the session's own `SessionStarted`
+(root: `session_manager.cpp:79`; fork child: `session.cpp:794-799`), so a prompt
+`UserMessage` cannot occupy index `0`; in practice `i >= 2` and
+`boundary_index >= 1`. The algorithm still permits `boundary_index = 0` in
+principle (an empty prefix), and such a fork is valid (78 FK2/FK3), but the
+shipped log never produces it.
 
 **No-target case.** If no index satisfies the three conditions, `targets` is
 empty; the picker shows its empty state (79-F3).
@@ -754,9 +849,8 @@ own lease, agent, and `workspace_sessions` junction via `HostRuntime::forkSessio
 **Mode.** New `UiMode::Rewind` in `include/ymh/ui/ui_event.hpp:45-55`.
 
 **Chain A (key precedence).** Insert a guard **after** the ModelPicker guard
-(`src/ui/supervisor.cpp:3834-3836`) and **before** spec 81's
-`if (model_.mode == UiMode::Dashboard) return handle_dashboard(event);` guard
-(81-D1, at `:3839`):
+(`src/ui/supervisor.cpp:3834-3836`, the current chain-A tail; the Ctrl+C
+suppression at `:3839` is not a mode guard):
 
 ```cpp
 if (model_.mode == UiMode::Rewind) {
@@ -764,12 +858,15 @@ if (model_.mode == UiMode::Rewind) {
 }
 ```
 
-Resulting order (spec 81 sec.2.2 A3-A9 extended):
+Resulting order once spec 81 lands (81 sec.2.2 A3-A9 extended):
 exitConfirm > dialog > Context > Switcher > ModelPicker > **Rewind** > Dashboard.
-So the exit confirm, the permission dialog, and `/context` stay above the picker;
-the picker stays above the dashboard. All keys reach `handle_rewind` while it owns
-the screen: ArrowUp/ArrowDown/`k`/`j`, Enter, Escape/Ctrl+C consumed; everything
-else consumed no-op (57-D4).
+Spec 81's dashboard guard (`handle_dashboard`) does not exist in the shipped tree
+yet; when 81 lands, the Rewind guard is placed above it so the picker stays above
+the dashboard. Until then Rewind is simply appended after the ModelPicker guard.
+The exit confirm, the permission dialog, and `/context` stay above the picker.
+All keys reach `handle_rewind` while it owns the screen:
+ArrowUp/ArrowDown/`k`/`j`, Enter, Escape/Ctrl+C consumed; everything else
+consumed no-op (57-D4).
 
 **Chain R (`build_ui`).** Add a branch beside the Switcher/ModelPicker branches
 (`src/ui/ui_render.cpp:2209-2214`):
@@ -838,7 +935,7 @@ would be violated.
 | RW1 | `/rewind` is read-only until Enter: opening the picker issues only `session.rewind_targets` and mutates nothing; the parent's events, header, lease, agent, and turn are unchanged (`host_runtime.cpp:1242-1253` is a pure read). |
 | RW2 | The rewind child satisfies 78 FK2: `kind='fork'`, `parent_session=parent.id`, `seed_length = boundary_index` in `[0, view_length)` (`session_persistence.cpp:49-50`; `session.cpp:362-368`). |
 | RW3 | `boundary_index` is the resolved-view array index of the chosen turn's prompt `UserMessage`; it is an index into `read(session)`, NOT a DB `Sequence` and NOT a `deriveMessages` position, and it equals `turn_start_index - 1` (`session_persistence.cpp:477-517`; `agent_loop.cpp:1169,1179`). |
-| RW4 | The child's resolved view is exactly `read(parent)[0, boundary_index) ++ read(child)`; the chosen turn's prompt, steps, and output are excluded, and the prompt is restored only into the composer (78 FK4; `session.cpp:617-627`). |
+| RW4 | The child's resolved view is exactly `read(parent)[0, boundary_index) ++ read(child)`; the chosen turn's prompt, steps, and output are excluded, and the prompt is restored only into the composer (78 FK4; `session_persistence.cpp:477-517`). |
 | RW5 | `/rewind` never mutates the parent and performs no `session.activate`; it focuses the child only through `focusSession` after `ensureSessionIn`/`track` (78 FK1/FK8/FK9). |
 | RW6 | Only `TurnStarted` events with `origin == User` are targets; `Steer`/`FollowUp`/`Injection`/`Maintenance` turns are never listed (79-D8). |
 | RW7 | Existing resolved-view indices are stable under append: a `boundary_index` captured at picker-open time names the same event at Enter time (`01` append-only; `02 sec.4`). |
@@ -914,7 +1011,7 @@ This spec does not edit tests; the implementation phase does.
 | RW-U5 | `HostRuntime.RW_U5_RewindTargetsCompactionCounted` (`tests/unit/host_runtime_test.cpp`) | a `ContextCompaction` event before a turn shifts both the turn's `boundary_index` and `view_length`; the boundary still names the prompt event (RW3/RW7) |
 | RW-U6 | `HostRuntime.RW_U6_RewindTargetsIsReadOnly` (`tests/unit/host_runtime_test.cpp`) | calling `rewindTargets` appends no event and changes no header/lease (RW8) |
 | RW-U7 | `TransportHost.RW_U7_FakeRewindTargetsMatchesDaemon` (`tests/unit/transport_server_test.cpp`) | `FakeTransportHost::rewindTargets` yields the same projection as the daemon for the same log; the TUs including the fake compile (sec.4.2) |
-| RW-U8 | `UiModel.RW_U8_RewindOverlayCursorAndClose` (`tests/unit/errata79_ui_test.cpp`) | `open_with` sets `open`, the cursor defaults to the last row, `moveUp`/`moveDown` clamp, and `close` sets `open=false` (sec.4.4) |
+| RW-U8 | `UiModel.RW_U8_RewindOverlayCursorAndClose` (`tests/unit/errata79_ui_test.cpp`) | `open_with` sets `open`, the cursor defaults to the last row, `moveUp`/`moveDown` clamp, and `close` sets `open=false` (sec.4.4); `make_rewind_summary` returns a `<age> \| <prompt>` excerpt and truncates a preview longer than 72 chars (sec.4.5) |
 | RW-U9 | `Supervisor.RW_U9_RewindNoOpGuard` (`tests/unit/errata79_ui_test.cpp`) | a target with `boundary_index >= view_length` produces the no-op notice and issues no `session.fork` (RW9/79-D10) |
 | RW-U10 | `Supervisor.RW_U10_RewindSubagentRefused` (`tests/unit/errata79_ui_test.cpp`) | a focused `subagent` state refuses with a notice and sends no RPC (RW11/79-D9) |
 
@@ -936,6 +1033,7 @@ Extend `tests/integration_host_harness_test.cpp` (in-process host via
 | RW-I8 | A focus change between picker-open and Enter drops the reply and opens nothing (RW-F11) |
 | RW-I9 | `/rewind` on a `subagent` focus is refused before any RPC (RW11/79-D9) |
 | RW-I10 | Enter on an empty target list closes the picker and forks nothing (RW-F3) |
+| RW-I11 | A `session.rewind_targets` call naming an unknown/evicted parent yields an `UnknownSession` notice, opens no overlay, and leaves focus unchanged (RW-F10) |
 
 ### 12.3 Golden render
 
@@ -947,7 +1045,7 @@ Extend `tests/integration_host_harness_test.cpp` (in-process host via
 
 ### 12.4 PTY / live (opt-in)
 
-| ID | Test (`tests/integration/ui_supervisor_pty_test.cpp`, `YMH_LIVE_LLM=1`) | Assertion |
+| ID | Test (`tests/unit/ui_supervisor_pty_test.cpp`, `YMH_LIVE_LLM=1`) | Assertion |
 |---|---|---|
 | RW-P1 | `/rewind` opens the picker, ArrowUp/Down move, Enter rewinds against a real DeepSeek daemon; a new `kind='fork'` row appears and the prompt is prefilled (RW1-RW5/RW10) |
 | RW-P2 | Escape in the picker closes it without a fork; the parent session continues (79-D6) |
@@ -977,7 +1075,7 @@ Extend `tests/integration_host_harness_test.cpp` (in-process host via
 | RW-F7 | RW-I1 (inherited 78 coverage), RW-I7 |
 | RW-F8 | RW-U9 |
 | RW-F9 | RW-I4 |
-| RW-F10 | RW-I6 |
+| RW-F10 | RW-I11 |
 | RW-F11 | RW-I8 |
 
 ---
@@ -1025,3 +1123,4 @@ Extend `tests/integration_host_harness_test.cpp` (in-process host via
 | Rev | Change |
 |---|---|
 | 1 | Initial draft: `/rewind` command + `CommandContext::rewind` hook; a read-only `session.rewind_targets` RPC and its DTOs; the pinned turn -> resolved-view index mapping (boundary = the prompt `UserMessage` index, `turn_start_index - 1`, over the raw resolved-view array; `Sequence` and `deriveMessages` positions are explicitly excluded; compaction events count); the fork reuses spec 78's `session.fork` with `seed_length = boundary_index`, focus-only; prompt restoration into the child composer; `UiMode::Rewind` picker with its precedence relative to spec 81's dashboard and the existing overlays; failure modes RW-F1..RW-F11, invariants RW1..RW13, state-lifetime table, dsh mapping with non-mirror justifications, and a hermetic test plan. Conversation-only; code restore deferred to spec 80. |
+| 2 | Fixes the Rev-1 gate (2 HIGH / 5 MEDIUM / 5 LOW; the report also files L1-L6). **H1**: the dependency references cite the now-verified revisions (78 verified Rev 4, 81 verified Rev 6) and drop the stale "(verified)" without a revision; a dependency-gate note pins that 79 stays `draft` until 78/81 land. **H2**: `text_of_blocks` is promoted from an `agent_loop.cpp` anonymous-namespace symbol to the shared `include/ymh/session/text.hpp` (inline body, callers in `agent_loop.cpp` and `HostRuntime::rewindTargets`), so the daemon TU links. **M1**: the boundary timestamp source becomes `epoch_ms(view[i].event.timestamp)` (`EventRecord` has no `timestamp`). **M2**: `make_rewind_summary` gains its signature, body, and RW-U8 test. **M3**: the live PTY test path is corrected to `tests/unit/ui_supervisor_pty_test.cpp`. **M4**: the `forkSession` anchor cites the shipped `std::int64_t` (`host.hpp:109`) and attributes the `std::optional<std::int64_t>` widening to 78 sec.4.3. **M5**: the chain-A insertion is re-anchored to the real tail after the ModelPicker guard (`:3834-3836`), and the "> Dashboard" order is marked conditional on 81. **L1** uses `model_.rewind.prev_mode`; **L2** states `boundary_index >= 1` in practice and drops the unreachable-`0` claim; **L3** adds RW-I11 and re-points RW-F10 at it; **L4** documents the nudge/steer producers in sec.2.2; **L5** declares `rewind_query_`; **L6** re-points RW4 at `session_persistence.cpp:477-517`. |

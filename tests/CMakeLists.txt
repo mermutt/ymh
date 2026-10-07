@@ -68,6 +68,9 @@ add_executable(ymh_tests
     unit/transport_socket_test.cpp
     unit/errata76_connection_timeout_test.cpp
     unit/errata76_startup_residue_test.cpp
+    unit/errata77_open_latency_test.cpp
+    unit/errata77_subscribe_seed_test.cpp
+    unit/errata77_replay_complete_test.cpp
     unit/config_test.cpp
     unit/spec52_endpoints_test.cpp
     unit/spec52_presets_test.cpp

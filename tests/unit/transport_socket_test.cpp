@@ -119,6 +119,12 @@ TEST(TransportSocket, HandshakeRequestAndReplay) {
     const auto begin_result = connection.request(protocol::method::kEventSubscribe, begin_params);
     EXPECT_TRUE(begin_result.contains("subscription"));
 
+    // 77-D4a: the empty `now` subscribe still emits its catch-up boundary.
+    const auto now_notice = connection.nextNotification(std::chrono::seconds{2});
+    ASSERT_TRUE(now_notice.has_value());
+    EXPECT_EQ(now_notice->method, "host.event");
+    EXPECT_EQ(now_notice->params.at("kind").get<std::string>(), "replay_complete");
+
     const auto first = connection.nextNotification(std::chrono::seconds{2});
     ASSERT_TRUE(first.has_value());
     EXPECT_EQ(first->method, "event.stream");
@@ -130,6 +136,12 @@ TEST(TransportSocket, HandshakeRequestAndReplay) {
     const auto second = connection.nextNotification(std::chrono::seconds{2});
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(second->params.get<protocol::StreamNotification>().cursor.value, "c1:s1:2");
+
+    // The `beginning` subscribe's own catch-up boundary follows its replay.
+    const auto complete = connection.nextNotification(std::chrono::seconds{2});
+    ASSERT_TRUE(complete.has_value());
+    EXPECT_EQ(complete->method, "host.event");
+    EXPECT_EQ(complete->params.at("kind").get<std::string>(), "replay_complete");
 
     connection.detach();
     EXPECT_FALSE(connection.isConnected());

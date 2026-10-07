@@ -539,7 +539,7 @@ TEST(TransportServer, SubscribeBeginningReplaysThenGoesLive) {
     harness.send(*peer, Harness::request(2, protocol::method::kEventSubscribe,
                                          Harness::subscribe_params(session, from)));
     auto frames = harness.drain(*peer);
-    ASSERT_EQ(frames.size(), 3u);
+    ASSERT_EQ(frames.size(), 4u);
     EXPECT_TRUE(frames[0].contains("result"));
     const auto result = frames[0].at("result").get<protocol::SubscribeResult>();
     EXPECT_EQ(result.cursor.value, "c1:s1:2");
@@ -548,6 +548,9 @@ TEST(TransportServer, SubscribeBeginningReplaysThenGoesLive) {
     EXPECT_EQ(frames[1].at("params").at("cursor").get<std::string>(), "c1:s1:1");
     EXPECT_TRUE(frames[2].at("params").at("replay").get<bool>());
     EXPECT_EQ(frames[2].at("params").at("cursor").get<std::string>(), "c1:s1:2");
+    // 77-D4a: the additive catch-up boundary follows the replay batch.
+    EXPECT_EQ(frames[3].at("method").get<std::string>(), "host.event");
+    EXPECT_EQ(frames[3].at("params").at("kind").get<std::string>(), "replay_complete");
 
     harness.emit(session, EventType::AssistantMessage, {{"n", 3}});
     const auto live = harness.drain(*peer);
@@ -571,8 +574,9 @@ TEST(TransportServer, SubscribeNowReplaysNothing) {
     harness.send(*peer, Harness::request(2, protocol::method::kEventSubscribe,
                                          Harness::subscribe_params(session, from)));
     auto frames = harness.drain(*peer);
-    ASSERT_EQ(frames.size(), 1u);
+    ASSERT_EQ(frames.size(), 2u);
     EXPECT_TRUE(frames[0].contains("result"));
+    EXPECT_EQ(frames[1].at("params").at("kind").get<std::string>(), "replay_complete");
 
     harness.emit(session, EventType::AssistantMessage);
     frames = harness.drain(*peer);
@@ -594,7 +598,7 @@ TEST(TransportServer, CursorResumeIsNoLossNoDuplicate) {
     harness.send(*peer, Harness::request(2, protocol::method::kEventSubscribe,
                                          Harness::subscribe_params(session, from)));
     auto frames = harness.drain(*peer);
-    ASSERT_EQ(frames.size(), 4u);
+    ASSERT_EQ(frames.size(), 5u);
     const std::string cursor3 = frames[3].at("params").at("cursor").get<std::string>();
     EXPECT_EQ(cursor3, "c1:s1:3");
 
@@ -611,10 +615,11 @@ TEST(TransportServer, CursorResumeIsNoLossNoDuplicate) {
     harness.send(*resumed_peer, Harness::request(4, protocol::method::kEventSubscribe,
                                                  Harness::subscribe_params(session, resume)));
     const auto resumed = harness.drain(*resumed_peer);
-    ASSERT_EQ(resumed.size(), 3u);
+    ASSERT_EQ(resumed.size(), 4u);
     EXPECT_TRUE(resumed[0].contains("result"));
     EXPECT_EQ(resumed[1].at("params").at("cursor").get<std::string>(), "c1:s1:4");
     EXPECT_EQ(resumed[2].at("params").at("cursor").get<std::string>(), "c1:s1:5");
+    EXPECT_EQ(resumed[3].at("params").at("kind").get<std::string>(), "replay_complete");
 
     harness.emit(session, EventType::AssistantChunk, {{"n", 6}});
     const auto live = harness.drain(*resumed_peer);
@@ -680,7 +685,8 @@ TEST(TransportServer, BackpressureDropsClientNotSession) {
     EXPECT_TRUE(harness.server->hasClient(fast->id));
 
     const auto delivered = harness.drain(*fast);
-    EXPECT_EQ(delivered.size(), 7u);
+    // 77-D4a: the subscribe reply, the ReplayComplete notice, and 6 live events.
+    EXPECT_EQ(delivered.size(), 8u);
 }
 
 TEST(TransportServer, ReconnectSupersedesSameInstance) {

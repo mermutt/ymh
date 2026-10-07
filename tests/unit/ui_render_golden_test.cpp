@@ -303,12 +303,44 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 │      · build · test-model · ↑12 ↓3 ⚡0           0 active · 0 waiting│
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
+const char* kOpeningGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
+│ymh (v0.002) · /work                                                  │
+├──────────────────────────────────────────────────────────────────────┤
+│opening demo title...                                                 │
+││ hello there                                                         │
+│Hello world                                                           │
+│▸ read_file  hello.txt                                                │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+├┬─────────────────────────────────────────────────────────────────────┤
+││                                                                     │
+││ >                                                                   │
+││                                                                     │
+│      · build · test-model · ↑12 ↓3 ⚡0           0 active · 0 waiting│
+╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
+
 TEST(UiRenderGolden, ConversationSnapshot) {
     const UiModel model = build_model();
     const std::string rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     std::cerr << "\n---GOLDEN-BEGIN---\n" << rendered << "\n---GOLDEN-END---\n";
     SCOPED_TRACE(rendered);
     EXPECT_EQ(rendered, std::string(kGolden));
+}
+
+// 77-D3: the optimistic open placeholder row ("opening <title>...") precedes the
+// already-delivered transcript rows.
+TEST(UiRenderGolden, OpeningRowSnapshot) {
+    UiModel model = build_model();
+    model.session(kSession)->opening = OpeningState{"demo title", std::chrono::steady_clock::now()};
+    const std::string rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    std::cerr << "\n---OPENING-GOLDEN-BEGIN---\n" << rendered << "\n---OPENING-GOLDEN-END---\n";
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered, std::string(kOpeningGolden));
 }
 
 TEST(UiRenderGolden, RenderIsPure) {

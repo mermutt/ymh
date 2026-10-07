@@ -411,7 +411,8 @@ SupervisorConnectionConfig config_for(const std::filesystem::path& socket_path,
 
 SupervisorSink sink_for(Collected& collected) {
     SupervisorSink sink;
-    sink.on_envelope = [&collected](const protocol::SessionEnvelope& envelope) {
+    sink.on_envelope = [&collected](const protocol::SessionEnvelope& envelope, bool,
+                                    std::optional<protocol::EventCursor>) {
         collected.add_envelope(envelope);
     };
     sink.on_permission = [&collected](const protocol::PermissionRequest& request) {

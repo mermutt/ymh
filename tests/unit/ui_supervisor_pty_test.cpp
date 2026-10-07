@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -1217,7 +1218,8 @@ TEST(UiSupervisorPty, TuiWithExplicitConfigPassesItToDaemon) {
 SessionId write_stored_session(const std::filesystem::path& workspace,
                                const std::string& title, const std::string& marker,
                                const std::string& model = "deepseek-flash",
-                               bool               close_turn = false) {
+                               bool               close_turn = false,
+                               std::optional<std::int64_t> updated_at_ms = std::nullopt) {
     const std::filesystem::path ymh_dir = workspace / ".ymh";
     std::filesystem::create_directories(ymh_dir);
     PersistenceConfig config;
@@ -1226,9 +1228,15 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
     config.boot_id   = BootId{"pty-test"};
     {
         const std::unique_ptr<SessionPersistence> store = SessionPersistence::open(config);
-        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::system_clock::now().time_since_epoch())
-                             .count();
+        // The catalog orders History sessions by `updated_at` desc (spec 22-A5),
+        // and `append` overwrites `updated_at` with the last event timestamp.
+        // Callers that seed several sessions in one burst must pin distinct
+        // timestamps; otherwise two same-millisecond writes tie and the
+        // spec-mandated `id asc` tie-break orders them by random UUID.
+        const auto now = updated_at_ms.value_or(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
         SessionHeader header;
         header.id            = SessionId{generate_uuid_v4()};
         header.cwd           = std::filesystem::canonical(workspace);
@@ -1249,7 +1257,8 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
             TypedEvent<payload::UserMessage> typed;
             typed.id         = EventId{generate_uuid_v4()};
             typed.session_id = header.id;
-            typed.timestamp  = std::chrono::system_clock::now();
+            typed.timestamp =
+                std::chrono::system_clock::time_point{std::chrono::milliseconds{now + 1}};
             typed.payload    = std::move(message);
             store->append(header.id, encode(typed));
         }
@@ -1263,7 +1272,8 @@ SessionId write_stored_session(const std::filesystem::path& workspace,
             TypedEvent<payload::AssistantMessage> typed_reply;
             typed_reply.id         = EventId{generate_uuid_v4()};
             typed_reply.session_id = header.id;
-            typed_reply.timestamp  = std::chrono::system_clock::now();
+            typed_reply.timestamp =
+                std::chrono::system_clock::time_point{std::chrono::milliseconds{now + 2}};
             typed_reply.payload    = std::move(reply);
             store->append(header.id, encode(typed_reply));
         }
@@ -1708,10 +1718,17 @@ TEST(UiSupervisorPty, SwP5_SessionsResumeInAttachedWorkspaceActivatesAndHydrates
     // history; the explicit `/sessions` selection below is the resume path. The
     // newer session carries a distinct stored model, so its status-bar hydration
     // proves the resume reply applied the stored value (not the config fallback).
-    const SessionId older =
-        write_stored_session(alpha, "zz-older", "zzoldermarker", "deepseek-flash", true);
-    const SessionId newer =
-        write_stored_session(alpha, "zz-newer", "zznewermarker", "deepseek-reasoner", true);
+    // 22-A5 orders History sessions by `updated_at` desc / `id` asc; pin distinct
+    // timestamps so "zz-newer" deterministically sorts first (two back-to-back
+    // writes can otherwise land in the same millisecond and tie on `id`).
+    const std::int64_t base_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    const SessionId older = write_stored_session(alpha, "zz-older", "zzoldermarker",
+                                                 "deepseek-flash", true, base_ms - 1000);
+    const SessionId newer = write_stored_session(alpha, "zz-newer", "zznewermarker",
+                                                 "deepseek-reasoner", true, base_ms);
     (void)older;
     (void)newer;
 
