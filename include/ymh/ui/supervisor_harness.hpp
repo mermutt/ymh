@@ -192,6 +192,32 @@ public:
     // Drive `SupervisorSink::on_subscribe_error`'s supervisor-side handling.
     virtual void deliver_subscribe_error(const SessionId& session,
                                          const std::string& detail) = 0;
+
+    // ---- spec 77 (session-open latency) test seams -------------------------
+    // M4: invoke `SupervisorApp::handle_sink_envelope` (the real 77-D1 gate, the
+    // applied_through update, the OL-X3 per-replay-envelope reconcile, and the
+    // OL-F1 first-live-envelope endOpening backstop), then drain.
+    virtual void feed_sink_envelope(const WorkspaceId& workspace,
+                                    const protocol::SessionEnvelope& envelope,
+                                    bool replay,
+                                    std::optional<protocol::EventCursor> cursor) = 0;
+    // M4: invoke `SupervisorApp::handle_sink_notice`, including the
+    // ReplayComplete handling (77-D4), then drain.
+    virtual void deliver_sink_notice(const WorkspaceId& workspace,
+                                     const protocol::HostNotice& notice) = 0;
+    // M4: invoke `SupervisorApp::set_daemon_turn_status` (77-D4), then drain.
+    virtual void set_daemon_turn_status(const SessionId& session, std::string status) = 0;
+    // N2: drive the real `SupervisorApp::resume_after_attach` call site on the UI
+    // thread - the production path that marks the 77-D3 opening (`beginOpening`)
+    // and sets `opening_pending_` before submitting `session.resume`.
+    virtual void resume_after_attach(const WorkspaceId& workspace,
+                                     const SessionId& session) = 0;
+    // N2: run one opening-expiry timer tick by calling the production scheduling
+    // decision `SupervisorApp::maybe_post_opening_expiry(now, post)` with a `post`
+    // that synchronously runs the production-delivered closure (the real
+    // `SupervisorApp::expire_openings`). Returns true iff an expiry task was
+    // posted.
+    virtual bool opening_expiry_tick(std::chrono::steady_clock::time_point now) = 0;
     // Drive `apply_session_deleted` (E43, the external `session.delete` seam).
     virtual void apply_session_deleted(const WorkspaceId& workspace,
                                        const SessionId& session) = 0;

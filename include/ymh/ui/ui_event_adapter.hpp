@@ -69,6 +69,14 @@ public:
     // renders blank (58-I10).
     void forget_session(const SessionId& id);
 
+    // 77-D4b: reconcile a replayed session whose daemon status is not Running.
+    // Resets the session's derived agent_state to Idle (clearing any dangling
+    // replayed Thinking a lost ReplayComplete left behind), emits an
+    // AgentStateChanged Idle when lastState_ != Idle, resets lastState_ to Idle,
+    // and flips any still-Running direct child in the model to
+    // SubagentStatus::Cancelled. Idempotent.
+    void force_idle(const SessionId& id);
+
     // Model-level clock; the ONLY place the flash advances (10 §5.2, F12, D16).
     // 64-D1: `now` drives the spinner's absolute-time frame; `delta` drives the
     // flash phase.

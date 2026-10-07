@@ -309,6 +309,17 @@ struct SubagentModel {
     std::vector<SubagentView> agents;
 };
 
+// 77-D3: the optimistic open state. Set the instant a resume is submitted for a
+// modeled workspace; cleared at replay completion (77-D4), on the first live
+// (replay == false) envelope, on resume failure, on a link-state drop, on
+// session eviction, or by the kOpeningTimeout escape. The derived turn is
+// reconciled independently of this placeholder on every replay envelope, so
+// clearing it early cannot strand a dangling turn. Never persisted.
+struct OpeningState {
+    std::string                           title;
+    std::chrono::steady_clock::time_point since;
+};
+
 struct SessionUiState {
     SessionId id;
     WorkspaceId workspace;
@@ -349,6 +360,13 @@ struct SessionUiState {
     bool subagent = false;
 
     AgentState agent_state = AgentState::Idle;
+
+    // 77-D3: present iff this session is actively being opened/resumed.
+    std::optional<OpeningState> opening;
+    // 77-D2: the opaque event.subscribe cursor (EventCursor.value) of the last
+    // event materialized into this state. Empty when no event has been applied.
+    // Never parsed; dies with the state.
+    std::string applied_through;
 };
 
 struct SessionCell {
@@ -400,6 +418,10 @@ struct UiNotice {
 };
 
 constexpr std::size_t kMaxNotices = 8;
+
+// 77-D3/OL15: the bounded wall-clock lifetime of an `opening` placeholder (30 s).
+// `UiModel::expireOpenings` ages it out; the supervisor timer schedules that call.
+constexpr std::chrono::milliseconds kOpeningTimeout{30'000};
 
 // 16 §3.6 (C4): display-only switcher marker, derived from DaemonStatus. It is
 // supervisor-local and never written to the registry.
@@ -716,6 +738,23 @@ struct UiModel {
                                  std::string title);
     void            setSessionReadOnly(const SessionId& id, bool read_only);
     void            eraseSession(const WorkspaceId& workspace, const SessionId& id);
+
+    // 77-D3: if `workspace` is modeled, ensure the session cell/state and mark it
+    // opening with `title`, then focus it. No-op for an unmodeled workspace (no
+    // phantom workspace; SW25). Returns true iff the state was marked.
+    bool beginOpening(const WorkspaceId& workspace, const SessionId& session,
+                      std::string title);
+    // 77-D3: clear `session`'s opening state. Returns true iff it was set.
+    bool endOpening(const SessionId& session);
+    // 77-D3: clear every opening state in `workspace` (link-state drop backstop).
+    void endOpeningsIn(const WorkspaceId& workspace);
+    // 77-D3/OL-X2: clear every opening state older than `kOpeningTimeout` as of
+    // `now` and return the ids whose opening it cleared, so the caller can
+    // reconcile the derived state at the same escape.
+    [[nodiscard]] std::vector<SessionId> expireOpenings(
+        std::chrono::steady_clock::time_point now);
+    // 77-D3: true iff any SessionUiState has an `opening`.
+    [[nodiscard]] bool hasAnyOpening() const;
 
     // 15 §4.7 (AM-1): the bounded MCP status token projected from a
     // `HostNoticeKind::McpServerStatus` host notice.

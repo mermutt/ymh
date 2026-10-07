@@ -65,12 +65,16 @@ void SupervisorConnection::stop() {
     }
 }
 
-void SupervisorConnection::track(const SessionId& session) {
+void SupervisorConnection::track(const SessionId& session,
+                                 std::optional<protocol::EventCursor> seed_from) {
     {
         std::lock_guard lock(mutex_);
         if (std::find(tracked_.begin(), tracked_.end(), session) == tracked_.end()) {
             tracked_.push_back(session);
             ++subscribe_requests_;
+        }
+        if (seed_from.has_value() && cursors_.find(session) == cursors_.end()) {
+            cursors_[session] = *seed_from;
         }
         subscribe_pending_ = true;
     }
@@ -399,7 +403,7 @@ void SupervisorConnection::dispatch(const protocol::Notification& notification) 
             cursors_[envelope.session] = stream.cursor;
         }
         if (sink_.on_envelope) {
-            sink_.on_envelope(envelope);
+            sink_.on_envelope(envelope, stream.replay, stream.cursor);
         }
         return;
     }
@@ -410,7 +414,7 @@ void SupervisorConnection::dispatch(const protocol::Notification& notification) 
             return;
         }
         if (sink_.on_envelope) {
-            sink_.on_envelope(envelope);
+            sink_.on_envelope(envelope, false, std::nullopt);
         }
         return;
     }

@@ -932,12 +932,11 @@ private:
 
         SupervisorSink sink;
         const WorkspaceId workspace_id = spec.id;
-        sink.on_envelope = [this, workspace_id](const protocol::SessionEnvelope& envelope) {
-            enqueue([this, workspace_id, envelope] {
-                adapter_.onSessionEnvelope(workspace_id, envelope);
-                if (envelope.event.type == EventType::AssistantMessage) {
-                    refresh_status_context(workspace_id, envelope.session);
-                }
+        sink.on_envelope = [this, workspace_id](
+                               const protocol::SessionEnvelope& envelope, bool replay,
+                               std::optional<protocol::EventCursor> cursor) {
+            enqueue([this, workspace_id, envelope, replay, cursor] {
+                handle_sink_envelope(workspace_id, envelope, replay, cursor);
             });
         };
         sink.on_permission = [this, workspace_id](const protocol::PermissionRequest& request) {
@@ -947,23 +946,7 @@ private:
         };
         sink.on_notice = [this, workspace_id](const protocol::HostNotice& notice) {
             enqueue([this, workspace_id, notice] {
-                if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
-                    notice.session.has_value()) {
-                    const auto connection = connections_.find(workspace_id);
-                    if (connection != connections_.end()) {
-                        connection->second->untrack(*notice.session);
-                    }
-                }
-                adapter_.onHostNotice(workspace_id, notice);
-                if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
-                    notice.session.has_value()) {
-                    reconcile_subagent_path_for(*notice.session, "closed");
-                }
-                if (notice.kind == protocol::HostNoticeKind::SessionCreated) {
-                    // 16 §7.6: one refresh fills the new cell's title; the
-                    // broadcast notice itself carries only the SessionId.
-                    refresh_sessions(workspace_id);
-                }
+                handle_sink_notice(workspace_id, notice);
             });
         };
         sink.on_state = [this, workspace_id](SupervisorLinkState state, std::string detail) {
@@ -1102,6 +1085,7 @@ private:
                 }
                 adapter_.forget_session(id);
                 model_.eraseSession(child_ws, id);
+                daemon_turn_status_.erase(id);
                 model_.dirty.markAggregate();
                 it = viewed_children_.erase(it);
             } else {
@@ -1181,6 +1165,7 @@ private:
         if (const auto tracked = viewed_children_.find(session);
             tracked != viewed_children_.end()) {
             model_.eraseSession(tracked->second, session);
+            daemon_turn_status_.erase(session);
         }
         reconcile_subagent_path();
         push_notice("subagent unavailable: " + detail);
@@ -1571,9 +1556,15 @@ private:
         // `resume_from_history` branch, and the `--resume` startup path (via
         // `pending_resume_`) — so no call site can omit the marker.
         ++resume_in_flight_[workspace];
+        // 77-D3: optimistically model + focus the target at submit, decoupled
+        // from the resume reply. No-op for an unmodeled workspace (SW25).
+        const bool session_was_modeled = model_.session(session) != nullptr;
+        if (model_.beginOpening(workspace, session, opening_title(workspace, session))) {
+            opening_pending_.store(true);
+        }
         submit_to(workspace, std::string(protocol::method::kSessionResume),
                   nlohmann::json{{"session", session.value}},
-                  [this, workspace, session](SupervisorReply reply) {
+                  [this, workspace, session, session_was_modeled](SupervisorReply reply) {
                       if (!reply.ok) {
                           // 22 §5.3 (SW-F3): a stale/unknown stored row yields a
                           // definitive `UnknownSession`; report it distinctly from
@@ -1586,17 +1577,41 @@ private:
                           // `unknown`/`surface_notice` split, so BOTH sub-exits are
                           // covered. `recover_unknown_session` must not touch the
                           // marker (it has non-resume callers).
-                          enqueue([this, workspace, session, error = reply.error, unknown] {
+                          enqueue([this, workspace, session, error = reply.error, unknown,
+                                   session_was_modeled] {
                               release_resume(workspace);
+                              // 77-D3: a failed resume clears the optimistic
+                              // placeholder (recovery re-focuses a valid session).
+                              model_.endOpening(session);
                               if (unknown) {
                                   recover_unknown_session(workspace, session);
                                   return;
+                              }
+                              // Undo the optimistic modeling/focus for a session
+                              // this resume introduced, so a failed open leaves the
+                              // prior focus usable and the SW-F3 notice on the
+                              // workspace-independent ring. An already-modeled
+                              // session keeps its transcript (OL7) and its
+                              // ErrorOccurred notice.
+                              if (!session_was_modeled) {
+                                  model_.eraseSession(workspace, session);
+                                  if (const auto ws = model_.workspaces.find(workspace);
+                                      ws != model_.workspaces.end() &&
+                                      !ws->second.sessions.empty()) {
+                                      model_.focusSessionIn(workspace,
+                                                            ws->second.sessions.front().id);
+                                  }
                               }
                               surface_notice(workspace, session, "resume failed: " + error);
                           });
                           return;
                       }
-                      enqueue([this, workspace, session] {
+                      // 77-D4: record the daemon's authoritative turn status on
+                      // the UI thread; the reply callback itself runs on the pump.
+                      const std::string status =
+                          reply.result.value("status", std::string{});
+                      enqueue([this, workspace, session, status] {
+                          set_daemon_turn_status(session, status);
                           apply_resume_success(workspace, session);
                           refresh_status_context(workspace, session);
                       });
@@ -1635,6 +1650,140 @@ private:
         return effective_model(options_.config);
     }
 
+    // 77-D1/77-D2/OL-X3/OL-F1: the extracted `on_envelope` sink body. Runs on the
+    // UI thread.
+    void handle_sink_envelope(const WorkspaceId& workspace,
+                              const protocol::SessionEnvelope& envelope, bool replay,
+                              std::optional<protocol::EventCursor> cursor) {
+        if (cursor.has_value()) {
+            if (SessionUiState* state = model_.session(envelope.session); state != nullptr) {
+                state->applied_through = cursor->value;
+            }
+        }
+        adapter_.onSessionEnvelope(workspace, envelope);
+        // OL-X3: reconcile the derived turn after every applied replay envelope,
+        // so a late dangling turn is forced Idle in the same UI action that
+        // applied it, regardless of the kOpeningTimeout escape's timing.
+        if (replay) {
+            reconcile_after_replay(envelope.session);
+        }
+        // 77-D1: only a live (non-replay) AssistantMessage refreshes the gauge.
+        if (!replay && envelope.event.type == EventType::AssistantMessage) {
+            refresh_status_context(workspace, envelope.session);
+        }
+        // OL-F1: a live event proves the catch-up ended, so the opening
+        // placeholder clears even when the ReplayComplete notice is lost.
+        if (!replay) {
+            model_.endOpening(envelope.session);
+        }
+    }
+
+    // 77-D4/X-3: the extracted `on_notice` sink body. Runs on the UI thread.
+    void handle_sink_notice(const WorkspaceId& workspace,
+                            const protocol::HostNotice& notice) {
+        if (notice.kind == protocol::HostNoticeKind::ReplayComplete &&
+            notice.session.has_value()) {
+            model_.endOpening(*notice.session);
+            reconcile_after_replay(*notice.session);
+            return;
+        }
+        if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
+            notice.session.has_value()) {
+            const auto connection = connections_.find(workspace);
+            if (connection != connections_.end()) {
+                connection->second->untrack(*notice.session);
+            }
+        }
+        adapter_.onHostNotice(workspace, notice);
+        if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
+            notice.session.has_value()) {
+            reconcile_subagent_path_for(*notice.session, "closed");
+        }
+        if (notice.kind == protocol::HostNoticeKind::SessionCreated) {
+            // 16 §7.6: one refresh fills the new cell's title; the broadcast
+            // notice itself carries only the SessionId.
+            refresh_sessions(workspace);
+        }
+    }
+
+    // 77-D4b: record the daemon's turn status for a session. The single writer is
+    // the session.resume reply callback (via the harness seam in tests).
+    void set_daemon_turn_status(const SessionId& session, std::string status) {
+        daemon_turn_status_[session] = std::move(status);
+    }
+
+    // 77-D4b: reconcile a replayed session whose recorded daemon turn status is
+    // not "Running". An absent entry (an auto-tracked `live` session) is a no-op:
+    // never hide a possibly-live turn. Idempotent.
+    void reconcile_after_replay(const SessionId& session) {
+        const auto it = daemon_turn_status_.find(session);
+        if (it == daemon_turn_status_.end()) {
+            return;
+        }
+        if (it->second == "Running") {
+            return;
+        }
+        adapter_.force_idle(session);
+    }
+
+    // 77-D3: the label for the opening placeholder. Prefers the modeled
+    // SessionCell title, then the `/sessions` catalog entry title, then the raw
+    // SessionId. Always non-empty.
+    std::string opening_title(const WorkspaceId& workspace,
+                              const SessionId& session) const {
+        if (const auto workspace_it = model_.workspaces.find(workspace);
+            workspace_it != model_.workspaces.end()) {
+            for (const SessionCell& cell : workspace_it->second.sessions) {
+                if (cell.id == session && !cell.title.empty()) {
+                    return cell.title;
+                }
+            }
+        }
+        for (const WorkspaceHistory& history : model_.catalog.workspaces) {
+            if (history.id != workspace) {
+                continue;
+            }
+            for (const SessionHistoryEntry& entry : history.sessions) {
+                if (entry.id == session && !entry.title.empty()) {
+                    return entry.title;
+                }
+            }
+            break;
+        }
+        return session.value;
+    }
+
+    // 77-D3/N1/N2: the timer loop's opening-expiry scheduling decision, factored
+    // out of the timer lambda so the decision itself is hermetic-testable. While a
+    // session is opening it delivers the expiry closure to `post` at most once per
+    // kPresencePostInterval, independent of `animation_active_`. Returns true iff
+    // it posted, so the timer body skips the presence heartbeat this tick.
+    bool maybe_post_opening_expiry(
+        std::chrono::steady_clock::time_point now,
+        const std::function<void(std::function<void()>)>& post) {
+        if (!opening_pending_.load()) {
+            return false;
+        }
+        if (now - last_opening_post < kPresencePostInterval) {
+            return false;
+        }
+        last_opening_post = now;
+        post([this] { expire_openings(); });
+        return true;
+    }
+
+    // 77-D3/N1: the timer's expiry callback, run on the UI thread from the Task
+    // `maybe_post_opening_expiry` posts. Ages out any opening past
+    // kOpeningTimeout, reconciles each expired session's derived state (OL-X2),
+    // and recomputes opening_pending_.
+    void expire_openings() {
+        for (const SessionId& session :
+             model_.expireOpenings(std::chrono::steady_clock::now())) {
+            reconcile_after_replay(session);
+        }
+        opening_pending_.store(model_.hasAnyOpening());
+    }
+
     // 22 §5.2 (SW25, MEDIUM-1): the success branch must never inject a workspace.
     // A workspace evicted between the submit and its reply is reported through
     // `surface_notice` and left unmodeled.
@@ -1664,7 +1813,15 @@ private:
         // sessions. A daemon predating that flag leaves the resume unsubscribed.
         if (const auto connection = connections_.find(workspace);
             connection != connections_.end()) {
-            connection->second->track(session);
+            // 77-D2: seed the subscribe from the model's retained applied-through
+            // cursor so an already-materialized transcript is not re-replayed;
+            // a fresh open (empty cursor) still subscribes from Beginning.
+            const std::string& through = state.applied_through;
+            connection->second->track(
+                session, through.empty()
+                             ? std::nullopt
+                             : std::optional<protocol::EventCursor>{
+                                   protocol::EventCursor{through}});
         }
         // 22 §5.2 "focus only; no session.activate": `focusSession` sets the
         // workspace's active session and switches `activeWorkspaceId`, so a
@@ -1679,6 +1836,7 @@ private:
     // dangles on a session the daemon will reject.
     void recover_unknown_session(const WorkspaceId& workspace, const SessionId& session) {
         model_.eraseSession(workspace, session);
+        daemon_turn_status_.erase(session);
         // 58-E42: a dropped child's subscription is released and the path popped.
         reconcile_subagent_path();
         push_notice("session no longer exists");
@@ -1848,6 +2006,12 @@ private:
             }
             it->second.daemonStatus = daemon_status_for(state);
             apply_daemon_status_liveness(it->second, it->second.daemonStatus);
+            // 77-D3: a dropped link can never deliver ReplayComplete, so clear
+            // every optimistic placeholder in the workspace.
+            if (state == SupervisorLinkState::Detached ||
+                state == SupervisorLinkState::Dead) {
+                model_.endOpeningsIn(workspace);
+            }
             model_.dirty.markAggregate();
             // 58-E36: fast-path guard; inert while the child state survives (the
             // real clear is the eviction, E37).
@@ -3205,6 +3369,7 @@ private:
     void apply_session_deleted(const WorkspaceId& workspace, const SessionId& session,
                                const std::optional<SwitcherCursor>& next) {
         model_.eraseSession(workspace, session);
+        daemon_turn_status_.erase(session);
         // 58-E43: an external `session.delete` for a viewed child pops the path.
         reconcile_subagent_path();
         if (next.has_value()) {
@@ -3946,6 +4111,15 @@ private:
                     continue;
                 }
                 const auto now = std::chrono::steady_clock::now();
+                // 77-D3/N1: schedule the opening-expiry callback independently of
+                // `animation_active_` (false while a placeholder is pending), so
+                // an idle-attached open still ages out. Falls through to the
+                // presence heartbeat when nothing expires or the rate limit holds.
+                if (maybe_post_opening_expiry(now, [this](std::function<void()> expiry) {
+                        screen_->Post(ftxui::Task{ftxui::Closure{std::move(expiry)}});
+                    })) {
+                    continue;
+                }
                 if (now - last_presence_post < kPresencePostInterval) {
                     continue;
                 }
@@ -4077,6 +4251,10 @@ private:
     // unguarded decrement would wrap a zero entry to `SIZE_MAX` and close the
     // gate forever. The gate is `count(workspace) == 0`.
     std::map<WorkspaceId, std::size_t> resume_in_flight_;
+    // 77-D4: authoritative per-session daemon turn status ("Idle" | "Running")
+    // recorded from the session.resume reply. Read after every applied replay
+    // envelope (OL-X3), at replay completion, and at the expiry escape. UI thread.
+    std::map<SessionId, std::string> daemon_turn_status_;
     // 46-D7 test seam (N6): canned `session.list` replies installed by the
     // harness, so the focus/create/resume decision is drivable without a daemon.
     bool           session_list_replies_installed_ = false;
@@ -4090,6 +4268,12 @@ private:
     // the frame timer. True only while the flash or the reasoning spinner is
     // animating, so the timer posts a repaint only when the screen can change.
     std::atomic<bool> animation_active_{false};
+    // 77-D3/N1: true while any session is opening. Set by `beginOpening`; read by
+    // the timer thread (hence atomic) and recomputed by `expire_openings`.
+    std::atomic<bool> opening_pending_{false};
+    // 77-D3/N1: the last time the timer posted an expiry task (timer thread in
+    // production, the UI thread in the `opening_expiry_tick` test seam).
+    std::chrono::steady_clock::time_point last_opening_post{};
     // RB-18: true while the `/sessions` History overlay is open. Read by the
     // catalog worker so it keeps delivering snapshots (fresh relative ages) only
     // while they are on screen; closed, unchanged snapshots are dropped.
@@ -4463,6 +4647,34 @@ public:
 
     void deliver_subscribe_error(const SessionId& session, const std::string& detail) override {
         app_.handle_subscribe_error(session, detail);
+    }
+
+    void feed_sink_envelope(const WorkspaceId& workspace,
+                            const protocol::SessionEnvelope& envelope, bool replay,
+                            std::optional<protocol::EventCursor> cursor) override {
+        app_.handle_sink_envelope(workspace, envelope, replay, cursor);
+        app_.drain();
+    }
+
+    void deliver_sink_notice(const WorkspaceId& workspace,
+                             const protocol::HostNotice& notice) override {
+        app_.handle_sink_notice(workspace, notice);
+        app_.drain();
+    }
+
+    void set_daemon_turn_status(const SessionId& session, std::string status) override {
+        app_.set_daemon_turn_status(session, std::move(status));
+        app_.drain();
+    }
+
+    void resume_after_attach(const WorkspaceId& workspace,
+                             const SessionId& session) override {
+        app_.resume_after_attach(workspace, session);
+    }
+
+    bool opening_expiry_tick(std::chrono::steady_clock::time_point now) override {
+        return app_.maybe_post_opening_expiry(
+            now, [this](std::function<void()> expiry) { expiry(); });
     }
 
     void apply_session_deleted(const WorkspaceId& workspace, const SessionId& session) override {

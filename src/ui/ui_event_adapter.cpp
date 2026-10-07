@@ -333,6 +333,41 @@ void UiEventAdapter::forget_session(const SessionId& id) {
     }
 }
 
+void UiEventAdapter::force_idle(const SessionId& id) {
+    const auto previous = lastState_.find(id);
+    const AgentState old =
+        previous == lastState_.end() ? AgentState::Idle : previous->second;
+    if (old != AgentState::Idle) {
+        // 77-D4b: apply the state change WITHOUT `applyAndMark`'s completion-flash
+        // arming. An interrupted turn reconciled to Idle is not a completion, so
+        // the open must not trigger the one-second aggregate flash (77 §10.1).
+        model_.apply(UiEvent{AgentStateChanged{id, old, AgentState::Idle}});
+        model_.aggregate.recompute(model_.workspaces, model_.sessions);
+        model_.dirty.markAggregate();
+    }
+    lastState_[id] = AgentState::Idle;
+
+    SessionUiState* state = model_.session(id);
+    if (state == nullptr) {
+        return;
+    }
+    // A daemon reporting a non-Running turn has no live direct child, so any
+    // still-Running replay-derived child is stale.
+    std::vector<SubagentView> children = state->subagents.agents;
+    for (const SubagentView& child : children) {
+        if (child.status != SubagentStatus::Running) {
+            continue;
+        }
+        SubagentUpdated updated;
+        updated.session = id;
+        updated.subagent = child.id;
+        updated.summary = child.summary;
+        updated.state = child.state;
+        updated.status = SubagentStatus::Cancelled;
+        applyAndMark(UiEvent{std::move(updated)});
+    }
+}
+
 void UiEventAdapter::onPermissionRequest(const SessionId& session,
                                          const PermissionRequestId& id,
                                          const PermissionRequest& request) {
@@ -427,6 +462,10 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
             model_.setMcpStatus(notice.detail);
             break;
         }
+        case protocol::HostNoticeKind::ReplayComplete:
+            // 77-D4a: handled by `SupervisorApp::handle_sink_notice` before the
+            // adapter is consulted; a no-op here keeps `-Wswitch -Werror` clean.
+            break;
     }
 }
 

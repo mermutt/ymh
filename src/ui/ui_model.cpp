@@ -613,6 +613,9 @@ namespace {
 // parent's derived work. The scope is direct children only: a background
 // grandchild is not covered once its own parent has settled (65-F5).
 bool session_working(const SessionUiState& state) {
+    if (state.opening.has_value()) {
+        return false;
+    }
     if (is_active_state(state.agent_state)) {
         return true;
     }
@@ -966,6 +969,77 @@ void UiModel::eraseSession(const WorkspaceId& workspace, const SessionId& id) {
         target.setActiveSessionId(SessionId{});
     }
     dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout | UiDirtyFlag::SessionBar);
+}
+
+bool UiModel::beginOpening(const WorkspaceId& workspace, const SessionId& session,
+                           std::string title) {
+    if (workspaces.find(workspace) == workspaces.end()) {
+        return false;
+    }
+    SessionUiState& state = ensureSessionIn(workspace, session);
+    OpeningState opening;
+    opening.title = std::move(title);
+    opening.since = std::chrono::steady_clock::now();
+    state.opening = std::move(opening);
+    focusSessionIn(workspace, session);
+    dirty.mark(session, UiDirtyFlag::Conversation | UiDirtyFlag::Layout);
+    dirty.markAggregate();
+    return true;
+}
+
+bool UiModel::endOpening(const SessionId& session) {
+    const auto it = sessions.find(session);
+    if (it == sessions.end() || !it->second.opening.has_value()) {
+        return false;
+    }
+    it->second.opening.reset();
+    dirty.mark(session, UiDirtyFlag::Conversation | UiDirtyFlag::Layout);
+    dirty.markAggregate();
+    return true;
+}
+
+void UiModel::endOpeningsIn(const WorkspaceId& workspace) {
+    bool changed = false;
+    for (auto& [id, state] : sessions) {
+        if (state.workspace != workspace || !state.opening.has_value()) {
+            continue;
+        }
+        state.opening.reset();
+        dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout);
+        changed = true;
+    }
+    if (changed) {
+        dirty.markAggregate();
+    }
+}
+
+std::vector<SessionId> UiModel::expireOpenings(std::chrono::steady_clock::time_point now) {
+    std::vector<SessionId> expired;
+    for (auto& [id, state] : sessions) {
+        if (!state.opening.has_value()) {
+            continue;
+        }
+        if (now - state.opening->since < kOpeningTimeout) {
+            continue;
+        }
+        state.opening.reset();
+        dirty.mark(id, UiDirtyFlag::Conversation | UiDirtyFlag::Layout);
+        expired.push_back(id);
+    }
+    if (!expired.empty()) {
+        dirty.markAggregate();
+    }
+    return expired;
+}
+
+bool UiModel::hasAnyOpening() const {
+    for (const auto& [id, state] : sessions) {
+        (void)id;
+        if (state.opening.has_value()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void UiModel::setMcpStatus(std::string detail) {

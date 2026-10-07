@@ -634,6 +634,16 @@ void ProtocolServer::handle_subscribe(Connection& conn, const Request& request, 
         }
     }
 
+    if (!replay_only && conn.profile == ServerProfile::Interactive) {
+        // 77-D4a: the additive catch-up boundary, distinct from the read-only
+        // `session.replay` `event.unsubscribed{reason:"replay_complete"}` below.
+        enqueue(conn, notification_json(
+                         notify::kHostEvent,
+                         to_json_value(HostNotice{HostNoticeKind::ReplayComplete,
+                                                  config_.workspace, params.session,
+                                                  std::string{}})));
+    }
+
     if (replay_only) {
         enqueue(conn, notification_json(
                          notify::kEventUnsubscribed,

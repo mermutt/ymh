@@ -517,6 +517,11 @@ Element render_conversation(const SessionUiState* active, const RenderContext& c
     }
     const std::vector<ConversationEntry>& entries = active->conversation.entries;
     const bool turn_active = is_active_state(active->agent_state);
+    // 77-D3: the optimistic open placeholder precedes the (already delivered)
+    // transcript rows.
+    if (active->opening.has_value()) {
+        rows.push_back(ftxui::text("opening " + active->opening->title + "...") | ftxui::dim);
+    }
     for (std::size_t index = 0; index < entries.size(); ++index) {
         rows.push_back(render_entry(entries[index], &active->tools,
                                     active->expand_all_folds,

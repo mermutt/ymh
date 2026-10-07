@@ -84,7 +84,13 @@ struct SupervisorConnectionConfig {
 // All callbacks run ON THE PUMP THREAD (10 §3.3). Keep them short and never
 // call back into the connection's blocking methods.
 struct SupervisorSink {
-    std::function<void(const protocol::SessionEnvelope&)> on_envelope;
+    // 77-D1/77-D2: `replay` is true for a catch-up `event.stream` replay batch,
+    // false for a live committed `event.stream` or an `event.live` delta.
+    // `cursor` is the post-event resume position (T21) for an `event.stream`
+    // notification; nullopt for `event.live` (which carries no cursor).
+    std::function<void(const protocol::SessionEnvelope&, bool replay,
+                       std::optional<protocol::EventCursor> cursor)>
+        on_envelope;
     std::function<void(const protocol::HostNotice&)>      on_notice;
     std::function<void(const protocol::PermissionRequest&)> on_permission;
     std::function<void(SupervisorLinkState, const std::string& detail)> on_state;
@@ -119,8 +125,13 @@ public:
     void stop();
 
     // Begin tracking a session: it is subscribed on the next attach (or
-    // immediately if already attached). Idempotent.
-    void track(const SessionId& session);
+    // immediately if already attached). Idempotent. 77-D2: `seed_from` is the
+    // caller-model retained applied-through cursor (opaque; never parsed), or
+    // nullopt for a fresh open. It initializes the per-session cursor ONLY when
+    // no cursor is already known, so a same-connection reconnect always keeps
+    // the fresher `cursors_` value and never regresses to a stale seed.
+    void track(const SessionId& session,
+               std::optional<protocol::EventCursor> seed_from = std::nullopt);
     void untrack(const SessionId& session);
 
     // Marshals `method`/`params` onto the pump. `reply` is invoked exactly once
