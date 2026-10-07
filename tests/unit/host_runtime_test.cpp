@@ -2030,4 +2030,64 @@ TEST_F(HostRuntimeTest, UI45_D10_AgentResumedOnPrompt) {
     EXPECT_GE(count_type(events, EventType::TurnEnded), 1u);
 }
 
+// 78-D2/D7 (FK-U6): an absent seed defaults to the parent's current resolved-view
+// length; an explicit integer is honored as the boundary.
+TEST_F(HostRuntimeTest, FK_U6_ForkDefaultsToFullView) {
+    Bridge bridge("hr_fk_u6");
+    const protocol::SessionCreated parent = bridge.host().createSession(nlohmann::json::object());
+    bridge.append_event(parent.session, EventType::TokenUsage);
+
+    const std::size_t parent_view =
+        bridge.runtime().sessions().sessionPtr(parent.session)->events().size();
+    ASSERT_EQ(parent_view, 2u);
+
+    const protocol::SessionCreated full =
+        bridge.host().forkSession(parent.session, std::nullopt);
+    const std::optional<SessionHeader> full_header = bridge.runtime().store().load(full.session);
+    ASSERT_TRUE(full_header.has_value());
+    ASSERT_TRUE(full_header->seedLength.has_value());
+    EXPECT_EQ(*full_header->seedLength, parent_view);
+
+    const protocol::SessionCreated partial =
+        bridge.host().forkSession(parent.session, std::int64_t{1});
+    const std::optional<SessionHeader> header = bridge.runtime().store().load(partial.session);
+    ASSERT_TRUE(header.has_value());
+    ASSERT_TRUE(header->seedLength.has_value());
+    EXPECT_EQ(*header->seedLength, 1u);
+}
+
+// 78-D5/FK8 (FK-U7): forkSession never touches the daemon's active session.
+TEST_F(HostRuntimeTest, FK_U7_ForkLeavesActiveSessionUnchanged) {
+    Bridge bridge("hr_fk_u7");
+    const protocol::SessionCreated parent = bridge.host().createSession(nlohmann::json::object());
+    bridge.host().activateSession(parent.session);
+    const std::optional<SessionId> before = bridge.host().hostStatus().active_session;
+    ASSERT_TRUE(before.has_value());
+    EXPECT_EQ(before->value, parent.session.value);
+
+    (void)bridge.host().forkSession(parent.session, 0);
+
+    const std::optional<SessionId> after = bridge.host().hostStatus().active_session;
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->value, parent.session.value);
+}
+
+// FK7 (FK-U8): the child gets its own lease, agent, and registry junction; the
+// parent's own remain intact.
+TEST_F(HostRuntimeTest, FK_U8_ForkChildHasOwnLeaseAgentJunction) {
+    Bridge bridge("hr_fk_u8");
+    const protocol::SessionCreated parent = bridge.host().createSession(nlohmann::json::object());
+    ASSERT_NE(bridge.runtime().agents().findShared(parent.session), nullptr);
+    ASSERT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(), 1u);
+
+    const protocol::SessionCreated child = bridge.host().forkSession(parent.session, 0);
+    EXPECT_NE(child.session.value, parent.session.value);
+    EXPECT_TRUE(bridge.runtime().store().isLeaseHolder(child.session));
+    EXPECT_NE(bridge.runtime().agents().findShared(child.session), nullptr);
+    EXPECT_EQ(bridge.registry().listSessions(bridge.identity().workspace).size(), 2u);
+
+    EXPECT_TRUE(bridge.runtime().store().isLeaseHolder(parent.session));
+    EXPECT_NE(bridge.runtime().agents().findShared(parent.session), nullptr);
+}
+
 } // namespace

@@ -147,17 +147,20 @@ public:
         return protocol::SessionResumed{id, "Idle"};
     }
 
-    protocol::SessionCreated forkSession(const SessionId& id, std::int64_t seed_length) override {
+    protocol::SessionCreated forkSession(const SessionId& id,
+                                         std::optional<std::int64_t> seed_length) override {
         calls.push_back("session.fork");
         if (!sessionExists(id)) {
             throw protocol::RpcException(static_cast<int>(protocol::AppCode::UnknownSession),
                                          "unknown session");
         }
+        const auto& parent = logs_.at(id.value);
+        const std::int64_t boundary =
+            seed_length.value_or(static_cast<std::int64_t>(parent.size()));
         const std::string child = "fork-" + std::to_string(next_session_++);
         std::vector<EventRecord> seeded;
-        const auto& parent = logs_.at(id.value);
         for (std::size_t index = 0; index < parent.size() &&
-                                    static_cast<std::int64_t>(index) < seed_length;
+                                    static_cast<std::int64_t>(index) < boundary;
              ++index) {
             EventRecord record = parent[index];
             record.seq = static_cast<Sequence>(index) + 1;

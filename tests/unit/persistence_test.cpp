@@ -479,6 +479,109 @@ TEST(Persistence, ForkResolvesSharedPrefix) {
     EXPECT_GT(childView[2].seq, parentView[1].seq);
 }
 
+// 78-D2/FK4 (FK-U3): the child's resolved view is exactly the parent prefix
+// `[0, seed_length)` followed by the child's own events; `ownEvents()` strips the
+// shared prefix.
+TEST(Persistence, FK_U3_ForkViewIsParentPrefixPlusOwn) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    const auto now = std::chrono::system_clock::now();
+    store->append(parent.id, make_event(parent.id, now));
+    store->append(parent.id, make_event(parent.id, now));
+    store->append(parent.id, make_event(parent.id, now));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 2;
+    store->create(child);
+    store->append(child.id, make_event(child.id, now));
+
+    const EventRange parentView = store->read(parent.id);
+    const EventRange childView  = store->read(child.id);
+    ASSERT_EQ(parentView.size(), 3u);
+    ASSERT_EQ(childView.size(), 3u);
+    EXPECT_EQ(childView[0].event.id.value, parentView[0].event.id.value);
+    EXPECT_EQ(childView[1].event.id.value, parentView[1].event.id.value);
+    EXPECT_EQ(childView[2].event.session_id.value, child.id.value);
+    EXPECT_NE(childView[2].event.id.value, parentView[2].event.id.value);
+
+    EventBus bus;
+    Session childSession = Session::replay(child, *store, bus);
+    EXPECT_EQ(childSession.events().size(), 3u);
+    ASSERT_EQ(childSession.ownEvents().size(), 1u);
+    EXPECT_EQ(childSession.ownEvents()[0].event.session_id.value, child.id.value);
+}
+
+// FK14 (FK-I7): fork-of-fork composes; the grandchild view is the child prefix
+// followed by its own event.
+TEST(Persistence, FK_I7_ForkOfForkComposes) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    EventBus      bus;
+    SessionManager manager(*store, bus);
+
+    SessionHeader parent = make_header(workspace.root());
+    store->create(parent);
+    const auto now = std::chrono::system_clock::now();
+    store->append(parent.id, make_event(parent.id, now));
+    store->append(parent.id, make_event(parent.id, now));
+
+    SessionHeader child = make_header(workspace.root(), SessionKind::Fork);
+    child.parentSession = parent.id;
+    child.seedLength    = 2;
+    store->create(child);
+    store->append(child.id, make_event(child.id, now));
+
+    SessionHeader grand = make_header(workspace.root(), SessionKind::Fork);
+    grand.parentSession = child.id;
+    grand.seedLength    = 3;
+    store->create(grand);
+    store->append(grand.id, make_event(grand.id, now));
+
+    const EventRange childView = store->read(child.id);
+    const EventRange grandView = store->read(grand.id);
+    ASSERT_EQ(childView.size(), 3u);
+    ASSERT_EQ(grandView.size(), 4u);
+    EXPECT_EQ(grandView[0].event.id.value, childView[0].event.id.value);
+    EXPECT_EQ(grandView[1].event.id.value, childView[1].event.id.value);
+    EXPECT_EQ(grandView[2].event.id.value, childView[2].event.id.value);
+    EXPECT_EQ(grandView[3].event.session_id.value, grand.id.value);
+}
+
+// FK-F7 (FK-I8): a fork row created without its own `SessionStarted` (the
+// recorded partial-fork) still resolves to the parent prefix and is listed; the
+// parent is untouched.
+TEST(Persistence, FK_I8_PartialForkRowResolves) {
+    TempWorkspace workspace;
+    auto          store = SessionPersistence::open(workspace.config());
+    const SessionHeader parent = store->create(make_header(workspace.root()));
+    const auto now = std::chrono::system_clock::now();
+    store->append(parent.id, make_event(parent.id, now));
+    store->append(parent.id, make_event(parent.id, now));
+
+    SessionHeader partial = make_header(workspace.root(), SessionKind::Fork);
+    partial.parentSession = parent.id;
+    partial.seedLength    = 2;
+    const SessionHeader created = store->create(partial);
+
+    const EventRange parentView = store->read(parent.id);
+    ASSERT_EQ(parentView.size(), 2u);
+    const EventRange partialView = store->read(created.id);
+    ASSERT_EQ(partialView.size(), 2u);
+    EXPECT_EQ(partialView[0].event.id.value, parentView[0].event.id.value);
+    EXPECT_EQ(partialView[1].event.id.value, parentView[1].event.id.value);
+
+    bool listed = false;
+    for (const SessionHeader& header : store->list()) {
+        if (header.id.value == created.id.value) {
+            listed = true;
+        }
+    }
+    EXPECT_TRUE(listed);
+    EXPECT_EQ(store->read(parent.id).size(), 2u);
+}
+
 TEST(Persistence, HeadSequenceIsHighestCommitted) {
     TempWorkspace workspace;
     auto          store  = SessionPersistence::open(workspace.config());

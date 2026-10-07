@@ -237,4 +237,19 @@ TEST(RenderGolden, TuiExitConfirmOverlayCountsAndOwnershipMark) {
     EXPECT_NE(switcher.find("[owned]"), std::string::npos);
 }
 
+// 78-D5 (FK-G2): the "forked -> <id>" confirmation renders on the status line.
+TEST(RenderGolden, FK_G2_ForkNotice) {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel& workspace = model.workspaces[model.activeWorkspaceId];
+    workspace.id = model.activeWorkspaceId;
+    model.focusSessionIn(model.activeWorkspaceId, SessionId{"session"});
+    model.pushNotice("forked -> child-9");
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("forked -> child-9"), std::string::npos);
+}
+
 } // namespace

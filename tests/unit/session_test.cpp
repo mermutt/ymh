@@ -1037,4 +1037,61 @@ TEST(Session, HeaderReturnsStableSnapshot) {
     EXPECT_GT(session.header().updatedAt, before.updatedAt);
 }
 
+// 78-D3 (FK-U1/FK5/FK6): a fork copies the parent's fixed route and composition
+// (`agent_preset`, `endpoint`, `profile_id`, `permission_preset`, `model_name`)
+// and inherits `depth` without incrementing it.
+TEST(Session, FK_U1_ForkInheritsRouteAndPreset) {
+    FakeStore    store;
+    EventBus     bus;
+    SessionManager manager(store, bus);
+
+    SessionOptions options;
+    options.cwd               = make_temp_dir();
+    options.serverProfile     = "interactive";
+    options.model             = "wire-model";
+    options.model_name        = "balanced";
+    options.title             = "root";
+    options.agent_preset      = "standard";
+    options.permission_preset = "plan";
+    options.endpoint          = "ds";
+    options.profile_id        = "default";
+    options.depth             = 3;
+    const SessionId root      = manager.createSession(options);
+
+    const SessionId child = manager.forkSession(root, 1);
+
+    const std::optional<SessionHeader> header = store.load(child);
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(header->kind, SessionKind::Fork);
+    ASSERT_TRUE(header->parentSession.has_value());
+    EXPECT_EQ(header->parentSession->value, root.value);
+    ASSERT_TRUE(header->seedLength.has_value());
+    EXPECT_EQ(*header->seedLength, 1u);
+    EXPECT_EQ(header->agent_preset, std::optional<std::string>{"standard"});
+    EXPECT_EQ(header->endpoint, std::optional<std::string>{"ds"});
+    EXPECT_EQ(header->profile_id, std::optional<std::string>{"default"});
+    EXPECT_EQ(header->permission_preset, std::optional<std::string>{"plan"});
+    EXPECT_EQ(header->model_name, std::optional<std::string>{"balanced"});
+    EXPECT_EQ(header->model, "wire-model");
+    EXPECT_EQ(header->depth, 3u);
+}
+
+// 78-D2 (FK-U2/FK3): a seed beyond the parent resolved view throws
+// `InvalidForkBoundary` and persists no child row.
+TEST(Session, FK_U2_ForkBoundaryOutOfRangeCreatesNothing) {
+    FakeStore    store;
+    EventBus     bus;
+    SessionManager manager(store, bus);
+
+    SessionOptions options;
+    options.cwd           = make_temp_dir();
+    options.serverProfile = "interactive";
+    options.model         = "wire-model";
+    const SessionId root  = manager.createSession(options);
+    ASSERT_EQ(manager.sessionPtr(root)->events().size(), 1u);
+
+    EXPECT_THROW(manager.forkSession(root, 2), InvalidForkBoundary);
+    EXPECT_EQ(store.list().size(), 1u);
+}
+
 } // namespace

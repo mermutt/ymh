@@ -71,6 +71,53 @@ TEST(CommandRegistryTest, HelpRendersAlias) {
     EXPECT_NE(rendered.find("/exit(quit) - quit the supervisor"), std::string::npos);
 }
 
+// 78-D1 (FK-U4): `/fork` is registered before the `/help` snapshot, so it appears
+// in the help listing and its dispatch reaches the `context.fork` hook.
+TEST(CommandRegistryTest, FK_U4_ForkRegisteredBeforeHelp) {
+    CommandRegistry registry = CommandRegistry::builtin();
+    UiModel         model;
+    SessionUiState& state = attach_session(model);
+    CommandContext  context{model};
+    context.session = &state;
+    bool        forked = false;
+    std::string received;
+    context.fork = [&forked, &received](const std::string& args) {
+        forked   = true;
+        received = args;
+    };
+
+    EXPECT_TRUE(registry.dispatch("/help", context));
+    std::string rendered;
+    for (const ConversationEntry& entry : state.conversation.entries) {
+        rendered += entry.text + "\n";
+    }
+    EXPECT_NE(rendered.find("/fork - branch the current session into a new independent session"),
+              std::string::npos);
+
+    EXPECT_TRUE(registry.dispatch("/fork", context));
+    EXPECT_TRUE(forked);
+    EXPECT_TRUE(received.empty());
+}
+
+// 78-D1 (FK-U5, FK-F3): the registry forwards the raw argument tail to the hook;
+// the boundary parsing and usage notice live in `SupervisorApp::fork_session`.
+TEST(CommandRegistryTest, FK_U5_ForkArgPassthrough) {
+    CommandRegistry registry = CommandRegistry::builtin();
+    UiModel         model;
+    SessionUiState& state = attach_session(model);
+    CommandContext  context{model};
+    context.session = &state;
+    std::vector<std::string> calls;
+    context.fork = [&calls](const std::string& args) { calls.push_back(args); };
+
+    EXPECT_TRUE(registry.dispatch("/fork", context));
+    EXPECT_TRUE(registry.dispatch("/fork 12", context));
+
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[0], "");
+    EXPECT_EQ(calls[1], "12");
+}
+
 TEST(CommandRegistryTest, SkillCommandRemovedAndSkillsDescriptionPinned) {
     const CommandRegistry registry = CommandRegistry::builtin();
     EXPECT_EQ(registry.find("skill"), nullptr);

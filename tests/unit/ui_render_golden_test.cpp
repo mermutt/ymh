@@ -527,6 +527,24 @@ TEST(UiRenderGolden, UI46_G5_QuitRowLiteral) {
     EXPECT_NE(rendered.find("> /exit(quit) - quit the supervisor"), std::string::npos);
 }
 
+// 78-D1 (FK-G1): the `/help` listing gains the `/fork` row.
+TEST(UiRenderGolden, FK_G1_HelpListsFork) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+
+    const CommandRegistry registry = CommandRegistry::builtin();
+    CommandContext context{model};
+    context.session = state;
+    ASSERT_TRUE(registry.dispatch("/help", context));
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{120, 40}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("/fork - branch the current session into a new independent session"),
+              std::string::npos);
+}
+
 TEST(UiRenderGolden, StatusShowsTokenUsage) {
     UiModel model = build_model();
     const std::string rendered =

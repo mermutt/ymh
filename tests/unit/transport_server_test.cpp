@@ -1437,4 +1437,22 @@ TEST(TransportServer, LiveEventAudienceIsPerSubscribedSession) {
     EXPECT_TRUE(harness.drain(*prehello).empty());
 }
 
+// 78-D2 (§4.3, FK-U9): `FakeTransportHost::forkSession` overrides the new
+// `std::optional<std::int64_t>` base virtual and resolves `nullopt` to the
+// parent's resolved-view length.
+TEST(TransportHost, FK_U9_FakeForkOverrideOptionalSeed) {
+    test::FakeTransportHost host;
+    const SessionId parent = host.seed("parent");
+    host.append(parent, EventType::UserMessage, nlohmann::json::object());
+    host.append(parent, EventType::AssistantMessage, nlohmann::json::object());
+
+    const protocol::SessionCreated full = host.forkSession(parent, std::nullopt);
+    EXPECT_EQ(host.readEvents(full.session, 0, 100).size(), 2u);
+
+    const protocol::SessionCreated partial = host.forkSession(parent, std::int64_t{1});
+    EXPECT_EQ(host.readEvents(partial.session, 0, 100).size(), 1u);
+
+    EXPECT_THROW(host.forkSession(SessionId{"missing"}, std::nullopt), protocol::RpcException);
+}
+
 } // namespace
