@@ -399,6 +399,29 @@ void validate_approval_value(const std::string& value, const std::filesystem::pa
     }
 }
 
+void apply_handoff(Config& config, const Json& table, const std::filesystem::path& source) {
+    reject_unknown(table, "handoff",
+                   {"enabled", "summarizer_model", "max_summary_tokens", "max_summary_bytes",
+                    "max_input_bytes", "keep_recent_turns"},
+                   source);
+    HandoffSettings& handoff = config.handoff;
+    handoff.enabled = read_bool(table, "enabled", "handoff", handoff.enabled, source);
+    handoff.summarizer_model =
+        read_string(table, "summarizer_model", "handoff", handoff.summarizer_model, source);
+    handoff.max_summary_tokens = static_cast<std::size_t>(read_int64(
+        table, "max_summary_tokens", "handoff",
+        static_cast<std::int64_t>(handoff.max_summary_tokens), source));
+    handoff.max_summary_bytes = static_cast<std::size_t>(read_int64(
+        table, "max_summary_bytes", "handoff",
+        static_cast<std::int64_t>(handoff.max_summary_bytes), source));
+    handoff.max_input_bytes = static_cast<std::size_t>(read_int64(
+        table, "max_input_bytes", "handoff",
+        static_cast<std::int64_t>(handoff.max_input_bytes), source));
+    handoff.keep_recent_turns = static_cast<std::size_t>(read_int64(
+        table, "keep_recent_turns", "handoff",
+        static_cast<std::int64_t>(handoff.keep_recent_turns), source));
+}
+
 void apply_agent(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "agent",
                    {"model", "max_steps", "max_segments", "max_turn_steps", "reasoning_effort",
@@ -1317,7 +1340,8 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
                     bool global_layer) {
     reject_unknown(table, "",
                    {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "session", "prompt", "tools", "presets", "goals", "jobs", "mcp_servers"},
+                    "session", "prompt", "tools", "presets", "goals", "jobs", "handoff",
+                    "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -1396,6 +1420,9 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     }
     if (const Json* jobs = section("jobs"); jobs != nullptr) {
         apply_jobs(config, *jobs, source);
+    }
+    if (const Json* handoff = section("handoff"); handoff != nullptr) {
+        apply_handoff(config, *handoff, source);
     }
     if (mcp_servers != nullptr) {
         apply_mcp_servers_object(config.mcp, *mcp_servers, source);

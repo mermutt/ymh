@@ -16,6 +16,7 @@
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/compactor.hpp"
 #include "ymh/agent/context_assembler.hpp"
+#include "ymh/agent/handoff.hpp"
 #include "ymh/agent/llm_pool.hpp"
 #include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
@@ -23,6 +24,7 @@
 #include "ymh/agent/session_activator.hpp"
 #include "ymh/agent/subagent_service.hpp"
 #include "ymh/cli/wiring.hpp"
+#include "ymh/commands/command_registry.hpp"
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/execution/config.hpp"
@@ -30,6 +32,7 @@
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/pty.hpp"
 #include "ymh/execution/resource_governor.hpp"
+#include "ymh/handoff/handoff_command.hpp"
 #include "ymh/jobs/job_registry.hpp"
 #include "ymh/jobs/job_wakeup.hpp"
 #include "ymh/llm/llm_runtime.hpp"
@@ -416,6 +419,13 @@ public:
             services_.context_compactor = compactor_.get();
         }
 
+        handoff_ = std::make_unique<HandoffService>(runtime_, pool_, sessions_, *environment_,
+                                                    &model_catalog_, to_handoff_policy(config));
+        const ScopeKey global_scope{};
+        const ScopeFor scope_for = [](const Agent&) { return ScopeKey{}; };
+        commands_ = std::make_unique<CommandRegistry>(sessions_, scope_for, ScopeParent{});
+        commands_->add(make_handoff_command(*handoff_), global_scope);
+
         route_catalog_ = std::make_unique<WorkspaceRouteCatalog>(model_catalog_);
         services_.route_catalog = route_catalog_.get();
         agents_ = std::make_unique<AgentRegistry>(services_, agent_config_);
@@ -549,6 +559,8 @@ public:
     std::optional<AdapterHandle>       adapter_handle_;
     LLMPool                            pool_;
     std::unique_ptr<ContextCompactor>  compactor_;
+    std::unique_ptr<HandoffService>    handoff_;
+    std::unique_ptr<CommandRegistry>   commands_;
     OutputRing                         ring_;
     RingOutputSink                     sink_;
     SessionManager                     sessions_;
@@ -684,6 +696,7 @@ SessionPersistence*   WorkspaceRuntime::persistence() noexcept { return impl_->p
 bool WorkspaceRuntime::hasDurableStore() const noexcept { return impl_->persistence_ != nullptr; }
 SessionManager&       WorkspaceRuntime::sessions() noexcept { return impl_->sessions_; }
 AgentRegistry&        WorkspaceRuntime::agents() noexcept { return *impl_->agents_; }
+CommandRegistry&      WorkspaceRuntime::commands() noexcept { return *impl_->commands_; }
 ToolRegistry&         WorkspaceRuntime::tools() noexcept { return impl_->tools_; }
 PermissionPolicy&     WorkspaceRuntime::policy() noexcept { return impl_->policy_; }
 PermissionGate&       WorkspaceRuntime::gate() noexcept { return impl_->gate_; }

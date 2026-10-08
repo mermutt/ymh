@@ -462,6 +462,7 @@ add_library(ymh_agent STATIC
     src/agent/compactor.cpp
     src/agent/context_assembler.cpp
     src/agent/context_snapshot.cpp
+    src/agent/handoff.cpp
     src/agent/llm_pool.cpp
     src/agent/model_selection.cpp
     src/agent/plan_mode_controller.cpp
@@ -473,6 +474,7 @@ add_library(ymh_agent STATIC
     src/agent/tool_result_pruner.cpp
     src/commands/command_registry.cpp
     src/commands/goal_command.cpp
+    src/commands/handoff_command.cpp
     src/goal/goal_service.cpp
     src/goal/round_driver.cpp
     src/jobs/job_registry.cpp

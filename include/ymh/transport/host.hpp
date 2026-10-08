@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/commands/command_types.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/transport/protocol.hpp"
 
@@ -117,6 +118,10 @@ public:
     virtual void activateSession(const SessionId& id) = 0;
     virtual void suspendSession(const SessionId& id) = 0;
     virtual void compactSession(const SessionId& id) = 0;
+    // 82-D8: forwards a raw durable-command line to the host-side command
+    // registry; replies before the handler settles (H8).
+    virtual void invokeCommand(const SessionId& id, std::string_view line,
+                               CommandSource source) = 0;
 
     virtual void agentPrompt(const SessionId& id, const nlohmann::json& message) = 0;
     virtual void agentFollowup(const SessionId& id, const nlohmann::json& message) = 0;

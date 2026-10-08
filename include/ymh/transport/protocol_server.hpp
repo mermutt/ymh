@@ -72,6 +72,9 @@ public:
     void onLeaseLost(const SessionId& session, std::string detail);
     void onDaemonShuttingDown(std::string detail);
     void onMcpServerStatus(std::string detail);
+    // 82-D9: emits HostNotice{HandoffResult} to Interactive connections on the
+    // transport io thread. Caller: the daemon's marshalled HandoffNoticeForwarder.
+    void onHandoffResult(const SessionId& session, std::string detail);
     void onPermissionRequest(const PermissionRequest& request);
 
     [[nodiscard]] std::size_t attachedClients() const;

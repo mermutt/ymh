@@ -654,6 +654,7 @@ private:
     void restoreCwd();
     void forwardEvent(const EventRecord& record);
     void forwardLiveEvent(const Event& event);
+    void forwardHandoffNotice(const SessionId& session, std::string detail);
     void armSignals();
     void armHeartbeat();
     void armLeaseRenewal();
@@ -903,7 +904,10 @@ HostExitCode WorkspaceHost::Impl::startup() {
     host_runtime_ = std::make_unique<HostRuntime>(
         *runtime_, *registry_, identity, *turns_, *broker_,
         [this](const EventRecord& record) { forwardEvent(record); },
-        [this](const Event& event) { forwardLiveEvent(event); });
+        [this](const Event& event) { forwardLiveEvent(event); },
+        [this](const SessionId& session, std::string detail) {
+            forwardHandoffNotice(session, std::move(detail));
+        });
     host_runtime_->setShutdownHook(
         [this](ShutdownReason reason) { requestShutdown(reason); });
 
@@ -1132,6 +1136,16 @@ void WorkspaceHost::Impl::forwardLiveEvent(const Event& event) {
         transport_->post([this, event] {
             if (protocol_ != nullptr) {
                 protocol_->onLiveEvent(event);
+            }
+        });
+    }
+}
+
+void WorkspaceHost::Impl::forwardHandoffNotice(const SessionId& session, std::string detail) {
+    if (transport_ != nullptr && transport_->running()) {
+        transport_->post([this, session, detail = std::move(detail)]() mutable {
+            if (protocol_ != nullptr) {
+                protocol_->onHandoffResult(session, std::move(detail));
             }
         });
     }

@@ -2954,6 +2954,21 @@ private:
                   });
     }
 
+    void request_handoff(const std::string& args) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
+            if (SessionUiState* state = model_.ensureActiveSession(); state != nullptr) {
+                append_system_entry(model_, *state, "handoff: no active session");
+            }
+            return;
+        }
+        nlohmann::json params{{"session", workspace->activeSessionId().value},
+                              {"line", "handoff " + args},
+                              {"source", "user"}};
+        submit_to(workspace->id, std::string(protocol::method::kCommandInvoke), std::move(params),
+                  nullptr);
+    }
+
     bool dispatch_command(const std::string& line) {
         CommandContext context{model_};
         context.session = model_.ensureActiveSession();
@@ -3037,6 +3052,7 @@ private:
         context.subagents = [this] { open_subagents(); };
         context.mcp = [this] { request_mcp(); };
         context.status = [this] { request_status(); };
+        context.handoff = [this](const std::string& args) { request_handoff(args); };
         return registry_.dispatch(line, context);
     }
 

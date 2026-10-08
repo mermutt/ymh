@@ -9,6 +9,7 @@
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/compactor.hpp"
+#include "ymh/agent/handoff.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_types.hpp"
@@ -44,6 +45,9 @@ namespace ymh {
 // config. Validates `max_summary_bytes` against `PersistenceConfig::
 // max_payload_bytes` (throws `ConfigError`, C18).
 [[nodiscard]] CompactionPolicy to_compaction_policy(const Config& config);
+
+// 82-D10: map the layered `[handoff]` section onto `HandoffPolicy`.
+[[nodiscard]] HandoffPolicy to_handoff_policy(const Config& config);
 
 [[nodiscard]] std::string default_system_prompt();
 

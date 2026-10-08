@@ -403,4 +403,21 @@ CompactionPolicy to_compaction_policy(const Config& config) {
     return policy;
 }
 
+HandoffPolicy to_handoff_policy(const Config& config) {
+    const HandoffSettings& settings = config.handoff;
+    HandoffPolicy          policy;
+    policy.enabled            = settings.enabled;
+    policy.summarizer_model   = settings.summarizer_model;
+    policy.max_summary_tokens = settings.max_summary_tokens;
+    policy.max_summary_bytes  = settings.max_summary_bytes;
+    policy.max_input_bytes    = settings.max_input_bytes;
+    policy.keep_recent_turns  = settings.keep_recent_turns;
+
+    if (policy.max_summary_bytes > PersistenceConfig{}.max_payload_bytes) {
+        throw ConfigError(
+            "[handoff].max_summary_bytes must be <= PersistenceConfig::max_payload_bytes");
+    }
+    return policy;
+}
+
 } // namespace ymh

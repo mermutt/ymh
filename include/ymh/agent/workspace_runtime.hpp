@@ -39,6 +39,7 @@ class ResourceGovernor;
 class EventBus;
 class SessionManager;
 class AgentRegistry;
+class CommandRegistry;
 class ToolRegistry;
 class PermissionPolicy;
 class PermissionGate;
@@ -156,6 +157,9 @@ public:
     [[nodiscard]] bool hasDurableStore() const noexcept;
     [[nodiscard]] SessionManager&       sessions() noexcept;
     [[nodiscard]] AgentRegistry&        agents() noexcept;
+    // 82-D11: the host-side durable-command registry `HostRuntime::invokeCommand`
+    // resolves against. Reached only through this accessor.
+    [[nodiscard]] CommandRegistry&      commands() noexcept;
     [[nodiscard]] ToolRegistry&         tools() noexcept;
     [[nodiscard]] PermissionPolicy&     policy() noexcept;
     [[nodiscard]] PermissionGate&       gate() noexcept;

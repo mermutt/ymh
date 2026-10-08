@@ -256,6 +256,7 @@ enum class HostNoticeKind : std::uint8_t {
     DaemonShuttingDown,  // host.shutdown accepted; drain begins
     McpServerStatus,     // 15 §4.7 (AM-1): bounded MCP status token in `detail`
     ReplayComplete,      // NEW (77-D4a): the Interactive event.subscribe catch-up ended
+    HandoffResult,       // 82-D9: `detail` is the handoff result line
 };
 
 struct HostNotice {
@@ -559,6 +560,8 @@ inline constexpr std::string_view kMcpStatus        = "mcp.status";
 // blank-session-only switch (Interactive only; MethodNotAllowedForProfile).
 inline constexpr std::string_view kAgentList        = "agent.list";
 inline constexpr std::string_view kAgentSelect      = "agent.select";
+// 82-D8: the durable-command forwarding path (`/handoff` is its first caller).
+inline constexpr std::string_view kCommandInvoke    = "command.invoke";
 } // namespace method
 
 // The full catalog, in the order of 05 §7. `host.hello` is first.

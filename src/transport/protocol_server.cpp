@@ -11,6 +11,7 @@
 
 #include <unistd.h>
 
+#include "ymh/commands/command_types.hpp"
 #include "ymh/transport/frame_codec.hpp"
 #include "ymh/transport/json_rpc.hpp"
 
@@ -448,6 +449,13 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             respond(conn, request.id, nlohmann::json::object());
         } else if (method_name == method::kSessionCompact) {
             host_.compactSession(session_param(request.params));
+            respond(conn, request.id, nlohmann::json{{"outcome", "Queued"}});
+        } else if (method_name == method::kCommandInvoke) {
+            const SessionId session = session_param(request.params);
+            const CommandSource source =
+                parse_command_source(request.params.value("source", std::string{"user"}))
+                    .value_or(CommandSource::User);
+            host_.invokeCommand(session, string_param(request.params, "line"), source);
             respond(conn, request.id, nlohmann::json{{"outcome", "Queued"}});
         } else if (method_name == method::kSessionClose) {
             const SessionId session = session_param(request.params);
@@ -949,6 +957,20 @@ void ProtocolServer::onMcpServerStatus(std::string detail) {
                          notify::kHostEvent,
                          to_json_value(HostNotice{HostNoticeKind::McpServerStatus,
                                                   config_.workspace, std::nullopt,
+                                                  std::move(detail)})));
+    }
+}
+
+void ProtocolServer::onHandoffResult(const SessionId& session, std::string detail) {
+    for (auto& entry : connections_) {
+        Connection& conn = entry.second;
+        if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
+            continue;
+        }
+        enqueue(conn, notification_json(
+                         notify::kHostEvent,
+                         to_json_value(HostNotice{HostNoticeKind::HandoffResult,
+                                                  config_.workspace, session,
                                                   std::move(detail)})));
     }
 }

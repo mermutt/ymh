@@ -4,6 +4,7 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/ui/command_registry.hpp"
 #include "ymh/ui/ui_render.hpp"
 
 namespace ymh::ui {
@@ -466,6 +467,17 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
             // 77-D4a: handled by `SupervisorApp::handle_sink_notice` before the
             // adapter is consulted; a no-op here keeps `-Wswitch -Werror` clean.
             break;
+        case protocol::HostNoticeKind::HandoffResult: {
+            if (notice.session.has_value()) {
+                if (SessionUiState* state = model_.session(*notice.session); state != nullptr) {
+                    append_system_entry(model_, *state, notice.detail);
+                    break;
+                }
+            }
+            model_.pushNotice(notice.detail);
+            model_.dirty.markAggregate();
+            break;
+        }
     }
 }
 

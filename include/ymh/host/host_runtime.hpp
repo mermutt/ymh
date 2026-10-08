@@ -84,6 +84,11 @@ public:
     // `ProtocolServer::onLiveEvent` directly (single-threaded tests only).
     using LiveEventForwarder = std::function<void(const Event&)>;
 
+    // 82-D9: io-thread marshalling seam for the handoff completion notice. The
+    // daemon wires it to `TransportServer::post`; when unset HostRuntime calls
+    // `ProtocolServer::onHandoffResult` directly (single-threaded tests only).
+    using HandoffNoticeForwarder = std::function<void(const SessionId&, std::string)>;
+
     // A wire error: the numeric JSON-RPC/application code plus the stable
     // `data.kind` token (errata §4.4, E12). Exposed so the daemon and the test
     // suite can assert the mapping table without provoking every failure.
@@ -100,7 +105,8 @@ public:
                 TurnExecutor& turns,
                 PermissionBroker& broker,
                 EventForwarder forwarder = {},
-                LiveEventForwarder live_forwarder = {});
+                LiveEventForwarder live_forwarder = {},
+                HandoffNoticeForwarder handoff_notice = {});
 
     // Two-phase variant for the daemon (see the construction-cycle note above).
     // The server is attached later with `attachServer`.
@@ -110,7 +116,8 @@ public:
                 TurnExecutor& turns,
                 PermissionBroker& broker,
                 EventForwarder forwarder = {},
-                LiveEventForwarder live_forwarder = {});
+                LiveEventForwarder live_forwarder = {},
+                HandoffNoticeForwarder handoff_notice = {});
 
     ~HostRuntime() override;
 
@@ -179,6 +186,8 @@ public:
     void                     activateSession(const SessionId& id) override;
     void                     suspendSession(const SessionId& id) override;
     void                     compactSession(const SessionId& id) override;
+    void                     invokeCommand(const SessionId& id, std::string_view line,
+                                           CommandSource source) override;
 
     void        agentPrompt(const SessionId& id, const nlohmann::json& message) override;
     void        agentFollowup(const SessionId& id, const nlohmann::json& message) override;
@@ -250,6 +259,7 @@ private:
     PermissionBroker&   broker_;
     EventForwarder      forwarder_;
     LiveEventForwarder  live_forwarder_;
+    HandoffNoticeForwarder handoff_notice_;
 
     std::atomic<protocol::HostState>       state_{protocol::HostState::Serving};
     std::optional<SessionId>               active_session_;

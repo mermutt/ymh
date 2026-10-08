@@ -50,13 +50,14 @@ constexpr std::array<WireEnumEntry<StreamFrom::Kind>, 3> kStreamKinds{{
     {StreamFrom::Kind::Cursor, "cursor"},
 }};
 
-constexpr std::array<WireEnumEntry<HostNoticeKind>, 6> kHostNoticeKinds{{
+constexpr std::array<WireEnumEntry<HostNoticeKind>, 7> kHostNoticeKinds{{
     {HostNoticeKind::SessionClosed, "session_closed"},
     {HostNoticeKind::SessionCreated, "session_created"},
     {HostNoticeKind::LeaseLost, "lease_lost"},
     {HostNoticeKind::DaemonShuttingDown, "daemon_shutting_down"},
     {HostNoticeKind::McpServerStatus, "mcp_server_status"},
     {HostNoticeKind::ReplayComplete, "replay_complete"},
+    {HostNoticeKind::HandoffResult, "handoff_result"},
 }};
 
 constexpr std::array<WireEnumEntry<PermissionAnswer>, 2> kPermissionAnswers{{
@@ -635,7 +636,7 @@ void from_json(const nlohmann::json& json, SessionDetail& detail) {
 
 namespace {
 
-constexpr std::array<std::string_view, 38> kMethodCatalog{{
+constexpr std::array<std::string_view, 39> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kHostOwnership,
@@ -650,7 +651,7 @@ constexpr std::array<std::string_view, 38> kMethodCatalog{{
     method::kSessionRename,    method::kSessionSetMode,   method::kSessionSetModel,
     method::kSkillsList,
     method::kSkillsShow,       method::kContextShow,      method::kMcpStatus,
-    method::kAgentList,        method::kAgentSelect,
+    method::kAgentList,        method::kAgentSelect,      method::kCommandInvoke,
 }};
 
 } // namespace

@@ -51,6 +51,9 @@ struct CommandContext {
     // session when one is modeled, else to the notice ring.
     std::function<void()> mcp;
     std::function<void()> status;
+    // 82-D2: forwards the raw argument tail of `/handoff` to the supervisor,
+    // which submits the durable `command.invoke` RPC.
+    std::function<void(const std::string&)> handoff;
 };
 
 // 20 §6.1: the non-static, callable-from-supervisor form of the file-local

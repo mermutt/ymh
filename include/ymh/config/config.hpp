@@ -104,6 +104,15 @@ struct CompactionSettings {
     bool        retry_on_context_length = true;
 };
 
+struct HandoffSettings {
+    bool        enabled = true;
+    std::string summarizer_model;
+    std::size_t max_summary_tokens = 2048;
+    std::size_t max_summary_bytes  = 256u * 1024u;
+    std::size_t max_input_bytes    = 256u * 1024u;
+    std::size_t keep_recent_turns  = 2;
+};
+
 struct AgentDefaults {
     std::string                model;   // may be empty; resolved with llm.model
     // 62-D3/D8 (Rev 3): per-segment step budget; a segment with a successful
@@ -416,6 +425,7 @@ struct Config {
     PresetsSettings    presets;
     GoalsSettings      goals;
     JobsSettings       jobs;
+    HandoffSettings    handoff;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

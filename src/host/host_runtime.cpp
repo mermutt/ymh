@@ -20,6 +20,8 @@
 #include "ymh/agent/preset.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
+#include "ymh/commands/command.hpp"
+#include "ymh/commands/command_registry.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/session/errors.hpp"
@@ -300,7 +302,8 @@ HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
                          TurnExecutor& turns,
                          PermissionBroker& broker,
                          EventForwarder forwarder,
-                         LiveEventForwarder live_forwarder)
+                         LiveEventForwarder live_forwarder,
+                         HandoffNoticeForwarder handoff_notice)
     : runtime_(runtime),
       registry_(registry),
       identity_(std::move(identity)),
@@ -308,7 +311,8 @@ HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
       turns_(turns),
       broker_(broker),
       forwarder_(std::move(forwarder)),
-      live_forwarder_(std::move(live_forwarder)) {
+      live_forwarder_(std::move(live_forwarder)),
+      handoff_notice_(std::move(handoff_notice)) {
     wireServer();
     startForwarding();
 }
@@ -319,14 +323,16 @@ HostRuntime::HostRuntime(WorkspaceRuntime& runtime,
                          TurnExecutor& turns,
                          PermissionBroker& broker,
                          EventForwarder forwarder,
-                         LiveEventForwarder live_forwarder)
+                         LiveEventForwarder live_forwarder,
+                         HandoffNoticeForwarder handoff_notice)
     : runtime_(runtime),
       registry_(registry),
       identity_(std::move(identity)),
       turns_(turns),
       broker_(broker),
       forwarder_(std::move(forwarder)),
-      live_forwarder_(std::move(live_forwarder)) {
+      live_forwarder_(std::move(live_forwarder)),
+      handoff_notice_(std::move(handoff_notice)) {
     startForwarding();
 }
 
@@ -976,6 +982,32 @@ void HostRuntime::compactSession(const SessionId& id) {
         ensureAgent(id);
         if (!turns_.submit(id, [this, id]() {
                 (void)runtime_.agents().requestCompaction(id);
+            })) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InternalError),
+                                   "InboxFull"});
+        }
+    });
+}
+
+void HostRuntime::invokeCommand(const SessionId& id, std::string_view line,
+                                CommandSource source) {
+    translate([&]() {
+        if (!sessionExists(id)) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
+                                   "UnknownSession"});
+        }
+        ensureAgent(id);
+        if (!turns_.submit(id, [this, id, text = std::string(line), source]() {
+                std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
+                if (agent == nullptr) {
+                    return;
+                }
+                const CommandOutcome outcome = runtime_.commands().invoke(*agent, text, source);
+                if (handoff_notice_) {
+                    handoff_notice_(id, outcome.text);
+                } else if (server_ != nullptr) {
+                    server_->onHandoffResult(id, outcome.text);
+                }
             })) {
             throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InternalError),
                                    "InboxFull"});

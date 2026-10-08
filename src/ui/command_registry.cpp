@@ -289,6 +289,13 @@ CommandRegistry CommandRegistry::builtin() {
                 context.fork(args);
             }
         }});
+    registry.add(Command{
+        "handoff", "summarize this session for continuation (writes a doc, seeds a session)",
+        [](CommandContext& context, const std::string& args) {
+            if (context.handoff) {
+                context.handoff(args);
+            }
+        }});
     std::vector<std::pair<std::string, std::string>> listed{{"help", "list slash commands"}};
     for (const Command& command : registry.commands()) {
         listed.emplace_back(command_display_name(command), command.description);
