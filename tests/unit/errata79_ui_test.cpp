@@ -152,6 +152,7 @@ TEST(Errata79, RW_U9_RewindNoOpGuard) {
     harness->drain_actions();
     EXPECT_EQ(harness->model().mode, UiMode::Rewind);
     EXPECT_TRUE(harness->dispatch_key("enter"));
+    EXPECT_TRUE(harness->dispatch_key("enter"));
 
     EXPECT_TRUE(has_notice(harness->model(), "already at the current state"));
     EXPECT_EQ(harness->submitted_count(kForkMethod), 0u);
@@ -200,6 +201,8 @@ TEST(Errata79, RW_I1_RewindForksAtBoundary) {
     EXPECT_EQ(harness->model().rewind.cursor, 1u);
     EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
+    EXPECT_TRUE(harness->dispatch_key("enter"));
+    harness->drain_actions();
 
     const std::optional<nlohmann::json> params = harness->last_submitted_params(kForkMethod);
     ASSERT_TRUE(params.has_value());
@@ -230,6 +233,8 @@ TEST(Errata79, RW_I2_ChildFocusedWithoutActivate) {
     harness->drain_actions();
     EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
+    EXPECT_TRUE(harness->dispatch_key("enter"));
+    harness->drain_actions();
 
     EXPECT_EQ(harness->submitted_count(kActivateMethod), 0u);
     EXPECT_EQ(harness->model().workspaces.at(workspace).activeSessionId().value, child.value);
@@ -254,6 +259,8 @@ TEST(Errata79, RW_I3_PromptRestoredIntoComposer) {
     harness->install_method_reply(kForkMethod, nlohmann::json{{"session", child.value}}, 0);
 
     EXPECT_TRUE(harness->dispatch_command_line("/rewind"));
+    harness->drain_actions();
+    EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
     EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
@@ -284,6 +291,8 @@ TEST(Errata79, RW_I4_TextlessPromptNotice) {
     harness->install_method_reply(kForkMethod, nlohmann::json{{"session", child.value}}, 0);
 
     EXPECT_TRUE(harness->dispatch_command_line("/rewind"));
+    harness->drain_actions();
+    EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
     EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
@@ -355,6 +364,8 @@ TEST(Errata79, RW_I7_InvalidForkBoundaryNotice) {
         "InvalidForkBoundary");
 
     EXPECT_TRUE(harness->dispatch_command_line("/rewind"));
+    harness->drain_actions();
+    EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();
     EXPECT_TRUE(harness->dispatch_key("enter"));
     harness->drain_actions();

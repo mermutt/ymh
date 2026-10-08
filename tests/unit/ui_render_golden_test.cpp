@@ -3815,7 +3815,7 @@ TEST(UiRenderGolden, RW_G1_RewindListsPrompts) {
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("first prompt"), std::string::npos);
     EXPECT_NE(rendered.find("second prompt"), std::string::npos);
-    EXPECT_NE(rendered.find("Up/Down move | Enter rewind | Esc cancel"), std::string::npos);
+    EXPECT_NE(rendered.find("Up/Down move | Enter select | Esc cancel"), std::string::npos);
     EXPECT_NE(rendered.find("> 2s ago | second prompt"), std::string::npos);
 }
 
@@ -3828,22 +3828,78 @@ TEST(UiRenderGolden, RW_G2_RewindEmptyState) {
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
     EXPECT_NE(rendered.find("no user turns to rewind"), std::string::npos);
-    EXPECT_NE(rendered.find("Up/Down move | Enter rewind | Esc cancel"), std::string::npos);
+    EXPECT_NE(rendered.find("Up/Down move | Enter select | Esc cancel"), std::string::npos);
 }
 
-// 79-D6/RW13 (RW-G3): with the dashboard raised, the picker composes over
-// `render_dashboard` rather than replacing it.
+// 80-D9 (supersedes 79-D6/79-RW13): the `/rewind` picker is a full-screen base,
+// and an overlay raised from it composes over it (chain R).
 TEST(UiRenderGolden, RW_G3_RewindComposesOverBase) {
     UiModel model = dashboard_model();
-    model.openDashboard();
     model.rewind.open_with(WorkspaceId{"ws-alpha"}, SessionId{"s-work"}, 10,
                            {RewindTargetView{TurnId{1}, 1, 0, "p", "1s ago | a prompt"}});
     model.mode = UiMode::Rewind;
+    model.exitConfirm.open  = true;
+    model.exitConfirm.sessions = 1;
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
     EXPECT_NE(rendered.find("a prompt"), std::string::npos);
+    EXPECT_NE(rendered.find("Exiting"), std::string::npos);
+}
+
+// 80-D9/CP-G1: the list renders full-screen and marks the revertible file count.
+TEST(UiRenderGolden, CP_G1_RewindListShowsCounts) {
+    UiModel model;
+    model.rewind.open = true;
+    model.rewind.targets.push_back(RewindTargetView{TurnId{1}, 0, 0, "p", "first turn", 2});
+    model.rewind.cursor = 0;
+    model.mode = UiMode::Rewind;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("rewind"), std::string::npos);
+    EXPECT_NE(rendered.find("first turn"), std::string::npos);
+    EXPECT_NE(rendered.find("(2 files)"), std::string::npos);
+}
+
+// 80-D9/CP-G2: the action menu's rows gate on `file_change_count`.
+TEST(UiRenderGolden, CP_G2_ActionMenuGateCorrectRows) {
+    UiModel gated;
+    gated.rewind_action.open_with(WorkspaceId{"ws"}, SessionId{"s"}, TurnId{1}, 0);
+    gated.mode = UiMode::RewindAction;
+    const std::string gated_render =
+        normalize(render_to_ansi(gated, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(gated_render);
+    EXPECT_NE(gated_render.find("2. Restore conversation"), std::string::npos);
+    EXPECT_NE(gated_render.find("4. Never mind"), std::string::npos);
+    EXPECT_EQ(gated_render.find("1. Restore code and conversation"), std::string::npos);
+    EXPECT_EQ(gated_render.find("3. Restore code"), std::string::npos);
+
+    UiModel full;
+    full.rewind_action.open_with(WorkspaceId{"ws"}, SessionId{"s"}, TurnId{1}, 3);
+    full.mode = UiMode::RewindAction;
+    const std::string full_render =
+        normalize(render_to_ansi(full, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(full_render);
+    EXPECT_NE(full_render.find("1. Restore code and conversation"), std::string::npos);
+    EXPECT_NE(full_render.find("2. Restore conversation"), std::string::npos);
+    EXPECT_NE(full_render.find("3. Restore code"), std::string::npos);
+    EXPECT_NE(full_render.find("4. Never mind"), std::string::npos);
+}
+
+// 80 sec.8/CP-G3: an overlay composes over the full-screen rewind base.
+TEST(UiRenderGolden, CP_G3_OverlaysComposeOverRewind) {
+    UiModel model;
+    model.rewind.open = true;
+    model.rewind.targets.push_back(RewindTargetView{TurnId{1}, 0, 0, "p", "a turn", 1});
+    model.mode = UiMode::Rewind;
+    model.exitConfirm.open  = true;
+    model.exitConfirm.sessions = 1;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("a turn"), std::string::npos);
+    EXPECT_NE(rendered.find("Exiting"), std::string::npos);
 }
 
 } // namespace

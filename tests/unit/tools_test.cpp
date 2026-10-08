@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
@@ -9,7 +11,9 @@
 
 #include "support/test_env.hpp"
 #include "ymh/execution/config.hpp"
+#include "ymh/execution/environment.hpp"
 #include "ymh/execution/errors.hpp"
+#include "ymh/session/checkpoints.hpp"
 #include "ymh/tools/builtin_tools.hpp"
 #include "ymh/tools/tool_registry.hpp"
 
@@ -38,6 +42,31 @@ ToolResult run(ToolRegistry& registry, ymh::test::ToolEnv& env, const std::strin
                nlohmann::json arguments) {
     return registry.execute(call(name, std::move(arguments)), env.context()).get();
 }
+
+class RecordingRecorder : public CheckpointRecorder {
+public:
+    struct Call {
+        TurnId                            turn{0};
+        std::vector<std::filesystem::path> paths;
+        std::vector<std::string>          pre_images;
+    };
+
+    void capture(const SessionId&, TurnId turn,
+                 const std::vector<std::filesystem::path>& paths,
+                 const ExecutionEnvironment& env) override {
+        Call recorded;
+        recorded.turn  = turn;
+        recorded.paths = paths;
+        for (const std::filesystem::path& path : paths) {
+            std::ifstream input(env.resolve(path.string()), std::ios::binary);
+            recorded.pre_images.push_back(std::string(
+                std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()));
+        }
+        calls.push_back(std::move(recorded));
+    }
+
+    std::vector<Call> calls;
+};
 
 TEST(BuiltinTools, ReadFileHappyPath) {
     ymh::test::ToolEnv env("tools_read");
@@ -319,6 +348,32 @@ TEST(BuiltinTools, SchemasAreDeterministicAndSorted) {
     EXPECT_EQ(values, (std::vector<std::string>{"edit_file", "git_diff", "git_status",
                                                 "glob", "grep", "read_file", "shell",
                                                 "write_file"}));
+}
+
+TEST(BuiltinTools, CP_U11_CaptureBeforeExecuteAndToolPaths) {
+    ymh::test::ToolEnv env("tools_cp_u11");
+    env.workspace.write("out.txt", "old");
+    ToolRegistry      registry;
+    auto              registrations = register_builtins(registry);
+    RecordingRecorder recorder;
+    registry.set_checkpoint_recorder(&recorder);
+
+    const ToolResult written = run(registry, env, "write_file",
+                                   nlohmann::json{{"path", "out.txt"}, {"content", "new"}});
+    EXPECT_EQ(written.outcome, payload::ToolOutcome::Ok);
+
+    ASSERT_EQ(recorder.calls.size(), 1u);
+    EXPECT_EQ(recorder.calls[0].turn, 1u);
+    ASSERT_EQ(recorder.calls[0].paths.size(), 1u);
+    EXPECT_EQ(recorder.calls[0].paths[0].string(), "out.txt");
+    ASSERT_EQ(recorder.calls[0].pre_images.size(), 1u);
+    EXPECT_EQ(recorder.calls[0].pre_images[0], "old");
+
+    const ToolResult read = run(registry, env, "read_file",
+                                nlohmann::json{{"path", "out.txt"}});
+    EXPECT_EQ(read.outcome, payload::ToolOutcome::Ok);
+    ASSERT_EQ(recorder.calls.size(), 2u);
+    EXPECT_TRUE(recorder.calls[1].paths.empty());
 }
 
 } // namespace

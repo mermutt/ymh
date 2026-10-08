@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -7,6 +8,7 @@
 #include "support/test_env.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/errors.hpp"
+#include "ymh/session/checkpoints.hpp"
 
 namespace {
 
@@ -154,6 +156,19 @@ TEST(PathSafety, GetcwdIsNeverAResolutionBase) {
 
     EXPECT_EQ(resolved, env.root() / "file.txt");
     EXPECT_NE(resolved, other_workspace.path() / "file.txt");
+}
+
+TEST(PathSafety, CP_U12_RestorePathIsRootConfined) {
+    TempWorkspace    workspace("path_cp_u12");
+    LocalEnvironment env(workspace.path());
+    CheckpointStore  store(env.root());
+    const SessionId  session{"s-path-cp-u12"};
+
+    store.capture(session, TurnId{1},
+                  {std::filesystem::path{"../ymh_cp_u12_outside.txt"}}, env);
+    const CheckpointRestoreReport report = store.restore(env, session, TurnId{1});
+    EXPECT_GE(report.failed, 1);
+    EXPECT_EQ(report.restored, 0);
 }
 
 } // namespace

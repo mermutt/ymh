@@ -1518,4 +1518,29 @@ TEST(TransportHost, RW_U7_FakeRewindTargetsMatchesDaemon) {
     EXPECT_THROW(host.rewindTargets(SessionId{"missing"}), protocol::RpcException);
 }
 
+TEST(TransportServer, CP_U14_FakeRestoreCodeCompiles) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+    const SessionId session = harness.host.seed("s1");
+
+    protocol::RestoreReport report;
+    report.restored = 2;
+    report.detail   = "ok";
+    harness.host.last_restore_report = report;
+
+    harness.send(*peer, Harness::request(
+                            2, protocol::method::kSessionRestoreCode,
+                            nlohmann::json{{"session", session.value}, {"turn", 3}}));
+    const auto frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].at("result").at("restored").get<std::int64_t>(), 2);
+    EXPECT_EQ(frames[0].at("result").at("detail").get<std::string>(), "ok");
+    ASSERT_EQ(harness.host.calls.size(), 1u);
+    EXPECT_EQ(harness.host.calls[0], "session.restore_code");
+    ASSERT_TRUE(harness.host.last_restore_turn.has_value());
+    EXPECT_EQ(*harness.host.last_restore_turn, 3u);
+}
+
 } // namespace

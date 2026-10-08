@@ -36,6 +36,8 @@ public:
     std::optional<nlohmann::json> last_message;
     std::optional<bool>           last_delete_only_if_empty;
     std::optional<bool>           last_delete_force;
+    std::optional<TurnId>         last_restore_turn;
+    std::optional<protocol::RestoreReport> last_restore_report;
     std::optional<nlohmann::json> context_result;
     std::optional<std::string> last_command_line;
     CommandSource              last_command_source = CommandSource::User;
@@ -212,6 +214,17 @@ public:
     void closeSession(const SessionId& id) override {
         calls.push_back("session.close");
         require_session(id);
+    }
+
+    protocol::RestoreReport restoreCode(const SessionId& id, TurnId turn) override {
+        calls.push_back("session.restore_code");
+        if (!sessionExists(id)) {
+            throw protocol::RpcException(static_cast<int>(protocol::AppCode::UnknownSession),
+                                         "unknown session");
+        }
+        protocol::RestoreReport report;
+        last_restore_turn = turn;
+        return last_restore_report.value_or(report);
     }
 
     void deleteSession(const SessionId& id, bool only_if_empty, bool force) override {

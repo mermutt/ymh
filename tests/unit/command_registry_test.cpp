@@ -116,7 +116,7 @@ TEST(CommandRegistryTest, RW_U1_RewindRegisteredBeforeHelp) {
         rendered += entry.text + "\n";
     }
     EXPECT_NE(rendered.find(
-                  "/rewind - rewind the conversation to a previous turn (branch)"),
+                  "/rewind - restore the conversation and/or code to a previous turn"),
               std::string::npos);
 
     EXPECT_TRUE(registry.dispatch("/rewind", context));

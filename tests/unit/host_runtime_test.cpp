@@ -40,6 +40,7 @@
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
 #include "ymh/registry/registry.hpp"
+#include "ymh/session/checkpoints.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/plan_mode.hpp"
@@ -2278,6 +2279,59 @@ TEST_F(HostRuntimeTest, HS_U15_SeedStoredOnlyThenLiveOnResume) {
         }
     }
     EXPECT_TRUE(live);
+}
+
+TEST_F(HostRuntimeTest, CP_U13_RestoreCodeDispatches) {
+    Bridge bridge("hr_cp_u13");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+
+    try {
+        (void)bridge.host().restoreCode(SessionId{"missing"}, TurnId{1});
+        FAIL() << "expected UnknownSession";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::AppCode::UnknownSession));
+    }
+
+    try {
+        (void)bridge.host().restoreCode(created.session, TurnId{1});
+        FAIL() << "expected StoreUnavailable";
+    } catch (const protocol::RpcException& error) {
+        EXPECT_EQ(error.code(), protocol::code_value(protocol::AppCode::StoreUnavailable));
+    }
+
+    const std::filesystem::path root = bridge.runtime().environment().root();
+    CheckpointStore              store(root);
+    bridge.host().set_checkpoint_store(&store);
+
+    const protocol::RestoreReport empty = bridge.host().restoreCode(created.session, TurnId{1});
+    EXPECT_EQ(empty.restored, 0);
+    EXPECT_FALSE(empty.expired);
+    EXPECT_EQ(empty.detail, "nothing to restore");
+
+    const CheckpointUnavailableError unavailable("io");
+    EXPECT_EQ(HostRuntime::map_store_error(unavailable).code,
+              protocol::code_value(protocol::AppCode::CheckpointUnavailable));
+}
+
+TEST_F(HostRuntimeTest, CP_U22_RewindTargetsDegradesOnStoreError) {
+    Bridge bridge("hr_cp_u22");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<Session> session_owner =
+        bridge.runtime().sessions().sessionPtr(created.session);
+    Session& session = *session_owner;
+    append_prompt(session, "hello");
+    append_turn(session, 1, payload::TurnOrigin::User);
+
+    const std::filesystem::path root = bridge.runtime().environment().root();
+    std::filesystem::create_directories(root / ".ymh" / "checkpoints" / "index.json");
+    CheckpointStore store(root);
+    bridge.host().set_checkpoint_store(&store);
+
+    const protocol::RewindTargets targets = bridge.host().rewindTargets(created.session);
+    ASSERT_EQ(targets.targets.size(), 1u);
+    EXPECT_EQ(targets.targets[0].file_change_count, 0);
+    EXPECT_THROW(store.restore(bridge.runtime().environment(), created.session, TurnId{1}),
+                 CheckpointUnavailableError);
 }
 
 } // namespace

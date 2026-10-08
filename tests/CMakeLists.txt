@@ -4,6 +4,7 @@ add_executable(ymh_tests
     unit/event_test.cpp
     unit/session_test.cpp
     unit/persistence_test.cpp
+    unit/checkpoints_test.cpp
     unit/llm_types_test.cpp
     unit/stream_event_codec_test.cpp
     unit/assistant_stream_test.cpp
@@ -75,6 +76,7 @@ add_executable(ymh_tests
     unit/errata77_replay_complete_test.cpp
     unit/errata78_ui_test.cpp
     unit/errata79_ui_test.cpp
+    unit/errata80_ui_test.cpp
     unit/errata81_ui_test.cpp
     unit/config_test.cpp
     unit/spec52_endpoints_test.cpp
@@ -144,6 +146,7 @@ add_executable(ymh_tests
     support/global_test_env.cpp
     support/replay_harness.cpp
     integration_child_process_test.cpp
+    integration_checkpoints_test.cpp
     integration_host_harness_test.cpp
     integration_pty_test.cpp
     integration_two_process_test.cpp

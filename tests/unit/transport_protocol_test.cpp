@@ -42,8 +42,8 @@ TEST(TransportProtocol, MethodCatalogIsComplete) {
     // 18 §3.4.1 (CX-D11/M10) landed at 33; 25-D5 adds `session.set_mode`;
     // 45-D6 adds `mcp.status`; 45-D9 adds `agent.list`/`agent.select`;
     // 53-D5 adds `session.set_model`; 82-D8 adds `command.invoke`;
-    // 79-D5 adds `session.rewind_targets`.
-    EXPECT_EQ(protocol::all_methods().size(), 40u);
+    // 79-D5 adds `session.rewind_targets`; 80-D8 adds `session.restore_code`.
+    EXPECT_EQ(protocol::all_methods().size(), 41u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
@@ -52,6 +52,7 @@ TEST(TransportProtocol, MethodCatalogIsComplete) {
     EXPECT_TRUE(protocol::is_known_method("session.set_mode"));
     EXPECT_TRUE(protocol::is_known_method("session.set_model"));
     EXPECT_TRUE(protocol::is_known_method(protocol::method::kSessionRewindTargets));
+    EXPECT_TRUE(protocol::is_known_method(protocol::method::kSessionRestoreCode));
     EXPECT_TRUE(protocol::is_known_method("skills.list"));
     EXPECT_TRUE(protocol::is_known_method("skills.show"));
     EXPECT_TRUE(protocol::is_known_method("context.show"));
@@ -412,6 +413,39 @@ TEST(TransportProtocol, LiveNotificationRoundTripsAndSkipsUnknownType) {
     protocol::LiveNotification skipped;
     protocol::from_json(unknown, skipped);
     EXPECT_TRUE(skipped.envelope.event_skipped);
+}
+
+TEST(TransportProtocol, CP_U15_RestoreReportRoundTrip) {
+    protocol::RestoreReport report;
+    report.restored = 2;
+    report.skipped  = 1;
+    report.failed   = 3;
+    report.changed  = 4;
+    report.expired  = true;
+    report.detail   = "partial";
+
+    nlohmann::json json;
+    protocol::to_json(json, report);
+    protocol::RestoreReport back;
+    protocol::from_json(json, back);
+    EXPECT_EQ(back.restored, 2);
+    EXPECT_EQ(back.skipped, 1);
+    EXPECT_EQ(back.failed, 3);
+    EXPECT_EQ(back.changed, 4);
+    EXPECT_TRUE(back.expired);
+    EXPECT_EQ(back.detail, "partial");
+
+    const nlohmann::json legacy{{"session", "s1"}, {"turn", 2},
+                                {"boundary_index", 1}, {"started_at_ms", 5},
+                                {"prompt", "p"}};
+    const protocol::RewindTarget target = legacy.get<protocol::RewindTarget>();
+    EXPECT_EQ(target.file_change_count, 0);
+
+    protocol::RewindTarget with_count = target;
+    with_count.file_change_count = 7;
+    nlohmann::json encoded;
+    protocol::to_json(encoded, with_count);
+    EXPECT_EQ(encoded.at("file_change_count").get<std::int64_t>(), 7);
 }
 
 } // namespace

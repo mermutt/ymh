@@ -429,6 +429,12 @@
       "section": "4.3"
     },
     {
+      "symbol": "protocol::method::kSessionRestoreCode",
+      "category": "wire_method",
+      "spec": "80-file-checkpoints-code-rewind-errata.md",
+      "section": "4.3"
+    },
+    {
       "symbol": "protocol::notify::kEventStream",
       "category": "wire_notification",
       "spec": "05-transport.md",
@@ -684,6 +690,12 @@
       "symbol": "protocol::RewindTargets",
       "category": "protocol_type",
       "spec": "79-rewind-command-errata.md",
+      "section": "4.3"
+    },
+    {
+      "symbol": "protocol::RestoreReport",
+      "category": "protocol_type",
+      "spec": "80-file-checkpoints-code-rewind-errata.md",
       "section": "4.3"
     },
     {
