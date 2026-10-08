@@ -1579,6 +1579,33 @@ Element render_model_picker(const UiModel& model, const Theme& theme) {
            ftxui::clear_under | ftxui::center;
 }
 
+// 79-D6: the `/rewind` picker overlay. A `clear_under` window over the current
+// base (chain R), peer of the switcher/model picker.
+Element render_rewind(const UiModel& model, const Theme& theme, int available_width) {
+    (void)available_width;
+    const RewindOverlayModel& rewind = model.rewind;
+    Elements                  rows;
+    rows.push_back(ftxui::text("rewind") | ftxui::bold);
+    rows.push_back(ftxui::separator());
+    if (rewind.targets.empty()) {
+        rows.push_back(ftxui::text("no user turns to rewind") | ftxui::dim);
+    } else {
+        for (std::size_t index = 0; index < rewind.targets.size(); ++index) {
+            std::string line = index == rewind.cursor ? "> " : "  ";
+            line += rewind.targets[index].summary;
+            Element element = ftxui::text(line);
+            if (index == rewind.cursor) {
+                element = paint(element, ftxui::Color::Cyan, theme) | ftxui::bold;
+            }
+            rows.push_back(element);
+        }
+    }
+    rows.push_back(ftxui::separator());
+    rows.push_back(ftxui::text("Up/Down move | Enter rewind | Esc cancel") | ftxui::dim);
+    return ftxui::window(ftxui::text("rewind"), ftxui::vbox(std::move(rows))) |
+           ftxui::clear_under | ftxui::center;
+}
+
 // 67-D1: UTF-8-safe display-column truncation with a single-glyph ellipsis.
 // Returns `text` unchanged when it already fits `max_width` columns (or when the
 // budget is empty).
@@ -2384,6 +2411,9 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     }
     if (model.mode == UiMode::ModelPicker && model.model_picker.visible) {
         return ftxui::dbox({base, render_model_picker(model, theme)});
+    }
+    if (model.mode == UiMode::Rewind) {
+        return ftxui::dbox({base, render_rewind(model, theme, size.width)});
     }
     return base;
 }

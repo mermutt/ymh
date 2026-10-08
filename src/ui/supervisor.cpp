@@ -449,6 +449,29 @@ std::string next_agent_id(const std::vector<AgentListEntry>& entries, const std:
     return entries[next].id;
 }
 
+// 79-D4: the picker excerpt = relative age + a bounded, newline-free preview.
+std::string make_rewind_summary(std::int64_t started_at_ms, const std::string& prompt) {
+    const std::int64_t now_ms = epoch_ms(std::chrono::system_clock::now());
+    const std::int64_t age_s  = std::max<std::int64_t>(0, now_ms - started_at_ms) / 1000;
+    std::string        age;
+    if (age_s < 60) {
+        age = std::to_string(age_s) + "s ago";
+    } else if (age_s < 3600) {
+        age = std::to_string(age_s / 60) + "m ago";
+    } else if (age_s < 86400) {
+        age = std::to_string(age_s / 3600) + "h ago";
+    } else {
+        age = std::to_string(age_s / 86400) + "d ago";
+    }
+    std::string preview = prompt;
+    std::replace(preview.begin(), preview.end(), '\n', ' ');
+    constexpr std::size_t kMaxPreview = 72;
+    if (preview.size() > kMaxPreview) {
+        preview = preview.substr(0, kMaxPreview - 3) + "...";
+    }
+    return age + " | " + preview;
+}
+
 class SupervisorApp final : public UiController {
 public:
     explicit SupervisorApp(SupervisorRunOptions options)
@@ -1958,6 +1981,157 @@ private:
         push_notice("forked -> " + child.value);
     }
 
+    // 79-D1/D5: `/rewind` opens the turn picker. Read-only until Enter: the only
+    // wire call here is `session.rewind_targets`.
+    void open_rewind(const std::string&) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
+            push_notice("no active session to rewind");
+            return;
+        }
+        const SessionUiState* focused = model_.activeSession();
+        if (focused != nullptr && focused->subagent) {
+            push_notice("subagent sessions are not rewindable (/subagents)");
+            return;
+        }
+        const WorkspaceId id      = workspace->id;
+        const SessionId   session = workspace->activeSessionId();
+        rewind_query_             = session;
+        submit_to(id, std::string(protocol::method::kSessionRewindTargets),
+                  nlohmann::json{{"session", session.value}},
+                  [this, id, session](SupervisorReply reply) {
+                      enqueue([this, id, session, reply = std::move(reply)]() mutable {
+                          if (!reply.ok) {
+                              rewind_query_.reset();
+                              surface_notice(id, session, "rewind failed: " + reply.error);
+                              return;
+                          }
+                          open_rewind_overlay(id, session,
+                                              reply.result.get<protocol::RewindTargets>());
+                      });
+                  });
+    }
+
+    // 79-D5/D6: turn the RPC projection into picker rows and open the overlay.
+    void open_rewind_overlay(const WorkspaceId& workspace, const SessionId& session,
+                             protocol::RewindTargets targets) {
+        rewind_query_.reset();
+        if (model_.activeWorkspace() == nullptr ||
+            model_.activeWorkspace()->activeSessionId() != session) {
+            return;
+        }
+        std::vector<RewindTargetView> views;
+        views.reserve(targets.targets.size());
+        for (const protocol::RewindTarget& target : targets.targets) {
+            views.push_back(RewindTargetView{
+                TurnId{target.turn}, target.boundary_index, target.started_at_ms,
+                target.prompt, make_rewind_summary(target.started_at_ms, target.prompt)});
+        }
+        model_.rewind.prev_mode = model_.mode;
+        model_.rewind.open_with(workspace, session, targets.view_length, std::move(views));
+        model_.mode = UiMode::Rewind;
+        model_.dirty.markAggregate();
+    }
+
+    // 79-D6/57-D4: the picker consumes every key while it owns the screen.
+    bool handle_rewind(const ftxui::Event& event) {
+        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
+            model_.rewind.close();
+            model_.mode = model_.rewind.prev_mode;
+            model_.dirty.markAggregate();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowDown ||
+            (event.is_character() && event.character() == "j")) {
+            model_.rewind.moveDown();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowUp ||
+            (event.is_character() && event.character() == "k")) {
+            model_.rewind.moveUp();
+            return true;
+        }
+        if (event == ftxui::Event::Return) {
+            if (const RewindTargetView* target = model_.rewind.selected();
+                target != nullptr) {
+                rewind_to(*target);
+            } else {
+                model_.rewind.close();
+                model_.mode = model_.rewind.prev_mode;
+                model_.dirty.markAggregate();
+            }
+            return true;
+        }
+        return true;
+    }
+
+    // 79-D3/D10: branch the frozen parent at the chosen boundary via spec 78's
+    // `session.fork`, then restore the prompt on the child.
+    void rewind_to(const RewindTargetView& target) {
+        const SessionId   parent = model_.rewind.session;
+        const WorkspaceId id     = model_.rewind.workspace;
+        if (target.boundary_index >= model_.rewind.view_length) {
+            push_notice("already at the current state");
+            model_.rewind.close();
+            model_.mode = model_.rewind.prev_mode;
+            return;
+        }
+        const std::string prompt = target.prompt;
+        const std::int64_t seed  = target.boundary_index;
+        model_.rewind.close();
+        model_.mode = model_.rewind.prev_mode;
+        nlohmann::json params{{"session", parent.value}, {"seed_length", seed}};
+        submit_to(id, std::string(protocol::method::kSessionFork), std::move(params),
+                  [this, id, parent, prompt](SupervisorReply reply) {
+                      enqueue([this, id, parent, prompt, reply = std::move(reply)]() mutable {
+                          if (!reply.ok) {
+                              surface_notice(id, parent, "rewind failed: " + reply.error);
+                              return;
+                          }
+                          const std::string child =
+                              reply.result.value("session", std::string{});
+                          if (child.empty()) {
+                              surface_notice(id, parent, "rewind failed: empty reply");
+                              return;
+                          }
+                          apply_rewind_success(id, SessionId{child}, prompt);
+                      });
+                  });
+    }
+
+    // 79-D4: mirrors 78's apply_fork_success (model/track/focus, no
+    // session.activate), then writes the chosen prompt into the child composer.
+    void apply_rewind_success(const WorkspaceId& workspace, const SessionId& child,
+                              const std::string& prompt) {
+        if (model_.workspaces.count(workspace) == 0) {
+            surface_notice(workspace, child,
+                           "rewound session in a workspace that is no longer open");
+            return;
+        }
+        SessionUiState& state = model_.ensureSessionIn(workspace, child);
+        if (state.status.model.empty()) {
+            state.status.model =
+                display_model(options_.config, stored_session_model(workspace, child));
+        }
+        model_.ensureCellIn(workspace, child);
+        if (const auto connection = connections_.find(workspace);
+            connection != connections_.end()) {
+            connection->second->track(child);
+        }
+        model_.focusSession(child);
+        sync_subagent_subscriptions();
+        if (!prompt.empty()) {
+            state.input.draft  = prompt;
+            state.input.cursor = prompt.size();
+        } else {
+            push_notice("rewound -> " + child.value + " (prompt unavailable)");
+            model_.dirty.markAggregate();
+            return;
+        }
+        push_notice("rewound -> " + child.value + " (prompt restored)");
+        model_.dirty.markAggregate();
+    }
+
     // 45-D10.8 (45-F23): drop a daemon-rejected session (which clears the focus
     // through the single mutator), report it, then focus the workspace's first
     // remaining session or create one when none remain, so the focus never
@@ -2469,6 +2643,7 @@ private:
         return model_.exitConfirm.open || model_.dialog.open ||
                (model_.mode == UiMode::Context && model_.context.open) ||
                model_.mode == UiMode::Dashboard || model_.mode == UiMode::Switcher ||
+               model_.mode == UiMode::Rewind ||
                (model_.mode == UiMode::ModelPicker && model_.model_picker.visible);
     }
 
@@ -3049,6 +3224,7 @@ private:
         context.context = [this] { open_context(); };
         context.sessions = [this] { open_sessions(); };
         context.fork = [this](const std::string& args) { fork_session(args); };
+        context.rewind = [this](const std::string& args) { open_rewind(args); };
         context.subagents = [this] { open_subagents(); };
         context.mcp = [this] { request_mcp(); };
         context.status = [this] { request_status(); };
@@ -4147,6 +4323,11 @@ private:
         if (model_.mode == UiMode::ModelPicker && model_.model_picker.visible) {
             return handle_model_picker(event);
         }
+        // 79-D6: the rewind picker sits above the dashboard and below the
+        // ModelPicker; it consumes every key while it owns the screen.
+        if (model_.mode == UiMode::Rewind) {
+            return handle_rewind(event);
+        }
         // 81-D1/81-I19: the dashboard guard precedes the globals, so every key
         // reaches `handle_dashboard` while it is the top focus owner.
         if (model_.mode == UiMode::Dashboard) {
@@ -4408,6 +4589,9 @@ private:
     // recorded from the session.resume reply. Read after every applied replay
     // envelope (OL-X3), at replay completion, and at the expiry escape. UI thread.
     std::map<SessionId, std::string> daemon_turn_status_;
+    // 79-F11: the session whose `session.rewind_targets` read is in flight; a
+    // stale reply is dropped when the focused session changed.
+    std::optional<SessionId> rewind_query_;
     // 46-D7 test seam (N6): canned `session.list` replies installed by the
     // harness, so the focus/create/resume decision is drivable without a daemon.
     bool           session_list_replies_installed_ = false;

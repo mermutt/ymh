@@ -296,6 +296,13 @@ CommandRegistry CommandRegistry::builtin() {
                 context.handoff(args);
             }
         }});
+    registry.add(Command{
+        "rewind", "rewind the conversation to a previous turn (branch)",
+        [](CommandContext& context, const std::string& args) {
+            if (context.rewind) {
+                context.rewind(args);
+            }
+        }});
     std::vector<std::pair<std::string, std::string>> listed{{"help", "list slash commands"}};
     for (const Command& command : registry.commands()) {
         listed.emplace_back(command_display_name(command), command.description);

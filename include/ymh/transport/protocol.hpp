@@ -408,6 +408,20 @@ struct SessionDetail {
     std::size_t     event_count{0};
 };
 
+// 79-D5: one user turn a `/rewind` may branch at. Read-only projection.
+struct RewindTarget {
+    SessionId     session;
+    std::uint64_t turn{0};           // payload::TurnStarted::turn
+    std::int64_t  boundary_index{0}; // resolved-view index of the prompt UserMessage
+    std::int64_t  started_at_ms{0};  // TurnStarted event timestamp (epoch ms)
+    std::string   prompt;            // text projection of the prompt UserMessage
+};
+
+struct RewindTargets {
+    std::int64_t              view_length{0};  // resolved view length at query time
+    std::vector<RewindTarget> targets;
+};
+
 // ---------------------------------------------------------------------------
 // Wire enum encodings (05 §2.1, T22)
 // ---------------------------------------------------------------------------
@@ -513,6 +527,11 @@ void from_json(const nlohmann::json& json, SessionSummary& summary);
 void to_json(nlohmann::json& json, const SessionDetail& detail);
 void from_json(const nlohmann::json& json, SessionDetail& detail);
 
+void to_json(nlohmann::json& json, const RewindTarget& target);
+void from_json(const nlohmann::json& json, RewindTarget& target);
+void to_json(nlohmann::json& json, const RewindTargets& targets);
+void from_json(const nlohmann::json& json, RewindTargets& targets);
+
 // ---------------------------------------------------------------------------
 // Method catalog (05 §7)
 // ---------------------------------------------------------------------------
@@ -532,6 +551,7 @@ inline constexpr std::string_view kSessionShow      = "session.show";
 inline constexpr std::string_view kSessionCreate    = "session.create";
 inline constexpr std::string_view kSessionResume    = "session.resume";
 inline constexpr std::string_view kSessionFork      = "session.fork";
+inline constexpr std::string_view kSessionRewindTargets = "session.rewind_targets";
 inline constexpr std::string_view kSessionReplay    = "session.replay";
 inline constexpr std::string_view kSessionActivate  = "session.activate";
 inline constexpr std::string_view kSessionSuspend   = "session.suspend";

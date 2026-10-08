@@ -172,6 +172,7 @@ public:
     protocol::SessionResumed resumeSession(const SessionId& id) override;
     protocol::SessionCreated forkSession(const SessionId& id,
                                          std::optional<std::int64_t> seed_length) override;
+    protocol::RewindTargets rewindTargets(const SessionId& id) override;
     protocol::SessionRenamedResult renameSession(const nlohmann::json& params) override;
     protocol::SetModeResult       setSessionMode(const nlohmann::json& params) override;
     protocol::SetModelResult      setSessionModel(const nlohmann::json& params) override;

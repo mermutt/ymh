@@ -439,6 +439,9 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
             respond(conn, request.id,
                     nlohmann::json{{"session", created.session.value}, {"header", created.header}});
             onSessionCreated(created.session);
+        } else if (method_name == method::kSessionRewindTargets) {
+            const SessionId session = session_param(request.params);
+            respond(conn, request.id, to_json_value(host_.rewindTargets(session)));
         } else if (method_name == method::kSessionReplay) {
             handle_subscribe(conn, request, true);
         } else if (method_name == method::kSessionActivate) {

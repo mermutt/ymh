@@ -634,15 +634,42 @@ void from_json(const nlohmann::json& json, SessionDetail& detail) {
     detail.event_count = json.at("event_count").get<std::size_t>();
 }
 
+void to_json(nlohmann::json& json, const RewindTarget& target) {
+    json = nlohmann::json{{"session", target.session.value},
+                          {"turn", target.turn},
+                          {"boundary_index", target.boundary_index},
+                          {"started_at_ms", target.started_at_ms},
+                          {"prompt", target.prompt}};
+}
+
+void from_json(const nlohmann::json& json, RewindTarget& target) {
+    target.session.value = json.at("session").get<std::string>();
+    target.turn = json.at("turn").get<std::uint64_t>();
+    target.boundary_index = json.at("boundary_index").get<std::int64_t>();
+    target.started_at_ms = json.at("started_at_ms").get<std::int64_t>();
+    target.prompt = json.at("prompt").get<std::string>();
+}
+
+void to_json(nlohmann::json& json, const RewindTargets& targets) {
+    json = nlohmann::json{{"view_length", targets.view_length},
+                          {"targets", targets.targets}};
+}
+
+void from_json(const nlohmann::json& json, RewindTargets& targets) {
+    targets.view_length = json.at("view_length").get<std::int64_t>();
+    targets.targets = json.at("targets").get<std::vector<RewindTarget>>();
+}
+
 namespace {
 
-constexpr std::array<std::string_view, 39> kMethodCatalog{{
+constexpr std::array<std::string_view, 40> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kHostOwnership,
     method::kWorkspaceList,    method::kWorkspaceShow,    method::kSessionList,
     method::kSessionShow,      method::kSessionCreate,    method::kSessionResume,
-    method::kSessionFork,      method::kSessionReplay,    method::kSessionActivate,
+    method::kSessionFork,      method::kSessionRewindTargets, method::kSessionReplay,
+    method::kSessionActivate,
     method::kSessionSuspend,   method::kSessionCompact,   method::kSessionClose,
     method::kSessionDelete,
     method::kAgentPrompt,      method::kAgentFollowup,    method::kAgentSteer,

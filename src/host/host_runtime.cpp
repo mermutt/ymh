@@ -22,11 +22,13 @@
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/commands/command.hpp"
 #include "ymh/commands/command_registry.hpp"
+#include "ymh/core/clock.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
+#include "ymh/session/text.hpp"
 #include "ymh/skills/skill_catalog.hpp"
 #include "ymh/transport/protocol_server.hpp"
 
@@ -860,6 +862,39 @@ protocol::SessionCreated HostRuntime::forkSession(const SessionId& id,
         protocol::SessionCreated result;
         result.session = child;
         result.header = header.has_value() ? nlohmann::json(*header) : nlohmann::json::object();
+        return result;
+    });
+}
+
+protocol::RewindTargets HostRuntime::rewindTargets(const SessionId& id) {
+    return translate([&]() -> protocol::RewindTargets {
+        if (!runtime_.store().load(id).has_value()) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
+                                   "UnknownSession"});
+        }
+        const EventRange view = runtime_.store().read(id, 0);
+        protocol::RewindTargets result;
+        result.view_length = static_cast<std::int64_t>(view.size());
+        for (std::size_t i = 1; i < view.size(); ++i) {
+            if (view[i].event.type != EventType::TurnStarted) {
+                continue;
+            }
+            const auto started = view[i].event.payload.get<payload::TurnStarted>();
+            if (started.origin != payload::TurnOrigin::User) {
+                continue;
+            }
+            if (view[i - 1].event.type != EventType::UserMessage) {
+                continue;
+            }
+            const auto prompt = view[i - 1].event.payload.get<payload::UserMessage>();
+            protocol::RewindTarget target;
+            target.session        = id;
+            target.turn           = started.turn;
+            target.boundary_index = static_cast<std::int64_t>(i - 1);
+            target.started_at_ms  = epoch_ms(view[i].event.timestamp);
+            target.prompt         = text_of_blocks(prompt.content);
+            result.targets.push_back(std::move(target));
+        }
         return result;
     });
 }

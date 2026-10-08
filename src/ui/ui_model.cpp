@@ -1824,6 +1824,42 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
     dirty.markAggregate();
 }
 
+void RewindOverlayModel::open_with(WorkspaceId ws, SessionId target,
+                                   std::int64_t resolved_view_length,
+                                   std::vector<RewindTargetView> rows) {
+    workspace   = std::move(ws);
+    session     = std::move(target);
+    view_length = resolved_view_length;
+    targets     = std::move(rows);
+    cursor      = targets.empty() ? 0 : targets.size() - 1;
+    open        = true;
+}
+
+void RewindOverlayModel::close() {
+    open = false;
+    targets.clear();
+    cursor = 0;
+}
+
+void RewindOverlayModel::moveUp() {
+    if (cursor > 0) {
+        --cursor;
+    }
+}
+
+void RewindOverlayModel::moveDown() {
+    if (!targets.empty() && cursor + 1 < targets.size()) {
+        ++cursor;
+    }
+}
+
+const RewindTargetView* RewindOverlayModel::selected() const {
+    if (!open || targets.empty() || cursor >= targets.size()) {
+        return nullptr;
+    }
+    return &targets[cursor];
+}
+
 void SwitcherOverlayModel::open(const UiModel& model) {
     openLive(model, /*include_focused=*/false);
 }

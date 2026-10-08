@@ -23,6 +23,7 @@
 #include "ymh/prompt/instructions.hpp"
 #include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session.hpp"
+#include "ymh/session/text.hpp"
 #include "ymh/tools/tool.hpp"
 #include "ymh/tools/tool_context.hpp"
 #include "ymh/tools/tool_registry.hpp"
@@ -46,19 +47,6 @@ std::string assembled_system_prompt(const LLMRequest& request) {
 std::string first_line(const std::string& text) {
     const std::size_t newline = text.find('\n');
     return text.substr(0, newline == std::string::npos ? text.size() : newline);
-}
-
-// 73-D1: the settled assistant text is the concatenation of the Text blocks
-// only; reasoning/thinking blocks are excluded, so a reasoning-only completion
-// with no visible answer and no tool call is a non-action.
-std::string text_of_blocks(const std::vector<ContentBlock>& blocks) {
-    std::string text;
-    for (const ContentBlock& block : blocks) {
-        if (block.kind == ContentBlockKind::Text) {
-            text += block.text;
-        }
-    }
-    return text;
 }
 
 // 73-D1: "blank" is empty or whitespace-only. It is a purely structural test;

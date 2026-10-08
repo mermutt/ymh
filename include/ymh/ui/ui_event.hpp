@@ -53,6 +53,8 @@ enum class UiMode : std::uint8_t {
     // 81-D1: the full-screen session dashboard (the Ctrl-S surface). Replaces
     // the former single-OK `Notice` mode (81-D4).
     Dashboard,
+    // 79-D6: the `/rewind` turn picker overlay.
+    Rewind,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {

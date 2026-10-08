@@ -44,6 +44,9 @@ struct CommandContext {
     // the same workspace daemon. `args` is the trimmed command-line tail: empty,
     // or a non-negative integer resolved-view boundary.
     std::function<void(const std::string&)> fork;
+    // 79-D1: opens the rewind picker for the focused session. `args` is the
+    // trimmed command-line tail; it is unused today (reserved).
+    std::function<void(const std::string&)> rewind;
     // 58-D1/E11: opens the Subagents picker for the viewed session (`/subagents`).
     std::function<void()> subagents;
     // 45-D6/45-D7: read-only informational surfaces. Both are session-less: the

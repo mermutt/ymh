@@ -595,6 +595,35 @@ public:
     void clamp_cursor();
 };
 
+// 79-D4/D6: one rewind-picker row. `prompt` is the full restore text written to
+// the child's composer; `summary` is the one-line excerpt the renderer draws.
+struct RewindTargetView {
+    TurnId       turn;
+    std::int64_t boundary_index{0};
+    std::int64_t started_at_ms{0};
+    std::string  prompt;
+    std::string  summary;
+};
+
+// 79-D6: the `/rewind` overlay state. `open` mirrors `mode == UiMode::Rewind`
+// for the renderer; `cursor` opens on the last (most recent) row.
+struct RewindOverlayModel {
+    bool                          open = false;
+    WorkspaceId                   workspace;
+    SessionId                     session;
+    std::int64_t                  view_length{0};   // 79-D10 no-op guard
+    std::vector<RewindTargetView> targets;
+    std::size_t                   cursor = 0;
+    UiMode                        prev_mode = UiMode::Conversation;
+
+    void open_with(WorkspaceId ws, SessionId session, std::int64_t view_length,
+                   std::vector<RewindTargetView> targets);
+    void close();
+    void moveUp();
+    void moveDown();
+    [[nodiscard]] const RewindTargetView* selected() const;
+};
+
 // 81-D2: the dashboard is a pure snapshot rebuilt on open and on every catalog
 // delivery. All fields are UI-only and process-local (81-I18). `open()` saves
 // `prev_mode` from the outgoing mode before the caller sets `UiMode::Dashboard`.
@@ -780,6 +809,8 @@ struct UiModel {
     ModelPickerModel                      model_picker;
     // 81-D2: the full-screen dashboard snapshot (81-D1).
     DashboardModel                        dashboard;
+    // 79-D6: the `/rewind` turn-picker overlay.
+    RewindOverlayModel                    rewind;
     UiMode                                mode = UiMode::Conversation;
     // 53-D3.1: the resolved model for the no-session fallback segment (entry
     // name when named, else the wire id). Never persisted.
