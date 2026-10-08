@@ -3801,4 +3801,49 @@ TEST(UiRenderGolden, DashboardStoppingBadge) {
     EXPECT_NE(rendered.find("[stopping]"), std::string::npos);
 }
 
+// 79-D6 (RW-G1): one row per target with the cursor on the last row and the
+// pinned footer literal.
+TEST(UiRenderGolden, RW_G1_RewindListsPrompts) {
+    UiModel model = build_model();
+    model.rewind.open_with(
+        WorkspaceId{"workspace"}, kSession, 10,
+        {RewindTargetView{TurnId{1}, 1, 0, "p", "5s ago | first prompt"},
+         RewindTargetView{TurnId{2}, 3, 0, "p", "2s ago | second prompt"}});
+    model.mode = UiMode::Rewind;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("first prompt"), std::string::npos);
+    EXPECT_NE(rendered.find("second prompt"), std::string::npos);
+    EXPECT_NE(rendered.find("Up/Down move | Enter rewind | Esc cancel"), std::string::npos);
+    EXPECT_NE(rendered.find("> 2s ago | second prompt"), std::string::npos);
+}
+
+// 79-F3 (RW-G2): an empty target list renders the empty-state line and no rows.
+TEST(UiRenderGolden, RW_G2_RewindEmptyState) {
+    UiModel model = build_model();
+    model.rewind.open_with(WorkspaceId{"workspace"}, kSession, 1, {});
+    model.mode = UiMode::Rewind;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("no user turns to rewind"), std::string::npos);
+    EXPECT_NE(rendered.find("Up/Down move | Enter rewind | Esc cancel"), std::string::npos);
+}
+
+// 79-D6/RW13 (RW-G3): with the dashboard raised, the picker composes over
+// `render_dashboard` rather than replacing it.
+TEST(UiRenderGolden, RW_G3_RewindComposesOverBase) {
+    UiModel model = dashboard_model();
+    model.openDashboard();
+    model.rewind.open_with(WorkspaceId{"ws-alpha"}, SessionId{"s-work"}, 10,
+                           {RewindTargetView{TurnId{1}, 1, 0, "p", "1s ago | a prompt"}});
+    model.mode = UiMode::Rewind;
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("Sessions"), std::string::npos);
+    EXPECT_NE(rendered.find("a prompt"), std::string::npos);
+}
+
 } // namespace

@@ -12,6 +12,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/core/clock.hpp"
+#include "ymh/session/events.hpp"
+#include "ymh/session/text.hpp"
 #include "ymh/transport/host.hpp"
 
 namespace ymh::test {
@@ -172,6 +175,38 @@ public:
         }
         logs_[child] = std::move(seeded);
         return protocol::SessionCreated{SessionId{child}, nlohmann::json{{"id", child}}};
+    }
+
+    protocol::RewindTargets rewindTargets(const SessionId& id) override {
+        calls.push_back("session.rewind_targets");
+        if (!sessionExists(id)) {
+            throw protocol::RpcException(static_cast<int>(protocol::AppCode::UnknownSession),
+                                         "unknown session");
+        }
+        const auto& view = logs_.at(id.value);
+        protocol::RewindTargets result;
+        result.view_length = static_cast<std::int64_t>(view.size());
+        for (std::size_t i = 1; i < view.size(); ++i) {
+            if (view[i].event.type != EventType::TurnStarted) {
+                continue;
+            }
+            const auto started = view[i].event.payload.get<payload::TurnStarted>();
+            if (started.origin != payload::TurnOrigin::User) {
+                continue;
+            }
+            if (view[i - 1].event.type != EventType::UserMessage) {
+                continue;
+            }
+            const auto prompt = view[i - 1].event.payload.get<payload::UserMessage>();
+            protocol::RewindTarget target;
+            target.session        = id;
+            target.turn           = started.turn;
+            target.boundary_index = static_cast<std::int64_t>(i - 1);
+            target.started_at_ms  = epoch_ms(view[i].event.timestamp);
+            target.prompt         = text_of_blocks(prompt.content);
+            result.targets.push_back(std::move(target));
+        }
+        return result;
     }
 
     void closeSession(const SessionId& id) override {

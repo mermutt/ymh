@@ -1479,4 +1479,43 @@ TEST(TransportHost, FK_U9_FakeForkOverrideOptionalSeed) {
     EXPECT_THROW(host.forkSession(SessionId{"missing"}, std::nullopt), protocol::RpcException);
 }
 
+// 79-D5 (§4.2, RW-U7): `FakeTransportHost::rewindTargets` computes the same
+// boundary rule as the daemon (prompt UserMessage index = TurnStarted - 1),
+// lists only User-origin turns, and throws for an unknown session.
+TEST(TransportHost, RW_U7_FakeRewindTargetsMatchesDaemon) {
+    test::FakeTransportHost host;
+    const SessionId parent = host.seed("parent");
+
+    host.append(parent, EventType::SessionStarted, nlohmann::json::object());
+
+    payload::UserMessage prompt;
+    prompt.id = "m1";
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "hello world";
+    prompt.content.push_back(block);
+    host.append(parent, EventType::UserMessage, nlohmann::json(prompt));
+
+    payload::TurnStarted user_turn;
+    user_turn.turn   = 1;
+    user_turn.origin = payload::TurnOrigin::User;
+    host.append(parent, EventType::TurnStarted, nlohmann::json(user_turn));
+
+    payload::TurnStarted steer_turn;
+    steer_turn.turn   = 2;
+    steer_turn.origin = payload::TurnOrigin::Steer;
+    host.append(parent, EventType::TurnStarted, nlohmann::json(steer_turn));
+
+    const protocol::RewindTargets targets = host.rewindTargets(parent);
+    EXPECT_EQ(targets.view_length, 4);
+    ASSERT_EQ(targets.targets.size(), 1u);
+    EXPECT_EQ(targets.targets[0].session.value, parent.value);
+    EXPECT_EQ(targets.targets[0].turn, 1u);
+    EXPECT_EQ(targets.targets[0].boundary_index, 1);
+    EXPECT_EQ(targets.targets[0].prompt, "hello world");
+    EXPECT_EQ(targets.targets[0].started_at_ms, epoch_ms(host.readEvents(parent, 0, 100)[2].event.timestamp));
+
+    EXPECT_THROW(host.rewindTargets(SessionId{"missing"}), protocol::RpcException);
+}
+
 } // namespace

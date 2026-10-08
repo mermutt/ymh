@@ -632,6 +632,155 @@ TEST_F(HostRuntimeTest, CreateResumeForkDeleteWriteJunction) {
     EXPECT_FALSE(bridge.host().sessionExists(forked.session));
 }
 
+namespace {
+
+void append_prompt(Session& session, const std::string& text) {
+    payload::UserMessage message;
+    message.id = "m-" + text;
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = text;
+    message.content.push_back(block);
+    session.append(message);
+}
+
+void append_turn(Session& session, std::uint64_t turn, payload::TurnOrigin origin) {
+    payload::TurnStarted started;
+    started.turn   = turn;
+    started.origin = origin;
+    session.append(started);
+}
+
+} // namespace
+
+// 79-D2/RW3 (RW-U2): the boundary is the prompt UserMessage's resolved-view
+// index (`turn_start_index - 1`), not the TurnStarted's index.
+TEST_F(HostRuntimeTest, RW_U2_RewindTargetsBoundaryIsPromptIndex) {
+    Bridge bridge("hr_rw_u2");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<Session> session_owner =
+        bridge.runtime().sessions().sessionPtr(created.session);
+    Session& session = *session_owner;
+    // Resolved view: SessionStarted(0), UserMessage(1), TurnStarted(2).
+    append_prompt(session, "hello");
+    append_turn(session, 1, payload::TurnOrigin::User);
+
+    const protocol::RewindTargets targets = bridge.host().rewindTargets(created.session);
+    EXPECT_EQ(targets.view_length, 3);
+    ASSERT_EQ(targets.targets.size(), 1u);
+    EXPECT_EQ(targets.targets[0].boundary_index, 1);
+    EXPECT_EQ(targets.targets[0].turn, 1u);
+    EXPECT_EQ(targets.targets[0].prompt, "hello");
+}
+
+// 79-D8/RW6 (RW-U3): only User-origin turns are targets.
+TEST_F(HostRuntimeTest, RW_U3_RewindTargetsOnlyUserOrigin) {
+    Bridge bridge("hr_rw_u3");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<Session> session_owner =
+        bridge.runtime().sessions().sessionPtr(created.session);
+    Session& session = *session_owner;
+
+    std::uint64_t turn = 1;
+    for (const payload::TurnOrigin origin : {payload::TurnOrigin::Steer,
+                                             payload::TurnOrigin::FollowUp,
+                                             payload::TurnOrigin::Injection,
+                                             payload::TurnOrigin::Maintenance}) {
+        append_prompt(session, "skip");
+        append_turn(session, turn++, origin);
+    }
+
+    const protocol::RewindTargets targets = bridge.host().rewindTargets(created.session);
+    EXPECT_TRUE(targets.targets.empty());
+    EXPECT_EQ(targets.view_length, 9);
+}
+
+// 79-D5 (§4.3, RW-U4): no user turns => an empty target list with the true
+// view length.
+TEST_F(HostRuntimeTest, RW_U4_RewindTargetsEmptyAndViewLength) {
+    Bridge bridge("hr_rw_u4");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+
+    const protocol::RewindTargets targets = bridge.host().rewindTargets(created.session);
+    EXPECT_TRUE(targets.targets.empty());
+    EXPECT_EQ(targets.view_length, 1);
+}
+
+// 79-D2/RW3/RW7 (RW-U5): a ContextCompaction event counts toward the view and
+// shifts both the turn's boundary_index and the view length.
+TEST_F(HostRuntimeTest, RW_U5_RewindTargetsCompactionCounted) {
+    Bridge bridge("hr_rw_u5");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<Session> session_owner =
+        bridge.runtime().sessions().sessionPtr(created.session);
+    Session& session = *session_owner;
+    session.append(payload::ContextCompaction{});
+    append_prompt(session, "hello");
+    append_turn(session, 1, payload::TurnOrigin::User);
+
+    const protocol::RewindTargets targets = bridge.host().rewindTargets(created.session);
+    EXPECT_EQ(targets.view_length, 4);
+    ASSERT_EQ(targets.targets.size(), 1u);
+    EXPECT_EQ(targets.targets[0].boundary_index, 2);
+    const EventRange view = bridge.runtime().store().read(created.session, 0);
+    ASSERT_LT(static_cast<std::size_t>(targets.targets[0].boundary_index), view.size());
+    EXPECT_EQ(view[static_cast<std::size_t>(targets.targets[0].boundary_index)].event.type,
+              EventType::UserMessage);
+}
+
+// 79-D5/RW8 (RW-U6): `rewindTargets` is a pure projection; it appends nothing
+// and changes no header.
+TEST_F(HostRuntimeTest, RW_U6_RewindTargetsIsReadOnly) {
+    Bridge bridge("hr_rw_u6");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<Session> session_owner =
+        bridge.runtime().sessions().sessionPtr(created.session);
+    Session& session = *session_owner;
+    append_prompt(session, "hello");
+    append_turn(session, 1, payload::TurnOrigin::User);
+
+    const std::size_t before = bridge.runtime().store().read(created.session, 0).size();
+    const std::optional<SessionHeader> header_before = bridge.runtime().store().load(created.session);
+    (void)bridge.host().rewindTargets(created.session);
+    (void)bridge.host().rewindTargets(created.session);
+    EXPECT_EQ(bridge.runtime().store().read(created.session, 0).size(), before);
+    EXPECT_EQ(bridge.runtime().store().load(created.session), header_before);
+}
+
+// 79-D3/RW2/RW4 (RW-I1): rewinding forks at `boundary_index`; the child is a
+// kind='fork' row carrying that seed, and the parent is byte-identical.
+TEST_F(HostRuntimeTest, RW_I1_RewindForksAtBoundaryAndKeepsParent) {
+    Bridge bridge("hr_rw_i1");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    const std::shared_ptr<Session> session_owner =
+        bridge.runtime().sessions().sessionPtr(created.session);
+    Session& session = *session_owner;
+    append_prompt(session, "first");
+    append_turn(session, 1, payload::TurnOrigin::User);
+    append_prompt(session, "second");
+    append_turn(session, 2, payload::TurnOrigin::User);
+
+    const protocol::RewindTargets targets = bridge.host().rewindTargets(created.session);
+    ASSERT_EQ(targets.targets.size(), 2u);
+    const std::int64_t boundary = targets.targets[1].boundary_index;
+    EXPECT_EQ(targets.targets[1].prompt, "second");
+
+    const std::size_t parent_size = bridge.runtime().store().read(created.session, 0).size();
+    const std::optional<SessionHeader> parent_before = bridge.runtime().store().load(created.session);
+
+    const protocol::SessionCreated child = bridge.host().forkSession(created.session, boundary);
+    const std::optional<SessionHeader> header = bridge.runtime().store().load(child.session);
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(header->kind, SessionKind::Fork);
+    ASSERT_TRUE(header->parentSession.has_value());
+    EXPECT_EQ(header->parentSession->value, created.session.value);
+    ASSERT_TRUE(header->seedLength.has_value());
+    EXPECT_EQ(static_cast<std::int64_t>(*header->seedLength), boundary);
+
+    EXPECT_EQ(bridge.runtime().store().read(created.session, 0).size(), parent_size);
+    EXPECT_EQ(bridge.runtime().store().load(created.session), parent_before);
+}
+
 TEST_F(HostRuntimeTest, ResumeReplaysUnreportedSettlementExactlyOnce) {
     Bridge bridge("hr_settlement_replay");
     const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());

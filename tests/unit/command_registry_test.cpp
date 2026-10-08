@@ -99,6 +99,30 @@ TEST(CommandRegistryTest, FK_U4_ForkRegisteredBeforeHelp) {
     EXPECT_TRUE(received.empty());
 }
 
+// 79-D1 (RW-U1): `/rewind` is registered before the `/help` snapshot, so it
+// appears in the help listing and its dispatch reaches `context.rewind`.
+TEST(CommandRegistryTest, RW_U1_RewindRegisteredBeforeHelp) {
+    CommandRegistry registry = CommandRegistry::builtin();
+    UiModel         model;
+    SessionUiState& state = attach_session(model);
+    CommandContext  context{model};
+    context.session = &state;
+    bool rewound    = false;
+    context.rewind  = [&rewound](const std::string&) { rewound = true; };
+
+    EXPECT_TRUE(registry.dispatch("/help", context));
+    std::string rendered;
+    for (const ConversationEntry& entry : state.conversation.entries) {
+        rendered += entry.text + "\n";
+    }
+    EXPECT_NE(rendered.find(
+                  "/rewind - rewind the conversation to a previous turn (branch)"),
+              std::string::npos);
+
+    EXPECT_TRUE(registry.dispatch("/rewind", context));
+    EXPECT_TRUE(rewound);
+}
+
 // 78-D1 (FK-U5, FK-F3): the registry forwards the raw argument tail to the hook;
 // the boundary parsing and usage notice live in `SupervisorApp::fork_session`.
 TEST(CommandRegistryTest, FK_U5_ForkArgPassthrough) {

@@ -983,9 +983,11 @@ TEST(UiModel, CommandRegistryDispatchesRename) {
     EXPECT_EQ(renamed, "my title");
 
     const std::vector<CompletionCandidate> matches = registry.complete_candidates("re");
-    ASSERT_EQ(matches.size(), 1u);
-    ASSERT_NE(matches.front().command, nullptr);
-    EXPECT_EQ(matches.front().command->name, "rename");
+    ASSERT_EQ(matches.size(), 2u);
+    ASSERT_NE(matches[0].command, nullptr);
+    EXPECT_EQ(matches[0].command->name, "rename");
+    ASSERT_NE(matches[1].command, nullptr);
+    EXPECT_EQ(matches[1].command->name, "rewind");
 }
 
 TEST(UiModel, CommandRegistryRenameWithoutSessionMakesNoCall) {
