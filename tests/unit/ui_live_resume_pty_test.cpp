@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 
+#include "support/live_provider_config.hpp"
 #include "support/pty_child.hpp"
 #include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
@@ -60,6 +61,7 @@ TEST(UiLiveResumePty, ResumesStoredSessionAndAnswersFollowUp) {
     }
 
     ShortTempRoot root("ui_live_resume");
+    write_live_provider_config(root.config_dir());
     const std::filesystem::path workspace = root.path() / "ws";
     std::filesystem::create_directories(workspace);
 

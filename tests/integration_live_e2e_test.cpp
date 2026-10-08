@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "support/host_harness.hpp"
+#include "support/live_provider_config.hpp"
 #include "support/pty_child.hpp"
 #include "support/scoped_env.hpp"
 #include "support/short_temp.hpp"
@@ -86,6 +87,7 @@ public:
         state_env_.emplace("XDG_STATE_HOME", root_.state_dir().string());
         home_env_.emplace("HOME", root_.path().string());
         config_env_.emplace("XDG_CONFIG_HOME", root_.config_dir().string());
+        write_live_provider_config(root_.config_dir());
         cache_env_.emplace("XDG_CACHE_HOME", (root_.path() / ".cache").string());
         id_ = register_workspace(registry_config_for(root_.state_dir()), root_.path(), "live-e2e");
     }

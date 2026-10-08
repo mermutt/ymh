@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 
+#include "support/dev_llm_config.hpp"
 #include "support/test_env.hpp"
 #include "ymh/cli/headless.hpp"
 #include "ymh/core/logging.hpp"
@@ -32,6 +33,11 @@ TEST(LiveHeadlessTest, RunsAgainstDeepSeek) {
     std::ostringstream  err;
 
     Config config;
+    const LLMProviderConfig pinned = deepseek_config();
+    config.llm.provider    = pinned.provider;
+    config.llm.base_url    = pinned.base_url;
+    config.llm.api_key_env = pinned.api_key_env;
+    config.llm.model       = pinned.model;
     if (const char* model = std::getenv("YMH_LIVE_LLM_MODEL"); model != nullptr && *model != '\0') {
         config.llm.model = model;
     }

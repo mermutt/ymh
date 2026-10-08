@@ -10,6 +10,8 @@
 
 #include <unistd.h>
 
+#include "support/live_provider_config.hpp"
+
 namespace ymh::test {
 namespace {
 
@@ -61,6 +63,8 @@ public:
             script_file << R"([{"text": "ok"}])";
             script_file.close();
             ::setenv("YMH_FAKE_LLM_SCRIPT", script.c_str(), 1);
+        } else {
+            write_live_provider_config(g_root / "config");
         }
 
         ::setenv("XDG_STATE_HOME", (g_root / "state").c_str(), 1);

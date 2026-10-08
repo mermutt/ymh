@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 
+#include "support/live_provider_config.hpp"
 #include "support/pty_child.hpp"
 #include "support/short_temp.hpp"
 
@@ -54,6 +55,7 @@ TEST(UiLivePty, StreamsAssistantReply) {
     // temp directory, so the live run never touches the developer's real
     // `~/.local/state/ymh/registry.db` or `~/.config/ymh/config.jsonc`.
     test::ShortTempRoot root("ui_live_pty");
+    test::write_live_provider_config(root.config_dir());
     const std::filesystem::path workspace = root.path() / "ws";
     std::filesystem::create_directories(workspace);
 
