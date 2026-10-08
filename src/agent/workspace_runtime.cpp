@@ -281,8 +281,6 @@ public:
           assembler_(tools_, agent_config_.system_prompt),
           provider_config_(std::move(provider_config)),
           pool_(governor_.caps().max_llm_concurrency),
-          ring_(governor_.caps().session_output_ring_bytes),
-          sink_(ring_),
           sessions_(*store_, bus_),
           model_catalog_(ModelCatalog::build(config)),
           plan_mode_([this](const SessionId& id, payload::PlanMode mode) {
@@ -391,7 +389,6 @@ public:
         services_.instructions    = instructions_.get();
         services_.execution       = environment_.get();
         services_.logger          = &category_logger(LogCategory::Tool);
-        services_.output          = &sink_;
         services_.estimator       = &estimator_;
         services_.presets         = roster_.get();
 
@@ -561,8 +558,6 @@ public:
     std::unique_ptr<ContextCompactor>  compactor_;
     std::unique_ptr<HandoffService>    handoff_;
     std::unique_ptr<CommandRegistry>   commands_;
-    OutputRing                         ring_;
-    RingOutputSink                     sink_;
     SessionManager                     sessions_;
     ModelCatalog                       model_catalog_;
     PlanModeController                 plan_mode_;

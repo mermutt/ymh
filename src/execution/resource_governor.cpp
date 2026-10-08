@@ -54,13 +54,22 @@ void ResourceGovernor::releasePty(SessionId session) {
     }
 }
 
-OutputRing& ResourceGovernor::ringFor(SessionId session) {
+std::shared_ptr<OutputRing> ResourceGovernor::ringFor(
+    SessionId session, const std::atomic<bool>* owner_alive) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (owner_alive != nullptr && owner_alive->load()) {
+        return nullptr;
+    }
     auto& ring = rings_[session.value];
     if (!ring) {
-        ring = std::make_unique<OutputRing>(caps_.session_output_ring_bytes);
+        ring = std::make_shared<OutputRing>(caps_.session_output_ring_bytes);
     }
-    return *ring;
+    return ring;
+}
+
+void ResourceGovernor::releaseSession(SessionId session) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    rings_.erase(session.value);
 }
 
 SubprocessSlot::SubprocessSlot(ResourceGovernor& governor, SessionId session)

@@ -158,4 +158,42 @@ std::string RingOutputSink::materialize(std::size_t max_bytes) const {
     return ring_->tail(max_bytes);
 }
 
+CallOutputSink::CallOutputSink(std::size_t per_call_capacity,
+                               std::shared_ptr<OutputRing> live)
+    : call_ring_(per_call_capacity), live_(std::move(live)) {}
+
+void CallOutputSink::write(std::string_view chunk) {
+    bool lost = false;
+    std::string clean = sanitize_utf8(chunk, lost);
+    utf8_loss_ = utf8_loss_ || lost;
+    bytes_written_ += chunk.size();
+    call_ring_.append(clean, false);
+    if (live_) {
+        live_->append(clean, false);
+    }
+}
+
+void CallOutputSink::writeErr(std::string_view chunk) {
+    bool lost = false;
+    std::string clean = sanitize_utf8(chunk, lost);
+    utf8_loss_ = utf8_loss_ || lost;
+    bytes_written_ += chunk.size();
+    call_ring_.append(clean, true);
+    if (live_) {
+        live_->append(clean, true);
+    }
+}
+
+void CallOutputSink::close() {}
+
+std::size_t CallOutputSink::bytesWritten() const noexcept { return bytes_written_; }
+
+bool CallOutputSink::truncated() const noexcept {
+    return utf8_loss_ || call_ring_.truncated();
+}
+
+std::string CallOutputSink::materialize(std::size_t max_bytes) const {
+    return call_ring_.tail(max_bytes);
+}
+
 } // namespace ymh

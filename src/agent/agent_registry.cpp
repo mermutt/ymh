@@ -281,6 +281,9 @@ void AgentRegistry::dispose(AgentId id) {
     }
 
     agent->dispose();
+    if (services_.governor != nullptr) {
+        services_.governor->releaseSession(sessionId);
+    }
     if (services_.sessions != nullptr) {
         services_.sessions->closeSession(sessionId);
     }
@@ -310,6 +313,9 @@ void AgentRegistry::finalizeAll() {
         // the agent without waiting (AL25). The local shared_ptr keeps the agent
         // — and, via its session_owner_, the Session — alive across the call.
         agent->dispose();
+        if (services_.governor != nullptr) {
+            services_.governor->releaseSession(agent->session());
+        }
         if (services_.sessions != nullptr) {
             services_.sessions->closeSession(agent->session());
         }

@@ -963,8 +963,7 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
 payload::ToolResult AgentLoop::runToolCall(const PreparedToolCall& plan) {
     payload::ToolResult result;
     if (services_.tools == nullptr || services_.execution == nullptr ||
-        services_.logger == nullptr || services_.governor == nullptr ||
-        services_.output == nullptr) {
+        services_.logger == nullptr || services_.governor == nullptr) {
         result.id      = plan.call.id;
         result.name    = plan.call.name;
         result.outcome = payload::ToolOutcome::Error;
@@ -980,8 +979,12 @@ payload::ToolResult AgentLoop::runToolCall(const PreparedToolCall& plan) {
     if (tool_timeout.count() > 0) {
         deadline = std::chrono::steady_clock::now() + tool_timeout;
     }
+    std::shared_ptr<OutputRing> live =
+        services_.governor->ringFor(session_.id(), &disposed_);
+    CallOutputSink call_output(
+        services_.governor->caps().session_output_ring_bytes, std::move(live));
     ToolContext context(*services_.execution, session_, *services_.logger, plan.token,
-                        *services_.governor, *services_.output, handle, plan.call.id,
+                        *services_.governor, call_output, handle, plan.call.id,
                         plan.call.turn, plan.call.step, deadline);
     try {
         result = services_.tools->execute(plan.call, context).get();

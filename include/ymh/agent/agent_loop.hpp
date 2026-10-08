@@ -42,7 +42,6 @@ class ResourceGovernor;
 class ToolRegistry;
 class ExecutionEnvironment;
 class Logger;
-class OutputSink;
 class SystemPrompt;
 class InstructionLoader;
 class AgentPresetRoster;
@@ -70,7 +69,6 @@ struct AgentServices {
     InstructionLoader*    instructions = nullptr;
     ExecutionEnvironment* execution = nullptr;
     Logger*               logger = nullptr;
-    OutputSink*           output = nullptr;
     Compactor*            compactor = nullptr;
     // The rich compactor the loop calls for `compact()`/`CompactionResult`
     // (13-context-compaction.md §5.2, errata A3); the frozen `compactor` seam

@@ -5,6 +5,7 @@
 // and release it on every path (X11). The governor is the single place a cap is
 // enforced, so no tool re-implements one.
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -45,7 +46,17 @@ public:
     bool tryAcquirePty(SessionId session);
     void releasePty(SessionId session);
 
-    OutputRing& ringFor(SessionId session);
+    // 83 §2.2 (A6/A7): returns an owning handle; the map holds one reference too.
+    // NEW-2: `owner_alive` is the owning agent's liveness token and is wired to
+    // `AgentLoop::disposed_`, so a non-null token reading true means the owner is
+    // gone. Read under `mutex_`; when the owner is disposed, return nullptr
+    // WITHOUT inserting -- a disposed session is never resurrected by a late
+    // call. Null means "always live" (governor-only tests).
+    std::shared_ptr<OutputRing> ringFor(SessionId session,
+                                        const std::atomic<bool>* owner_alive = nullptr);
+    // 83 §2.2: erases the map entry under `mutex_` (`rings_.erase(key)`), dropping
+    // only the governor's reference. Idempotent.
+    void releaseSession(SessionId session) noexcept;
 
     [[nodiscard]] const ResourceCaps& caps() const noexcept { return caps_; }
 
@@ -57,7 +68,7 @@ private:
     std::size_t                                 global_ptys_ = 0;
     std::unordered_map<std::string, std::size_t> session_subprocesses_;
     std::unordered_map<std::string, std::size_t> session_ptys_;
-    std::unordered_map<std::string, std::unique_ptr<OutputRing>> rings_;
+    std::unordered_map<std::string, std::shared_ptr<OutputRing>> rings_;
 };
 
 // RAII slot guards (X11): release on completion, timeout, cancellation, throw.

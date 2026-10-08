@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -77,6 +78,40 @@ private:
     OutputRing* ring_;
     std::size_t bytes_written_ = 0;
     bool        utf8_loss_ = false;
+};
+
+// 83 §2.2 (A2): per-call writer. Owns the call's own bounded ring, which is the
+// ONLY source `materialize()` reads, so a `ToolResult` can never contain another
+// call's, session's, or subagent's bytes. Each sanitized chunk is optionally
+// fanned out to the session's live ring (`live`), which stays the UI live buffer
+// (07 §8.2) and never feeds `materialize()`. `live` is held by an owning
+// `shared_ptr` (83 NEW-1) so the sink keeps the ring alive for the call even if
+// the governor's map entry is evicted mid-call. Built on the call's stack; not
+// copyable or movable (a copy would share `live_` and split `call_ring_`).
+class CallOutputSink final : public OutputSink {
+public:
+    // `per_call_capacity` is `ResourceCaps::session_output_ring_bytes`; `live`
+    // may be null (governor-less loop, tests) => no live tee.
+    CallOutputSink(std::size_t per_call_capacity, std::shared_ptr<OutputRing> live);
+
+    CallOutputSink(const CallOutputSink&) = delete;
+    CallOutputSink& operator=(const CallOutputSink&) = delete;
+    CallOutputSink(CallOutputSink&&) = delete;
+    CallOutputSink& operator=(CallOutputSink&&) = delete;
+
+    void write(std::string_view chunk) override;     // sanitize once; append to
+    void writeErr(std::string_view chunk) override;  //  call_ring_ + *live_
+    void close() override;                           // idempotent no-op barrier
+
+    [[nodiscard]] std::size_t bytesWritten() const noexcept override;
+    [[nodiscard]] bool        truncated() const noexcept override;
+    [[nodiscard]] std::string materialize(std::size_t max_bytes) const override;
+
+private:
+    OutputRing                 call_ring_;  // authoritative result buffer
+    std::shared_ptr<OutputRing> live_;      // nullable; keeps the live ring alive
+    std::size_t                bytes_written_ = 0;
+    bool                       utf8_loss_ = false;
 };
 
 // Lossy-converts `bytes` to valid UTF-8 (invalid sequences become U+FFFD) and
