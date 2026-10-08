@@ -628,7 +628,7 @@ std::unique_ptr<AgentLoop> make_direct_loop(AgentEnv& env,
                                             LlmRuntime* runtime) {
     AgentServices services = make_agent_services(
         env.sessions, env.governor, env.tools, env.policy, nullptr, assembler, env.env, env.logger,
-        env.sink, env.runtime, env.pool, env.estimator, AgentServices::PermissionResolver{},
+        env.runtime, env.pool, env.estimator, AgentServices::PermissionResolver{},
         nullptr);
     services.runtime = runtime;
     return std::make_unique<AgentLoop>(AgentId{"direct"}, session, services, std::move(config));

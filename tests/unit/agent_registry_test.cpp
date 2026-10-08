@@ -133,7 +133,7 @@ struct DurableAgentEnv {
           assembler(tools, ""),
           pool(4),
           registry(make_agent_services(sessions, governor, tools, policy, nullptr, assembler, env,
-                                       logger, sink, runtime, pool, estimator,
+                                       logger, runtime, pool, estimator,
                                        AgentServices::PermissionResolver{}, nullptr, nullptr),
                    AgentConfig{}) {}
 
@@ -163,8 +163,6 @@ struct DurableAgentEnv {
     SessionManager                      sessions;
     LocalEnvironment                    env;
     ResourceGovernor                    governor;
-    OutputRing                          ring{1u << 20};
-    RingOutputSink                      sink{ring};
     NullLogger                          logger;
     ToolRegistry                        tools;
     RegistrationKeeper                  keeper{tools};
@@ -198,7 +196,7 @@ TEST(AgentRegistry, ConstructsNoAdapterItself) {
     LlmRuntime     clean;
     AgentServices services = make_agent_services(
         env.sessions, env.governor, env.tools, env.policy, nullptr, env.assembler, env.env,
-        env.logger, env.sink, clean, env.pool, env.estimator, AgentServices::PermissionResolver{},
+        env.logger, clean, env.pool, env.estimator, AgentServices::PermissionResolver{},
         nullptr);
 
     AgentRegistry registry(services, AgentConfig{});

@@ -64,7 +64,6 @@ inline AgentServices make_agent_services(SessionManager& sessions,
                                          ContextAssembler& context,
                                          ExecutionEnvironment& execution,
                                          Logger& logger,
-                                         OutputSink& output,
                                          LlmRuntime& runtime,
                                          LLMPool& pool,
                                          TokenEstimator& estimator,
@@ -83,7 +82,6 @@ inline AgentServices make_agent_services(SessionManager& sessions,
     services.context             = &context;
     services.execution           = &execution;
     services.logger              = &logger;
-    services.output              = &output;
     services.runtime             = &runtime;
     services.pool                = &pool;
     services.estimator           = &estimator;
@@ -138,7 +136,7 @@ struct AgentEnv {
                                          })
                                    : std::nullopt),
           registry(make_agent_services(sessions, governor, tools, policy, gate.get(), assembler, env,
-                                        logger, sink, runtime, pool, estimator,
+                                        logger, runtime, pool, estimator,
                                         std::move(resolver), compactor, context_compactor.get(),
                                         plan_mode_controller ? &*plan_mode_controller : nullptr,
                                         prompt, instructions),
@@ -179,8 +177,6 @@ struct AgentEnv {
     SessionManager sessions;
     LocalEnvironment env;
     ResourceGovernor governor;
-    OutputRing ring{1u << 20};
-    RingOutputSink sink{ring};
     NullLogger logger;
     ToolRegistry tools;
     RegistrationKeeper keeper{tools};

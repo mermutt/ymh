@@ -19,6 +19,7 @@ add_executable(ymh_tests
     unit/llm_live_test.cpp
     unit/path_safety_test.cpp
     unit/output_test.cpp
+    unit/errata83_output_isolation_test.cpp
     unit/retention_test.cpp
     unit/repeat_tool_reminder_test.cpp
     unit/tool_result_pruner_test.cpp
