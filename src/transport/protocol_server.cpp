@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "ymh/commands/command_types.hpp"
+#include "ymh/session/ids.hpp"
 #include "ymh/transport/frame_codec.hpp"
 #include "ymh/transport/json_rpc.hpp"
 
@@ -442,6 +443,16 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
         } else if (method_name == method::kSessionRewindTargets) {
             const SessionId session = session_param(request.params);
             respond(conn, request.id, to_json_value(host_.rewindTargets(session)));
+        } else if (method_name == method::kSessionRestoreCode) {
+            const SessionId session = session_param(request.params);
+            const nlohmann::json& params = object_params(request.params);
+            const auto turn = params.find("turn");
+            if (turn == params.end() || !turn->is_number_unsigned()) {
+                throw RpcException(code_value(RpcCode::InvalidParams),
+                                   "turn must be an unsigned integer");
+            }
+            respond(conn, request.id,
+                    to_json_value(host_.restoreCode(session, turn->get<TurnId>())));
         } else if (method_name == method::kSessionReplay) {
             handle_subscribe(conn, request, true);
         } else if (method_name == method::kSessionActivate) {

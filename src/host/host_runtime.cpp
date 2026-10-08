@@ -25,6 +25,7 @@
 #include "ymh/core/clock.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/host/workspace_host.hpp"
+#include "ymh/session/checkpoints.hpp"
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
@@ -893,9 +894,51 @@ protocol::RewindTargets HostRuntime::rewindTargets(const SessionId& id) {
             target.boundary_index = static_cast<std::int64_t>(i - 1);
             target.started_at_ms  = epoch_ms(view[i].event.timestamp);
             target.prompt         = text_of_blocks(prompt.content);
+            target.file_change_count =
+                checkpoints_ == nullptr
+                    ? 0
+                    : checkpoints_->revertible_count(id, TurnId{started.turn});
             result.targets.push_back(std::move(target));
         }
         return result;
+    });
+}
+
+protocol::RestoreReport HostRuntime::restoreCode(const SessionId& id, TurnId turn) {
+    return translate([&]() -> protocol::RestoreReport {
+        if (!runtime_.store().load(id).has_value()) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::UnknownSession),
+                                   "UnknownSession"});
+        }
+        const std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
+        if (agent != nullptr) {
+            switch (agent->state()) {
+                case AgentState::Thinking:
+                case AgentState::CallingTool:
+                case AgentState::WaitingForPermission:
+                case AgentState::WaitingForInput:
+                case AgentState::Cancelling:
+                    throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                           "turn in progress"});
+                case AgentState::Idle:
+                case AgentState::Error:
+                    break;
+            }
+        }
+        if (checkpoints_ == nullptr) {
+            throw_mapped(WireError{protocol::code_value(protocol::AppCode::StoreUnavailable),
+                                   "StoreUnavailable"});
+        }
+        const CheckpointRestoreReport domain =
+            checkpoints_->restore(runtime_.environment(), id, turn);
+        protocol::RestoreReport out;
+        out.restored = domain.restored;
+        out.skipped  = domain.skipped;
+        out.failed   = domain.failed;
+        out.changed  = domain.changed;
+        out.expired  = domain.expired;
+        out.detail   = domain.detail;
+        return out;
     });
 }
 
@@ -973,6 +1016,9 @@ void HostRuntime::deleteSession(const SessionId& id, bool only_if_empty, bool fo
         runtime_.sessions().deleteSession(id, only_if_empty);
         runtime_.plan_mode().erase(id);
         runtime_.model_selection().erase(id);
+        if (checkpoints_ != nullptr) {
+            checkpoints_->removeSession(id);
+        }
 
         if (active_session_.has_value() && active_session_->value == id.value) {
             active_session_.reset();
@@ -1406,6 +1452,10 @@ HostRuntime::WireError HostRuntime::map_agent_error(const AgentError& error) noe
 }
 
 HostRuntime::WireError HostRuntime::map_store_error(const std::exception& error) noexcept {
+    if (dynamic_cast<const CheckpointUnavailableError*>(&error) != nullptr) {
+        return {protocol::code_value(protocol::AppCode::CheckpointUnavailable),
+                "CheckpointUnavailable"};
+    }
     if (dynamic_cast<const InvalidForkBoundary*>(&error) != nullptr) {
         return {protocol::code_value(protocol::AppCode::InvalidForkBoundary),
                 "InvalidForkBoundary"};

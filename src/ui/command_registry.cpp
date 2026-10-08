@@ -297,7 +297,7 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
-        "rewind", "rewind the conversation to a previous turn (branch)",
+        "rewind", "restore the conversation and/or code to a previous turn",
         [](CommandContext& context, const std::string& args) {
             if (context.rewind) {
                 context.rewind(args);

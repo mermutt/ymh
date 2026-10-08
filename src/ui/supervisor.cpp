@@ -2025,7 +2025,8 @@ private:
         for (const protocol::RewindTarget& target : targets.targets) {
             views.push_back(RewindTargetView{
                 TurnId{target.turn}, target.boundary_index, target.started_at_ms,
-                target.prompt, make_rewind_summary(target.started_at_ms, target.prompt)});
+                target.prompt, make_rewind_summary(target.started_at_ms, target.prompt),
+                target.file_change_count});
         }
         model_.rewind.prev_mode = model_.mode;
         model_.rewind.open_with(workspace, session, targets.view_length, std::move(views));
@@ -2054,7 +2055,7 @@ private:
         if (event == ftxui::Event::Return) {
             if (const RewindTargetView* target = model_.rewind.selected();
                 target != nullptr) {
-                rewind_to(*target);
+                open_rewind_action(*target);
             } else {
                 model_.rewind.close();
                 model_.mode = model_.rewind.prev_mode;
@@ -2130,6 +2131,146 @@ private:
         }
         push_notice("rewound -> " + child.value + " (prompt restored)");
         model_.dirty.markAggregate();
+    }
+
+    // 80-D9: Enter on the list opens the action menu; the list stays open so
+    // Escape/cancel returns to it.
+    void open_rewind_action(const RewindTargetView& target) {
+        model_.rewind_action.prev_mode = model_.mode;
+        model_.rewind_action.open_with(model_.rewind.workspace, model_.rewind.session,
+                                       target.turn, target.file_change_count);
+        model_.mode = UiMode::RewindAction;
+        model_.dirty.markAggregate();
+    }
+
+    // 80-D9/sec.8: the action menu consumes every key while it owns the screen.
+    bool handle_rewind_action(const ftxui::Event& event) {
+        if (event == ftxui::Event::Escape || event == ftxui::Event::CtrlC) {
+            apply_rewind_action(RewindAction::Cancel);
+            return true;
+        }
+        if (event == ftxui::Event::ArrowDown ||
+            (event.is_character() && event.character() == "j")) {
+            model_.rewind_action.moveDown();
+            return true;
+        }
+        if (event == ftxui::Event::ArrowUp ||
+            (event.is_character() && event.character() == "k")) {
+            model_.rewind_action.moveUp();
+            return true;
+        }
+        if (event == ftxui::Event::Return) {
+            if (const RewindAction* action = model_.rewind_action.selected()) {
+                apply_rewind_action(*action);
+            } else {
+                apply_rewind_action(RewindAction::Cancel);
+            }
+            return true;
+        }
+        if (event.is_character() && event.character().size() == 1) {
+            const char key = event.character().front();
+            if (key >= '1' && key <= '4') {
+                const auto candidate = static_cast<RewindAction>(key - '1');
+                for (const RewindAction action : model_.rewind_action.actions) {
+                    if (action == candidate) {
+                        apply_rewind_action(candidate);
+                        break;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // 80-D10: dispatch the chosen action. Conversation restore reuses spec 79's
+    // `rewind_to`; code restore calls the new `session.restore_code`.
+    void apply_rewind_action(RewindAction action) {
+        if (action == RewindAction::Cancel) {
+            const UiMode restore = model_.rewind_action.prev_mode;
+            model_.rewind_action.close();
+            model_.mode = restore;
+            model_.dirty.markAggregate();
+            return;
+        }
+        const WorkspaceId id      = model_.rewind_action.workspace;
+        const SessionId   session = model_.rewind_action.session;
+        const TurnId      turn    = model_.rewind_action.turn;
+
+        const RewindTargetView* target = nullptr;
+        for (const RewindTargetView& row : model_.rewind.targets) {
+            if (row.turn == turn) {
+                target = &row;
+                break;
+            }
+        }
+        model_.rewind_action.close();
+        if (target == nullptr) {
+            model_.rewind.close();
+            model_.mode = UiMode::Conversation;
+            model_.dirty.markAggregate();
+            return;
+        }
+
+        if (action == RewindAction::RestoreCode ||
+            action == RewindAction::RestoreCodeAndConversation) {
+            restore_code(id, session, turn);
+        }
+        if (action == RewindAction::RestoreConversation ||
+            action == RewindAction::RestoreCodeAndConversation) {
+            rewind_to(*target);
+        } else {
+            model_.rewind.close();
+            model_.mode = model_.rewind.prev_mode;
+            model_.dirty.markAggregate();
+        }
+    }
+
+    // 80-D8: issue `session.restore_code`; the reply is gated by `restore_query_`
+    // so a focus change drops it (mirrors 79-F11).
+    void restore_code(const WorkspaceId& workspace, const SessionId& session, TurnId turn) {
+        restore_query_ = std::make_pair(session, turn);
+        submit_to(workspace, std::string(protocol::method::kSessionRestoreCode),
+                  nlohmann::json{{"session", session.value}, {"turn", turn}},
+                  [this, workspace, session](SupervisorReply reply) {
+                      enqueue([this, workspace, session, reply = std::move(reply)]() mutable {
+                          if (!restore_query_.has_value() ||
+                              restore_query_->first != session) {
+                              restore_query_.reset();
+                              return;
+                          }
+                          restore_query_.reset();
+                          if (!reply.ok) {
+                              surface_notice(workspace, session,
+                                             "restore failed: " + reply.error);
+                              return;
+                          }
+                          apply_restore_report(workspace, session,
+                                               reply.result.get<protocol::RestoreReport>());
+                      });
+                  });
+    }
+
+    // 80-D6: surface the per-file report as a status-bar notice.
+    void apply_restore_report(const WorkspaceId& workspace, const SessionId& session,
+                              protocol::RestoreReport report) {
+        std::string message;
+        if (report.expired) {
+            message = report.detail.empty()
+                          ? "checkpoint expired; code restore unavailable"
+                          : report.detail;
+        } else {
+            message = "restored " + std::to_string(report.restored) + " file(s)";
+            if (report.skipped > 0) {
+                message += ", skipped " + std::to_string(report.skipped);
+            }
+            if (report.failed > 0) {
+                message += ", failed " + std::to_string(report.failed);
+            }
+            if (!report.detail.empty()) {
+                message += " - " + report.detail;
+            }
+        }
+        surface_notice(workspace, session, message);
     }
 
     // 45-D10.8 (45-F23): drop a daemon-rejected session (which clears the focus
@@ -2643,7 +2784,7 @@ private:
         return model_.exitConfirm.open || model_.dialog.open ||
                (model_.mode == UiMode::Context && model_.context.open) ||
                model_.mode == UiMode::Dashboard || model_.mode == UiMode::Switcher ||
-               model_.mode == UiMode::Rewind ||
+               model_.mode == UiMode::Rewind || model_.mode == UiMode::RewindAction ||
                (model_.mode == UiMode::ModelPicker && model_.model_picker.visible);
     }
 
@@ -4328,6 +4469,10 @@ private:
         if (model_.mode == UiMode::Rewind) {
             return handle_rewind(event);
         }
+        // 80-D9: the action menu is a peer of the list, above the dashboard.
+        if (model_.mode == UiMode::RewindAction) {
+            return handle_rewind_action(event);
+        }
         // 81-D1/81-I19: the dashboard guard precedes the globals, so every key
         // reaches `handle_dashboard` while it is the top focus owner.
         if (model_.mode == UiMode::Dashboard) {
@@ -4592,6 +4737,7 @@ private:
     // 79-F11: the session whose `session.rewind_targets` read is in flight; a
     // stale reply is dropped when the focused session changed.
     std::optional<SessionId> rewind_query_;
+    std::optional<std::pair<SessionId, TurnId>> restore_query_;
     // 46-D7 test seam (N6): canned `session.list` replies installed by the
     // harness, so the focus/create/resume decision is drivable without a daemon.
     bool           session_list_replies_installed_ = false;

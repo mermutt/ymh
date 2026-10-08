@@ -168,6 +168,7 @@ add_library(ymh_core STATIC
     src/core/event.cpp
     src/core/event_bus.cpp
     src/core/retention.cpp
+    src/core/fs.cpp
 )
 add_library(ymh::core ALIAS ymh_core)
 
@@ -193,6 +194,7 @@ add_library(ymh_session STATIC
     src/session/session_persistence.cpp
     src/session/session_manager.cpp
     src/session/plan_mode.cpp
+    src/session/checkpoints.cpp
 )
 add_library(ymh::session ALIAS ymh_session)
 
@@ -207,6 +209,8 @@ target_link_libraries(ymh_session
         nlohmann_json::nlohmann_json
     PRIVATE
         SQLite3::SQLite3
+        ymh::llm
+        ymh::logging
         ymh::warnings
 )
 

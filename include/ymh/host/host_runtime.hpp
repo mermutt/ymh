@@ -55,6 +55,7 @@ namespace ymh {
 class WorkspaceRuntime;
 class TurnExecutor;
 class Agent;
+class CheckpointStore;
 struct AgentError;
 enum class WorkspaceRuntimeErrorCode : std::uint8_t;
 enum class ShutdownReason : std::uint8_t;  // workspace_host.hpp; opaque enum is complete
@@ -129,6 +130,10 @@ public:
     // requests to a late-attaching supervisor (D19.4). Idempotent.
     void attachServer(protocol::ProtocolServer& server);
 
+    // 80/M1: non-owning; the daemon owns the store. Wired once in
+    // WorkspaceHost::Impl::startup.
+    void set_checkpoint_store(CheckpointStore* store) noexcept { checkpoints_ = store; }
+
     // Starts the single EventBus forwarding subscriber (idempotent; the ctor
     // already calls it). Exposed for the daemon after `attachServer`.
     void startForwarding();
@@ -173,6 +178,7 @@ public:
     protocol::SessionCreated forkSession(const SessionId& id,
                                          std::optional<std::int64_t> seed_length) override;
     protocol::RewindTargets rewindTargets(const SessionId& id) override;
+    protocol::RestoreReport restoreCode(const SessionId& id, TurnId turn) override;
     protocol::SessionRenamedResult renameSession(const nlohmann::json& params) override;
     protocol::SetModeResult       setSessionMode(const nlohmann::json& params) override;
     protocol::SetModelResult      setSessionModel(const nlohmann::json& params) override;
@@ -258,6 +264,7 @@ private:
     protocol::ProtocolServer* server_ = nullptr;
     TurnExecutor&       turns_;
     PermissionBroker&   broker_;
+    CheckpointStore*    checkpoints_ = nullptr;
     EventForwarder      forwarder_;
     LiveEventForwarder  live_forwarder_;
     HandoffNoticeForwarder handoff_notice_;

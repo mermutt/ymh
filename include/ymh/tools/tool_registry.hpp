@@ -22,6 +22,8 @@
 
 namespace ymh {
 
+class CheckpointRecorder;
+
 class ToolRegistry {
 public:
     class Registration {
@@ -95,6 +97,13 @@ public:
     [[nodiscard]] const ToolConfig& config() const noexcept { return config_; }
     void set_config(ToolConfig config) { config_ = config; }
 
+    // 80-D2: wires the daemon-owned checkpoint recorder (non-owning). Called
+    // once at daemon startup; the recorder is invoked before each tracked
+    // mutating tool executes. Null disables capture.
+    void set_checkpoint_recorder(CheckpointRecorder* recorder) noexcept {
+        checkpoint_recorder_ = recorder;
+    }
+
     // One scope per adapter namespace. `prefix` must be a valid ToolName prefix
     // ending in '.', unique among scopes, and disjoint from non-adapter tool
     // names. Callable only before freeze(); after freeze() it throws
@@ -120,6 +129,7 @@ private:
     std::atomic<std::uint64_t>                                generation_{0};
     std::atomic<bool>                                         frozen_{false};
     ToolConfig                                                config_;
+    CheckpointRecorder*                                       checkpoint_recorder_ = nullptr;
 };
 
 } // namespace ymh

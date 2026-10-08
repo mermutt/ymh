@@ -205,6 +205,9 @@ enum class AppCode : int {
     // 53-F6: the target model's `ResolvedEndpoint` identity has no registered
     // route in the daemon.
     EndpointNotRouted          = -32021,
+    // 80-D8/CP-F14: the checkpoint index cannot be opened or read (an I/O
+    // error). A corrupt/unknown-version index loads as empty, not this code.
+    CheckpointUnavailable      = -32022,
 };
 
 [[nodiscard]] constexpr int code_value(RpcCode code) noexcept {
@@ -415,11 +418,25 @@ struct RewindTarget {
     std::int64_t  boundary_index{0}; // resolved-view index of the prompt UserMessage
     std::int64_t  started_at_ms{0};  // TurnStarted event timestamp (epoch ms)
     std::string   prompt;            // text projection of the prompt UserMessage
+    // 80-D8: distinct files a restore to this checkpoint would revert; 0 hides
+    // the code actions (defaulted => wire-compatible).
+    std::int64_t  file_change_count{0};
 };
 
 struct RewindTargets {
     std::int64_t              view_length{0};  // resolved view length at query time
     std::vector<RewindTarget> targets;
+};
+
+// 80-D6/D7: the WIRE result of a code restore. The session-layer domain type is
+// `ymh::CheckpointRestoreReport`; the host bridges field-by-field.
+struct RestoreReport {
+    std::int64_t restored{0};
+    std::int64_t skipped{0};
+    std::int64_t failed{0};
+    std::int64_t changed{0};
+    bool         expired{false};
+    std::string  detail;
 };
 
 // ---------------------------------------------------------------------------
@@ -532,6 +549,9 @@ void from_json(const nlohmann::json& json, RewindTarget& target);
 void to_json(nlohmann::json& json, const RewindTargets& targets);
 void from_json(const nlohmann::json& json, RewindTargets& targets);
 
+void to_json(nlohmann::json& json, const RestoreReport& report);
+void from_json(const nlohmann::json& json, RestoreReport& report);
+
 // ---------------------------------------------------------------------------
 // Method catalog (05 §7)
 // ---------------------------------------------------------------------------
@@ -552,6 +572,7 @@ inline constexpr std::string_view kSessionCreate    = "session.create";
 inline constexpr std::string_view kSessionResume    = "session.resume";
 inline constexpr std::string_view kSessionFork      = "session.fork";
 inline constexpr std::string_view kSessionRewindTargets = "session.rewind_targets";
+inline constexpr std::string_view kSessionRestoreCode   = "session.restore_code";
 inline constexpr std::string_view kSessionReplay    = "session.replay";
 inline constexpr std::string_view kSessionActivate  = "session.activate";
 inline constexpr std::string_view kSessionSuspend   = "session.suspend";

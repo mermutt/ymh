@@ -603,6 +603,9 @@ struct RewindTargetView {
     std::int64_t started_at_ms{0};
     std::string  prompt;
     std::string  summary;
+    // 80-D8/80-D9: distinct files a restore to this checkpoint would revert;
+    // 0 hides the code actions.
+    std::int64_t file_change_count{0};
 };
 
 // 79-D6: the `/rewind` overlay state. `open` mirrors `mode == UiMode::Rewind`
@@ -622,6 +625,33 @@ struct RewindOverlayModel {
     void moveUp();
     void moveDown();
     [[nodiscard]] const RewindTargetView* selected() const;
+};
+
+// 80-D9: the second step of `/rewind`. The four table actions (1-4) gate on
+// `file_change_count`: code actions appear only when it is > 0.
+enum class RewindAction : std::uint8_t {
+    RestoreCodeAndConversation,
+    RestoreConversation,
+    RestoreCode,
+    Cancel,
+};
+
+struct RewindActionModel {
+    bool                      open = false;
+    WorkspaceId               workspace;
+    SessionId                 session;
+    TurnId                    turn{0};
+    std::int64_t              file_change_count{0};
+    std::vector<RewindAction> actions;
+    std::size_t               cursor = 0;
+    UiMode                    prev_mode = UiMode::Rewind;
+
+    void open_with(WorkspaceId ws, SessionId session, TurnId turn,
+                   std::int64_t file_change_count);
+    void close();
+    void moveUp();
+    void moveDown();
+    [[nodiscard]] const RewindAction* selected() const;
 };
 
 // 81-D2: the dashboard is a pure snapshot rebuilt on open and on every catalog
@@ -811,6 +841,8 @@ struct UiModel {
     DashboardModel                        dashboard;
     // 79-D6: the `/rewind` turn-picker overlay.
     RewindOverlayModel                    rewind;
+    // 80-D9: the second-step action menu.
+    RewindActionModel                     rewind_action;
     UiMode                                mode = UiMode::Conversation;
     // 53-D3.1: the resolved model for the no-session fallback segment (entry
     // name when named, else the wire id). Never persisted.

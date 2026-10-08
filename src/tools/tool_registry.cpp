@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include "ymh/session/checkpoints.hpp"
+
 namespace ymh {
 namespace {
 
@@ -343,6 +345,11 @@ Task<ToolResult> ToolRegistry::execute(const payload::ToolCall& call,
     }
 
     const ToolArguments arguments{call.arguments};
+    if (checkpoint_recorder_ != nullptr) {
+        checkpoint_recorder_->capture(context.sessionId(), context.turn(),
+                                      tool->checkpoint_paths(context, arguments),
+                                      context.execution());
+    }
     try {
         ToolResult result = tool->execute(context, arguments).get();
         result.id = call.id;

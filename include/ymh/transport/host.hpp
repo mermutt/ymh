@@ -19,6 +19,7 @@
 
 #include "ymh/commands/command_types.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/session/ids.hpp"
 #include "ymh/transport/protocol.hpp"
 
 namespace ymh::protocol {
@@ -114,6 +115,9 @@ public:
                                        std::optional<std::int64_t> seed_length) = 0;
     // 79-D5: read-only projection of the session's user turns. Never mutates.
     virtual RewindTargets rewindTargets(const SessionId& id) = 0;
+    // 80-D8: restore the working tree to the checkpoint at `turn`. Mutates
+    // files under the workspace root only; never touches the event log.
+    virtual RestoreReport restoreCode(const SessionId& id, TurnId turn) = 0;
     virtual SessionRenamedResult renameSession(const nlohmann::json& params) = 0;
     virtual void closeSession(const SessionId& id) = 0;
     virtual void deleteSession(const SessionId& id, bool only_if_empty, bool force) = 0;

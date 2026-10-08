@@ -639,7 +639,8 @@ void to_json(nlohmann::json& json, const RewindTarget& target) {
                           {"turn", target.turn},
                           {"boundary_index", target.boundary_index},
                           {"started_at_ms", target.started_at_ms},
-                          {"prompt", target.prompt}};
+                          {"prompt", target.prompt},
+                          {"file_change_count", target.file_change_count}};
 }
 
 void from_json(const nlohmann::json& json, RewindTarget& target) {
@@ -648,6 +649,7 @@ void from_json(const nlohmann::json& json, RewindTarget& target) {
     target.boundary_index = json.at("boundary_index").get<std::int64_t>();
     target.started_at_ms = json.at("started_at_ms").get<std::int64_t>();
     target.prompt = json.at("prompt").get<std::string>();
+    target.file_change_count = json.value("file_change_count", std::int64_t{0});
 }
 
 void to_json(nlohmann::json& json, const RewindTargets& targets) {
@@ -660,15 +662,34 @@ void from_json(const nlohmann::json& json, RewindTargets& targets) {
     targets.targets = json.at("targets").get<std::vector<RewindTarget>>();
 }
 
+void to_json(nlohmann::json& json, const RestoreReport& report) {
+    json = nlohmann::json{{"restored", report.restored},
+                          {"skipped", report.skipped},
+                          {"failed", report.failed},
+                          {"changed", report.changed},
+                          {"expired", report.expired},
+                          {"detail", report.detail}};
+}
+
+void from_json(const nlohmann::json& json, RestoreReport& report) {
+    report.restored = json.value("restored", std::int64_t{0});
+    report.skipped = json.value("skipped", std::int64_t{0});
+    report.failed = json.value("failed", std::int64_t{0});
+    report.changed = json.value("changed", std::int64_t{0});
+    report.expired = json.value("expired", false);
+    report.detail = json.value("detail", std::string{});
+}
+
 namespace {
 
-constexpr std::array<std::string_view, 40> kMethodCatalog{{
+constexpr std::array<std::string_view, 41> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kHostOwnership,
     method::kWorkspaceList,    method::kWorkspaceShow,    method::kSessionList,
     method::kSessionShow,      method::kSessionCreate,    method::kSessionResume,
-    method::kSessionFork,      method::kSessionRewindTargets, method::kSessionReplay,
+    method::kSessionFork,      method::kSessionRewindTargets, method::kSessionRestoreCode,
+    method::kSessionReplay,
     method::kSessionActivate,
     method::kSessionSuspend,   method::kSessionCompact,   method::kSessionClose,
     method::kSessionDelete,

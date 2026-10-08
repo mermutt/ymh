@@ -1579,8 +1579,7 @@ Element render_model_picker(const UiModel& model, const Theme& theme) {
            ftxui::clear_under | ftxui::center;
 }
 
-// 79-D6: the `/rewind` picker overlay. A `clear_under` window over the current
-// base (chain R), peer of the switcher/model picker.
+// 79-D6 (superseded by 80-D9): the `/rewind` picker, now a full-screen base.
 Element render_rewind(const UiModel& model, const Theme& theme, int available_width) {
     (void)available_width;
     const RewindOverlayModel& rewind = model.rewind;
@@ -1593,6 +1592,10 @@ Element render_rewind(const UiModel& model, const Theme& theme, int available_wi
         for (std::size_t index = 0; index < rewind.targets.size(); ++index) {
             std::string line = index == rewind.cursor ? "> " : "  ";
             line += rewind.targets[index].summary;
+            if (rewind.targets[index].file_change_count > 0) {
+                line += "  (" + std::to_string(rewind.targets[index].file_change_count) +
+                        " files)";
+            }
             Element element = ftxui::text(line);
             if (index == rewind.cursor) {
                 element = paint(element, ftxui::Color::Cyan, theme) | ftxui::bold;
@@ -1601,9 +1604,55 @@ Element render_rewind(const UiModel& model, const Theme& theme, int available_wi
         }
     }
     rows.push_back(ftxui::separator());
-    rows.push_back(ftxui::text("Up/Down move | Enter rewind | Esc cancel") | ftxui::dim);
-    return ftxui::window(ftxui::text("rewind"), ftxui::vbox(std::move(rows))) |
-           ftxui::clear_under | ftxui::center;
+    rows.push_back(ftxui::text("Up/Down move | Enter select | Esc cancel") | ftxui::dim);
+    return ftxui::vbox(std::move(rows)) | ftxui::border;
+}
+
+int rewind_action_number(RewindAction action) {
+    switch (action) {
+        case RewindAction::RestoreCodeAndConversation: return 1;
+        case RewindAction::RestoreConversation:        return 2;
+        case RewindAction::RestoreCode:                return 3;
+        case RewindAction::Cancel:                     return 4;
+    }
+    return 4;
+}
+
+std::string rewind_action_label(RewindAction action) {
+    switch (action) {
+        case RewindAction::RestoreCodeAndConversation: return "Restore code and conversation";
+        case RewindAction::RestoreConversation:        return "Restore conversation";
+        case RewindAction::RestoreCode:                return "Restore code";
+        case RewindAction::Cancel:                     return "Never mind";
+    }
+    return "Never mind";
+}
+
+// 80-D9: the second-step action menu, a full-screen peer of the picker.
+Element render_rewind_action(const UiModel& model, const Theme& theme, int available_width) {
+    (void)available_width;
+    const RewindActionModel& action = model.rewind_action;
+    Elements                 rows;
+    rows.push_back(ftxui::text("rewind") | ftxui::bold);
+    rows.push_back(ftxui::separator());
+    if (action.actions.empty()) {
+        rows.push_back(ftxui::text("no actions") | ftxui::dim);
+    } else {
+        for (std::size_t index = 0; index < action.actions.size(); ++index) {
+            std::string line = index == action.cursor ? "> " : "  ";
+            line += std::to_string(rewind_action_number(action.actions[index])) + ". " +
+                    rewind_action_label(action.actions[index]);
+            Element element = ftxui::text(line);
+            if (index == action.cursor) {
+                element = paint(element, ftxui::Color::Cyan, theme) | ftxui::bold;
+            }
+            rows.push_back(element);
+        }
+    }
+    rows.push_back(ftxui::separator());
+    rows.push_back(ftxui::text("1-4 select | Up/Down move | Enter confirm | Esc cancel") |
+                   ftxui::dim);
+    return ftxui::vbox(std::move(rows)) | ftxui::border;
 }
 
 // 67-D1: UTF-8-safe display-column truncation with a single-glyph ellipsis.
@@ -2396,7 +2445,10 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     // overlay raised from the dashboard composes over the dashboard, never the
     // conversation.
     Element base =
-        model.dashboard.open ? render_dashboard(model, size, theme) : std::move(main);
+        model.dashboard.open     ? render_dashboard(model, size, theme)
+        : model.rewind_action.open ? render_rewind_action(model, theme, size.width)
+        : model.rewind.open        ? render_rewind(model, theme, size.width)
+                                   : std::move(main);
     if (model.exitConfirm.open) {
         return ftxui::dbox({base, render_exit_confirm(model, theme)});
     }
@@ -2411,9 +2463,6 @@ Element build_ui(const UiModel& model, TerminalSize size, const Theme& theme,
     }
     if (model.mode == UiMode::ModelPicker && model.model_picker.visible) {
         return ftxui::dbox({base, render_model_picker(model, theme)});
-    }
-    if (model.mode == UiMode::Rewind) {
-        return ftxui::dbox({base, render_rewind(model, theme, size.width)});
     }
     return base;
 }

@@ -48,6 +48,7 @@
 #include "ymh/permission/permission_transport.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/registry/liveness.hpp"
+#include "ymh/session/checkpoints.hpp"
 #include "ymh/session/session_manager.hpp"
 #include "ymh/transport/host_connection.hpp"
 #include "ymh/transport/protocol_server.hpp"
@@ -684,6 +685,7 @@ private:
     std::unique_ptr<AsioExecutor>     executor_;
 
     std::unique_ptr<GrantStore>             grant_store_;
+    std::unique_ptr<CheckpointStore>        checkpoints_;
     std::unique_ptr<WorkspaceRuntime>       runtime_;
     std::unique_ptr<WorkspaceRegistry>      registry_;
     std::unique_ptr<TransportServerAdapter> permission_adapter_;
@@ -910,6 +912,15 @@ HostExitCode WorkspaceHost::Impl::startup() {
         });
     host_runtime_->setShutdownHook(
         [this](ShutdownReason reason) { requestShutdown(reason); });
+
+    checkpoints_ = std::make_unique<CheckpointStore>(canonical_root_);
+    std::set<SessionId> live_sessions;
+    for (const SessionHeader& header : runtime_->store().list()) {
+        live_sessions.insert(header.id);
+    }
+    checkpoints_->sweep(live_sessions, std::chrono::system_clock::now());
+    runtime_->tools().set_checkpoint_recorder(checkpoints_.get());
+    host_runtime_->set_checkpoint_store(checkpoints_.get());
 
     protocol::ProtocolServerConfig server_config;
     server_config.uid       = protocol::current_uid();

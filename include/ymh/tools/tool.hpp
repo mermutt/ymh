@@ -6,9 +6,11 @@
 // never decides policy (X6/X8).
 
 #include <cstdint>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -68,6 +70,16 @@ public:
 
     virtual ToolName    name() const { return schema().name; }
     virtual ToolVersion version() const { return schema().version; }
+
+    // 80-D2/80-D5: the workspace paths this call will mutate that the checkpoint
+    // store should snapshot BEFORE `execute` runs. The default is empty
+    // (read-only and untracked tools). A path is returned UNRESOLVED - the raw
+    // `path` argument - so the store can run its non-following symlink check
+    // before resolve() canonicalizes the leaf away.
+    [[nodiscard]] virtual std::vector<std::filesystem::path>
+    checkpoint_paths(const ToolContext&, const ToolArguments&) const {
+        return {};
+    }
 };
 
 // ToolName grammar, validated at registration (07 §2.1).

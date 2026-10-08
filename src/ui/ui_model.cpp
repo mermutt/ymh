@@ -1860,6 +1860,50 @@ const RewindTargetView* RewindOverlayModel::selected() const {
     return &targets[cursor];
 }
 
+void RewindActionModel::open_with(WorkspaceId ws, SessionId target, TurnId at_turn,
+                                  std::int64_t change_count) {
+    workspace         = std::move(ws);
+    session           = std::move(target);
+    turn              = at_turn;
+    file_change_count = change_count;
+    actions.clear();
+    if (file_change_count > 0) {
+        actions.push_back(RewindAction::RestoreCodeAndConversation);
+        actions.push_back(RewindAction::RestoreConversation);
+        actions.push_back(RewindAction::RestoreCode);
+    } else {
+        actions.push_back(RewindAction::RestoreConversation);
+    }
+    actions.push_back(RewindAction::Cancel);
+    cursor = 0;
+    open   = true;
+}
+
+void RewindActionModel::close() {
+    open = false;
+    actions.clear();
+    cursor = 0;
+}
+
+void RewindActionModel::moveUp() {
+    if (cursor > 0) {
+        --cursor;
+    }
+}
+
+void RewindActionModel::moveDown() {
+    if (!actions.empty() && cursor + 1 < actions.size()) {
+        ++cursor;
+    }
+}
+
+const RewindAction* RewindActionModel::selected() const {
+    if (!open || actions.empty() || cursor >= actions.size()) {
+        return nullptr;
+    }
+    return &actions[cursor];
+}
+
 void SwitcherOverlayModel::open(const UiModel& model) {
     openLive(model, /*include_focused=*/false);
 }

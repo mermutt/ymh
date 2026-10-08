@@ -55,6 +55,8 @@ enum class UiMode : std::uint8_t {
     Dashboard,
     // 79-D6: the `/rewind` turn picker overlay.
     Rewind,
+    // 80-D9: the second step of `/rewind` - the code/conversation action menu.
+    RewindAction,
 };
 
 enum class WorkspaceEventKind : std::uint8_t {

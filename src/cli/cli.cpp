@@ -40,6 +40,7 @@
 #include "ymh/llm/model_profile.hpp"
 #include "ymh/llm/redaction.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/core/fs.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/core/version.hpp"
 #include "ymh/execution/config.hpp"
@@ -794,16 +795,6 @@ bool validate_imported_mcp(nlohmann::json& document, const nlohmann::json& local
         return fail_import(backstop);
     }
     return true;
-}
-
-void fsync_parent_directory(const std::filesystem::path& file) {
-    const std::filesystem::path directory =
-        file.parent_path().empty() ? std::filesystem::path{"."} : file.parent_path();
-    const int dir_fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir_fd >= 0) {
-        (void)::fsync(dir_fd);
-        ::close(dir_fd);
-    }
 }
 
 bool write_imported_config(const nlohmann::json& document,

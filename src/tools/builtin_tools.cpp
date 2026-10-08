@@ -146,6 +146,12 @@ class WriteFileTool final : public Tool {
 public:
     explicit WriteFileTool([[maybe_unused]] ToolConfig config) {}
 
+    [[nodiscard]] std::vector<std::filesystem::path>
+    checkpoint_paths(const ToolContext& /*context*/,
+                     const ToolArguments& arguments) const override {
+        return {std::filesystem::path{arguments.value.at("path").get<std::string>()}};
+    }
+
     ToolSchema schema() const override {
         return ToolSchema{
             ToolName{"write_file"},
@@ -177,6 +183,12 @@ public:
 class EditFileTool final : public Tool {
 public:
     explicit EditFileTool([[maybe_unused]] ToolConfig config) {}
+
+    [[nodiscard]] std::vector<std::filesystem::path>
+    checkpoint_paths(const ToolContext& /*context*/,
+                     const ToolArguments& arguments) const override {
+        return {std::filesystem::path{arguments.value.at("path").get<std::string>()}};
+    }
 
     ToolSchema schema() const override {
         return ToolSchema{
