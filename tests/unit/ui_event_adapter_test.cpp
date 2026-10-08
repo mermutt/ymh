@@ -452,4 +452,35 @@ TEST(UiEventAdapter, UI65_D2_ChildTurnEndedDoesNotIdleParent) {
     EXPECT_EQ(model.session(kSessionB)->agent_state, AgentState::Idle);
 }
 
+TEST(UiEventAdapter, HS_I16_HandoffResultAppendsSystemNoticeWithoutChangingFocus) {
+    UiModel        model = make_model();
+    UiEventAdapter adapter(model);
+
+    protocol::HostNotice notice;
+    notice.kind    = protocol::HostNoticeKind::HandoffResult;
+    notice.session = kSessionA;
+    notice.detail  = "handoff: wrote .ymh/handoffs/x.md";
+    adapter.onHostNotice(kWorkspaceA, notice);
+
+    const SessionUiState* state = model.session(kSessionA);
+    ASSERT_NE(state, nullptr);
+    bool found = false;
+    for (const ConversationEntry& entry : state->conversation.entries) {
+        if (entry.role == ConversationRole::System && entry.text == notice.detail) {
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+    ASSERT_NE(model.activeWorkspace(), nullptr);
+    EXPECT_EQ(model.activeWorkspace()->activeSessionId(), kSessionA);
+
+    protocol::HostNotice unmodeled;
+    unmodeled.kind    = protocol::HostNoticeKind::HandoffResult;
+    unmodeled.session = SessionId{"not-modeled"};
+    unmodeled.detail  = "handoff: ring";
+    adapter.onHostNotice(kWorkspaceA, unmodeled);
+    ASSERT_FALSE(model.notices.empty());
+    EXPECT_EQ(model.notices.back().text, "handoff: ring");
+}
+
 } // namespace

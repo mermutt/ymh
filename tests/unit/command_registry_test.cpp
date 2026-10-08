@@ -118,6 +118,35 @@ TEST(CommandRegistryTest, FK_U5_ForkArgPassthrough) {
     EXPECT_EQ(calls[1], "12");
 }
 
+// 82-D2 (HS-I19): `/handoff` is registered before the `/help` snapshot and
+// forwards the raw argument tail to the `context.handoff` hook.
+TEST(CommandRegistryTest, HS_I19_HandoffRegisteredBeforeHelp) {
+    CommandRegistry registry = CommandRegistry::builtin();
+    UiModel         model;
+    SessionUiState& state = attach_session(model);
+    CommandContext  context{model};
+    context.session = &state;
+    bool        forwarded = false;
+    std::string received;
+    context.handoff = [&forwarded, &received](const std::string& args) {
+        forwarded = true;
+        received  = args;
+    };
+
+    EXPECT_TRUE(registry.dispatch("/help", context));
+    std::string rendered;
+    for (const ConversationEntry& entry : state.conversation.entries) {
+        rendered += entry.text + "\n";
+    }
+    EXPECT_NE(rendered.find("/handoff - summarize this session for continuation (writes a doc, "
+                            "seeds a session)"),
+              std::string::npos);
+
+    EXPECT_TRUE(registry.dispatch("/handoff --no-seed", context));
+    EXPECT_TRUE(forwarded);
+    EXPECT_EQ(received, "--no-seed");
+}
+
 TEST(CommandRegistryTest, SkillCommandRemovedAndSkillsDescriptionPinned) {
     const CommandRegistry registry = CommandRegistry::builtin();
     EXPECT_EQ(registry.find("skill"), nullptr);

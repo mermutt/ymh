@@ -417,6 +417,12 @@
       "section": "11.2"
     },
     {
+      "symbol": "protocol::method::kCommandInvoke",
+      "category": "wire_method",
+      "spec": "82-handoff-command-errata.md",
+      "section": "5.2"
+    },
+    {
       "symbol": "protocol::notify::kEventStream",
       "category": "wire_notification",
       "spec": "05-transport.md",
@@ -1939,6 +1945,42 @@
       "category": "config_key",
       "spec": "52-endpoints-models-and-dsh-agent-presets.md",
       "section": "5.6"
+    },
+    {
+      "symbol": "config::handoff.enabled",
+      "category": "config_key",
+      "spec": "82-handoff-command-errata.md",
+      "section": "6"
+    },
+    {
+      "symbol": "config::handoff.summarizer_model",
+      "category": "config_key",
+      "spec": "82-handoff-command-errata.md",
+      "section": "6"
+    },
+    {
+      "symbol": "config::handoff.max_summary_tokens",
+      "category": "config_key",
+      "spec": "82-handoff-command-errata.md",
+      "section": "6"
+    },
+    {
+      "symbol": "config::handoff.max_summary_bytes",
+      "category": "config_key",
+      "spec": "82-handoff-command-errata.md",
+      "section": "6"
+    },
+    {
+      "symbol": "config::handoff.max_input_bytes",
+      "category": "config_key",
+      "spec": "82-handoff-command-errata.md",
+      "section": "6"
+    },
+    {
+      "symbol": "config::handoff.keep_recent_turns",
+      "category": "config_key",
+      "spec": "82-handoff-command-errata.md",
+      "section": "6"
     }
   ]
 }

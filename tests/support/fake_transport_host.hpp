@@ -34,6 +34,8 @@ public:
     std::optional<bool>           last_delete_only_if_empty;
     std::optional<bool>           last_delete_force;
     std::optional<nlohmann::json> context_result;
+    std::optional<std::string> last_command_line;
+    CommandSource              last_command_source = CommandSource::User;
     std::optional<std::string> last_reason;
     std::optional<protocol::ShutdownReason> last_shutdown_reason;
     std::shared_ptr<const std::vector<protocol::ClientInstanceId>> owner_snapshot{
@@ -200,6 +202,14 @@ public:
 
     void compactSession(const SessionId& id) override {
         calls.push_back("session.compact");
+        require_session(id);
+    }
+
+    void invokeCommand(const SessionId& id, std::string_view line,
+                       CommandSource source) override {
+        calls.push_back("command.invoke");
+        last_command_line = std::string(line);
+        last_command_source = source;
         require_session(id);
     }
 

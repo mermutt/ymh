@@ -53,6 +53,8 @@ add_executable(ymh_tests
     unit/command_test.cpp
     unit/agent_coalescer_test.cpp
     unit/compaction_test.cpp
+    unit/handoff_test.cpp
+    unit/handoff_seed_test.cpp
     unit/compaction_trigger_test.cpp
     unit/context_snapshot_test.cpp
     unit/plan_mode_test.cpp

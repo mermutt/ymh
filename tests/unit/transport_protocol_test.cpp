@@ -41,8 +41,8 @@ TEST(TransportProtocol, ParseEnumRejectsUnknown) {
 TEST(TransportProtocol, MethodCatalogIsComplete) {
     // 18 §3.4.1 (CX-D11/M10) landed at 33; 25-D5 adds `session.set_mode`;
     // 45-D6 adds `mcp.status`; 45-D9 adds `agent.list`/`agent.select`;
-    // 53-D5 adds `session.set_model`.
-    EXPECT_EQ(protocol::all_methods().size(), 38u);
+    // 53-D5 adds `session.set_model`; 82-D8 adds `command.invoke`.
+    EXPECT_EQ(protocol::all_methods().size(), 39u);
     for (const std::string_view name : protocol::all_methods()) {
         EXPECT_TRUE(protocol::is_known_method(name));
     }
@@ -56,6 +56,7 @@ TEST(TransportProtocol, MethodCatalogIsComplete) {
     EXPECT_TRUE(protocol::is_known_method("mcp.status"));
     EXPECT_TRUE(protocol::is_known_method("agent.list"));
     EXPECT_TRUE(protocol::is_known_method("agent.select"));
+    EXPECT_TRUE(protocol::is_known_method("command.invoke"));
     EXPECT_FALSE(protocol::is_known_method("host.nope"));
 }
 

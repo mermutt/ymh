@@ -1098,7 +1098,12 @@ TEST(SupervisorHarnessTest, UI46_D10_SlashEscThenTypeRebuildsList) {
     ASSERT_NE(state, nullptr);
     EXPECT_FALSE(state->hints_dismissed);
     ASSERT_FALSE(state->command_hints.empty());
-    EXPECT_EQ(state->command_hints.front().name, "help");
+    // 82-D2 registers `/handoff` before `/help`, so it sorts first for "h".
+    EXPECT_EQ(state->command_hints.front().name, "handoff");
+    const bool has_help =
+        std::any_of(state->command_hints.begin(), state->command_hints.end(),
+                    [](const CommandHint& hint) { return hint.name == "help"; });
+    EXPECT_TRUE(has_help);
 }
 
 // 45-D5.1 (45-I8): Esc hides a visible list without touching the draft.

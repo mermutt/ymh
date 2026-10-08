@@ -2090,4 +2090,45 @@ TEST_F(HostRuntimeTest, FK_U8_ForkChildHasOwnLeaseAgentJunction) {
     EXPECT_NE(bridge.runtime().agents().findShared(parent.session), nullptr);
 }
 
+TEST_F(HostRuntimeTest, HS_U15_SeedStoredOnlyThenLiveOnResume) {
+    Bridge bridge("handoff_u15");
+    const protocol::SessionCreated created = bridge.host().createSession(nlohmann::json::object());
+    (void)bridge.host().resumeSession(created.session);
+
+    std::shared_ptr<Session> source = bridge.runtime().sessions().sessionPtr(created.session);
+    payload::UserMessage     message;
+    message.id = make_event_id().value;
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "please hand off";
+    message.content.push_back(std::move(block));
+    source->append(message);
+
+    bridge.host().invokeCommand(created.session, "handoff", CommandSource::User);
+
+    for (int attempt = 0; attempt < 400 && bridge.host().hasPendingWork(created.session);
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+
+    std::optional<SessionId> seed;
+    for (const protocol::SessionSummary& summary : bridge.host().listSessions()) {
+        if (summary.id.value != created.session.value) {
+            seed = summary.id;
+            EXPECT_FALSE(summary.live);
+        }
+    }
+    ASSERT_TRUE(seed.has_value());
+    EXPECT_EQ(bridge.runtime().agents().findShared(*seed), nullptr);
+
+    (void)bridge.host().resumeSession(*seed);
+    bool live = false;
+    for (const protocol::SessionSummary& summary : bridge.host().listSessions()) {
+        if (summary.id.value == seed->value) {
+            live = summary.live;
+        }
+    }
+    EXPECT_TRUE(live);
+}
+
 } // namespace

@@ -14,12 +14,18 @@
 
 #include "support/test_env.hpp"
 #include "ymh/agent/agent.hpp"
+#include "ymh/agent/handoff.hpp"
+#include "ymh/agent/llm_pool.hpp"
+#include "ymh/agent/message.hpp"
 #include "ymh/commands/command.hpp"
 #include "ymh/commands/command_registry.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/core/event_bus.hpp"
+#include "ymh/execution/environment.hpp"
 #include "ymh/goal/goal_command.hpp"
 #include "ymh/goal/goal_service.hpp"
+#include "ymh/handoff/handoff_command.hpp"
+#include "ymh/llm/llm_runtime.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
@@ -291,6 +297,65 @@ TEST(CommandRegistry, GoalCommandRoundTripsThroughTheLog) {
     EXPECT_EQ(change.goal->objective, "ship it");
     EXPECT_EQ(events[2].event.payload.get<payload::CommandDone>().kind,
               payload::CommandDoneKind::Success);
+}
+
+TEST(CommandRegistry, HS_I15_HandoffInvokeAppendsOnePairedRunAndDone) {
+    CommandFixture  fixture;
+    LocalEnvironment env{std::filesystem::current_path()};
+    LlmRuntime       runtime;
+    LLMPool          pool(1);
+    HandoffService   handoff(runtime, pool, fixture.sessions, env, nullptr, HandoffPolicy{});
+
+    payload::UserMessage user_message;
+    user_message.id = make_event_id().value;
+    ContentBlock block;
+    block.kind = ContentBlockKind::Text;
+    block.text = "do the thing";
+    user_message.content.push_back(std::move(block));
+    fixture.session()->append(user_message);
+
+    const std::vector<Message> before = fixture.session()->deriveMessages();
+
+    CommandRegistry registry = fixture.registry();
+    registry.add(make_handoff_command(handoff), "");
+
+    const CommandOutcome outcome =
+        registry.invoke(*fixture.agent, "handoff", CommandSource::User);
+    EXPECT_EQ(outcome.kind, CommandOutcomeKind::Error);
+
+    const EventRange events = fixture.tail(2);
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].event.type, EventType::CommandRun);
+    EXPECT_EQ(events[1].event.type, EventType::CommandDone);
+    EXPECT_EQ(events[0].event.payload.get<payload::CommandRun>().command_id,
+              events[1].event.payload.get<payload::CommandDone>().command_id);
+
+    const std::vector<Message> after = fixture.session()->deriveMessages();
+    ASSERT_EQ(before.size(), after.size());
+    for (std::size_t index = 0; index < before.size(); ++index) {
+        EXPECT_EQ(before[index].role, after[index].role);
+        ASSERT_EQ(before[index].content.size(), after[index].content.size());
+        EXPECT_EQ(before[index].content.front().text, after[index].content.front().text);
+    }
+}
+
+TEST(CommandRegistry, HS_I18_HandoffResolvesInGlobalScopeAndUnknownFails) {
+    CommandFixture  fixture;
+    LocalEnvironment env{std::filesystem::current_path()};
+    LlmRuntime       runtime;
+    LLMPool          pool(1);
+    HandoffService   handoff(runtime, pool, fixture.sessions, env, nullptr, HandoffPolicy{});
+
+    CommandRegistry registry = fixture.registry();
+    registry.add(make_handoff_command(handoff), "");
+
+    const AgentContext context{fixture.agent->id(), ScopeKey{}};
+    ASSERT_NE(registry.resolve(context, "handoff"), nullptr);
+    EXPECT_EQ(registry.resolve(context, "nope"), nullptr);
+
+    const CommandOutcome outcome = registry.invoke(*fixture.agent, "/nope", CommandSource::User);
+    EXPECT_EQ(outcome.kind, CommandOutcomeKind::Error);
+    EXPECT_EQ(outcome.text, "unknown command: nope");
 }
 
 } // namespace

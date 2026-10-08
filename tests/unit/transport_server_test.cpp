@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -142,6 +143,29 @@ TEST(TransportServer, HandshakeAssignsClientId) {
     EXPECT_EQ(result.protocol_version, protocol::kProtocolVersion);
     EXPECT_TRUE(harness.server->isHandshaken(peer->id));
     EXPECT_FALSE(peer->drop_reason.has_value());
+}
+
+TEST(TransportServer, HS_I17_CommandInvokeRepliesQueuedAndReachesHost) {
+    Harness harness;
+    Peer*   peer = harness.open();
+    harness.hello(*peer, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*peer);
+
+    const protocol::SessionCreated created = harness.host.createSession(nlohmann::json::object());
+    harness.send(*peer,
+                 Harness::request(2, protocol::method::kCommandInvoke,
+                                  nlohmann::json{{"session", created.session.value},
+                                                 {"line", "handoff --no-seed"},
+                                                 {"source", "user"}}));
+    const std::vector<nlohmann::json> frames = harness.drain(*peer);
+    ASSERT_EQ(frames.size(), 1u);
+    ASSERT_TRUE(frames[0].contains("result"));
+    EXPECT_EQ(frames[0].at("result").at("outcome").get<std::string>(), "Queued");
+    ASSERT_TRUE(harness.host.last_command_line.has_value());
+    EXPECT_EQ(*harness.host.last_command_line, "handoff --no-seed");
+    EXPECT_EQ(harness.host.last_command_source, CommandSource::User);
+    EXPECT_NE(std::find(harness.host.calls.begin(), harness.host.calls.end(), "command.invoke"),
+              harness.host.calls.end());
 }
 
 TEST(TransportServer, OwnerLivenessSinkCountsOnlyOwnerRoles) {
