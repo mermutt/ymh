@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(
     ymh
-    VERSION 0.002
+    VERSION 0.003
     DESCRIPTION "Terminal coding-agent harness"
     LANGUAGES CXX
 )
