@@ -301,8 +301,8 @@ TEST(Err76, StaleSocketReclaimed) {
     ASSERT_TRUE(std::filesystem::exists(path));
 
     const protocol::WorkspaceId workspace{generate_uuid_v4()};
-    const protocol::SocketProbeResult probe =
-        protocol::probe_existing_socket(path, workspace, std::chrono::steady_clock::now() + 1s);
+    const protocol::SocketProbeResult probe = protocol::probe_existing_socket(
+        path, workspace, protocol::HostBootId{}, std::chrono::steady_clock::now() + 1s);
     EXPECT_EQ(probe, protocol::SocketProbeResult::Residue);
 
     test::FakeTransportHost host;
@@ -327,8 +327,8 @@ TEST(Err76, LiveHelloNotReclaimed) {
 
     const std::optional<ino_t> before = inode_of(path);
     ASSERT_TRUE(before.has_value());
-    const protocol::SocketProbeResult probe =
-        protocol::probe_existing_socket(path, host.workspace, std::chrono::steady_clock::now() + 2s);
+    const protocol::SocketProbeResult probe = protocol::probe_existing_socket(
+        path, host.workspace, host.boot_id, std::chrono::steady_clock::now() + 2s);
     EXPECT_EQ(probe, protocol::SocketProbeResult::LiveYmhDaemon);
     EXPECT_TRUE(std::filesystem::exists(path));
     EXPECT_EQ(inode_of(path), before);

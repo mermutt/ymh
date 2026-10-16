@@ -283,7 +283,7 @@ void seed_catalog_session(UiModel& model, const WorkspaceId& workspace,
 // `⚡0 · [░░░░░░░░░░] —`); the reservation keeps the text column stable and the
 // right aggregate unclipped, which the user asked for.
 const char* kGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
-│ymh (v0.002) · /work                                                  │
+│ymh (v0.003) · /work                                                  │
 ├┬─────────────────────────────────────────────────────────────────────┤
 ││ hello there                                                         │
 │Hello world                                                           │
@@ -304,7 +304,7 @@ const char* kGolden = R"GOLDEN(╭───────────────�
 ╰──────────────────────────────────────────────────────────────────────╯)GOLDEN";
 
 const char* kOpeningGolden = R"GOLDEN(╭──────────────────────────────────────────────────────────────────────╮
-│ymh (v0.002) · /work                                                  │
+│ymh (v0.003) · /work                                                  │
 ├──────────────────────────────────────────────────────────────────────┤
 │opening demo title...                                                 │
 ││ hello there                                                         │
@@ -936,7 +936,7 @@ TEST(UiRenderGolden, HeaderTruncatesLongSessionTitle) {
     // 67-D1: the right slot is ellipsized to the cells left of the workspace
     // title, so the header never exceeds the terminal width and the left slot
     // stays visible.
-    EXPECT_NE(header.find("ymh (v0.002) · /work"), std::string::npos);
+    EXPECT_NE(header.find("ymh (v0.003) · /work"), std::string::npos);
     EXPECT_NE(header.find("…"), std::string::npos);
     EXPECT_EQ(header.find(long_title), std::string::npos);
     EXPECT_NE(header.find("│"), std::string::npos);
@@ -966,10 +966,10 @@ TEST(UiRenderGolden, HeaderShowsVersionLabel) {
     const std::size_t second = rendered.find('\n', first + 1);
     const std::string header = rendered.substr(first + 1, second - first - 1);
     SCOPED_TRACE(header);
-    EXPECT_NE(header.find("ymh (v0.002)"), std::string::npos);
+    EXPECT_NE(header.find("ymh (v0.003)"), std::string::npos);
     // The label is the header's top-left product mark, immediately after the
     // left border cell, followed by the workspace cwd.
-    EXPECT_NE(header.find("ymh (v0.002) · /work"), std::string::npos);
+    EXPECT_NE(header.find("ymh (v0.003) · /work"), std::string::npos);
 }
 
 TEST(UiRenderGolden, HeaderHidesPlaceholderTitle) {
@@ -2165,7 +2165,7 @@ TEST(UiRenderGolden, G53_StatusWithModel) {
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("ymh (v0.002) · /eager/work"), std::string::npos);
+    EXPECT_NE(rendered.find("ymh (v0.003) · /eager/work"), std::string::npos);
     EXPECT_NE(rendered.find("first eager prompt"), std::string::npos);
     EXPECT_NE(rendered.find("build · balanced"), std::string::npos);
     EXPECT_EQ(rendered.find("no workspace attached"), std::string::npos);

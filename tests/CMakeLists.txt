@@ -66,6 +66,7 @@ add_executable(ymh_tests
     unit/host_runtime_test.cpp
     unit/workspace_host_test.cpp
     unit/workspace_registry_test.cpp
+    unit/errata88_doctor_test.cpp
     unit/transport_frame_test.cpp
     unit/transport_protocol_test.cpp
     unit/transport_server_test.cpp
@@ -81,6 +82,9 @@ add_executable(ymh_tests
     unit/errata81_ui_test.cpp
     unit/errata85_turn_failure_test.cpp
     unit/errata86_paste_placeholder_test.cpp
+    unit/errata87_ownership_integrity_test.cpp
+    unit/errata87_supervisor_loss_test.cpp
+    unit/errata87_live_test.cpp
     unit/config_test.cpp
     unit/spec52_endpoints_test.cpp
     unit/spec52_presets_test.cpp
@@ -155,6 +159,7 @@ add_executable(ymh_tests
     integration_two_process_test.cpp
     integration_ownership_two_supervisor_test.cpp
     integration_errata76_residue_recovery_test.cpp
+    integration_errata87_restart_storm_test.cpp
     integration_mcp_test.cpp
     integration_live_e2e_test.cpp
 )
