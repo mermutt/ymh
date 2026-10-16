@@ -210,6 +210,26 @@ struct ToolModel {
     [[nodiscard]] std::size_t find(const std::string& id) const;
 };
 
+// 86-D2/D4: the out-of-band store for one chip of one draft.
+struct PasteChip {
+    std::size_t index = 0;      // N
+    std::string token;          // exact in-draft bytes, e.g. "[Pasted text #1 +4 lines]"
+    std::string text;           // the full reassembled paste (out of band)
+    std::size_t line_count = 0; // M = 1 + count('\n')
+};
+
+// 86-D2: a byte span [first, second) of a chip in `draft`. Also the element type
+// of `chip_spans()` and the parameter type of `composer_move_cursor_vertical`.
+using ChipSpan = std::pair<std::size_t, std::size_t>;
+
+// 86-D1/D3: thresholds and caps (definitions in the .cpp). A paste segment is
+// collapsed to a chip iff it is longer than `kPasteChipLineThreshold` lines or
+// `kPasteChipByteThreshold` bytes, and the registry is under both caps.
+inline constexpr std::size_t kPasteChipLineThreshold = 3;
+inline constexpr std::size_t kPasteChipByteThreshold = 512;
+inline constexpr std::size_t kMaxPasteChips          = 64;
+inline constexpr std::size_t kPasteChipTotalBytes    = 16u * 1024u * 1024u;
+
 // 45-D2 (45-I4): `CompletionCycle` and `InputModel::completion` are retired.
 // Tab no longer freezes a cycle; ArrowUp/ArrowDown move the highlight and Tab
 // consumes it (45-D2).
@@ -220,6 +240,11 @@ struct InputModel {
     std::size_t              history_pos = 0;
     std::string              saved_draft;
 
+    // 86-D4: chips of THIS draft, keyed by N. Owner: the InputModel.
+    std::map<std::size_t, PasteChip> paste_chips;
+    // 86-D3: sticky per-draft counter; 1 on construction/clear; never reused.
+    std::size_t                      next_chip_index = 1;
+
     void push_history(std::string line);
     bool history_up();
     bool history_down();
@@ -228,17 +253,63 @@ struct InputModel {
     // 48-D4.5: class-model delete (skip trailing Space, then one Word/Punct run).
     bool delete_word();
 
+    // 86-D3: exact token bytes for (index, line_count). Caller: insert_paste.
+    [[nodiscard]] static std::string paste_chip_token(std::size_t index,
+                                                      std::size_t line_count);
+    // 86-D1: 1 + count('\n'). Caller: insert_paste.
+    [[nodiscard]] static std::size_t paste_line_count(std::string_view text);
+
+    // 86-D1/D4: insert ONE reassembled paste segment at the caret. Collapses
+    // THIS segment to one chip when long and under the caps, else verbatim.
+    // Never submits. Returns the inserted byte length. Caller:
+    // SupervisorApp::flush_paste (src/ui/supervisor.cpp).
+    [[nodiscard]] std::size_t insert_paste(std::string text);
+
+    // 86-D2/D6: all live chip spans of `draft`, ascending start; every occurrence
+    // of a live token is a span (duplicates included). Pure. Callers:
+    // expand_paste_chips; chip_ending_at/chip_starting_at;
+    // handle_input ArrowUp/ArrowDown (src/ui/supervisor.cpp).
+    [[nodiscard]] std::vector<ChipSpan> chip_spans() const;
+
+    // 86-D6: replace every live chip span from the ORIGINAL draft with its text,
+    // right-to-left; pure, no mutation, postcondition PP2. Callers: handle_input
+    // Return branch, edit_prompt (src/ui/supervisor.cpp).
+    [[nodiscard]] std::string expand_paste_chips() const;
+
+    // 86-D4: drop all chips. Callers: clear_line, submit, the dispatch branch,
+    // and the draft-replacing sites in 86-A5 (src/ui/supervisor.cpp).
+    void clear_paste_chips();
+
+    // 86-D5: span of a live chip that ends at `pos` or contains it; else nullopt.
+    // Caller: backspace_atom. (Adjacent-chip tie rule, spec 86 Sec. 4.5.)
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>>
+        chip_ending_at(std::size_t pos) const;
+    // 86-D5: span of a live chip that starts at `pos` or contains it; else nullopt.
+    // Caller: delete_forward.
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>>
+        chip_starting_at(std::size_t pos) const;
+
+    // 86-D5: Backspace that erases a whole chip when adjacent/inside. Caller:
+    // handle_input Backspace branch (src/ui/supervisor.cpp).
+    bool backspace_atom();
+
     // 48-D4.1: pure word motion. Never edits the draft. Byte-aligned to a
     // character-class boundary (Word/Space/Punct; continuation bytes inherit
     // their lead byte's class). Both are total and clamp to [0, draft.size()].
+    // 86-A4: a boundary strictly inside a chip snaps to the chip edge.
     [[nodiscard]] std::size_t word_left_boundary(std::size_t cursor) const;
     [[nodiscard]] std::size_t word_right_boundary(std::size_t cursor) const;
 
     // 48-D5.1 (Rev 2): glyph-wise motion for the plain arrows. Both are pure,
     // total, and clamp to [0, draft.size()]; `cursor_left` never lands on a
-    // UTF-8 continuation byte.
+    // UTF-8 continuation byte. 86-A4: motion jumps over a whole chip.
     [[nodiscard]] std::size_t cursor_left(std::size_t cursor) const;
     [[nodiscard]] std::size_t cursor_right(std::size_t cursor) const;
+
+  private:
+    // 86-D2: EVERY occurrence of `token` in `draft`, ascending. Callers:
+    // chip_spans, expand_paste_chips.
+    [[nodiscard]] std::vector<ChipSpan> token_occurrences(std::string_view token) const;
 };
 
 // 48-D5.1 (Rev 2): render-time glyph snap. Advances `cursor` off any UTF-8

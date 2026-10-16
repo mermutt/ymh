@@ -4,6 +4,7 @@
 // writes ANSI to a caller buffer; it never performs I/O or advances a timer
 // (U3, D16). The golden tests and the PTY assertions share this code path.
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -66,9 +67,13 @@ inline constexpr int kComposerTextInset = 6;
 // caret is already on the first row (`direction < 0`) or the last row
 // (`direction > 0`) nothing is changed and `false` is returned, so the caller
 // falls through to history recall (45-D1.2). The draft is never mutated.
+// 86-A9: a target that lands strictly inside a chip span edge-snaps to the
+// nearest chip edge (byte distance; tie -> the chip's start); `chip_spans`
+// defaults empty so the existing call sites compile unchanged until they opt in.
 [[nodiscard]] bool composer_move_cursor_vertical(std::string_view draft,
                                                  std::size_t& cursor, int direction,
-                                                 int text_width);
+                                                 int text_width,
+                                                 std::span<const ChipSpan> chip_spans = {});
 
 // 58-A8/58-I6: the four distinct subagent edge glyphs (`>`/`✓`/`✗`/`-`).
 [[nodiscard]] const char* subagent_status_glyph(SubagentStatus status);

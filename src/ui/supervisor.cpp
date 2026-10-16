@@ -577,6 +577,7 @@ public:
             composer->input.draft.clear();
             composer->input.cursor = 0;
             composer->input.saved_draft.clear();
+            composer->input.clear_paste_chips();
             composer->command_hints.clear();
             composer->command_hint_selected = 0;
             const std::optional<WorkspaceId> id =
@@ -595,6 +596,7 @@ public:
             state->input.draft.clear();
             state->input.cursor = 0;
             state->input.saved_draft.clear();
+            state->input.clear_paste_chips();
             state->command_hints.clear();
             state->command_hint_selected = 0;
             model_.dirty.mark(workspace->activeSessionId(), UiDirtyFlag::Input);
@@ -1605,6 +1607,7 @@ private:
                                 model_.pendingComposer.input.draft = std::move(pending->second);
                                 model_.pendingComposer.input.cursor =
                                     model_.pendingComposer.input.draft.size();
+                                model_.pendingComposer.input.clear_paste_chips();
                             }
                             pending_creates_.erase(pending);
                         }
@@ -2124,6 +2127,7 @@ private:
         if (!prompt.empty()) {
             state.input.draft  = prompt;
             state.input.cursor = prompt.size();
+            state.input.clear_paste_chips();
         } else {
             push_notice("rewound -> " + child.value + " (prompt unavailable)");
             model_.dirty.markAggregate();
@@ -2872,7 +2876,10 @@ private:
         }
         std::optional<std::string> edited;
         std::string                error;
-        const auto run = [&] { edited = edit_text_in_editor(state.input.draft, error); };
+        // 86-A8: show the editor the full text, not the chip placeholders.
+        const auto run = [&] {
+            edited = edit_text_in_editor(state.input.expand_paste_chips(), error);
+        };
         // 66-D9: suspend bracketed paste across the fork, re-arm after it exits.
         BracketedPasteSuspension paste_suspended(terminal_);
         if (with_restored_io_) {
@@ -2886,6 +2893,8 @@ private:
         }
         state.input.draft = *edited;
         state.input.cursor = state.input.draft.size();
+        // 86-A8: the edited result is plain text; drop the chip registry with it.
+        state.input.clear_paste_chips();
         state.hints_dismissed = false;
         refresh_hints(state);
         model_.dirty.mark(state.id, UiDirtyFlag::Input);
@@ -3434,6 +3443,7 @@ private:
             }
             state.input.draft  = "/" + matches.front().spelling + " ";
             state.input.cursor = state.input.draft.size();
+            state.input.clear_paste_chips();
             state.command_hint_selected = 0;
             return true;
         }
@@ -3441,6 +3451,7 @@ private:
         const std::size_t index = std::min(state.command_hint_selected, count - 1);
         state.input.draft  = "/" + state.command_hints[index].insert + " ";
         state.input.cursor = state.input.draft.size();
+        state.input.clear_paste_chips();
         state.command_hints.clear();
         state.command_hint_selected = 0;
         return true;
@@ -4038,7 +4049,9 @@ private:
             return true;
         }
         if (event == ftxui::Event::Return) {
-            const std::string text = input.draft;
+            // 86-D6: the sole producer of the model-bound string; chips expand
+            // to their out-of-band text so no placeholder reaches the model.
+            const std::string text = input.expand_paste_chips();
             switch (classify_enter(*state, text)) {
                 case EnterAction::Complete:
                     // 46-D6.3: completion is non-destructive; a second Enter
@@ -4053,6 +4066,7 @@ private:
                         input.draft.clear();
                         input.cursor = 0;
                         input.saved_draft.clear();
+                        input.clear_paste_chips();
                         state->command_hints.clear();
                         state->command_hint_selected = 0;
                         model_.dirty.mark(state->id,
@@ -4092,9 +4106,7 @@ private:
             return false;
         }
         if (event == ftxui::Event::Backspace) {
-            if (input.cursor > 0) {
-                input.draft.erase(input.cursor - 1, 1);
-                --input.cursor;
+            if (input.backspace_atom()) {
                 state->hints_dismissed = false;
                 refresh_hints(*state);
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
@@ -4141,7 +4153,8 @@ private:
             // 59-D7: a later visual row claims the arrow; the first row falls
             // through to history.
             const int text_width = std::max(1, composer_terminal_width_ - kComposerTextInset);
-            if (composer_move_cursor_vertical(input.draft, input.cursor, -1, text_width)) {
+            if (composer_move_cursor_vertical(input.draft, input.cursor, -1, text_width,
+                                              input.chip_spans())) {
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
@@ -4159,7 +4172,8 @@ private:
             }
             // 59-D7: the last visual row falls through to history.
             const int text_width = std::max(1, composer_terminal_width_ - kComposerTextInset);
-            if (composer_move_cursor_vertical(input.draft, input.cursor, 1, text_width)) {
+            if (composer_move_cursor_vertical(input.draft, input.cursor, 1, text_width,
+                                              input.chip_spans())) {
                 model_.dirty.mark(state->id, UiDirtyFlag::Input);
                 return true;
             }
@@ -4413,16 +4427,15 @@ private:
             return;
         }
         InputModel& input = state->input;
-        input.draft.insert(input.cursor, text);
-        input.cursor += text.size();
+        (void)input.insert_paste(text);
         // 66-F3 (M1): a paste made while a modal owns the keyboard must survive
         // `release_modal_composer`, which restores the snapshot taken at open.
         // Mirror the insert into the live snapshot so the text is not dropped.
+        // 86-A2: `insert_paste` gives the snapshot its own registry entry.
         if (modal_composer_snapshot_.has_value() &&
             modal_composer_snapshot_->session == state->id) {
             InputModel& snapshot = modal_composer_snapshot_->input;
-            snapshot.draft.insert(snapshot.cursor, text);
-            snapshot.cursor += text.size();
+            (void)snapshot.insert_paste(text);
         }
         state->hints_dismissed   = false;
         state->composer_input_at = std::chrono::steady_clock::now();

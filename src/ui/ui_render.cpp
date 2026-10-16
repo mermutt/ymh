@@ -2220,7 +2220,8 @@ Element render_dashboard(const UiModel& model, TerminalSize size, const Theme& t
 } // namespace
 
 bool composer_move_cursor_vertical(std::string_view draft, std::size_t& cursor,
-                                   int direction, int text_width) {
+                                   int direction, int text_width,
+                                   std::span<const ChipSpan> chip_spans) {
     if (direction == 0) {
         return false;
     }
@@ -2284,6 +2285,16 @@ bool composer_move_cursor_vertical(std::string_view draft, std::size_t& cursor,
         return false;
     }
     cursor = target < glyph_count ? starts[target] : draft.size();
+    // 86-A9: never rest the caret strictly inside a chip; snap to the nearest
+    // chip edge by byte distance (tie -> the chip's start).
+    for (const ChipSpan& span : chip_spans) {
+        if (span.first < cursor && cursor < span.second) {
+            const std::size_t to_start = cursor - span.first;
+            const std::size_t to_end   = span.second - cursor;
+            cursor = to_start <= to_end ? span.first : span.second;
+            break;
+        }
+    }
     return true;
 }
 

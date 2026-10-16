@@ -373,7 +373,193 @@ bool InputModel::history_down() {
     return true;
 }
 
+std::string InputModel::paste_chip_token(std::size_t index, std::size_t line_count) {
+    return "[Pasted text #" + std::to_string(index) + " +" + std::to_string(line_count) +
+           (line_count == 1 ? " line]" : " lines]");
+}
+
+std::size_t InputModel::paste_line_count(std::string_view text) {
+    return 1 + static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n'));
+}
+
+std::vector<ChipSpan> InputModel::token_occurrences(std::string_view token) const {
+    std::vector<ChipSpan> spans;
+    if (token.empty() || token.size() > draft.size()) {
+        return spans;
+    }
+    const std::string_view haystack(draft);
+    std::size_t            search = 0;
+    while (search + token.size() <= haystack.size()) {
+        const std::size_t found = haystack.find(token, search);
+        if (found == std::string_view::npos) {
+            break;
+        }
+        spans.emplace_back(found, found + token.size());
+        search = found + 1;
+    }
+    return spans;
+}
+
+std::vector<ChipSpan> InputModel::chip_spans() const {
+    std::vector<ChipSpan> spans;
+    for (const auto& [index, chip] : paste_chips) {
+        (void)index;
+        for (const ChipSpan& span : token_occurrences(chip.token)) {
+            spans.push_back(span);
+        }
+    }
+    std::sort(spans.begin(), spans.end());
+    std::vector<ChipSpan> merged;
+    for (const ChipSpan& span : spans) {
+        if (!merged.empty() && span.first < merged.back().second) {
+            if (span.second - span.first > merged.back().second - merged.back().first) {
+                merged.back() = span;
+            }
+            continue;
+        }
+        merged.push_back(span);
+    }
+    return merged;
+}
+
+std::string InputModel::expand_paste_chips() const {
+    std::vector<std::pair<ChipSpan, const std::string*>> replacements;
+    for (const auto& [index, chip] : paste_chips) {
+        (void)index;
+        for (const ChipSpan& span : token_occurrences(chip.token)) {
+            replacements.emplace_back(span, &chip.text);
+        }
+    }
+    if (replacements.empty()) {
+        return draft;
+    }
+    std::sort(replacements.begin(), replacements.end(),
+              [](const auto& left, const auto& right) {
+                  if (left.first.first != right.first.first) {
+                      return left.first.first > right.first.first;
+                  }
+                  return left.first.second > right.first.second;
+              });
+    std::string result = draft;
+    for (const auto& [span, text] : replacements) {
+        result.replace(span.first, span.second - span.first, *text);
+    }
+    return result;
+}
+
+void InputModel::clear_paste_chips() {
+    paste_chips.clear();
+    next_chip_index = 1;
+}
+
+std::size_t InputModel::insert_paste(std::string text) {
+    if (text.empty()) {
+        return 0;
+    }
+    const bool long_paste = paste_line_count(text) > kPasteChipLineThreshold ||
+                            text.size() > kPasteChipByteThreshold;
+    if (long_paste) {
+        std::size_t retained = 0;
+        for (const auto& [index, chip] : paste_chips) {
+            (void)index;
+            retained += chip.text.size();
+        }
+        if (paste_chips.size() < kMaxPasteChips &&
+            retained + text.size() <= kPasteChipTotalBytes) {
+            // 86-D3: allocate past any chip-shaped token already typed into the
+            // draft, so a hand-typed `[Pasted text #k ...]` is never live.
+            const std::string_view view(draft);
+            std::size_t            scanned = 0;
+            std::size_t            search  = view.find("[Pasted text #");
+            while (search != std::string_view::npos) {
+                const std::size_t digits_at = search + 14; // len("[Pasted text #")
+                std::size_t       digits    = 0;
+                while (digits_at + digits < view.size() && view[digits_at + digits] >= '0' &&
+                       view[digits_at + digits] <= '9') {
+                    ++digits;
+                }
+                if (digits > 0) {
+                    std::size_t value = 0;
+                    for (std::size_t offset = 0; offset < digits; ++offset) {
+                        value = value * 10 + static_cast<std::size_t>(view[digits_at + offset] - '0');
+                    }
+                    scanned = std::max(scanned, value);
+                }
+                search = view.find("[Pasted text #", search + 1);
+            }
+            const std::size_t index = std::max(next_chip_index, scanned + 1);
+            const std::size_t lines = paste_line_count(text);
+            std::string       token = paste_chip_token(index, lines);
+            const std::size_t length = token.size();
+            draft.insert(cursor, token);
+            cursor += length;
+            paste_chips[index] = PasteChip{index, std::move(token), std::move(text), lines};
+            next_chip_index    = index + 1;
+            return length;
+        }
+    }
+    const std::size_t length = text.size();
+    draft.insert(cursor, text);
+    cursor += length;
+    return length;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>>
+InputModel::chip_ending_at(std::size_t pos) const {
+    for (const ChipSpan& span : chip_spans()) {
+        if ((span.first <= pos && pos < span.second) || span.second == pos) {
+            return span;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>>
+InputModel::chip_starting_at(std::size_t pos) const {
+    for (const ChipSpan& span : chip_spans()) {
+        if ((span.first <= pos && pos < span.second) || span.first == pos) {
+            return span;
+        }
+    }
+    return std::nullopt;
+}
+
+bool InputModel::backspace_atom() {
+    if (const auto span = chip_ending_at(cursor); span.has_value()) {
+        const std::string token = draft.substr(span->first, span->second - span->first);
+        draft.erase(span->first, span->second - span->first);
+        cursor = span->first;
+        for (auto entry = paste_chips.begin(); entry != paste_chips.end();) {
+            if (entry->second.token == token) {
+                entry = paste_chips.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
+        return true;
+    }
+    if (cursor > 0) {
+        draft.erase(cursor - 1, 1);
+        --cursor;
+        return true;
+    }
+    return false;
+}
+
 bool InputModel::delete_forward() {
+    if (const auto span = chip_starting_at(cursor); span.has_value()) {
+        const std::string token = draft.substr(span->first, span->second - span->first);
+        draft.erase(span->first, span->second - span->first);
+        cursor = span->first;
+        for (auto entry = paste_chips.begin(); entry != paste_chips.end();) {
+            if (entry->second.token == token) {
+                entry = paste_chips.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
+        return true;
+    }
     if (cursor >= draft.size()) {
         return false;
     }
@@ -384,6 +570,7 @@ bool InputModel::delete_forward() {
 void InputModel::clear_line() {
     draft.clear();
     cursor = 0;
+    clear_paste_chips();
 }
 
 bool InputModel::delete_word() {
@@ -403,8 +590,32 @@ bool InputModel::delete_word() {
     if (boundary == cursor) {
         return false;
     }
-    draft.erase(boundary, cursor - boundary);
-    cursor = boundary;
+    // 86-A4: widen the erased span to whole chips so no chip is split.
+    std::size_t lo = boundary;
+    std::size_t hi = cursor;
+    const std::vector<ChipSpan> spans = chip_spans();
+    for (const ChipSpan& span : spans) {
+        if (span.second <= lo || span.first >= hi) {
+            continue;
+        }
+        lo = std::min(lo, span.first);
+        hi = std::max(hi, span.second);
+    }
+    for (const ChipSpan& span : spans) {
+        if (span.first < lo || span.second > hi) {
+            continue;
+        }
+        const std::string token = draft.substr(span.first, span.second - span.first);
+        for (auto entry = paste_chips.begin(); entry != paste_chips.end();) {
+            if (entry->second.token == token) {
+                entry = paste_chips.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
+    }
+    draft.erase(lo, hi - lo);
+    cursor = lo;
     return true;
 }
 
@@ -422,6 +633,12 @@ std::size_t InputModel::word_left_boundary(std::size_t position) const {
     const WordClass run = byte_class(draft, boundary - 1);
     while (boundary > 0 && byte_class(draft, boundary - 1) == run) {
         --boundary;
+    }
+    // 86-A4: a boundary strictly inside a chip snaps to the chip's near edge.
+    for (const ChipSpan& span : chip_spans()) {
+        if (span.first < boundary && boundary < span.second) {
+            return span.first;
+        }
     }
     return boundary;
 }
@@ -442,6 +659,12 @@ std::size_t InputModel::word_right_boundary(std::size_t position) const {
     while (boundary < size && byte_class(draft, boundary) == run) {
         ++boundary;
     }
+    // 86-A4: a boundary strictly inside a chip snaps to the chip's far edge.
+    for (const ChipSpan& span : chip_spans()) {
+        if (span.first < boundary && boundary < span.second) {
+            return span.second;
+        }
+    }
     return boundary;
 }
 
@@ -452,6 +675,12 @@ std::size_t InputModel::cursor_left(std::size_t position) const {
     std::size_t index = position;
     if (index > draft.size()) {
         index = draft.size();
+    }
+    // 86-A4: a caret inside a chip or at its end jumps to the chip's start.
+    for (const ChipSpan& span : chip_spans()) {
+        if ((span.first <= index && index < span.second) || span.second == index) {
+            return span.first;
+        }
     }
     --index;
     while (index > 0 && (static_cast<unsigned char>(draft[index]) & 0xC0) == 0x80) {
@@ -464,6 +693,12 @@ std::size_t InputModel::cursor_right(std::size_t position) const {
     const std::size_t size = draft.size();
     if (position >= size) {
         return size;
+    }
+    // 86-A4: a caret inside a chip or at its start jumps to the chip's end.
+    for (const ChipSpan& span : chip_spans()) {
+        if ((span.first <= position && position < span.second) || span.first == position) {
+            return span.second;
+        }
     }
     std::size_t index = position + 1;
     while (index < size && (static_cast<unsigned char>(draft[index]) & 0xC0) == 0x80) {
