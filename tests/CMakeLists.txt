@@ -79,6 +79,7 @@ add_executable(ymh_tests
     unit/errata79_ui_test.cpp
     unit/errata80_ui_test.cpp
     unit/errata81_ui_test.cpp
+    unit/errata85_turn_failure_test.cpp
     unit/config_test.cpp
     unit/spec52_endpoints_test.cpp
     unit/spec52_presets_test.cpp

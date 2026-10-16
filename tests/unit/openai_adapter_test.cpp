@@ -201,6 +201,7 @@ struct Options {
     std::chrono::milliseconds connect_timeout{10'000};
     std::chrono::milliseconds idle_timeout{60'000};
     std::chrono::milliseconds request_timeout{120'000};
+    std::chrono::milliseconds total_timeout{0};
     ymh::OpenAICompatibleProvider::SteadyNow now = [] {
         return std::chrono::steady_clock::now();
     };
@@ -223,6 +224,7 @@ ymh::OpenAICompatibleProvider make_provider(std::shared_ptr<ymh::HttpTransport> 
     config.connect_timeout = options.connect_timeout;
     config.idle_timeout = options.idle_timeout;
     config.request_timeout = options.request_timeout;
+    config.retry.total_timeout = options.total_timeout;
     config.transcript = std::move(options.transcript);
     return ymh::OpenAICompatibleProvider(config, options.caps, std::move(transport),
                                          std::move(options.now));
@@ -462,6 +464,134 @@ TEST_F(OpenAiAdapterTest, RetriesBeforeFirstEventThenSucceeds) {
     EXPECT_EQ(transport->requests.size(), 2u);
 }
 
+TEST_F(OpenAiAdapterTest, RetryableTimeoutRetriesThenSucceeds) {
+    auto fake_now = std::make_shared<std::atomic<std::int64_t>>(0);
+
+    FakeTransport::Script first;
+    first.response.transport_error =
+        ymh::LLMError{ymh::LLMErrorCode::Timeout, 0, "", "transport timeout", true};
+    first.delay = std::chrono::milliseconds{500};
+
+    FakeTransport::Script second;
+    second.response.status = 200;
+    second.response.body = sse_body({text_frame("ok"), finish_frame("stop")});
+
+    auto transport = std::make_shared<FakeTransport>(std::vector{first, second});
+    transport->attach_clock(fake_now);
+    auto provider = make_provider(
+        transport,
+        Options{.max_attempts = 3,
+                .request_timeout = std::chrono::milliseconds{500},
+                .now = [fake_now] {
+                    return std::chrono::steady_clock::time_point{
+                        std::chrono::milliseconds{fake_now->load()}};
+                }});
+
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Completed);
+    EXPECT_EQ(transport->requests.size(), 2u);
+}
+
+TEST_F(OpenAiAdapterTest, DerivedBudgetSchedulesEveryAttempt) {
+    auto fake_now = std::make_shared<std::atomic<std::int64_t>>(0);
+
+    FakeTransport::Script script;
+    script.response.transport_error =
+        ymh::LLMError{ymh::LLMErrorCode::Timeout, 0, "", "transport timeout", true};
+    script.delay = std::chrono::milliseconds{500};
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>(5, script));
+    transport->attach_clock(fake_now);
+    auto provider = make_provider(
+        transport,
+        Options{.max_attempts = 5,
+                .request_timeout = std::chrono::milliseconds{500},
+                .now = [fake_now] {
+                    return std::chrono::steady_clock::time_point{
+                        std::chrono::milliseconds{fake_now->load()}};
+                }});
+
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
+    EXPECT_EQ(transport->requests.size(), 5u);
+}
+
+TEST_F(OpenAiAdapterTest, BudgetNarrowerThanOneAttemptYieldsOneAttempt) {
+    auto fake_now = std::make_shared<std::atomic<std::int64_t>>(0);
+
+    FakeTransport::Script script;
+    script.response.transport_error =
+        ymh::LLMError{ymh::LLMErrorCode::Timeout, 0, "", "transport timeout", true};
+    script.delay = std::chrono::milliseconds{800};
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>(2, script));
+    transport->attach_clock(fake_now);
+    auto provider = make_provider(
+        transport,
+        Options{.max_attempts = 3,
+                .request_timeout = std::chrono::milliseconds{2000},
+                .total_timeout = std::chrono::milliseconds{500},
+                .now = [fake_now] {
+                    return std::chrono::steady_clock::time_point{
+                        std::chrono::milliseconds{fake_now->load()}};
+                }});
+
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
+    EXPECT_EQ(transport->requests.size(), 1u);
+}
+
+TEST_F(OpenAiAdapterTest, CallerDeadlineNarrowerThanOneAttemptYieldsOneAttempt) {
+    auto fake_now = std::make_shared<std::atomic<std::int64_t>>(0);
+
+    FakeTransport::Script script;
+    script.response.transport_error =
+        ymh::LLMError{ymh::LLMErrorCode::Timeout, 0, "", "transport timeout", true};
+    script.delay = std::chrono::milliseconds{800};
+    auto transport = std::make_shared<FakeTransport>(
+        std::vector<FakeTransport::Script>(2, script));
+    transport->attach_clock(fake_now);
+    auto provider = make_provider(
+        transport,
+        Options{.max_attempts = 3,
+                .request_timeout = std::chrono::milliseconds{2000},
+                .now = [fake_now] {
+                    return std::chrono::steady_clock::time_point{
+                        std::chrono::milliseconds{fake_now->load()}};
+                }});
+
+    ymh::LLMRequest request = text_request();
+    request.deadline = std::chrono::milliseconds{500};
+    const auto result = run(provider, request);
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::Timeout);
+    EXPECT_EQ(transport->requests.size(), 1u);
+}
+
+TEST_F(OpenAiAdapterTest, NonRetryableErrorIsNotRetried) {
+    FakeTransport::Script first;
+    first.response.status = 400;
+    first.response.body = "{}";
+
+    FakeTransport::Script second;
+    second.response.status = 200;
+    second.response.body = sse_body({text_frame("ok"), finish_frame("stop")});
+
+    auto transport = std::make_shared<FakeTransport>(std::vector{first, second});
+    auto provider = make_provider(transport);
+    const auto result = run(provider, text_request());
+
+    EXPECT_EQ(result.response.outcome, ymh::StreamOutcome::Failed);
+    EXPECT_EQ(result.response.error.code, ymh::LLMErrorCode::BadRequest);
+    EXPECT_EQ(transport->requests.size(), 1u);
+}
+
 TEST_F(OpenAiAdapterTest, AuthErrorIsNotRetriedAndIsRedacted) {
     FakeTransport::Script script;
     script.response.status = 401;
@@ -616,6 +746,61 @@ TEST(OpenAiHelpersTest, BackoffIsBoundedAndCapped) {
     EXPECT_EQ(ymh::backoff_delay(policy, 1, 1.0).count(), 1250);
     EXPECT_EQ(ymh::backoff_delay(policy, 2, 0.5).count(), 2000);
     EXPECT_EQ(ymh::backoff_delay(policy, 10, 0.5).count(), 30000);
+}
+
+TEST(OpenAiHelpersTest, EffectiveTimeoutIsTotal) {
+    using Ms = std::chrono::milliseconds;
+    EXPECT_EQ(ymh::effective_timeout(Ms{0}, Ms{500}).count(), 500);
+    EXPECT_EQ(ymh::effective_timeout(Ms{300}, Ms{500}).count(), 300);
+    EXPECT_EQ(ymh::effective_timeout(Ms{800}, Ms{500}).count(), 500);
+    EXPECT_EQ(ymh::effective_timeout(Ms{0}, Ms{0}).count(), 0);
+    EXPECT_EQ(ymh::effective_timeout(Ms{-5}, Ms{500}).count(), 500);
+    EXPECT_EQ(ymh::effective_timeout(Ms{400}, Ms{0}).count(), 400);
+    EXPECT_EQ(ymh::effective_timeout(Ms{-5}, Ms{0}).count(), 0);
+}
+
+TEST(OpenAiHelpersTest, DeriveTotalBudgetTable) {
+    using Ms = std::chrono::milliseconds;
+    ymh::RetryPolicy shipped;
+    shipped.base_delay = Ms{500};
+    shipped.max_delay  = Ms{30000};
+    shipped.jitter     = 0.25;
+
+    EXPECT_EQ(ymh::derive_total_budget(Ms{0}, shipped, 3).count(), 0);
+    EXPECT_EQ(ymh::derive_total_budget(Ms{500}, shipped, 1).count(), 500);
+    EXPECT_EQ(ymh::derive_total_budget(Ms{120000}, shipped, 3).count(), 361875);
+
+    const auto rep_max = std::numeric_limits<Ms::rep>::max();
+    EXPECT_EQ(ymh::derive_total_budget(Ms{rep_max}, shipped, 3).count(), rep_max);
+}
+
+TEST(OpenAiHelpersTest, ResolveOverallBudgetTable) {
+    using Ms = std::chrono::milliseconds;
+    ymh::RetryPolicy shipped;
+    shipped.base_delay = Ms{500};
+    shipped.max_delay  = Ms{30000};
+    shipped.jitter     = 0.25;
+
+    EXPECT_EQ(ymh::resolve_overall_budget(Ms{180000}, Ms{0}, Ms{120000}, shipped, 3).count(),
+              180000);
+    EXPECT_EQ(ymh::resolve_overall_budget(Ms{0}, Ms{0}, Ms{120000}, shipped, 3).count(), 361875);
+    EXPECT_EQ(ymh::resolve_overall_budget(Ms{0}, Ms{50000}, Ms{120000}, shipped, 3).count(),
+              50000);
+    EXPECT_EQ(ymh::resolve_overall_budget(Ms{180000}, Ms{50000}, Ms{120000}, shipped, 3).count(),
+              50000);
+    EXPECT_EQ(ymh::resolve_overall_budget(Ms{0}, Ms{50000}, Ms{0}, shipped, 3).count(), 50000);
+    EXPECT_EQ(ymh::resolve_overall_budget(Ms{0}, Ms{0}, Ms{0}, shipped, 3).count(), 0);
+}
+
+TEST(OpenAiHelpersTest, PerAttemptTimeoutTable) {
+    using Ms = std::chrono::milliseconds;
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{500}, Ms{0}, Ms{999}).count(), 500);
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{500}, Ms{500}, Ms{0}).count(), 500);
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{500}, Ms{500}, Ms{300}).count(), 200);
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{2000}, Ms{500}, Ms{0}).count(), 500);
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{0}, Ms{500}, Ms{300}).count(), 200);
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{500}, Ms{500}, Ms{500}).count(), 0);
+    EXPECT_EQ(ymh::per_attempt_timeout(Ms{500}, Ms{500}, Ms{600}).count(), 0);
 }
 
 TEST(OpenAiHelpersTest, RetryAfterParsing) {
@@ -828,6 +1013,7 @@ TEST_F(OpenAiAdapterTest, RetryBudgetIsBoundedByRequestDeadline) {
         transport,
         Options{.max_attempts = 5,
                 .request_timeout = std::chrono::milliseconds{500},
+                .total_timeout = std::chrono::milliseconds{500},
                 .now = [fake_now] {
                     return std::chrono::steady_clock::time_point{
                         std::chrono::milliseconds{fake_now->load()}};

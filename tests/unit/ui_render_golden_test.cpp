@@ -3902,4 +3902,93 @@ TEST(UiRenderGolden, CP_G3_OverlaysComposeOverRewind) {
     EXPECT_NE(rendered.find("Exiting"), std::string::npos);
 }
 
+// ---- spec 85 (turn-failure attribution) ------------------------------------
+
+UiModel tool_then_turn_failure_model() {
+    UiModel model;
+    model.activeWorkspaceId = WorkspaceId{"workspace"};
+    WorkspaceModel workspace;
+    workspace.id           = model.activeWorkspaceId;
+    workspace.cwd          = "/work";
+    workspace.daemonStatus = DaemonStatus::Attached;
+    workspace.live         = true;
+    model.workspaces.emplace(workspace.id, workspace);
+    model.focusSessionIn(workspace.id, kSession);
+    model.session(kSession)->status.model = "test-model";
+
+    UiEventAdapter adapter(model);
+    adapter.onEvent(typed_event(EventType::ToolCall, [] {
+        payload::ToolCall call;
+        call.id        = "t1";
+        call.name      = "edit_file";
+        call.arguments = {{"file", "a.txt"}};
+        return call;
+    }()));
+    adapter.onEvent(typed_event(EventType::ToolResult, [] {
+        payload::ToolResult result;
+        result.id      = "t1";
+        result.name    = "edit_file";
+        result.outcome = payload::ToolOutcome::Ok;
+        result.output  = "ok";
+        return result;
+    }()));
+    model.session(kSession)->expand_all_folds = true;
+    model.apply(UiEvent{TurnFailedNotice{kSession, 7, "ProviderFailed", "transport timeout"}});
+    return model;
+}
+
+// 85-U6a (TF2/TF3/TF7): the turn-failure banner is a separated row carrying the
+// canonical label and neither the tool nor the failure glyph -- it is not a tool
+// row.
+TEST(UiRenderGolden, TurnFailureBannerStructure) {
+    UiModel model = tool_then_turn_failure_model();
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    const std::vector<std::string> lines = split_lines(rendered);
+    std::size_t banner = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("turn 7 failed: transport timeout") != std::string::npos) {
+            banner = i;
+            break;
+        }
+    }
+    ASSERT_LT(banner, lines.size());
+    ASSERT_GT(banner, 0u);
+    EXPECT_TRUE(lines[banner - 1].find_first_not_of(" \xE2\x94\x82") == std::string::npos)
+        << "the banner row must be preceded by a blank separator row";
+    EXPECT_EQ(lines[banner].find("\u25b8"), std::string::npos);
+    EXPECT_EQ(lines[banner].find("\u2717"), std::string::npos);
+}
+
+// 85-U6b (85-D6): the banner label is bold red on the raw SGR stream.
+TEST(UiRenderGolden, TurnFailureBannerColor) {
+    UiModel model = tool_then_turn_failure_model();
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    const std::size_t label = raw.find("turn 7 failed:");
+    ASSERT_NE(label, std::string::npos);
+    const std::string sgr = trailing_sgr(raw, label);
+    EXPECT_NE(sgr.find("\x1b[31m"), std::string::npos) << sgr;
+    EXPECT_NE(sgr.find("\x1b[1m"), std::string::npos) << sgr;
+}
+
+// 85-U7 (TF8/62-D5): a step-ceiling Notice keeps its unprefixed yellow label and
+// never gains the red turn-failure banner.
+TEST(UiRenderGolden, StepLimitNoticeUnchanged) {
+    UiModel model = build_model();
+    model.apply(UiEvent{StepLimitReached{kSession, "step limit (100) reached"}});
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("step limit (100) reached"), std::string::npos);
+    EXPECT_EQ(rendered.find("failed:"), std::string::npos);
+
+    const std::string raw = render_to_ansi(model, TerminalSize{72, 20}, Theme{true});
+    const std::size_t pos = raw.find("step limit (100) reached");
+    ASSERT_NE(pos, std::string::npos);
+    const std::string sgr = trailing_sgr(raw, pos);
+    EXPECT_NE(sgr.find("\x1b[33m"), std::string::npos) << sgr;
+    EXPECT_EQ(sgr.find("\x1b[31m"), std::string::npos) << sgr;
+}
+
 } // namespace

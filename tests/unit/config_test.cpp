@@ -97,7 +97,8 @@ bool same_config(const Config& a, const Config& b) {
            a.llm.retry.base_delay == b.llm.retry.base_delay &&
            a.llm.retry.max_delay == b.llm.retry.max_delay &&
            a.llm.retry.jitter == b.llm.retry.jitter &&
-           a.llm.retry.honor_retry_after == b.llm.retry.honor_retry_after;
+           a.llm.retry.honor_retry_after == b.llm.retry.honor_retry_after &&
+           a.llm.retry.total_timeout == b.llm.retry.total_timeout;
 }
 
 TEST(Config, DefaultsAreVendorFree) {
@@ -271,6 +272,78 @@ TEST(Config, RetryAndTimeoutsParse) {
     EXPECT_EQ(config.llm.retry.max_attempts, 9u);
     EXPECT_EQ(config.llm.retry.base_delay.count(), 250);
     EXPECT_DOUBLE_EQ(config.llm.retry.jitter, 0.5);
+}
+
+TEST(Config, RetryTotalTimeoutParses) {
+    test::TempWorkspace workspace("config_retry_total");
+    workspace.write(".ymh/config.jsonc",
+                    "{\n  \"llm\": { \"default\": {\n    \"retry\": { "
+                    "\"total_timeout_ms\": 180000 }\n  } }\n}\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_EQ(load_config(paths).llm.retry.total_timeout.count(), 180000);
+}
+
+TEST(Config, RetryTotalTimeoutDefaultsToZero) {
+    test::TempWorkspace workspace("config_retry_total_default");
+    workspace.write(".ymh/config.jsonc", "{ \"llm\": { \"default\": { \"retry\": {} } } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_EQ(load_config(paths).llm.retry.total_timeout.count(), 0);
+}
+
+TEST(Config, EndpointRetryTotalTimeoutParses) {
+    test::TempWorkspace workspace("config_retry_total_endpoint");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"llm\": { \"endpoints\": { \"ep\": { \"base_url\": "
+                    "\"https://example.test/v1\", \"retry\": { \"total_timeout_ms\": 9000 } } "
+                    "} } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.llm.endpoints.count("ep"), 1u);
+    EXPECT_EQ(config.llm.endpoints.at("ep").retry.total_timeout.count(), 9000);
+}
+
+TEST(Config, NegativeRetryTotalTimeoutRejected) {
+    test::TempWorkspace workspace("config_retry_total_negative");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"llm\": { \"default\": { \"retry\": { \"total_timeout_ms\": -1 } } } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, UnknownRetryKeyRejected) {
+    test::TempWorkspace workspace("config_retry_unknown");
+    workspace.write(".ymh/config.jsonc",
+                    "{ \"llm\": { \"default\": { \"retry\": { \"bogus\": 1 } } } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+}
+
+TEST(Config, ScaffoldContainsRetryTotalTimeout) {
+    test::TempWorkspace         workspace("config_scaffold_total");
+    const std::filesystem::path global = workspace.path() / "xdg" / "ymh" / "config.jsonc";
+
+    ASSERT_TRUE(scaffold_config(workspace.path(), global).ok);
+    EXPECT_NE(read_file(global).find("\"total_timeout_ms\": 0"), std::string::npos);
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace_config_path(workspace.path());
+    EXPECT_EQ(load_config(paths).llm.retry.total_timeout.count(), 0);
 }
 
 TEST(Config, MalformedTimeoutRejected) {
