@@ -452,8 +452,12 @@ TEST(Errata66Paste, EditorHandoffSuspendsBracketedPaste) {
 }
 
 TEST(Errata66Paste, CapExceededPasteFlushesWithoutSubmitting) {
-    // 66-I2 (corrected): a paste above `kMaxPasteBytes` mutates more than once
-    // but never submits and never loses bytes.
+    // 66-I2 (corrected, amended by spec 86): a paste above `kMaxPasteBytes`
+    // mutates more than once but never submits and never loses bytes. Spec 86
+    // (86-A1/PP1) supersedes 66-D4 for the long case: each flush segment above
+    // the chip threshold lands in the out-of-band registry as a chip, so the
+    // bytes are recovered by `expand_paste_chips` rather than sitting verbatim in
+    // the draft.
     const std::unique_ptr<SupervisorHarness> harness = make_harness();
     const WorkspaceId workspace{"ws-a"};
     const SessionId   session{"s1"};
@@ -465,7 +469,9 @@ TEST(Errata66Paste, CapExceededPasteFlushesWithoutSubmitting) {
     harness->dispatch_event(ftxui::Event::Character(std::string(payload_size, 'x')));
     harness->dispatch_event(ftxui::Event::Special(kPasteClose));
 
-    EXPECT_EQ(draft_of(*harness, session).size(), payload_size);
+    const SessionUiState* state = harness->model().session(session);
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(state->input.expand_paste_chips().size(), payload_size);
     EXPECT_EQ(harness->submitted_count("agent.prompt"), 0u);
 }
 

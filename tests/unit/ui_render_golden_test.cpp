@@ -332,6 +332,17 @@ TEST(UiRenderGolden, ConversationSnapshot) {
     EXPECT_EQ(rendered, std::string(kGolden));
 }
 
+// 86-U12 (golden): a chip renders as its literal token bytes through the
+// existing glyph pipeline, with the composer row prefix (86-D9, no render change).
+TEST(UiRenderGolden, ChipRendersAsLiteralToken) {
+    UiModel model = build_model();
+    model.session(kSession)->input.draft = "[Pasted text #1 +4 lines]";
+    const std::string rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("[Pasted text #1 +4 lines]"), std::string::npos);
+    EXPECT_NE(rendered.find("> "), std::string::npos);
+}
+
 // 77-D3: the optimistic open placeholder row ("opening <title>...") precedes the
 // already-delivered transcript rows.
 TEST(UiRenderGolden, OpeningRowSnapshot) {
