@@ -83,7 +83,7 @@ public:
 
 class OpenAICompatibleProvider final : public LLMProvider {
 public:
-    // 08-D18 test seam: the steady clock used to compute the shared per-request
+    // 84-D2: the steady clock used to measure elapsed time against the overall
     // retry budget. Defaults to `std::chrono::steady_clock::now`; a test may
     // inject a fake clock to exercise the budget arithmetic without real sleeps.
     using SteadyNow = std::function<std::chrono::steady_clock::time_point()>;
@@ -130,6 +130,47 @@ private:
 [[nodiscard]] std::chrono::milliseconds backoff_delay(const RetryPolicy& policy,
                                                       std::uint32_t attempt,
                                                       double jitter_sample);
+
+// 84-D1/84-D4: the per-attempt wall-clock deadline. Amended to a total function:
+// `configured <= 0` returns `max(deadline, 0)`; `deadline <= 0` returns
+// `configured`; otherwise `min(deadline, configured)`. The only behavioral change
+// from the pre-84 shape is the previously-unbounded `configured == 0 && deadline
+// > 0` arm (dormant: no caller sets `LLMRequest.deadline`).
+[[nodiscard]] std::chrono::milliseconds effective_timeout(
+    std::chrono::milliseconds deadline,
+    std::chrono::milliseconds configured);
+
+// 84-D3: the derived overall budget (used when `retry.total_timeout == 0`).
+// `attempt_deadline * max_attempts + backoff_envelope`; `0` means the overall
+// budget is unbounded, returned when `attempt_deadline <= 0`. Saturating (RB-F1).
+[[nodiscard]] std::chrono::milliseconds derive_total_budget(
+    std::chrono::milliseconds attempt_deadline,
+    const RetryPolicy&        retry,
+    std::uint32_t             max_attempts);
+
+// 84-D2/84-D4: the overall budget for one `stream()` call across every attempt
+// and backoff. A positive `retry_total_timeout` wins; otherwise the derived
+// budget is used. A non-zero `request_deadline` `min`-caps the result. `0` means
+// unbounded. Saturating.
+[[nodiscard]] std::chrono::milliseconds resolve_overall_budget(
+    std::chrono::milliseconds retry_total_timeout,
+    std::chrono::milliseconds request_deadline,
+    std::chrono::milliseconds attempt_deadline,
+    const RetryPolicy&        retry,
+    std::uint32_t             max_attempts);
+
+// 84-D5: the per-attempt transport deadline (algebra (e)). Total (L1):
+//   overall_budget == 0        -> attempt_deadline        (0 == unbounded)
+//   overall_budget  > 0:
+//       remaining = max(overall_budget - elapsed, 0)      (clamped to 0)
+//       attempt_deadline == 0  -> remaining
+//       else                   -> min(attempt_deadline, remaining)
+// The clamped `elapsed >= overall` arm returns 0; the caller must not issue a
+// transport call with this 0 (the stream() loop guard runs first).
+[[nodiscard]] std::chrono::milliseconds per_attempt_timeout(
+    std::chrono::milliseconds attempt_deadline,
+    std::chrono::milliseconds overall_budget,
+    std::chrono::milliseconds elapsed);
 
 // Parses a `Retry-After` value (delta-seconds or IMF-fixdate). `nullopt` when
 // absent or unparseable.

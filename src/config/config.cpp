@@ -173,7 +173,7 @@ void reject_unknown_named_map(const Json& table,
                 }
                 for (auto field = retry->begin(); field != retry->end(); ++field) {
                     if (!name_in({"max_attempts", "base_delay_ms", "max_delay_ms", "jitter",
-                                  "honor_retry_after"},
+                                  "honor_retry_after", "total_timeout_ms"},
                                  field.key())) {
                         fail(source, "unknown key '" + label + ".retry." + field.key() + "'");
                     }
@@ -596,11 +596,14 @@ void read_retry(RetrySettings& retry, const Json& table, std::string_view label,
     retry.jitter = read_double(table, "jitter", label, retry.jitter, source);
     retry.honor_retry_after =
         read_bool(table, "honor_retry_after", label, retry.honor_retry_after, source);
+    retry.total_timeout = std::chrono::milliseconds{
+        read_int64(table, "total_timeout_ms", label, retry.total_timeout.count(), source)};
 }
 
 void apply_retry(Config& config, const Json& table, const std::filesystem::path& source) {
     reject_unknown(table, "llm.default.retry",
-                   {"max_attempts", "base_delay_ms", "max_delay_ms", "jitter", "honor_retry_after"},
+                   {"max_attempts", "base_delay_ms", "max_delay_ms", "jitter", "honor_retry_after",
+                    "total_timeout_ms"},
                    source);
     read_retry(config.llm.retry, table, "llm.default.retry", source);
 }
@@ -1517,7 +1520,8 @@ constexpr std::string_view kDefaultConfigJsonc =
         "base_delay_ms": 500,
         "max_delay_ms": 30000,
         "jitter": 0.25,
-        "honor_retry_after": true
+        "honor_retry_after": true,
+        "total_timeout_ms": 0 // 0 = derived from max_attempts x request_timeout_ms + backoff
       }
     }
   }

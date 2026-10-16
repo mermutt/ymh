@@ -103,6 +103,10 @@ enum class ConversationRole : std::uint8_t {
     // 62-D5: an actionable, non-error notice (e.g. the step hard ceiling). Not
     // dimmed like System, so a stopped-but-recoverable turn stands out.
     Notice,
+    // 85-D2: a turn-level failure. Distinct from System (dim "error:") and
+    // Notice (yellow, recoverable): rendered as a bold red banner, attributed
+    // to its turn. Never carries tool_name/tool_call_id.
+    TurnError,
 };
 
 struct ConversationEntry {
@@ -113,6 +117,11 @@ struct ConversationEntry {
     bool             streaming = false;
     std::optional<MessageSource> source  = std::nullopt;
     std::optional<ContextFormed> context = std::nullopt;
+    // 85-D3: the durable turn this entry is attributed to. std::nullopt for
+    // every entry not tied to a turn (all pre-85 roles). Set only by TurnError
+    // and READ by render_entry (ui_render.cpp), which composes the
+    // "turn <N> failed:" label when set and non-zero (the production consumer; TF2).
+    std::optional<TurnId> turn = std::nullopt;
 };
 
 struct ConversationModel {

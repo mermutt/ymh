@@ -117,6 +117,7 @@ LLMProviderConfig to_provider_config(const ResolvedEndpoint& endpoint,
     provider.retry.max_delay         = endpoint.retry.max_delay;
     provider.retry.jitter            = endpoint.retry.jitter;
     provider.retry.honor_retry_after = endpoint.retry.honor_retry_after;
+    provider.retry.total_timeout     = endpoint.retry.total_timeout;
     provider.profile = profile;
     return provider;
 }

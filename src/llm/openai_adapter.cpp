@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -277,12 +278,33 @@ std::int64_t days_from_civil(std::int64_t year, unsigned month, unsigned day) {
     return era * 146097 + static_cast<std::int64_t>(day_of_era) - 719468;
 }
 
-std::chrono::milliseconds effective_timeout(std::chrono::milliseconds deadline,
-                                            std::chrono::milliseconds configured) {
-    if (deadline.count() <= 0) {
-        return configured;
+// 84-D3: the maximum total sleep the backoff schedule can emit across
+// `max_attempts` tries, using the upper jitter bound `1 + retry.jitter`.
+// Saturating: a huge `max_attempts` clamps to `milliseconds::rep` max (RB-F1).
+std::chrono::milliseconds::rep backoff_envelope(const RetryPolicy& retry,
+                                                std::uint32_t      max_attempts) {
+    using Rep = std::chrono::milliseconds::rep;
+    constexpr Rep kMax = std::numeric_limits<Rep>::max();
+    if (max_attempts <= 1) {
+        return 0;
     }
-    return std::min(deadline, configured);
+    const double base =
+        std::max(0.0, static_cast<double>(retry.base_delay.count()));
+    const double max_delay =
+        std::max(0.0, static_cast<double>(retry.max_delay.count()));
+    const double jitter = std::max(0.0, retry.jitter);
+    Rep          total  = 0;
+    for (std::uint32_t i = 1; i < max_attempts; ++i) {
+        const double scaled = base * std::pow(2.0, static_cast<double>(i - 1));
+        const double capped = std::min(scaled, max_delay);
+        const double term   = std::ceil(capped * (1.0 + jitter));
+        const Rep    add    = term >= static_cast<double>(kMax) ? kMax : static_cast<Rep>(term);
+        if (total > kMax - add) {
+            return kMax;
+        }
+        total += add;
+    }
+    return total;
 }
 
 bool sleep_with_cancel(std::chrono::milliseconds delay, const CancellationToken& cancel) {
@@ -936,6 +958,68 @@ std::chrono::milliseconds backoff_delay(const RetryPolicy& policy,
     return std::chrono::milliseconds{static_cast<std::int64_t>(delay)};
 }
 
+std::chrono::milliseconds effective_timeout(std::chrono::milliseconds deadline,
+                                            std::chrono::milliseconds configured) {
+    if (configured.count() <= 0) {
+        return std::chrono::milliseconds{std::max<std::int64_t>(0, deadline.count())};
+    }
+    if (deadline.count() <= 0) {
+        return configured;
+    }
+    return std::min(deadline, configured);
+}
+
+std::chrono::milliseconds derive_total_budget(std::chrono::milliseconds attempt_deadline,
+                                              const RetryPolicy&        retry,
+                                              std::uint32_t             max_attempts) {
+    using Rep = std::chrono::milliseconds::rep;
+    constexpr Rep kMax = std::numeric_limits<Rep>::max();
+    if (attempt_deadline.count() <= 0) {
+        return std::chrono::milliseconds{0};
+    }
+    if (max_attempts <= 1) {
+        return attempt_deadline;
+    }
+    const Rep add = static_cast<Rep>(max_attempts);
+    const Rep product =
+        attempt_deadline.count() > kMax / add ? kMax : attempt_deadline.count() * add;
+    const Rep envelope = backoff_envelope(retry, max_attempts);
+    const Rep total    = product > kMax - envelope ? kMax : product + envelope;
+    return std::chrono::milliseconds{total};
+}
+
+std::chrono::milliseconds resolve_overall_budget(std::chrono::milliseconds retry_total_timeout,
+                                                 std::chrono::milliseconds request_deadline,
+                                                 std::chrono::milliseconds attempt_deadline,
+                                                 const RetryPolicy&        retry,
+                                                 std::uint32_t             max_attempts) {
+    const std::chrono::milliseconds base =
+        retry_total_timeout.count() > 0
+            ? retry_total_timeout
+            : derive_total_budget(attempt_deadline, retry, max_attempts);
+    if (request_deadline.count() <= 0) {
+        return base;
+    }
+    if (base.count() <= 0) {
+        return request_deadline;
+    }
+    return std::min(base, request_deadline);
+}
+
+std::chrono::milliseconds per_attempt_timeout(std::chrono::milliseconds attempt_deadline,
+                                              std::chrono::milliseconds overall_budget,
+                                              std::chrono::milliseconds elapsed) {
+    if (overall_budget.count() <= 0) {
+        return attempt_deadline;
+    }
+    const std::chrono::milliseconds remaining =
+        std::max(overall_budget - elapsed, std::chrono::milliseconds{0});
+    if (attempt_deadline.count() <= 0) {
+        return remaining;
+    }
+    return std::min(attempt_deadline, remaining);
+}
+
 std::optional<std::chrono::milliseconds> parse_retry_after(std::string_view value) {
     const std::string text = trim_copy(value);
     if (text.empty()) {
@@ -1230,18 +1314,26 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
     const ModelProfile*  active_profile = config_.profile.id.empty() ? nullptr : &config_.profile;
     const ToolCallPolicy policy{active_profile, offered_names};
 
-    // 08-D18: the retry budget is bounded by the per-request deadline, not by
-    // `max_attempts` fresh deadlines (08 §3.7). A zero budget means unbounded.
-    const auto                    call_start  = now_();
-    const std::chrono::milliseconds call_budget =
+    // 84-D1: each attempt gets a fresh per-attempt deadline. 84-D2/D3/D4: the
+    // whole call is bounded by a separate overall budget (config total_timeout,
+    // else derived, else caller deadline). A zero budget means unbounded.
+    const auto                    call_start = now_();
+    const std::chrono::milliseconds attempt_deadline =
         effective_timeout(request.deadline, config_.request_timeout);
-    const auto remaining_budget = [this, &call_start, call_budget]() -> std::chrono::milliseconds {
-        if (call_budget.count() <= 0) {
+    const std::chrono::milliseconds overall_budget =
+        resolve_overall_budget(config_.retry.total_timeout, request.deadline, attempt_deadline,
+                               config_.retry, max_attempts);
+    const auto remaining_overall =
+        [this, &call_start, overall_budget]() -> std::chrono::milliseconds {
+        if (overall_budget.count() <= 0) {
             return std::chrono::milliseconds{0};
         }
         const auto used =
             std::chrono::duration_cast<std::chrono::milliseconds>(now_() - call_start);
-        return call_budget - used;
+        return std::max(overall_budget - used, std::chrono::milliseconds{0});
+    };
+    const auto elapsed_since_start = [this, &call_start]() -> std::chrono::milliseconds {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now_() - call_start);
     };
 
     for (std::uint32_t attempt = 1; attempt <= max_attempts; ++attempt) {
@@ -1249,8 +1341,7 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
             return cancelled();
         }
 
-        std::chrono::milliseconds budget = remaining_budget();
-        if (call_budget.count() > 0 && budget.count() <= 0) {
+        if (overall_budget.count() > 0 && remaining_overall().count() <= 0) {
             return failed(make_error(LLMErrorCode::Timeout, "request deadline exceeded"));
         }
 
@@ -1282,7 +1373,8 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
         http.body = payload;
         http.connect_timeout = config_.connect_timeout;
         http.idle_timeout = config_.idle_timeout;
-        http.total_timeout = call_budget.count() > 0 ? budget : call_budget;
+        http.total_timeout =
+            per_attempt_timeout(attempt_deadline, overall_budget, elapsed_since_start());
 
         if (transcript_) {
             transcript_->record_request(request_id, attempt, request.model, endpoint_host,
@@ -1354,8 +1446,9 @@ Task<LLMResponse> OpenAICompatibleProvider::stream(const LLMRequest& request,
                     delay = *retry_after;
                 }
             }
-            budget = remaining_budget();
-            if (call_budget.count() > 0 && (budget.count() <= 0 || delay >= budget)) {
+            const auto remaining = remaining_overall();
+            if (overall_budget.count() > 0 &&
+                (remaining.count() <= 0 || delay >= remaining)) {
                 return failed(error);
             }
             if (!sleep_with_cancel(delay, cancel)) {

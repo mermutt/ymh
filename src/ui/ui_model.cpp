@@ -959,6 +959,8 @@ Presentation entry_presentation(const std::vector<ConversationEntry>& entries,
             return Presentation::Chrome;
         case ConversationRole::Notice:
             return Presentation::FinalAnswer;
+        case ConversationRole::TurnError:
+            return Presentation::FinalAnswer;
         case ConversationRole::Assistant:
             break;
     }
@@ -1418,6 +1420,7 @@ void UiModel::apply(const UiEvent& event) {
                    std::is_same_v<T, ToolFinished> ||
                    std::is_same_v<T, ErrorOccurred> ||
                    std::is_same_v<T, StepLimitReached> ||
+                   std::is_same_v<T, TurnFailedNotice> ||
                    std::is_same_v<T, CompactionMarker> ||
                    std::is_same_v<T, CompactionOutcomeNotice> ||
                    std::is_same_v<T, ContextInjected>;
@@ -1659,6 +1662,16 @@ void UiModel::apply(const UiEvent& event) {
                 entry.text = e.message;
                 state.conversation.entries.push_back(std::move(entry));
                 state.status.note = e.message;
+                dirty.mark(e.session, UiDirtyFlag::Conversation | UiDirtyFlag::Status |
+                                           UiDirtyFlag::Attention);
+            } else if constexpr (std::is_same_v<T, TurnFailedNotice>) {
+                state.status.last_error = e.message;
+                state.status.api_state  = ApiConnectivity::Error;
+                ConversationEntry entry;
+                entry.role = ConversationRole::TurnError;
+                entry.turn = e.turn;
+                entry.text = e.message.empty() ? e.code : e.message;
+                state.conversation.entries.push_back(std::move(entry));
                 dirty.mark(e.session, UiDirtyFlag::Conversation | UiDirtyFlag::Status |
                                            UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, TokenUsageUpdated>) {

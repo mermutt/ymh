@@ -482,6 +482,19 @@ Element render_entry(const ConversationEntry& entry, const ToolModel* tools,
         case ConversationRole::Notice:
             return paint(ftxui::text(entry.text) | ftxui::bold, ftxui::Color::Yellow,
                          theme);
+        case ConversationRole::TurnError: {
+            rows.push_back(ftxui::text(""));   // turn-boundary separator (85-D6)
+            // 85-D3/85-D5: read the attribution and compose the canonical label HERE.
+            // entry.text is the bare message; the renderer owns the single label.
+            const std::string turn_part =
+                entry.turn.has_value() && *entry.turn != 0
+                    ? "turn " + std::to_string(*entry.turn) + " "
+                    : "turn ";
+            rows.push_back(paint(ftxui::paragraph(turn_part + "failed: " + entry.text) |
+                                     ftxui::bold,
+                                 ftxui::Color::Red, theme));
+            break;
+        }
         case ConversationRole::Context: {
             const ContextForm form =
                 entry.context.has_value() ? entry.context->form : ContextForm::None;

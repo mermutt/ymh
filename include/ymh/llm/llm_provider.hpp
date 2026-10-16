@@ -44,6 +44,9 @@ struct RetryPolicy {
     std::chrono::milliseconds max_delay{30'000};
     double                    jitter = 0.25;  // +/- fraction, full-jitter sample
     bool                      honor_retry_after = true;
+    // 84-D2: overall budget for one stream() call across all attempts and
+    // backoffs. 0 => derived (84-D3).
+    std::chrono::milliseconds total_timeout{0};
 };
 
 // Authoritative terminal value of `stream()` (08 §3.4). Text and reasoning are

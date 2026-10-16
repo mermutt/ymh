@@ -225,6 +225,9 @@ struct RetrySettings {
     std::chrono::milliseconds max_delay{30'000};
     double                    jitter = 0.25;
     bool                      honor_retry_after = true;
+    // 84-D2: overall budget for one stream() call across all attempts and
+    // backoffs. 0 => derived (84-D3). Non-negative (read_int64 rejects < 0).
+    std::chrono::milliseconds total_timeout{0};
 };
 
 // [llm.endpoints.<name>] (52-D1). One named connection. The absent fields of an

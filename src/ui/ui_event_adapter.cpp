@@ -139,7 +139,8 @@ std::vector<UiEvent> UiEventAdapter::adapt(const Event& event) const {
             if (payload.code == "StepLimitExceeded") {
                 events.push_back(UiEvent{StepLimitReached{session, payload.message}});
             } else {
-                events.push_back(UiEvent{ErrorOccurred{session, payload.message}});
+                events.push_back(UiEvent{TurnFailedNotice{
+                    session, payload.turn, payload.code, payload.message}});
             }
             break;
         }

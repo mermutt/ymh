@@ -206,6 +206,17 @@ struct StepLimitReached {
     std::string message;
 };
 
+// 85-D1: a turn-level (non-recoverable) loop/provider failure. Distinct from
+// ErrorOccurred so the model can attribute it to its turn -- not to the
+// preceding tool row -- and render a turn-scoped banner. Frontend-only; never
+// serialized on the wire (U4, ui_event.hpp:3-7).
+struct TurnFailedNotice {
+    SessionId   session;
+    TurnId      turn = 0;   // payload::TurnFailed::turn
+    std::string code;        // AgentErrorCode name, e.g. "ProviderFailed"
+    std::string message;     // payload::TurnFailed::message
+};
+
 struct TokenUsageUpdated {
     SessionId session;
     Usage     usage;
@@ -267,6 +278,7 @@ struct UiEvent {
         SubagentUpdated,
         ErrorOccurred,
         StepLimitReached,
+        TurnFailedNotice,
         TokenUsageUpdated,
         StatusChanged,
         CompactionMarker,
