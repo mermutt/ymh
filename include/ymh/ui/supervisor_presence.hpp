@@ -28,6 +28,14 @@ namespace ymh::ui {
 // collide on a shared file.
 [[nodiscard]] protocol::ClientInstanceId process_client_instance();
 
+// 87-D2 (87-A2): a transient, NON-owning liveness-probe identity -- a fresh
+// in-memory UUIDv4 plus `ClientRole::Observer` ("owns nothing", 16 §4.6). It
+// never shares the durable link's supersede key and is excluded from the owner
+// set, so a probe can neither evict a live `SupervisorConnection` nor pollute
+// `live_supervisors`. Callers: bare `ymh` (`src/cli/cli.cpp`) and the
+// supervisor's `ensure_worker_loop` (`src/ui/supervisor.cpp`).
+[[nodiscard]] AttachIdentity probe_attach_identity();
+
 // 16 §4.1 orphaning predicate. `live_supervisors` is a raw count INCLUDING the
 // caller, so `== 1` means "just me"; `other_fresh_owners` already excludes the
 // caller. Display/exit logic only; never writes the registry.

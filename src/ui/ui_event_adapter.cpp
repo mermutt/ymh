@@ -479,6 +479,12 @@ void UiEventAdapter::onHostNotice(const WorkspaceId& workspace,
             model_.dirty.markAggregate();
             break;
         }
+        case protocol::HostNoticeKind::LinkDropped:
+            // 87-D3/L3: the daemon is closing this handshaked connection; the
+            // `Dead` transition and its 69-channel diagnostic are surfaced by
+            // `SupervisorConnection`/`handle_sink_notice`, so the adapter is a
+            // no-op here (keeps the exhaustive `-Wswitch -Werror` switch total).
+            break;
     }
 }
 

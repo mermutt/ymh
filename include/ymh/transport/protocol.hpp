@@ -260,6 +260,10 @@ enum class HostNoticeKind : std::uint8_t {
     McpServerStatus,     // 15 §4.7 (AM-1): bounded MCP status token in `detail`
     ReplayComplete,      // NEW (77-D4a): the Interactive event.subscribe catch-up ended
     HandoffResult,       // 82-D9: `detail` is the handoff result line
+    // 87-D3 (additive): the daemon is closing a handshaked connection;
+    // `detail` is the bounded drop reason. Wire: "link_dropped". `kProtocolVersion`
+    // stays 1 (87-D6): only a pre-87 client's strict parse is affected (87-F13).
+    LinkDropped,
 };
 
 struct HostNotice {
@@ -318,6 +322,15 @@ struct HelloResult {
     TransportLimits            limits;
     std::int64_t               server_time_ms{0};
 };
+
+// 87-D1: the SINGLE notion of "this workspace's live daemon" (87-I1). True iff
+// the hello names `workspace` AND (no `expected_boot_id` is known, or the hello's
+// boot matches it). The empty-nonce case is the conservative fallback: it accepts
+// (refuses to unlink) a same-workspace answering daemon rather than treating it
+// as residue, so it can never reclaim a live daemon (87-F2). Callers:
+// `connect_checked`, `attempt_attach`, and `probe_existing_socket`.
+[[nodiscard]] bool names_live_daemon(const HelloResult& hello, const WorkspaceId& workspace,
+                                     const HostBootId& expected_boot_id) noexcept;
 
 // `host.ownership` (16 §7.4, new read-only method). No request params: the
 // daemon uses the calling connection's ClientInstanceId (set at hello), so it

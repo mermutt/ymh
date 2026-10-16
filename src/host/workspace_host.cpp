@@ -403,7 +403,8 @@ std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& soc
         connection->handshake(protocol::profile_for_role(identity.role),
                               identity.client_instance, identity.role,
                               std::min(budget.handshake, remaining_until(deadline)));
-    if (hello.workspace.value != workspace.value || hello.boot_id.value != boot_id.value) {
+    if (!protocol::names_live_daemon(hello, protocol::WorkspaceId{workspace.value},
+                                     protocol::HostBootId{boot_id.value})) {
         connection->close();
         throw HostError(protocol::HostErrorCode::AttachRejected,
                         "attach identity mismatch at " + socket_path.string());
@@ -947,7 +948,9 @@ HostExitCode WorkspaceHost::Impl::startup() {
     lease_timer_     = std::make_unique<asio::steady_timer>(transport_->io());
 
     try {
-        transport_->start();
+        transport_->start(protocol::HostBootId{
+            config_.predecessor_boot_id.has_value() ? config_.predecessor_boot_id->value
+                                                    : std::string{}});
     } catch (const protocol::TransportError& transport_error) {
         return mapTransportError(transport_error.code());
     } catch (const std::exception&) {
@@ -1395,6 +1398,10 @@ std::vector<std::string> ForkExecLauncher::build_argv(
         argv.push_back("--boot-id");
         argv.push_back(config.boot_id->value);
     }
+    if (config.predecessor_boot_id.has_value()) {
+        argv.push_back("--predecessor-boot-id");
+        argv.push_back(config.predecessor_boot_id->value);
+    }
     return argv;
 }
 
@@ -1547,6 +1554,12 @@ HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     config.persistence.lock_path = record.canonicalPath / ".ymh" / "sessions.lock";
     config.require_owner         = true;
     config.watchdog_disabled     = false;
+    // 87-D1/87-I3: the claim being replaced (captured pre-reap by `ensureRunning`,
+    // which copies the record before `reapIfStale`). Empty only on the no-claim
+    // path where `record.host` is absent.
+    if (record.host.has_value()) {
+        config.predecessor_boot_id = record.host->bootId;
+    }
     return config;
 }
 

@@ -14,9 +14,15 @@
 namespace ymh {
 
 WorkspaceLockProbe probeWorkspaceLock(const std::filesystem::path& workspaceRoot) {
+    return probeWorkspaceLock(workspaceRoot, true);
+}
+
+WorkspaceLockProbe probeWorkspaceLock(const std::filesystem::path& workspaceRoot,
+                                      bool create_if_missing) {
     WorkspaceLockProbe probe;
     const std::filesystem::path lock_path = workspaceRoot / ".ymh" / "sessions.lock";
-    const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    const int flags = create_if_missing ? (O_RDWR | O_CREAT | O_CLOEXEC) : (O_RDONLY | O_CLOEXEC);
+    const int fd = ::open(lock_path.c_str(), flags, 0600);
     if (fd < 0) {
         return probe;
     }

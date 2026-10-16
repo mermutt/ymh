@@ -54,13 +54,15 @@ enum class SocketProbeResult : std::uint8_t {
     LiveYmhDaemon,  // connected and a hello named this workspace
 };
 
-// 76-D6: bounded non-blocking connect + authenticated `host.hello` within
-// `deadline`. Mints a throwaway ClientInstanceId, uses
-// ServerProfile::Interactive, and compares HelloResult.workspace. Concrete
-// caller: TransportServer::start.
+// 76-D6 / 87-D1: bounded non-blocking connect + authenticated `host.hello`
+// within `deadline`. Mints a throwaway ClientInstanceId and declares
+// `ClientRole::Observer` (87-D2, owns nothing). `LiveYmhDaemon` iff
+// `names_live_daemon(hello, workspace, expected_boot_id)`; otherwise `Residue`.
+// An empty `expected_boot_id` is a workspace-only accept (never `Residue`,
+// 87-F2). Concrete caller: `TransportServer::start`.
 [[nodiscard]] SocketProbeResult probe_existing_socket(
     const std::string& socket_path, const WorkspaceId& workspace,
-    std::chrono::steady_clock::time_point deadline);
+    const HostBootId& expected_boot_id, std::chrono::steady_clock::time_point deadline);
 
 class TransportServer {
 public:
@@ -77,7 +79,11 @@ public:
     TransportServer(const TransportServer&) = delete;
     TransportServer& operator=(const TransportServer&) = delete;
 
-    void start();
+    // 87-D1/87-A5: `expected_predecessor_boot_id` is the boot nonce of the claim
+    // this daemon is replacing; it bounds what counts as a live peer at reclaim
+    // time. Defaulted so existing callers/tests keep compiling (empty => the
+    // probe is a workspace-only accept, 87-F2).
+    void start(const HostBootId& expected_predecessor_boot_id = {});
     void stop();
 
     // Invoked on the io runner thread immediately before `run()`. Lets the

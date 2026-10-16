@@ -321,13 +321,13 @@ std::optional<nlohmann::json> ProtocolServer::handle_hello(Connection& conn,
     for (const auto& entry : connections_) {
         const Connection& other = entry.second;
         if (other.id != conn.id && !other.dropped && other.hello_done &&
-            other.instance == params.client_instance) {
+            other.instance == params.client_instance && other.role == params.role) {
             superseded.push_back(other.id);
         }
     }
     for (const ClientId target : superseded) {
         if (Connection* other = find(target)) {
-            drop_client(*other, "superseded");
+            graceful_drop(*other, "superseded");
         }
     }
 
@@ -765,7 +765,7 @@ void ProtocolServer::maybe_close_after_drain(Connection& conn) {
         return;
     }
     if (conn.close_when_drained && conn.outbound.empty() && conn.outstanding == 0) {
-        drop_client(conn, "closed");
+        drop_client(conn, conn.close_reason.empty() ? std::string{"closed"} : conn.close_reason);
     }
 }
 
@@ -805,6 +805,40 @@ void ProtocolServer::end_subscriptions(Connection& conn, const SessionId& sessio
             ++it;
         }
     }
+}
+
+void ProtocolServer::end_all_subscriptions(Connection& conn, std::string reason) {
+    for (auto it = conn.subscriptions.begin(); it != conn.subscriptions.end();) {
+        const std::uint64_t subscription = it->first;
+        it = conn.subscriptions.erase(it);
+        enqueue(conn, notification_json(
+                         notify::kEventUnsubscribed,
+                         to_json_value(UnsubscribedNotice{SubscriptionId{subscription}, reason})));
+        if (conn.dropped) {
+            return;
+        }
+    }
+}
+
+void ProtocolServer::graceful_drop(Connection& conn, std::string reason) {
+    if (conn.dropped || !conn.hello_done || !conn.send) {
+        drop_client(conn, std::move(reason));
+        return;
+    }
+    end_all_subscriptions(conn, reason);
+    if (conn.dropped) {
+        return;
+    }
+    enqueue(conn, notification_json(
+                     notify::kHostEvent,
+                     to_json_value(HostNotice{HostNoticeKind::LinkDropped, config_.workspace,
+                                              std::nullopt, reason})));
+    if (conn.dropped) {
+        return;
+    }
+    conn.close_when_drained = true;
+    conn.close_reason = reason;
+    maybe_close_after_drain(conn);
 }
 
 HostStatus ProtocolServer::compose_status(const Connection& conn) const {

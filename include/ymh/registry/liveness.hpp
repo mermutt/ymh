@@ -30,6 +30,16 @@ struct WorkspaceLockProbe {
 [[nodiscard]] WorkspaceLockProbe probeWorkspaceLock(
     const std::filesystem::path& workspaceRoot);
 
+// 88-A3 (spec 88 §7): the create-controlling overload. With
+// `create_if_missing == false` the probe opens the existing lock file
+// `O_RDONLY|O_CLOEXEC` and never creates `<ws>/.ymh/sessions.lock`, so
+// `ymh doctor` stays read-only (DOC1/88-D5); a missing file reports not held.
+// The 1-arg overload above delegates here with `create_if_missing == true` and is
+// behaviourally unchanged for all existing callers. Caller: `run_doctor`
+// (create_if_missing == false); every existing caller keeps the 1-arg overload.
+[[nodiscard]] WorkspaceLockProbe probeWorkspaceLock(
+    const std::filesystem::path& workspaceRoot, bool create_if_missing);
+
 // `kill(pid, 0)` classification (§6.3 rule 3). Only `ESRCH` proves death;
 // `EPERM` means "exists but not ours" ⇒ Alive.
 enum class KillHint : std::uint8_t { Alive, Dead, Unknown };

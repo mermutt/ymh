@@ -1576,8 +1576,11 @@ private:
                            !options_.registry->findById(request.workspace).has_value()) {
                     notice = "workspace no longer registered";
                 } else {
+                    // 87-D2/87-A2: the returned connection is discarded (RAII
+                    // close), so this is a transient liveness probe: a fresh
+                    // non-owning identity, never the durable `options_.identity`.
                     AttachResult attach = options_.lifecycle->ensureRunning(
-                        WorkspaceId{request.workspace.value}, options_.identity);
+                        WorkspaceId{request.workspace.value}, probe_attach_identity());
                     (void)attach;   // dropped (RAII close); `attach_workspace` makes
                                     // its own connection. The supervisor presence
                                     // keeps the daemon owned.

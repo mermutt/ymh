@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -32,6 +33,44 @@ bool all_digits(const std::string& value) {
     return !value.empty() && std::all_of(value.begin(), value.end(), [](char character) {
         return character >= '0' && character <= '9';
     });
+}
+
+// 88-A4: parse `/proc/net/unix`, returning the inode of the AF_UNIX socket bound
+// at `socketPath`. The line format is seven fixed columns followed by the bound
+// path (which may contain spaces), so the path is whatever remains after the
+// seventh token.
+std::optional<std::uint64_t> unix_socket_inode(const std::filesystem::path& socketPath) {
+    std::ifstream net{std::filesystem::path{"/proc/net/unix"}};
+    if (!net) {
+        return std::nullopt;
+    }
+    const std::string target = socketPath.string();
+    std::string       line;
+    std::getline(net, line);
+    while (std::getline(net, line)) {
+        std::istringstream       stream{line};
+        std::vector<std::string> columns;
+        std::string              token;
+        while (columns.size() < 7 && stream >> token) {
+            columns.push_back(token);
+        }
+        if (columns.size() < 7) {
+            continue;
+        }
+        std::string path;
+        std::getline(stream, path);
+        const std::size_t first = path.find_first_not_of(" \t");
+        path = first == std::string::npos ? std::string{} : path.substr(first);
+        if (path != target) {
+            continue;
+        }
+        try {
+            return static_cast<std::uint64_t>(std::stoull(columns[6]));
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -97,10 +136,14 @@ std::vector<ScannedHost> scanHosts(
     return result;
 }
 
-std::vector<ProcessEntry> readProcessTable() {
-    std::vector<ProcessEntry> table;
-    std::error_code           error;
+ProcessTable readProcessTableChecked() {
+    ProcessTable    table;
+    std::error_code error;
     std::filesystem::directory_iterator iterator{"/proc", error};
+    if (error) {
+        table.complete = false;
+        return table;
+    }
     const std::filesystem::directory_iterator end;
     while (!error && iterator != end) {
         const std::filesystem::path entry = iterator->path();
@@ -123,11 +166,58 @@ std::vector<ProcessEntry> readProcessTable() {
             if (link_error) {
                 process.cwd.clear();
             }
-            table.push_back(std::move(process));
+            table.entries.push_back(std::move(process));
         }
         iterator.increment(error);
     }
+    if (error) {
+        table.complete = false;
+        table.entries.clear();
+    }
     return table;
+}
+
+std::vector<ProcessEntry> readProcessTable() {
+    return readProcessTableChecked().entries;
+}
+
+std::optional<std::int32_t> socketOwnerPid(const std::filesystem::path& socketPath) {
+    const std::optional<std::uint64_t> inode = unix_socket_inode(socketPath);
+    if (!inode.has_value()) {
+        return std::nullopt;
+    }
+    const std::string needle = "socket:[" + std::to_string(*inode) + "]";
+
+    std::error_code error;
+    std::filesystem::directory_iterator iterator{"/proc", error};
+    if (error) {
+        return std::nullopt;
+    }
+    const std::filesystem::directory_iterator end;
+    for (; !error && iterator != end; iterator.increment(error)) {
+        const std::filesystem::path entry = iterator->path();
+        const std::string           name = entry.filename().string();
+        if (!all_digits(name)) {
+            continue;
+        }
+        std::error_code                 fd_error;
+        std::filesystem::directory_iterator fds{entry / "fd", fd_error};
+        if (fd_error) {
+            continue;
+        }
+        const std::filesystem::directory_iterator fd_end;
+        for (; !fd_error && fds != fd_end; fds.increment(fd_error)) {
+            std::error_code link_error;
+            const std::filesystem::path link = std::filesystem::read_symlink(fds->path(), link_error);
+            if (link_error) {
+                continue;
+            }
+            if (link.string() == needle) {
+                return static_cast<std::int32_t>(std::stol(name));
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace ymh

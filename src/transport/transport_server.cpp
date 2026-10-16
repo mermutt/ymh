@@ -42,6 +42,7 @@ namespace {
 
 SocketProbeResult probe_existing_socket(const std::string& socket_path,
                                         const WorkspaceId& workspace,
+                                        const HostBootId& expected_boot_id,
                                         std::chrono::steady_clock::time_point deadline) {
     struct stat status {};
     if (::lstat(socket_path.c_str(), &status) != 0) {
@@ -63,10 +64,10 @@ SocketProbeResult probe_existing_socket(const std::string& socket_path,
     try {
         const HelloResult hello =
             probe.handshake(ServerProfile::Interactive,
-                            ClientInstanceId{generate_uuid_v4()},
+                            ClientInstanceId{generate_uuid_v4()}, ClientRole::Observer,
                             remaining_until(deadline));
         probe.close();
-        if (hello.workspace.value == workspace.value) {
+        if (names_live_daemon(hello, workspace, expected_boot_id)) {
             return SocketProbeResult::LiveYmhDaemon;
         }
         return SocketProbeResult::Residue;
@@ -252,7 +253,7 @@ bool TransportServer::post(std::function<void()> fn) {
     return true;
 }
 
-void TransportServer::start() {
+void TransportServer::start(const HostBootId& expected_predecessor_boot_id) {
     if (socket_path_too_long()) {
         throw TransportError(HostErrorCode::SocketPathTooLong,
                              "transport: socket path too long: " + socket_path_);
@@ -260,7 +261,8 @@ void TransportServer::start() {
 
     const std::chrono::steady_clock::time_point probe_deadline =
         std::chrono::steady_clock::now() + kHostConnectTimeout;
-    switch (probe_existing_socket(socket_path_, server_.workspace(), probe_deadline)) {
+    switch (probe_existing_socket(socket_path_, server_.workspace(), expected_predecessor_boot_id,
+                                  probe_deadline)) {
         case SocketProbeResult::Free:
             break;
         case SocketProbeResult::Refused:

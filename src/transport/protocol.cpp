@@ -50,7 +50,7 @@ constexpr std::array<WireEnumEntry<StreamFrom::Kind>, 3> kStreamKinds{{
     {StreamFrom::Kind::Cursor, "cursor"},
 }};
 
-constexpr std::array<WireEnumEntry<HostNoticeKind>, 7> kHostNoticeKinds{{
+constexpr std::array<WireEnumEntry<HostNoticeKind>, 8> kHostNoticeKinds{{
     {HostNoticeKind::SessionClosed, "session_closed"},
     {HostNoticeKind::SessionCreated, "session_created"},
     {HostNoticeKind::LeaseLost, "lease_lost"},
@@ -58,6 +58,7 @@ constexpr std::array<WireEnumEntry<HostNoticeKind>, 7> kHostNoticeKinds{{
     {HostNoticeKind::McpServerStatus, "mcp_server_status"},
     {HostNoticeKind::ReplayComplete, "replay_complete"},
     {HostNoticeKind::HandoffResult, "handoff_result"},
+    {HostNoticeKind::LinkDropped, "link_dropped"},
 }};
 
 constexpr std::array<WireEnumEntry<PermissionAnswer>, 2> kPermissionAnswers{{
@@ -112,6 +113,14 @@ std::string request_id_key(const RequestId& id) {
         return "s:" + std::get<std::string>(id.value);
     }
     return "n:";
+}
+
+bool names_live_daemon(const HelloResult& hello, const WorkspaceId& workspace,
+                       const HostBootId& expected_boot_id) noexcept {
+    if (hello.workspace.value != workspace.value) {
+        return false;
+    }
+    return expected_boot_id.value.empty() || hello.boot_id.value == expected_boot_id.value;
 }
 
 int rpc_code_for_host_error(HostErrorCode code) noexcept {

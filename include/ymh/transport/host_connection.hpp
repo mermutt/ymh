@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -22,6 +23,38 @@
 #include "ymh/transport/protocol.hpp"
 
 namespace ymh::protocol {
+
+// 87-D4 (87-I8): a typed transport fault, distinct from an `RpcException`
+// (semantic per-op error, incl. decode/framing failures and server error
+// responses). Every `HostConnection` transport fault -- connect, send, read,
+// and both bounded waits -- is a `ConnectionError` with a kind.
+enum class ConnectionErrorKind : std::uint8_t {
+    Connect,     // connect(2)/SO_ERROR before an established link
+    Socket,      // socket(2)/fcntl/poll setup failure
+    Timeout,     // a bounded wait expired on a live link (send-track POLLOUT or
+                 // request()'s read wait). NON-link-loss.
+    Epipe,       // send(2) => EPIPE (peer read side closed)
+    PeerClosed,  // read => 0 / ECONNRESET / ECONNABORTED, OR write-side
+                 // POLLERR|POLLHUP|POLLNVAL ("write: peer closed the connection")
+    Other,
+};
+
+class ConnectionError : public std::runtime_error {
+public:
+    ConnectionError(ConnectionErrorKind kind, std::string message);
+    [[nodiscard]] ConnectionErrorKind kind() const noexcept { return kind_; }
+    [[nodiscard]] bool is_link_loss() const noexcept {
+        return kind_ == ConnectionErrorKind::Epipe || kind_ == ConnectionErrorKind::PeerClosed;
+    }
+
+private:
+    ConnectionErrorKind kind_;
+};
+
+// 87-D4 (87-I9/87-I12): the bounded, ASCII, single-line token for a transport
+// fault. `SupervisorConnection` uses this (never the raw `what()`) in a
+// `SupervisorReply.error` and in a `Dead` detail surfaced to the user.
+[[nodiscard]] std::string_view describe_connection_loss(ConnectionErrorKind kind) noexcept;
 
 class HostConnection {
 public:

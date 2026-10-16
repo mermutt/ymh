@@ -232,14 +232,10 @@ bool SupervisorConnection::attempt_attach() {
         connection->connect(config_.socket_path);
         const protocol::HelloResult hello = connection->handshake(
             config_.profile, config_.client_instance, config_.role, config_.handshake_timeout);
-        if (hello.workspace.value != config_.workspace.value) {
+        if (!protocol::names_live_daemon(hello, protocol::WorkspaceId{config_.workspace.value},
+                                         protocol::HostBootId{config_.expected_boot_id})) {
             connection->close();
-            set_state(SupervisorLinkState::Dead, "attach identity mismatch (workspace)");
-            return false;
-        }
-        if (!config_.expected_boot_id.empty() && hello.boot_id.value != config_.expected_boot_id) {
-            connection->close();
-            set_state(SupervisorLinkState::Dead, "attach identity mismatch (boot_id)");
+            set_state(SupervisorLinkState::Dead, "attach identity mismatch");
             return false;
         }
         {
@@ -442,6 +438,8 @@ void SupervisorConnection::process_requests() {
     for (std::size_t index = 0; index < batch.size(); ++index) {
         PendingRequest& request = batch[index];
         SupervisorReply reply;
+        bool link_lost = false;
+        protocol::ConnectionErrorKind lost_kind = protocol::ConnectionErrorKind::Other;
         try {
             reply.ok = true;
             const std::chrono::milliseconds timeout =
@@ -452,6 +450,16 @@ void SupervisorConnection::process_requests() {
             reply.ok = false;
             reply.error_code = error.code();
             reply.error = error.what();
+        } catch (const protocol::ConnectionError& error) {
+            // 87-D4/87-I9: never the raw transport `what()`; a link-loss kind
+            // additionally transitions the link to `Dead` and reconnects, while
+            // `Timeout` (non-link-loss) leaves the link `Attached`.
+            reply.ok = false;
+            reply.error = std::string{protocol::describe_connection_loss(error.kind())};
+            if (error.is_link_loss()) {
+                link_lost = true;
+                lost_kind = error.kind();
+            }
         } catch (const std::exception& error) {
             reply.ok = false;
             reply.error = error.what();
@@ -464,6 +472,16 @@ void SupervisorConnection::process_requests() {
             ++state_generation_;
         }
         cv_.notify_all();
+        if (link_lost) {
+            const std::string detail{protocol::describe_connection_loss(lost_kind)};
+            for (std::size_t rest = index + 1; rest < batch.size(); ++rest) {
+                if (batch[rest].reply) {
+                    batch[rest].reply(SupervisorReply{false, {}, 0, detail});
+                }
+            }
+            handle_disconnect(detail);
+            return;
+        }
         if (connection_ == nullptr || !connection_->isConnected()) {
             // 46-D7 / O-H3: the reply guarantee is structural, not assumed.
             // Answer every remaining request in this batch so a `session.resume`
@@ -494,6 +512,10 @@ void SupervisorConnection::maybe_ping() {
         static_cast<void>(
             connection_->request(protocol::method::kHostPing, nlohmann::json::object(),
                                  config_.request_timeout));
+    } catch (const protocol::ConnectionError& error) {
+        // 87-D4/87-I9: a ping that dies on the wire is a classified link loss,
+        // never the raw transport string.
+        handle_disconnect(std::string{protocol::describe_connection_loss(error.kind())});
     } catch (const std::exception& error) {
         handle_disconnect(std::string("ping failed: ") + error.what());
     }

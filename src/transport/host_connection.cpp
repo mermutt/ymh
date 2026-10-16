@@ -19,8 +19,19 @@
 namespace ymh::protocol {
 namespace {
 
-[[nodiscard]] std::runtime_error connection_error(const std::string& what) {
-    return std::runtime_error("host connection: " + what);
+[[nodiscard]] ConnectionError connection_error(ConnectionErrorKind kind,
+                                               const std::string& what) {
+    return ConnectionError(kind, "host connection: " + what);
+}
+
+[[nodiscard]] ConnectionErrorKind kind_for_io_errno(int value) noexcept {
+    if (value == EPIPE) {
+        return ConnectionErrorKind::Epipe;
+    }
+    if (value == ECONNRESET || value == ECONNABORTED) {
+        return ConnectionErrorKind::PeerClosed;
+    }
+    return ConnectionErrorKind::Other;
 }
 
 [[nodiscard]] std::chrono::milliseconds remaining_until(
@@ -34,6 +45,26 @@ namespace {
 
 } // namespace
 
+ConnectionError::ConnectionError(ConnectionErrorKind kind, std::string message)
+    : std::runtime_error(std::move(message)), kind_(kind) {}
+
+std::string_view describe_connection_loss(ConnectionErrorKind kind) noexcept {
+    switch (kind) {
+        case ConnectionErrorKind::Connect:
+            return "connect failed";
+        case ConnectionErrorKind::Socket:
+            return "socket unavailable";
+        case ConnectionErrorKind::Timeout:
+            return "request timed out";
+        case ConnectionErrorKind::Epipe:
+        case ConnectionErrorKind::PeerClosed:
+            return "connection lost";
+        case ConnectionErrorKind::Other:
+            return "connection error";
+    }
+    return "connection error";
+}
+
 HostConnection::HostConnection() = default;
 
 HostConnection::~HostConnection() { close(); }
@@ -43,14 +74,15 @@ void HostConnection::connect(const std::string& socket_path,
     close();
     const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) {
-        throw connection_error(std::string("socket: ") + std::strerror(errno));
+        throw connection_error(ConnectionErrorKind::Socket,
+                               std::string("socket: ") + std::strerror(errno));
     }
 
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
     if (socket_path.size() >= sizeof(address.sun_path)) {
         ::close(fd);
-        throw connection_error("socket path too long");
+        throw connection_error(ConnectionErrorKind::Socket, "socket path too long");
     }
     std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
 
@@ -60,7 +92,8 @@ void HostConnection::connect(const std::string& socket_path,
             const int saved = errno;
             ::close(fd);
             errno = saved;
-            throw connection_error("connect: " + std::string(std::strerror(saved)));
+            throw connection_error(ConnectionErrorKind::Connect,
+                                   "connect: " + std::string(std::strerror(saved)));
         }
         pollfd descriptor{};
         descriptor.fd = fd;
@@ -82,11 +115,13 @@ void HostConnection::connect(const std::string& socket_path,
             ::close(fd);
             errno = saved;
             if (ready < 0) {
-                throw connection_error("connect: " + std::string(std::strerror(saved)));
+                throw connection_error(ConnectionErrorKind::Connect,
+                                       "connect: " + std::string(std::strerror(saved)));
             }
             errno = ETIMEDOUT;
-            throw connection_error("connect: timed out after " +
-                                   std::to_string(timeout.count()) + " ms");
+            throw connection_error(ConnectionErrorKind::Connect,
+                                   "connect: timed out after " +
+                                       std::to_string(timeout.count()) + " ms");
         }
         int so_error = 0;
         socklen_t length = sizeof(so_error);
@@ -94,17 +129,20 @@ void HostConnection::connect(const std::string& socket_path,
             const int saved = errno;
             ::close(fd);
             errno = saved;
-            throw connection_error("connect: " + std::string(std::strerror(saved)));
+            throw connection_error(ConnectionErrorKind::Connect,
+                                   "connect: " + std::string(std::strerror(saved)));
         }
         if (so_error != 0) {
             ::close(fd);
             errno = so_error;
-            throw connection_error("connect: " + std::string(std::strerror(so_error)));
+            throw connection_error(ConnectionErrorKind::Connect,
+                                   "connect: " + std::string(std::strerror(so_error)));
         }
         if ((descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
             ::close(fd);
             errno = ECONNRESET;
-            throw connection_error("connect: peer closed during connect");
+            throw connection_error(ConnectionErrorKind::Connect,
+                                   "connect: peer closed during connect");
         }
     }
     fd_ = fd;
@@ -113,14 +151,15 @@ void HostConnection::connect(const std::string& socket_path,
 void HostConnection::send_message(const nlohmann::json& message,
                                   std::chrono::steady_clock::time_point deadline) {
     if (fd_ < 0) {
-        throw connection_error("not connected");
+        throw connection_error(ConnectionErrorKind::Other, "not connected");
     }
     const std::string frame = FrameCodec::encode(message.dump(), limits.max_frame_bytes);
     std::size_t written = 0;
     while (written < frame.size()) {
         const auto remaining = remaining_until(deadline);
         if (remaining.count() <= 0) {
-            throw connection_error("write: timed out after the deadline");
+            throw connection_error(ConnectionErrorKind::Timeout,
+                                   "write: timed out after the deadline");
         }
         pollfd descriptor{};
         descriptor.fd = fd_;
@@ -130,14 +169,17 @@ void HostConnection::send_message(const nlohmann::json& message,
             if (errno == EINTR) {
                 continue;
             }
-            throw connection_error(std::string("poll: ") + std::strerror(errno));
+            throw connection_error(ConnectionErrorKind::Socket,
+                                   std::string("poll: ") + std::strerror(errno));
         }
         if (ready == 0) {
-            throw connection_error("write: timed out after the deadline");
+            throw connection_error(ConnectionErrorKind::Timeout,
+                                   "write: timed out after the deadline");
         }
         if ((descriptor.revents & POLLOUT) == 0 &&
             (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-            throw connection_error("write: peer closed the connection");
+            throw connection_error(ConnectionErrorKind::PeerClosed,
+                                   "write: peer closed the connection");
         }
         const ssize_t count =
             ::send(fd_, frame.data() + written, frame.size() - written, MSG_NOSIGNAL);
@@ -145,7 +187,8 @@ void HostConnection::send_message(const nlohmann::json& message,
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
-            throw connection_error(std::string("write: ") + std::strerror(errno));
+            throw connection_error(kind_for_io_errno(errno),
+                                   std::string("write: ") + std::strerror(errno));
         }
         written += static_cast<std::size_t>(count);
     }
@@ -163,7 +206,8 @@ bool HostConnection::wait_readable(std::chrono::milliseconds timeout) const {
         if (errno == EINTR) {
             return false;
         }
-        throw connection_error(std::string("poll: ") + std::strerror(errno));
+        throw connection_error(ConnectionErrorKind::Socket,
+                               std::string("poll: ") + std::strerror(errno));
     }
     if (ready == 0) {
         return false;
@@ -196,13 +240,15 @@ bool HostConnection::fill_incoming(std::chrono::milliseconds timeout) {
         char buffer[65536];
         const ssize_t count = ::read(fd_, buffer, sizeof(buffer));
         if (count == 0) {
-            throw connection_error("peer closed the connection");
+            throw connection_error(ConnectionErrorKind::PeerClosed,
+                                   "peer closed the connection");
         }
         if (count < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
-            throw connection_error(std::string("read: ") + std::strerror(errno));
+            throw connection_error(kind_for_io_errno(errno),
+                                   std::string("read: ") + std::strerror(errno));
         }
         read_buffer.append(buffer, static_cast<std::size_t>(count));
     }
@@ -238,8 +284,8 @@ nlohmann::json HostConnection::request(std::string_view method, nlohmann::json p
 
     while (true) {
         if (!fill_incoming(remaining_until(deadline))) {
-            throw RpcException(static_cast<int>(RpcCode::InternalError),
-                               "timed out waiting for a response");
+            throw ConnectionError(ConnectionErrorKind::Timeout,
+                                  "timed out waiting for a response");
         }
         Message message = parse_message(incoming.front());
         incoming.pop_front();

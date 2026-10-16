@@ -625,6 +625,8 @@ add_library(ymh_registry STATIC
     src/registry/registry.cpp
     src/registry/liveness.cpp
     src/registry/process_scan.cpp
+    src/registry/doctor.cpp
+    src/registry/doctor_cli.cpp
     src/registry/supervisor.cpp
     src/registry/workspace_cli.cpp
 )

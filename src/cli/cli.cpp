@@ -35,6 +35,7 @@
 #include "ymh/cli/wiring.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/host/workspace_host.hpp"
+#include "ymh/registry/doctor_cli.hpp"
 #include "ymh/registry/workspace_cli.hpp"
 #include "ymh/config/config.hpp"
 #include "ymh/llm/model_profile.hpp"
@@ -176,6 +177,7 @@ bool command_loads_config(CliInvocation::Command command) {
             return true;
         case CliInvocation::Command::Workspace:
         case CliInvocation::Command::Session:
+        case CliInvocation::Command::Doctor:
         case CliInvocation::Command::Config:
         case CliInvocation::Command::Version:
             return false;
@@ -222,7 +224,7 @@ std::string help_text(CLI::App& app, std::initializer_list<CLI::App*> subcommand
 
 std::string host_usage() {
     return "ymh --host --workspace <uuid> --root <canonical-root> --socket <path>\n"
-           "          [--config <path>] [--boot-id <uuid>]\n";
+           "          [--config <path>] [--boot-id <uuid>] [--predecessor-boot-id <uuid>]\n";
 }
 
 bool contains_host_flag(const std::vector<std::string>& args) {
@@ -235,6 +237,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     std::string socket_path;
     std::string config_path;
     std::string boot_id;
+    std::string predecessor_boot_id;
 
     for (std::size_t index = 0; index < args.size(); ++index) {
         const std::string& argument = args[index];
@@ -262,6 +265,8 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
             if (!take_value(config_path)) { err << host_usage(); return 2; }
         } else if (argument == "--boot-id") {
             if (!take_value(boot_id)) { err << host_usage(); return 2; }
+        } else if (argument == "--predecessor-boot-id") {
+            if (!take_value(predecessor_boot_id)) { err << host_usage(); return 2; }
         } else {
             err << "ymh --host: unknown argument '" << argument << "'\n";
             return 2;
@@ -313,6 +318,9 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     host_config.watchdog_disabled     = false;
     if (!boot_id.empty()) {
         host_config.boot_id = HostBootId{boot_id};
+    }
+    if (!predecessor_boot_id.empty()) {
+        host_config.predecessor_boot_id = HostBootId{predecessor_boot_id};
     }
 
     std::unique_ptr<WorkspaceHost> host;
@@ -516,11 +524,16 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     ForkExecLauncher launcher;
     HostLifecycle    lifecycle(launcher, *registry, config_path);
 
+    // 87-D2/87-A2: the bare-`ymh` `ensureRunning` is a transient liveness probe
+    // (its returned connection is discarded via RAII), so it uses a fresh
+    // non-owning identity. The durable TUI link keeps the process-wide identity
+    // (`process_client_instance()`), which `options.identity` below pins.
     const AttachIdentity identity{ui::process_client_instance(),
                                   protocol::ClientRole::Supervisor};
     std::optional<std::string> startup_notice;
     try {
-        const AttachResult attach = lifecycle.ensureRunning(row->id, identity, AttachBudget{});
+        const AttachResult attach =
+            lifecycle.ensureRunning(row->id, ui::probe_attach_identity(), AttachBudget{});
         (void)attach;
     } catch (const std::exception& error) {
         // 53-D1 step 4: an explicit activation (`--resume`/`--new`) stays fatal;
@@ -1185,6 +1198,16 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     workspace_stop->add_option("target", workspace_stop_target, "Workspace ID or path")->required();
     workspace_stop->add_flag("--force", workspace_stop_force,
                              "Stop even when the workspace has live owners (§4.6)");
+    CLI::App*   workspace_reap = workspace->add_subcommand(
+        "reap", "Clear a stale host claim when the sidecar lock is free");
+    std::string workspace_reap_target;
+    bool        workspace_reap_yes = false;
+    workspace_reap->add_option("target", workspace_reap_target, "Workspace ID or path")->required();
+    workspace_reap->add_flag("--yes", workspace_reap_yes, "Skip the confirmation prompt (88-D8)");
+
+    CLI::App* doctor = app.add_subcommand("doctor", "Diagnose workspace ownership integrity");
+    add_common(*doctor, invocation);
+    doctor->add_flag("--json", invocation.doctor_json, "Machine-readable JSON output (88 §6.2)");
 
     CLI::App*   session = app.add_subcommand("session", "Session lifecycle commands");
     CLI::App*   session_prune = session->add_subcommand("prune", "Prune unprompted root sessions");
@@ -1215,7 +1238,7 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     } catch (const CLI::CallForAllHelp&) {
         throw CLI::ParseError(app.help("", CLI::AppFormatMode::All), 0);
     } catch (const CLI::CallForHelp&) {
-        throw CLI::ParseError(help_text(app, {run, list, show, replay, fork, workspace, session, config}), 0);
+        throw CLI::ParseError(help_text(app, {run, list, show, replay, fork, workspace, doctor, session, config}), 0);
     }
 
     if (invocation.version_requested) {
@@ -1259,7 +1282,15 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
             invocation.workspace_args.emplace_back("stop");
             invocation.workspace_args.push_back(workspace_stop_target);
             invocation.workspace_force = workspace_stop_force;
+        } else if (workspace_reap->parsed()) {
+            invocation.workspace_args.emplace_back("reap");
+            invocation.workspace_args.push_back(workspace_reap_target);
+            invocation.workspace_yes = workspace_reap_yes;
         }
+        return invocation;
+    }
+    if (doctor->parsed()) {
+        invocation.command = CliInvocation::Command::Doctor;
         return invocation;
     }
     if (session->parsed()) {
@@ -1424,7 +1455,18 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                 return run_workspace_stop(invocation.workspace_args, invocation.workspace_force,
                                           out, err);
             }
+            if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "reap") {
+                return run_workspace_reap(invocation.workspace_args, invocation.workspace_yes, out,
+                                          err);
+            }
             return run_workspace_command(invocation.workspace_args, out, err);
+
+        case CliInvocation::Command::Doctor: {
+            DoctorOptions options;
+            options.json = invocation.doctor_json;
+            options.workspace = invocation.workspace;
+            return run_doctor(options, out, err);
+        }
 
         case CliInvocation::Command::Session: {
             if (invocation.session_older_than) {

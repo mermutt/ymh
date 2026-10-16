@@ -53,6 +53,26 @@ using HostConfirmer =
 // Real enumeration: `/proc/<pid>/cmdline` and `/proc/<pid>/cwd`.
 [[nodiscard]] std::vector<ProcessEntry> readProcessTable();
 
+// 88-A4 (spec 88 §7): the availability-aware process table. `complete == false`
+// means `/proc` could not be enumerated, so no process is observable; a consumer
+// (`diagnose`, C12/DF4b) must skip pid-dependent checks rather than guess.
+struct ProcessTable {
+    std::vector<ProcessEntry> entries;
+    bool                      complete = true;
+};
+
+// Enumeration that reports whether `/proc` was fully readable. The shipped
+// `readProcessTable()` keeps its signature and returns `.entries` (empty when
+// incomplete). Caller of the checked form: `run_doctor`.
+[[nodiscard]] ProcessTable readProcessTableChecked();
+
+// 88-A4 (spec 88 §7): the pid holding the AF_UNIX socket inode at `socketPath`,
+// or `nullopt` when unknown. Pure reads: `/proc/net/unix` (path -> inode), then a
+// scan of `/proc/<pid>/fd` for `socket:[<inode>]`. Never connects; never
+// signals. Caller: `run_doctor`.
+[[nodiscard]] std::optional<std::int32_t> socketOwnerPid(
+    const std::filesystem::path& socketPath);
+
 // `true` iff the argv is a `ymh` host invocation carrying the flag triple.
 [[nodiscard]] bool is_ymh_host_process(const std::vector<std::string>& argv);
 

@@ -134,6 +134,9 @@ private:
         bool                     hello_done{false};
         bool                     dropped{false};
         bool                     close_when_drained{false};
+        // 87-D3: the reason a graceful drain-close reports to the `DropFn`;
+        // empty for the pre-existing "closed" path (host.detach, shutdown).
+        std::string              close_reason;
         bool                     pumping{false};
         bool                     suppress_response{false};
         ServerProfile            profile{ServerProfile::Interactive};
@@ -169,6 +172,15 @@ private:
     void maybe_close_after_drain(Connection& conn);
     void drop_client(Connection& conn, std::string reason);
     void end_subscriptions(Connection& conn, const SessionId& session, std::string reason);
+
+    // 87-D3: deliver the close-reason frames for a handshaked connection, then
+    // drain and close. Falls back to `drop_client` when nothing can be delivered
+    // (`conn.dropped || !conn.hello_done || !conn.send`). Caller: the supersede
+    // path in `handle_hello`.
+    void graceful_drop(Connection& conn, std::string reason);
+    // 87-D3/L2: end EVERY subscription on the connection (the shipped
+    // `end_subscriptions` is session-scoped). Caller: `graceful_drop`.
+    void end_all_subscriptions(Connection& conn, std::string reason);
     void publish_owner_liveness();
 
     // 16 §4.4 (O-H2): io-thread admission pre-check run BEFORE requestShutdown

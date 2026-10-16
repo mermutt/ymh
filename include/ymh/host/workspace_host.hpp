@@ -149,6 +149,11 @@ struct HostConfig {
     // UUIDv4 after chdir and before store open (04 §3.3 step 3).
     std::optional<HostBootId> boot_id;
 
+    // 87-D1: the boot nonce of the claim this daemon is replacing (the
+    // pre-reap registry claim), threaded in memory and on the daemon argv. Empty
+    // only on the no-claim path; bounds what `TransportServer::start` reclaims.
+    std::optional<HostBootId> predecessor_boot_id;
+
     // D9: substitute the store (must be a non-final `SessionStore`). Unset in
     // production. Caller keeps it alive; one store/one flock (H6).
     std::function<std::unique_ptr<SessionStore>()> store_factory;
