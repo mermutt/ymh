@@ -487,6 +487,10 @@ private:
                 (void)!::write(status_pipe[1], &status_byte, 1);
                 ::_exit(127);
             }
+            if (request.confinement != nullptr) {
+                set_confinement_status_fd(status_pipe[1]);
+                kernel_confinement().apply_or_abort(*request.confinement);
+            }
             ::execve(executable.c_str(), argv_raw.data(), env_raw.data());
             const char status_byte = 'E';
             (void)!::write(status_pipe[1], &status_byte, 1);

@@ -28,6 +28,7 @@
 #include "ymh/core/event.hpp"
 #include "ymh/core/task.hpp"
 #include "ymh/execution/config.hpp"
+#include "ymh/execution/confinement.hpp"
 #include "ymh/execution/errors.hpp"
 #include "ymh/execution/executor.hpp"
 
@@ -378,6 +379,10 @@ struct PtyRequest {
     SessionId                session;      // owning session (caps + routing)
     std::vector<std::pair<std::string, std::string>> environment;  // overlay
     std::string              term{"xterm-256color"};
+
+    // 89-D17/89-A10 (L2): when set, the forked child applies kernel confinement
+    // before `execve` (after the slave/master/status closes). Null => none.
+    const ConfinementPolicy* confinement{nullptr};
 };
 
 // ---- 14 §4.1 — the `PtyService` seam (pinned) ------------------------------

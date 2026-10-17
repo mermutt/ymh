@@ -74,6 +74,11 @@ struct PermissionRequest {
     // tool_defaults, default_verdict, and grants; `tool_is_mutating` never
     // reads it, so `SandboxMode::ReadOnly` does not pre-rule deny the review.
     bool                   force_ask = false;
+
+    // 89-D14/89-D17: whether L2 kernel confinement is Enforced for this call
+    // (`ConfinementStatus::Enforced`). `false` makes the L1 guard promote a
+    // recognized in-root destructive command to Confirm (`L1.None => L2.on`).
+    bool                   kernel_confinement = false;
 };
 
 struct PolicyRule {
@@ -159,6 +164,16 @@ public:
 
     virtual PolicyVerdict evaluate(const PermissionRequest&) const = 0;
 
+    // 89-D10: the same classification with an additive, bounded, echo-free
+    // guard reason out-param. The default delegates to the one-arg form.
+    virtual PolicyVerdict evaluate(const PermissionRequest& request,
+                                   std::string*               reason) const {
+        if (reason != nullptr) {
+            reason->clear();
+        }
+        return evaluate(request);
+    }
+
     // 46-D2: returns the created grant (was `void`); callers may ignore it.
     virtual PolicyRule remember(const PermissionRequest&,
                                 payload::PermissionDecisionKind,
@@ -178,6 +193,8 @@ public:
     explicit RulePermissionPolicy(PermissionConfig config, GrantStore* store = nullptr);
 
     PolicyVerdict evaluate(const PermissionRequest& request) const override;
+    PolicyVerdict evaluate(const PermissionRequest& request,
+                           std::string*               reason) const override;
     PolicyRule    remember(const PermissionRequest& request,
                            payload::PermissionDecisionKind kind,
                            GrantScope scope) override;

@@ -879,6 +879,9 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         request.root = services_.execution->root();
     }
     request.sandbox = config_.sandbox;
+    request.kernel_confinement =
+        services_.execution != nullptr &&
+        services_.execution->confinementStatus() == ConfinementStatus::Enforced;
     if (services_.tools != nullptr) {
         if (Tool* tool = services_.tools->find(ToolName{call.name}); tool != nullptr) {
             request.destructive = tool->schema().destructive;
@@ -909,13 +912,17 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         reason   = outcome.reason;
         state_   = AgentState::CallingTool;
     } else {
+        std::string         policy_reason;
         const PolicyVerdict verdict =
-            services_.policy != nullptr ? services_.policy->evaluate(request) : PolicyVerdict::Ask;
+            services_.policy != nullptr
+                ? services_.policy->evaluate(request, &policy_reason)
+                : PolicyVerdict::Ask;
         if (verdict == PolicyVerdict::Allow) {
             decision = payload::PermissionDecisionKind::Allow;
+            reason   = policy_reason;
         } else if (verdict == PolicyVerdict::Deny) {
             decision = payload::PermissionDecisionKind::Deny;
-            reason   = "denied by policy";
+            reason   = policy_reason.empty() ? std::string{"denied by policy"} : policy_reason;
         } else {
             state_ = AgentState::WaitingForPermission;
             if (services_.permission_resolver) {

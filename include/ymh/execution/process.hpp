@@ -19,6 +19,7 @@
 
 #include "ymh/core/cancellation.hpp"
 #include "ymh/core/task.hpp"
+#include "ymh/execution/confinement.hpp"
 #include "ymh/execution/output.hpp"
 
 namespace ymh {
@@ -47,6 +48,10 @@ struct ProcessRequest {
     bool                      capture_stdout{true};
     bool                      capture_stderr{true};
     OutputSink*               sink{nullptr};   // streaming; null => buffered
+
+    // 89-D17/89-A10 (L2): when set, the forked child applies kernel confinement
+    // after `close_inherited_fds()` and before `execvp`. Null => no confinement.
+    const ConfinementPolicy*  confinement{nullptr};
 };
 
 struct ProcessResult {

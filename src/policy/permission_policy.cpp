@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ymh/execution/glob.hpp"
+#include "ymh/policy/shell_guard.hpp"
 
 namespace ymh {
 
@@ -264,8 +265,39 @@ void RulePermissionPolicy::reorder() {
 }
 
 PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request) const {
+    return evaluate(request, nullptr);
+}
+
+PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
+                                             std::string*               reason) const {
+    if (reason != nullptr) {
+        reason->clear();
+    }
+
+    const std::string guard_text = shell_guard_text(request);
+    ShellCommandRisk  guard_risk = ShellCommandRisk::None;
+    if (!guard_text.empty()) {
+        // 89-D14 coupling: `kernel_confinement == false` makes the classifier
+        // promote a recognized in-root destructive command to `Confirm`, so the
+        // rule fold below can never silently `Allow` it (`L1.None => L2.on`).
+        guard_risk = classify_shell_command(guard_text, request.root, request.root,
+                                            request.kernel_confinement);
+        if (guard_risk == ShellCommandRisk::Forbid) {
+            if (reason != nullptr) {
+                *reason = "shell-guard:outside-root";
+            }
+            return PolicyVerdict::Deny;
+        }
+    }
+
     if (request.sandbox == SandboxMode::ReadOnly && tool_is_mutating(request)) {
         return PolicyVerdict::Deny;
+    }
+    if (guard_risk == ShellCommandRisk::Confirm) {
+        if (reason != nullptr) {
+            *reason = "shell-guard:unbounded-in-root";
+        }
+        return PolicyVerdict::Ask;
     }
     if (request.force_ask) {
         return PolicyVerdict::Ask;
@@ -424,14 +456,16 @@ void PermissionGate::emit_decision(const PermissionRequest& request,
 PermissionOutcome PermissionGate::resolve(const PermissionRequest& request,
                                           CancellationToken cancel,
                                           bool subscribers_attached) {
-    const PolicyVerdict verdict = policy_.evaluate(request);
+    std::string            reason;
+    const PolicyVerdict    verdict = policy_.evaluate(request, &reason);
+    const std::string      fallback_reason = reason.empty() ? std::string{"rule"} : reason;
     if (verdict == PolicyVerdict::Allow) {
-        PermissionOutcome outcome{payload::PermissionDecisionKind::Allow, "rule"};
+        PermissionOutcome outcome{payload::PermissionDecisionKind::Allow, fallback_reason};
         emit_decision(request, outcome);
         return outcome;
     }
     if (verdict == PolicyVerdict::Deny) {
-        PermissionOutcome outcome{payload::PermissionDecisionKind::Deny, "rule"};
+        PermissionOutcome outcome{payload::PermissionDecisionKind::Deny, fallback_reason};
         emit_decision(request, outcome);
         return outcome;
     }

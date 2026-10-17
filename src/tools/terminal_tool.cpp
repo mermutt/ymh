@@ -131,10 +131,12 @@ private:
                             "open requires exactly one of command or argv"};
         }
 
+        SpawnConfinement confinement(context.root());
+
         PtyRequest request;
         if (has_command) {
             request.executable = "/bin/bash";
-            request.argv = {"/bin/bash", "-lc",
+            request.argv = {"/bin/bash", "--noprofile", "--norc", "-lc",
                             arguments.value["command"].get<std::string>()};
         } else {
             const auto argv = arguments.value["argv"].get<std::vector<std::string>>();
@@ -149,6 +151,12 @@ private:
             request.cwd = context.resolve(arguments.value["cwd"].get<std::string>());
         } else {
             request.cwd = context.root();
+        }
+        request.environment = {{"HOME", confinement.home().string()},
+                               {"TMPDIR", confinement.tmpdir().string()},
+                               {"PWD", request.cwd.string()}};
+        if (context.execution().confinementStatus() == ConfinementStatus::Enforced) {
+            request.confinement = &confinement.policy();
         }
         if (arguments.value.contains("rows")) {
             request.rows = arguments.value["rows"].get<int>();

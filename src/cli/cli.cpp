@@ -301,6 +301,18 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
         return 2;
     }
 
+    // 89-D16: a workspace root that is (or contains) $HOME would let the L2
+    // write grant bless the home tree -- refuse before any daemon turn runs.
+    {
+        const char*                    home_env = std::getenv("HOME");
+        const std::filesystem::path    home =
+            home_env != nullptr ? std::filesystem::path{home_env} : std::filesystem::path{};
+        if (const std::optional<std::string> refusal = clamp_or_refuse_root(canonical, home)) {
+            err << "ymh --host: " << *refusal << '\n';
+            return 2;
+        }
+    }
+
     HostConfig host_config;
     host_config.workspace      = WorkspaceId{workspace_id};
     host_config.workspace_root = canonical;

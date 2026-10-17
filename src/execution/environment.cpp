@@ -1,8 +1,10 @@
 #include "ymh/execution/environment.hpp"
 
+#include <atomic>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unistd.h>
 
 #include "ymh/execution/errors.hpp"
 
@@ -40,6 +42,7 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
                                    PtyService* pty)
     : root_(std::move(root)),
       mode_(mode),
+      confinement_status_(kernel_confinement().probe()),
       fs_(std::filesystem::path{}, config),
       process_(config.terminate_grace),
       pty_(pty != nullptr ? pty : &pty_fallback_),
@@ -89,6 +92,58 @@ std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
                         "path escapes workspace root: " + raw.string()};
     }
     return final;
+}
+
+SpawnConfinement::SpawnConfinement(const std::filesystem::path& workspace_root) {
+    static std::atomic<std::uint64_t> counter{0};
+    const std::string unique =
+        std::to_string(::getpid()) + "-" + std::to_string(counter.fetch_add(1));
+
+    std::error_code ec;
+    base_ = std::filesystem::temp_directory_path(ec) / ("ymh-spawn-" + unique);
+    if (ec) {
+        base_ = workspace_root / ".ymh" / "spawn" / unique;
+    }
+    home_ = base_ / "home";
+    tmp_  = base_ / "tmp";
+    std::filesystem::create_directories(home_, ec);
+    std::filesystem::create_directories(tmp_, ec);
+
+    policy_.root    = workspace_root;
+    policy_.home    = home_;
+    policy_.tmpdir  = tmp_;
+    policy_.ro_paths = {std::filesystem::path{"/"}};
+}
+
+SpawnConfinement::~SpawnConfinement() { cleanup(); }
+
+SpawnConfinement::SpawnConfinement(SpawnConfinement&& other) noexcept
+    : policy_(std::move(other.policy_)),
+      base_(std::move(other.base_)),
+      home_(std::move(other.home_)),
+      tmp_(std::move(other.tmp_)) {
+    other.base_.clear();
+}
+
+SpawnConfinement& SpawnConfinement::operator=(SpawnConfinement&& other) noexcept {
+    if (this != &other) {
+        cleanup();
+        policy_ = std::move(other.policy_);
+        base_   = std::move(other.base_);
+        home_   = std::move(other.home_);
+        tmp_    = std::move(other.tmp_);
+        other.base_.clear();
+    }
+    return *this;
+}
+
+void SpawnConfinement::cleanup() noexcept {
+    if (base_.empty()) {
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(base_, ec);
+    base_.clear();
 }
 
 } // namespace ymh

@@ -213,12 +213,14 @@ struct PermissionBroker::State {
 std::future<PermissionOutcome> PermissionBroker::State::resolve(const PermissionRequest& request,
                                                                 CancellationToken cancel,
                                                                 std::weak_ptr<State> weak) {
-    const PolicyVerdict verdict = policy.evaluate(request);
+    std::string         reason;
+    const PolicyVerdict verdict = policy.evaluate(request, &reason);
+    const std::string   fallback_reason = reason.empty() ? std::string{"rule"} : reason;
     if (verdict == PolicyVerdict::Allow) {
-        return ready_outcome({payload::PermissionDecisionKind::Allow, "rule"});
+        return ready_outcome({payload::PermissionDecisionKind::Allow, fallback_reason});
     }
     if (verdict == PolicyVerdict::Deny) {
-        return ready_outcome({payload::PermissionDecisionKind::Deny, "rule"});
+        return ready_outcome({payload::PermissionDecisionKind::Deny, fallback_reason});
     }
     if (cancel.cancelled()) {
         return ready_outcome({payload::PermissionDecisionKind::Deny, "cancelled"});

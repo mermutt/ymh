@@ -262,6 +262,7 @@ add_library(ymh_execution STATIC
     src/execution/deadline.cpp
     src/execution/process.cpp
     src/execution/environment.cpp
+    src/execution/landlock.cpp
     src/execution/git_service.cpp
     src/execution/resource_governor.cpp
     src/execution/pty.cpp
@@ -289,6 +290,7 @@ target_link_libraries(ymh_execution
 
 add_library(ymh_policy STATIC
     src/policy/permission_policy.cpp
+    src/policy/shell_guard.cpp
 )
 add_library(ymh::policy ALIAS ymh_policy)
 

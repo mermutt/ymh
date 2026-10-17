@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "ymh/execution/config.hpp"
+#include "ymh/execution/confinement.hpp"
 #include "ymh/execution/filesystem.hpp"
 #include "ymh/execution/git_service.hpp"
 #include "ymh/execution/process.hpp"
@@ -35,6 +36,12 @@ public:
     // The confinement policy `resolve()` obeys (§6.2, §6.8). Immutable per
     // environment; selected by config, never by the model (decision (r)).
     virtual SandboxMode mode() const noexcept = 0;
+
+    // 89-D17/89-D14 (L2): the kernel-confinement status. `Enforced` lets the
+    // agent loop set `PermissionRequest::kernel_confinement` (the coupling
+    // `L1.None => L2.on`); `Unavailable`/`NotApplicable` forces a recognized
+    // destructive in-root call to `Confirm`. Probed and cached at construction.
+    [[nodiscard]] virtual ConfinementStatus confinementStatus() const noexcept = 0;
 
     virtual Filesystem&      fs() = 0;
     virtual ProcessService&  process() = 0;
@@ -61,6 +68,11 @@ public:
     std::filesystem::path        resolve(std::string_view path) const override;
     SandboxMode                  mode() const noexcept override { return mode_; }
 
+    [[nodiscard]] ConfinementStatus confinementStatus() const noexcept override {
+        return mode_ == SandboxMode::Unrestricted ? ConfinementStatus::NotApplicable
+                                                  : confinement_status_;
+    }
+
     Filesystem&     fs() override { return fs_; }
     ProcessService& process() override { return process_; }
     PtyService&     pty() override { return *pty_; }
@@ -74,6 +86,7 @@ public:
 private:
     std::filesystem::path root_;
     SandboxMode           mode_;
+    ConfinementStatus     confinement_status_ = ConfinementStatus::Unavailable;
     LocalFilesystem       fs_;
     LocalProcessService   process_;
     UnavailablePtyService pty_fallback_;

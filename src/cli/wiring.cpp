@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "ymh/core/logging.hpp"
@@ -419,6 +422,37 @@ HandoffPolicy to_handoff_policy(const Config& config) {
             "[handoff].max_summary_bytes must be <= PersistenceConfig::max_payload_bytes");
     }
     return policy;
+}
+
+std::optional<std::string> clamp_or_refuse_root(const std::filesystem::path& canonical_root,
+                                                const std::filesystem::path& home) {
+    std::error_code error;
+    std::filesystem::path root = std::filesystem::weakly_canonical(canonical_root, error);
+    if (error) {
+        root = canonical_root.lexically_normal();
+    }
+
+    if (!home.empty()) {
+        std::error_code home_error;
+        std::filesystem::path canonical_home = std::filesystem::weakly_canonical(home, home_error);
+        if (home_error) {
+            canonical_home = home.lexically_normal();
+        }
+        if (path_is_within(canonical_home, root)) {
+            return "workspace root contains $HOME: " + root.string();
+        }
+    }
+
+    static const std::filesystem::path kSensitive[] = {
+        "/",     "/home", "/etc",  "/usr", "/bin", "/sbin",
+        "/lib",  "/lib64", "/var", "/boot", "/root", "/opt",
+    };
+    for (const std::filesystem::path& sensitive : kSensitive) {
+        if (path_is_within(sensitive, root)) {
+            return "workspace root is a sensitive system path: " + root.string();
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace ymh

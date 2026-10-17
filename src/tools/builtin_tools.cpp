@@ -412,10 +412,19 @@ public:
                             "subprocess cap exhausted"};
         }
 
+        SpawnConfinement confinement(context.root());
+
         ProcessRequest request;
         request.executable = "/bin/bash";
-        request.argv = {"/bin/bash", "-lc", command};
+        request.argv = {"/bin/bash", "--noprofile", "--norc", "-lc", command};
         request.cwd = context.root();
+        request.env_mode = ProcessEnvMode::Minimal;
+        request.environment = {{"HOME", confinement.home().string()},
+                               {"TMPDIR", confinement.tmpdir().string()},
+                               {"PWD", context.root().string()}};
+        if (context.execution().confinementStatus() == ConfinementStatus::Enforced) {
+            request.confinement = &confinement.policy();
+        }
         request.sink = &context.output();
         if (arguments.value.contains("timeout_ms")) {
             request.timeout = std::chrono::milliseconds{

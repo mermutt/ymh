@@ -135,6 +135,19 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         return result;
     }
 
+    // 89-D16: refuse a workspace root that is (or contains) $HOME / a sensitive
+    // system path before any turn runs (the L2 write grant would bless it).
+    {
+        const char*                 home_env = std::getenv("HOME");
+        const std::filesystem::path home =
+            home_env != nullptr ? std::filesystem::path{home_env} : std::filesystem::path{};
+        if (const std::optional<std::string> refusal = clamp_or_refuse_root(root, home)) {
+            err << "ymh: " << *refusal << '\n';
+            result.exit_code = 2;
+            return result;
+        }
+    }
+
     WorkspaceRuntimeOptions runtime_options;
     runtime_options.config  = options.config;
     runtime_options.root    = root;

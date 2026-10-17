@@ -398,11 +398,20 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
         }
         redirect_to_devnull(STDIN_FILENO);
 
+        if (request.env_mode == ProcessEnvMode::Minimal) {
+            ::clearenv();
+            ::setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+        }
         for (const auto& [key, value] : request.environment) {
             ::setenv(key.c_str(), value.c_str(), 1);
         }
 
         close_inherited_fds();
+
+        if (request.confinement != nullptr) {
+            set_confinement_status_fd(errsig.write_fd);
+            kernel_confinement().apply_or_abort(*request.confinement);
+        }
 
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
@@ -581,6 +590,10 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
             ::setenv(key.c_str(), value.c_str(), 1);
         }
         close_inherited_fds();
+        if (request.confinement != nullptr) {
+            set_confinement_status_fd(errsig.write_fd);
+            kernel_confinement().apply_or_abort(*request.confinement);
+        }
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
         const int saved = errno;

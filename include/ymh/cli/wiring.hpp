@@ -5,6 +5,8 @@
 // (06 §3). Keeping these conversions out of `ymh_config` keeps that library
 // free of a dependency on the agent/policy layers.
 
+#include <filesystem>
+#include <optional>
 #include <string>
 
 #include "ymh/agent/agent.hpp"
@@ -54,6 +56,14 @@ namespace ymh {
 // 25-D3: the built-in plan-mode guidance section, used when
 // `agent.plan.section` is empty.
 [[nodiscard]] std::string default_plan_section();
+
+// 89-D16 (L6): refuse a workspace whose canonical root is `home`, an ancestor of
+// `home`, or a sensitive system path (`/`, `/home`, `/etc`, `/usr`, ...). A
+// non-nullopt result is the refusal detail; the daemon/CLI startup path prints
+// it and exits 2 before any turn runs. An empty `home` skips the home check.
+[[nodiscard]] std::optional<std::string> clamp_or_refuse_root(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& home);
 
 // 11-m2-errata §6 (D17): the per-process boot nonce. Minted EXACTLY ONCE at
 // daemon startup (04 §3.3 step 3), after chdir, before store open; a UUIDv4
