@@ -32,6 +32,11 @@ add_executable(ymh_tests
     unit/permissions_test.cpp
     unit/permission_broker_test.cpp
     unit/errata46_permissions_test.cpp
+    unit/errata89_shell_guard_test.cpp
+    unit/errata89_landlock_test.cpp
+    unit/errata89_clamp_test.cpp
+    unit/errata89_l2_absent_test.cpp
+    unit/errata89_corpus_test.cpp
     unit/errata46_localcode_test.cpp
     unit/errata46_deadline_test.cpp
     unit/errata46_ui_test.cpp
@@ -162,6 +167,11 @@ add_executable(ymh_tests
     integration_errata87_restart_storm_test.cpp
     integration_mcp_test.cpp
     integration_live_e2e_test.cpp
+    integration/errata89_l2_confinement_test.cpp
+    integration/errata89_l2_na_test.cpp
+    integration/errata89_b1_spawn_census_test.cpp
+    integration/errata89_b2_danger_test.cpp
+    integration/errata89_canary_test.cpp
 )
 
 add_executable(fake_mcp_server support/fake_mcp_server.cpp)

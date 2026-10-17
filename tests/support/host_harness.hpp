@@ -55,6 +55,17 @@ inline std::filesystem::path resolve_ymh_binary() {
 #endif
 }
 
+// 89-D16: a workspace whose root is (or contains) $HOME is refused at daemon
+// startup, so an isolated HOME must live OUTSIDE the workspace root, never equal
+// to it. Sibling of the workspace, under the same (already-writable) temp base.
+inline std::filesystem::path isolated_home_for(const std::filesystem::path& workspace_root) {
+    std::filesystem::path home =
+        workspace_root.parent_path() / (workspace_root.filename().string() + "-home");
+    std::error_code error;
+    std::filesystem::create_directories(home, error);
+    return home;
+}
+
 class HostHarness {
 public:
     explicit HostHarness(HostHarnessOptions options) : options_(std::move(options)) {
@@ -100,7 +111,7 @@ public:
         child.cwd              = options_.workspace_root;
         child.stdout_path      = stdout_capture_;
         child.stderr_path      = stderr_capture_;
-        child.env["HOME"]           = options_.workspace_root.string();
+        child.env["HOME"]           = isolated_home_for(options_.workspace_root).string();
         child.env["XDG_STATE_HOME"] = (options_.workspace_root / ".state").string();
         child.env["XDG_CONFIG_HOME"] = (options_.workspace_root / ".config").string();
         child.env["XDG_CACHE_HOME"] = (options_.workspace_root / ".cache").string();

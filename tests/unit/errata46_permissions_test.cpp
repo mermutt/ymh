@@ -43,12 +43,21 @@ PermissionRequest request_for(const std::filesystem::path& root,
     if (!command.empty()) {
         request.arguments["command"] = std::move(command);
     }
+    // 89: these cases exercise the rule fold, which an L1-destructive command
+    // only reaches when L2 is on (`L1.None => L2.on`, 89-D14).
+    request.kernel_confinement = true;
     return request;
 }
 
 Config master_allow_config() {
     Config config;
     config.permissions.default_verdict = "allow";
+    return config;
+}
+
+Config danger_full_access_config() {
+    Config config;
+    config.permissions.default_preset = std::string{kDangerFullAccessPreset};
     return config;
 }
 
@@ -123,8 +132,10 @@ TEST(Errata46D1, UI46_D1_DefaultAllowNoPrompts) {
 TEST(Errata46D1, UI46_D1_DefaultAllowShellGitMcp) {
     RulePermissionPolicy policy(to_permission_config(master_allow_config()));
     test::TempWorkspace  workspace("d1_all_classes");
+    // 89-D15: default-allow cannot override the guard; a provably-outside
+    // destructive shell command is Deny before the rule fold.
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "rm -rf /")),
-              PolicyVerdict::Allow);
+              PolicyVerdict::Deny);
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "git_commit")), PolicyVerdict::Allow);
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "mcp.github.create_issue")),
               PolicyVerdict::Allow);
@@ -205,6 +216,24 @@ TEST(Errata46D1, UI46_D1_MasterSwitchBeatsShellDeny) {
               PolicyVerdict::Allow);
 }
 
+TEST(Errata46D1, UI46_D1_DangerFullAccessGuardAskIsNotAutoApproved) {
+    RulePermissionPolicy policy(to_permission_config(danger_full_access_config()));
+    test::TempWorkspace  workspace("d1_danger_guard_ask");
+
+    PermissionRequest request = request_for(workspace.path(), "shell", "rm -rf build");
+    request.kernel_confinement = false;
+    std::string reason;
+    EXPECT_EQ(policy.evaluate(request, &reason), PolicyVerdict::Ask);
+    EXPECT_EQ(reason, "shell-guard:unbounded-in-root");
+
+    PermissionRequest incident = request_for(workspace.path(), "shell", "rm -fr build ~");
+    incident.kernel_confinement = true;
+    EXPECT_EQ(policy.evaluate(incident), PolicyVerdict::Deny);
+
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "rm -rf build")),
+              PolicyVerdict::Allow);
+}
+
 TEST(Errata46D1, UI46_D1_MalformedRuleIsConfigError) {
     test::TempWorkspace workspace("d1_malformed_rule");
     Config              config;
@@ -241,7 +270,7 @@ TEST(Errata46D2, UI46_D2_AlwaysPersistsAcrossRestart) {
         EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "git push origin main")),
                   PolicyVerdict::Allow);
         EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "rm -rf /")),
-                  PolicyVerdict::Ask);
+                  PolicyVerdict::Deny);
     }
 }
 
@@ -439,7 +468,7 @@ TEST(Errata46D2, UI46_D2_GrantCommandIsLiteral) {
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "rm -rf build/*")),
               PolicyVerdict::Allow);
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "rm -rf build/../../etc")),
-              PolicyVerdict::Ask);
+              PolicyVerdict::Deny);
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "shell", "rm -rf build/foo")),
               PolicyVerdict::Ask);
 }

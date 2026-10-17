@@ -606,7 +606,7 @@ protected:
 
     void configure_workspace(const ShortTempRoot& root) {
         state_env_.emplace("XDG_STATE_HOME", (root.path() / ".state").string());
-        home_env_.emplace("HOME", root.path().string());
+        home_env_.emplace("HOME", isolated_home_for(root.path()).string());
         config_env_.emplace("XDG_CONFIG_HOME", (root.path() / ".config").string());
         cache_env_.emplace("XDG_CACHE_HOME", (root.path() / ".cache").string());
         // M4: every daemon spawned by this fixture needs a required global
@@ -624,7 +624,7 @@ protected:
         options.socket_path                = root.host_socket();
         options.log_sink                   = root.host_log();
         options.env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-        options.env["HOME"]                = root.path().string();
+        options.env["HOME"]                = isolated_home_for(root.path()).string();
         options.env["YMH_FAKE_LLM_SCRIPT"] = script.string();
         return options;
     }
@@ -761,7 +761,7 @@ TEST_F(TwoProcess, CrashRespawnReconnectNoLossNoDup) {
 std::map<std::string, std::string> supervisor_env(const ShortTempRoot& root) {
     std::map<std::string, std::string> env;
     env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-    env["HOME"]                = root.path().string();
+    env["HOME"]                = isolated_home_for(root.path()).string();
     env["TERM"]                = "xterm-256color";
     env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
     return env;
@@ -942,7 +942,7 @@ TEST_F(TwoProcess, TwoSpawnsExactlyOneDaemon) {
     loser.stdout_path = root.path() / ".ymh" / "loser.stdout.log";
     loser.stderr_path = root.path() / ".ymh" / "loser.stderr.log";
     loser.env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-    loser.env["HOME"]                = root.path().string();
+    loser.env["HOME"]                = isolated_home_for(root.path()).string();
     loser.env["YMH_FAKE_LLM_SCRIPT"] = script.string();
     const ExitStatus loser_status = run_child(std::move(loser), 10s);
     ASSERT_TRUE(loser_status.exited);

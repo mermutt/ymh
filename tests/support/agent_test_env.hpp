@@ -72,12 +72,13 @@ inline AgentServices make_agent_services(SessionManager& sessions,
                                          ContextCompactor* context_compactor = nullptr,
                                          PlanModeController* plan_mode = nullptr,
                                          SystemPrompt* prompt = nullptr,
-                                         InstructionLoader* instructions = nullptr) {
+                                         InstructionLoader* instructions = nullptr,
+                                         PermissionPolicy* policy_override = nullptr) {
     AgentServices services;
     services.sessions            = &sessions;
     services.governor            = &governor;
     services.tools               = &tools;
-    services.policy              = &policy;
+    services.policy              = policy_override != nullptr ? policy_override : &policy;
     services.gate                = gate;
     services.context             = &context;
     services.execution           = &execution;
@@ -110,7 +111,8 @@ struct AgentEnv {
              SystemPrompt* prompt = nullptr,
              InstructionLoader* instructions = nullptr,
              GrantStore* grant_store = nullptr,
-             ToolConfig tool_config = {})
+             ToolConfig tool_config = {},
+             PermissionPolicy* policy_override = nullptr)
         : workspace(prefix),
           sessions(store, bus),
           env(workspace.path(), SandboxMode::Workspace, tool_config),
@@ -139,7 +141,7 @@ struct AgentEnv {
                                         logger, runtime, pool, estimator,
                                         std::move(resolver), compactor, context_compactor.get(),
                                         plan_mode_controller ? &*plan_mode_controller : nullptr,
-                                        prompt, instructions),
+                                        prompt, instructions, policy_override),
                    std::move(config)) {
         if (register_builtins) {
             for (std::unique_ptr<Tool>& tool : make_builtin_tools()) {

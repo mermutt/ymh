@@ -114,7 +114,7 @@ std::map<std::string, std::string> child_env(const ShortTempRoot& root,
                                              const std::filesystem::path& script) {
     std::map<std::string, std::string> env;
     env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-    env["HOME"]                = root.path().string();
+    env["HOME"]                = isolated_home_for(root.path()).string();
     env["XDG_CONFIG_HOME"]     = (root.path() / ".config").string();
     env["XDG_CACHE_HOME"]      = (root.path() / ".cache").string();
     env["TERM"]                = "xterm-256color";
@@ -140,7 +140,7 @@ TEST(OwnershipTwoSupervisor, SessionCreatedBroadcastReachesAttachedClients) {
     options.workspace_id               = workspace_id;
     options.socket_path                = root.host_socket();
     options.env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-    options.env["HOME"]                = root.path().string();
+    options.env["HOME"]                = isolated_home_for(root.path()).string();
     options.env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
 
     HostHarness harness(options);
@@ -291,7 +291,7 @@ TEST(OwnershipTwoSupervisor, PeerReplayAndFollowUpLeaveOwnerFocusUnchanged) {
     options.workspace_id               = workspace_id;
     options.socket_path                = root.host_socket();
     options.env["XDG_STATE_HOME"]      = (root.path() / ".state").string();
-    options.env["HOME"]                = root.path().string();
+    options.env["HOME"]                = isolated_home_for(root.path()).string();
     options.env["YMH_FAKE_LLM_SCRIPT"] = (root.path() / "fake.json").string();
 
     HostHarness harness(options);

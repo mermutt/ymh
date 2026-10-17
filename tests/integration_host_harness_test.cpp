@@ -284,7 +284,8 @@ TEST_F(HostIntegration, RunRoutesThroughLiveDaemon) {
 
     const ymh::test::ScopedEnvVar state_env("XDG_STATE_HOME",
                                             (root.path() / ".state").string());
-    const ymh::test::ScopedEnvVar home_env("HOME", root.path().string());
+    const ymh::test::ScopedEnvVar home_env("HOME",
+                                           ymh::test::isolated_home_for(root.path()).string());
     const ymh::test::ScopedEnvVar config_env("XDG_CONFIG_HOME",
                                              (root.path() / ".config").string());
 
@@ -313,7 +314,7 @@ TEST_F(HostIntegration, RunFallsBackInProcessWithoutDaemon) {
     ScopedEnv config_env("XDG_CONFIG_HOME");
     ScopedEnv fake_env("YMH_FAKE_LLM_SCRIPT");
     ::setenv("XDG_STATE_HOME", (root.path() / ".state").string().c_str(), 1);
-    ::setenv("HOME", root.path().string().c_str(), 1);
+    ::setenv("HOME", ymh::test::isolated_home_for(root.path()).string().c_str(), 1);
     ::setenv("XDG_CONFIG_HOME", (root.path() / ".config").string().c_str(), 1);
     ::setenv("YMH_FAKE_LLM_SCRIPT", (root.path() / "fake.json").string().c_str(), 1);
 
