@@ -35,6 +35,14 @@ public:
     // fail-closed and never leaves the request pending.
     virtual bool broadcast_permission_request(protocol::PermissionRequest request) = 0;
 
+    // 95-D4: broadcast `permission.resolved` with the same predicate as
+    // `broadcast_permission_request` (95-D2). Best-effort: false means the
+    // transport is not running; the request is already resolved (95-D15). The
+    // default keeps the test fakes compiling; production implementors override.
+    virtual bool broadcast_permission_resolved(protocol::PermissionResolvedNotice) {
+        return false;
+    }
+
     // Run `fn` on the transport io thread after `delay` (a steady timer on
     // `TransportServer::io()`, errata §2.2). Returns false when the transport
     // is not running. `fn` is invoked at most once; a request resolved before

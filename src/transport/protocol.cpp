@@ -573,6 +573,30 @@ void from_json(const nlohmann::json& json, PermissionDecisionParams& params) {
     params.scope = *scope;
 }
 
+void to_json(nlohmann::json& json, const PermissionResolvedNotice& notice) {
+    json = nlohmann::json{{"request_id", notice.request_id},
+                          {"session", notice.session.value},
+                          {"decision", std::string{wire_name(notice.decision)}},
+                          {"scope", std::string{wire_name(notice.scope)}},
+                          {"reason", notice.reason}};
+}
+
+void from_json(const nlohmann::json& json, PermissionResolvedNotice& notice) {
+    notice.request_id = json.at("request_id").get<std::string>();
+    notice.session.value = json.at("session").get<std::string>();
+    const auto decision = parse_permission_answer(json.at("decision").get<std::string>());
+    if (!decision.has_value()) {
+        throw std::invalid_argument("unknown permission decision");
+    }
+    notice.decision = *decision;
+    const auto scope = parse_permission_scope(json.at("scope").get<std::string>());
+    if (!scope.has_value()) {
+        throw std::invalid_argument("unknown permission scope");
+    }
+    notice.scope = *scope;
+    notice.reason = json.value("reason", std::string{});
+}
+
 void to_json(nlohmann::json& json, const WorkspaceSummary& summary) {
     json = nlohmann::json{{"id", summary.id.value},
                           {"canonical_path", summary.canonical_path},

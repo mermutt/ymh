@@ -227,6 +227,17 @@ protocol::PermissionAnswer wire_answer(payload::PermissionDecisionKind decision)
                                                              : protocol::PermissionAnswer::Allow;
 }
 
+payload::PermissionDecisionKind decision_kind(protocol::PermissionAnswer answer,
+                                              protocol::PermissionScope scope) {
+    if (answer == protocol::PermissionAnswer::Deny) {
+        return payload::PermissionDecisionKind::Deny;
+    }
+    if (scope == protocol::PermissionScope::Always) {
+        return payload::PermissionDecisionKind::AllowAlways;
+    }
+    return payload::PermissionDecisionKind::Allow;
+}
+
 protocol::PermissionScope wire_scope(GrantScope scope) {
     switch (scope) {
         case GrantScope::Once:
@@ -975,6 +986,16 @@ private:
                 adapter_.onPermissionRequest(workspace_id, request);
             });
         };
+        // 95-D5: a `permission.resolved` broadcast from another UI closes the
+        // matching dialog (95-D6) and keeps agent state truthful (95-D6b).
+        sink.on_permission_resolved =
+            [this](const protocol::PermissionResolvedNotice& notice) {
+                enqueue([this, notice] {
+                    adapter_.onPermissionResolved(
+                        notice.session, PermissionRequestId{notice.request_id},
+                        decision_kind(notice.decision, notice.scope));
+                });
+            };
         sink.on_notice = [this, workspace_id](const protocol::HostNotice& notice) {
             enqueue([this, workspace_id, notice] {
                 handle_sink_notice(workspace_id, notice);
@@ -1779,6 +1800,8 @@ private:
             if (connection != connections_.end()) {
                 connection->second->untrack(*notice.session);
             }
+            // 95-D16: the session is gone, so its dialog must not linger.
+            model_.closePermissionDialogForSession(*notice.session);
         }
         adapter_.onHostNotice(workspace, notice);
         if (notice.kind == protocol::HostNoticeKind::SessionClosed &&
@@ -2461,6 +2484,9 @@ private:
             if (state == SupervisorLinkState::Detached ||
                 state == SupervisorLinkState::Dead) {
                 model_.endOpeningsIn(workspace);
+                // 95-D16: a dropped link can never deliver the notice, so the
+                // workspace's open dialog must not block the composer.
+                model_.closePermissionDialogForWorkspace(workspace);
             }
             model_.dirty.markAggregate();
             // 58-E36: fast-path guard; inert while the child state survives (the

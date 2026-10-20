@@ -1643,6 +1643,36 @@ void UiModel::eraseWorkspace(const WorkspaceId& workspace) {
     dirty.markAggregate();
 }
 
+bool UiModel::permission_dialog_open_for(const SessionId& session,
+                                        const PermissionRequestId& id) const {
+    return dialog.open && dialog.session == session && dialog.request == id;
+}
+
+void UiModel::closePermissionDialogForSession(const SessionId& session) {
+    if (!dialog.open || dialog.session != session) {
+        return;
+    }
+    const UiMode prev = dialog.prev_mode;
+    dialog.open = false;
+    mode = prev;
+    const auto it = sessions.find(session);
+    if (it != sessions.end()) {
+        it->second.attention.needsInput = false;
+    }
+    dirty.mark(session, UiDirtyFlag::Attention);
+}
+
+void UiModel::closePermissionDialogForWorkspace(const WorkspaceId& workspace) {
+    if (!dialog.open) {
+        return;
+    }
+    const auto it = sessions.find(dialog.session);
+    if (it == sessions.end() || it->second.workspace != workspace) {
+        return;
+    }
+    closePermissionDialogForSession(dialog.session);
+}
+
 void UiModel::apply(const UiEvent& event) {
     const bool conversation_event = std::visit(
         [](const auto& e) {
@@ -1849,12 +1879,15 @@ void UiModel::apply(const UiEvent& event) {
                 mode = UiMode::Dialog;
                 dirty.mark(e.session, UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, PermissionResolved>) {
-                if (dialog.request == e.request) {
+                // 95-D6a: session + request must both match, and the dialog
+                // must still be open. Attention is cleared only inside the
+                // guard so a stale notice cannot clear a newer prompt's.
+                if (dialog.open && dialog.session == e.session && dialog.request == e.request) {
                     const UiMode prev = dialog.prev_mode;
                     dialog.open = false;
                     mode = prev;
+                    state.attention.needsInput = false;
                 }
-                state.attention.needsInput = false;
                 dirty.mark(e.session, UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, AgentStateChanged>) {
                 state.agent_state = e.newState;

@@ -415,12 +415,17 @@ void UiEventAdapter::onPermissionRequest(const WorkspaceId& workspace,
 void UiEventAdapter::onPermissionResolved(const SessionId& session,
                                           const PermissionRequestId& id,
                                           payload::PermissionDecisionKind decision) {
+    // 95-D6b: the state transition needs BOTH an open matching dialog and a
+    // session still WaitingForPermission. A duplicate or late notice is then a
+    // pure no-op for agent state (95-I4/95-I8).
+    const bool was_open = model_.permission_dialog_open_for(session, id);
+    const auto state = lastState_.find(session);
+    const bool waiting =
+        state != lastState_.end() && state->second == AgentState::WaitingForPermission;
     applyAndMark(UiEvent{PermissionResolved{session, id, decision}});
-
-    const auto previous = lastState_.find(session);
-    const AgentState old = previous == lastState_.end() ? AgentState::Idle : previous->second;
-    if (old != AgentState::Thinking) {
-        applyAndMark(UiEvent{AgentStateChanged{session, old, AgentState::Thinking}});
+    if (was_open && waiting) {
+        applyAndMark(UiEvent{AgentStateChanged{session, AgentState::WaitingForPermission,
+                                               AgentState::Thinking}});
     }
 }
 

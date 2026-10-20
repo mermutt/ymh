@@ -76,6 +76,9 @@ public:
     // transport io thread. Caller: the daemon's marshalled HandoffNoticeForwarder.
     void onHandoffResult(const SessionId& session, std::string detail);
     void onPermissionRequest(const PermissionRequest& request);
+    // 95-D1: emits `permission.resolved` to every Interactive connection that
+    // received the matching request (same predicate, 95-D2).
+    void onPermissionResolved(const PermissionResolvedNotice& notice);
 
     [[nodiscard]] std::size_t attachedClients() const;
     [[nodiscard]] bool hasClient(ClientId id) const;
@@ -161,6 +164,11 @@ private:
     std::optional<nlohmann::json> handle_hello(Connection& conn, const Request& request);
     void handle_method(Connection& conn, const Request& request, std::string_view method_name);
     void handle_subscribe(Connection& conn, const Request& request, bool replay_only);
+
+    // 95-D2: the single fan-out predicate shared by `onPermissionRequest` and
+    // `onPermissionResolved` (dropped? hello done? Interactive? subscribed?).
+    [[nodiscard]] bool is_subscribed_interactive(const Connection& conn,
+                                                 const SessionId& session) const;
 
     void respond(Connection& conn, const RequestId& id, nlohmann::json result);
     void respond_error(Connection& conn, const RequestId& id, int code, std::string message,

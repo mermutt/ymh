@@ -93,6 +93,8 @@ struct SupervisorSink {
         on_envelope;
     std::function<void(const protocol::HostNotice&)>      on_notice;
     std::function<void(const protocol::PermissionRequest&)> on_permission;
+    // 95-D5: a `permission.resolved` broadcast from another attached UI.
+    std::function<void(const protocol::PermissionResolvedNotice&)> on_permission_resolved;
     std::function<void(SupervisorLinkState, const std::string& detail)> on_state;
     // 58-A6/E29: a per-session subscribe failed (UnknownSession/SubscriptionLimit).
     std::function<void(const SessionId&, const std::string&)> on_subscribe_error;

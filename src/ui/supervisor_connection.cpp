@@ -421,6 +421,13 @@ void SupervisorConnection::dispatch(const protocol::Notification& notification) 
         }
         return;
     }
+    if (notification.method == protocol::notify::kPermissionResolved) {
+        const auto notice = notification.params.get<protocol::PermissionResolvedNotice>();
+        if (sink_.on_permission_resolved) {
+            sink_.on_permission_resolved(notice);
+        }
+        return;
+    }
     if (notification.method == protocol::notify::kHostEvent) {
         const auto notice = notification.params.get<protocol::HostNotice>();
         if (sink_.on_notice) {

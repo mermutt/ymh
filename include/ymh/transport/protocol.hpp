@@ -294,6 +294,17 @@ struct PermissionDecisionParams {
     PermissionScope  scope{PermissionScope::Once};
 };
 
+// 95-D1: broadcast when a delivered `permission.request` is resolved. Every
+// Interactive subscriber that received the request receives exactly one
+// notice. `reason` is a bounded diagnostic token (95-D12), never an error.
+struct PermissionResolvedNotice {
+    std::string      request_id;
+    SessionId        session;
+    PermissionAnswer decision{PermissionAnswer::Deny};
+    PermissionScope  scope{PermissionScope::Once};
+    std::string      reason;
+};
+
 struct HostStatus {
     HostState                 state{HostState::Starting};
     WorkspaceId               workspace;
@@ -545,6 +556,9 @@ void from_json(const nlohmann::json& json, PermissionRequest& request);
 void to_json(nlohmann::json& json, const PermissionDecisionParams& params);
 void from_json(const nlohmann::json& json, PermissionDecisionParams& params);
 
+void to_json(nlohmann::json& json, const PermissionResolvedNotice& notice);
+void from_json(const nlohmann::json& json, PermissionResolvedNotice& notice);
+
 void to_json(nlohmann::json& json, const WorkspaceSummary& summary);
 void from_json(const nlohmann::json& json, WorkspaceSummary& summary);
 
@@ -638,6 +652,7 @@ inline constexpr std::string_view kEventStream   = "event.stream";
 inline constexpr std::string_view kEventLive     = "event.live";
 inline constexpr std::string_view kEventUnsubscribed = "event.unsubscribed";
 inline constexpr std::string_view kPermissionRequest = "permission.request";
+inline constexpr std::string_view kPermissionResolved = "permission.resolved"; // 95-D1
 inline constexpr std::string_view kHostEvent     = "host.event";
 } // namespace notify
 

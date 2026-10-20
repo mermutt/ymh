@@ -83,6 +83,17 @@ public:
         });
     }
 
+    bool broadcast_permission_resolved(protocol::PermissionResolvedNotice notice) override {
+        if (transport_ == nullptr || server_ == nullptr) {
+            return false;
+        }
+        return transport_->post([server = server_, notice = std::move(notice)]() mutable {
+            if (server != nullptr) {
+                server->onPermissionResolved(notice);
+            }
+        });
+    }
+
     bool schedule_after(std::chrono::milliseconds delay, std::function<void()> fn) override {
         if (transport_ == nullptr) {
             return false;

@@ -5,7 +5,9 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -18,6 +20,11 @@ struct Pending {
     std::promise<PermissionOutcome> promise;
     Clock::time_point               deadline{};
     bool                            resolved = false;
+    // 95-D3a: true once the request post has returned true. A resolution that
+    // wins the publication race defers its notice here until phase 2 flushes
+    // it AFTER the request post (request-before-notice, 95-I10).
+    bool request_posted = false;
+    std::optional<protocol::PermissionResolvedNotice> deferred_notice;
 };
 
 std::future<PermissionOutcome> ready_outcome(PermissionOutcome outcome) {
@@ -186,8 +193,8 @@ struct PermissionBroker::State {
         return reader ? reader(session) : 0;
     }
 
-    std::shared_ptr<Pending> claim(const std::string& id) {
-        std::lock_guard<std::mutex> lock(mutex);
+    // 95-D18: caller holds `mutex`; `claim` is the locking wrapper.
+    std::shared_ptr<Pending> claim_locked(const std::string& id) {
         for (auto it = pending.begin(); it != pending.end(); ++it) {
             if ((*it)->wire.request_id != id) {
                 continue;
@@ -201,6 +208,45 @@ struct PermissionBroker::State {
             return claimed;
         }
         return nullptr;
+    }
+
+    std::shared_ptr<Pending> claim(const std::string& id) {
+        std::lock_guard<std::mutex> lock(mutex);
+        return claim_locked(id);
+    }
+
+    // 95-D3/95-D15: best-effort resolution notice. Reads `request_posted` under
+    // the mutex and posts WITHOUT it (no virtual call under `mutex`, 95-M1);
+    // a pre-post resolution defers to the phase-2 flush. Never throws.
+    void notify_resolved(const std::shared_ptr<Pending>& entry,
+                         protocol::PermissionAnswer answer,
+                         protocol::PermissionScope scope,
+                         std::string_view reason) noexcept {
+        try {
+            protocol::PermissionResolvedNotice notice;
+            notice.request_id = entry->wire.request_id;
+            notice.session = entry->core.session;
+            notice.decision = answer;
+            notice.scope = scope;
+            notice.reason = std::string(reason);
+            // 95-D12: at most 64 bytes: first 61 + "...".
+            if (notice.reason.size() > 61) {
+                notice.reason.resize(61);
+                notice.reason += "...";
+            }
+            bool posted = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                posted = entry->request_posted;
+                if (!posted) {
+                    entry->deferred_notice = notice;
+                }
+            }
+            if (posted) {
+                (void)transport.broadcast_permission_resolved(std::move(notice));
+            }
+        } catch (...) {
+        }
     }
 
     std::future<PermissionOutcome> resolve(const PermissionRequest& request,
@@ -254,45 +300,91 @@ std::future<PermissionOutcome> PermissionBroker::State::resolve(const Permission
     }
 
     std::future<PermissionOutcome> future = entry->promise.get_future();
-
-    cancel.on_cancel([weak, id] {
-        if (std::shared_ptr<State> locked = weak.lock()) {
-            if (std::shared_ptr<Pending> claimed = locked->claim(id)) {
-                claimed->promise.set_value(
-                    {payload::PermissionDecisionKind::Deny, "cancelled"});
-            }
-        }
-    });
-
-    if (config.permission_timeout.count() > 0) {
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            entry->deadline - now());
-        const std::chrono::milliseconds delay =
-            remaining.count() > 0 ? remaining : std::chrono::milliseconds{1};
-        const bool scheduled = transport.schedule_after(delay, [weak, id] {
+    try {
+        cancel.on_cancel([weak, id] {
             if (std::shared_ptr<State> locked = weak.lock()) {
                 if (std::shared_ptr<Pending> claimed = locked->claim(id)) {
                     claimed->promise.set_value(
-                        {payload::PermissionDecisionKind::Deny, "timeout"});
+                        {payload::PermissionDecisionKind::Deny, "cancelled"});
+                    locked->notify_resolved(claimed, protocol::PermissionAnswer::Deny,
+                                            protocol::PermissionScope::Once, "cancelled");
                 }
             }
         });
-        if (!scheduled) {
+
+        if (config.permission_timeout.count() > 0) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                entry->deadline - now());
+            const std::chrono::milliseconds delay =
+                remaining.count() > 0 ? remaining : std::chrono::milliseconds{1};
+            const bool scheduled = transport.schedule_after(delay, [weak, id] {
+                if (std::shared_ptr<State> locked = weak.lock()) {
+                    if (std::shared_ptr<Pending> claimed = locked->claim(id)) {
+                        claimed->promise.set_value(
+                            {payload::PermissionDecisionKind::Deny, "timeout"});
+                        locked->notify_resolved(claimed, protocol::PermissionAnswer::Deny,
+                                                protocol::PermissionScope::Once, "timeout");
+                    }
+                }
+            });
+            if (!scheduled) {
+                if (std::shared_ptr<Pending> claimed = claim(id)) {
+                    claimed->promise.set_value(
+                        {payload::PermissionDecisionKind::Deny, "transport"});
+                }
+                return future;
+            }
+        }
+
+        // 95-D3a phase 2: never post the request under the mutex. A resolution
+        // that won the race above deferred its notice; flush it only AFTER the
+        // request post so a client can never see the notice first (95-I10).
+        bool already_resolved = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            already_resolved = entry->resolved;
+        }
+        if (already_resolved) {
+            return future;
+        }
+
+        const bool posted = transport.broadcast_permission_request(entry->wire);
+        std::optional<protocol::PermissionResolvedNotice> flush;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            entry->request_posted = posted;
+            if (posted && entry->deferred_notice.has_value()) {
+                flush = std::move(entry->deferred_notice);
+            }
+            entry->deferred_notice.reset();
+        }
+        if (flush.has_value()) {
+            try {
+                (void)transport.broadcast_permission_resolved(std::move(*flush));
+            } catch (...) {
+                // 95-D15: a notice failure never changes the resolution.
+            }
+        }
+        if (!posted) {
             if (std::shared_ptr<Pending> claimed = claim(id)) {
                 claimed->promise.set_value(
                     {payload::PermissionDecisionKind::Deny, "transport"});
             }
-            return future;
         }
-    }
-
-    if (!transport.broadcast_permission_request(entry->wire)) {
-        if (std::shared_ptr<Pending> claimed = claim(id)) {
-            claimed->promise.set_value(
-                {payload::PermissionDecisionKind::Deny, "transport"});
+        return future;
+    } catch (...) {
+        // 95-D18: contain every post-publication failure. A pre-post throw was
+        // never delivered, so this path never emits a notice (95-I3).
+        std::shared_ptr<Pending> claimed;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            claimed = claim_locked(id);
         }
+        if (claimed) {
+            claimed->promise.set_value({payload::PermissionDecisionKind::Deny, "internal"});
+        }
+        return future;
     }
-    return future;
 }
 
 PermissionBroker::PermissionBroker(PermissionPolicy& policy,
@@ -341,6 +433,9 @@ bool PermissionBroker::onDecision(const protocol::PermissionDecisionParams& para
 
     const payload::PermissionDecisionKind kind = decision_kind(params.decision, params.scope);
     entry->promise.set_value({kind, "user"});
+    // 95-D3: emit AFTER `set_value`; verbatim wire answer and scope (95-D3a:
+    // cancel/timeout may have already deferred their notice).
+    state->notify_resolved(entry, params.decision, params.scope, "user");
     if (!entry->core.force_ask) {
         state->policy.remember(entry->core, kind, grant_scope(params.scope));
     }

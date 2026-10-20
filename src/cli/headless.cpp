@@ -109,6 +109,10 @@ class HeadlessPermissionTransport final : public PermissionTransport {
 public:
     bool broadcast_permission_request(protocol::PermissionRequest) override { return false; }
 
+    bool broadcast_permission_resolved(protocol::PermissionResolvedNotice) override {
+        return false;
+    }
+
     bool schedule_after(std::chrono::milliseconds, std::function<void()>) override {
         return false;
     }

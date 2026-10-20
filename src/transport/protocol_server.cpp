@@ -1023,19 +1023,31 @@ void ProtocolServer::onHandoffResult(const SessionId& session, std::string detai
     }
 }
 
+bool ProtocolServer::is_subscribed_interactive(const Connection& conn,
+                                              const SessionId& session) const {
+    if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
+        return false;
+    }
+    return std::any_of(conn.subscriptions.begin(), conn.subscriptions.end(),
+                       [&session](const auto& sub_entry) {
+                           return sub_entry.second.session == session;
+                       });
+}
+
 void ProtocolServer::onPermissionRequest(const PermissionRequest& request) {
     for (auto& entry : connections_) {
         Connection& conn = entry.second;
-        if (conn.dropped || !conn.hello_done || conn.profile != ServerProfile::Interactive) {
-            continue;
-        }
-        const bool subscribed =
-            std::any_of(conn.subscriptions.begin(), conn.subscriptions.end(),
-                        [&request](const auto& sub_entry) {
-                            return sub_entry.second.session == request.session;
-                        });
-        if (subscribed) {
+        if (is_subscribed_interactive(conn, request.session)) {
             enqueue(conn, notification_json(notify::kPermissionRequest, to_json_value(request)));
+        }
+    }
+}
+
+void ProtocolServer::onPermissionResolved(const PermissionResolvedNotice& notice) {
+    for (auto& entry : connections_) {
+        Connection& conn = entry.second;
+        if (is_subscribed_interactive(conn, notice.session)) {
+            enqueue(conn, notification_json(notify::kPermissionResolved, to_json_value(notice)));
         }
     }
 }

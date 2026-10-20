@@ -962,6 +962,15 @@ struct UiModel {
     void            setSessionReadOnly(const SessionId& id, bool read_only);
     void            eraseSession(const WorkspaceId& workspace, const SessionId& id);
 
+    // 95-D6/95-D16: the permission dialog is one global modal, so closes are
+    // session-keyed. `closePermissionDialogForSession` restores `prev_mode` and
+    // clears attention only when it actually closes; the workspace variant maps
+    // the open dialog's session to its owning workspace.
+    [[nodiscard]] bool permission_dialog_open_for(const SessionId& session,
+                                                  const PermissionRequestId& id) const;
+    void               closePermissionDialogForSession(const SessionId& session);
+    void               closePermissionDialogForWorkspace(const WorkspaceId& workspace);
+
     // 77-D3: if `workspace` is modeled, ensure the session cell/state and mark it
     // opening with `title`, then focus it. No-op for an unmodeled workspace (no
     // phantom workspace; SW25). Returns true iff the state was marked.
