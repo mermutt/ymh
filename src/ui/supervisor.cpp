@@ -3589,11 +3589,41 @@ private:
             }
             return true;
         }
-        // Decision 2026-09-17 (RB-12): the dialog resolves only on `Return`
-        // against the highlighted option. Printable keys are deliberately
-        // swallowed (this method still returns true) so a slash command typed
-        // while the dialog is up can never silently allow or deny. See
-        // REQUIREMENTS_BACKLOG.md RB-12.
+        if (event.is_character()) {
+            const std::string value = event.character();
+            if (value.size() == 1) {
+                switch (value[0]) {
+                    case 'O':
+                    case 'o':
+                        resolve_dialog(payload::PermissionDecisionKind::Allow,
+                                       GrantScope::Once);
+                        return true;
+                    case 'D':
+                    case 'd':
+                        resolve_dialog(payload::PermissionDecisionKind::Deny,
+                                       GrantScope::Once);
+                        return true;
+                    case 'A':
+                    case 'a':
+                        if (!model_.dialog.force_ask) {
+                            resolve_dialog(payload::PermissionDecisionKind::AllowAlways,
+                                           GrantScope::Always);
+                        }
+                        return true;
+                    case 'S':
+                    case 's':
+                        if (!model_.dialog.force_ask) {
+                            resolve_dialog(payload::PermissionDecisionKind::Allow,
+                                           GrantScope::Session);
+                        }
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        }
+        // RB-12 is narrowed for exactly A/a, O/o, S/s, D/d (94-D5/D6);
+        // every other printable key is still swallowed.
         return true;
     }
 
@@ -4981,14 +5011,16 @@ public:
     }
 
     void open_permission_dialog(const SessionId& session, const PermissionRequestId& request,
-                                std::string tool, std::string summary) override {
+                                std::string tool, std::string summary,
+                                bool force_ask) override {
         app_.last_dialog_resolution_.reset();
         app_.model_.dialog.open    = true;
         app_.model_.dialog.session = session;
         app_.model_.dialog.request = request;
         app_.model_.dialog.tool    = std::move(tool);
         app_.model_.dialog.summary = std::move(summary);
-        app_.model_.dialog.selected = 0;
+        app_.model_.dialog.force_ask = force_ask;
+        app_.model_.dialog.selected = force_ask ? 1 : 0;
         // 81-D13: record the interrupted mode so the resolve restores it.
         app_.model_.dialog.prev_mode = app_.model_.mode;
         app_.model_.mode = UiMode::Dialog;

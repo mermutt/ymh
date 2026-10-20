@@ -571,7 +571,8 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
 
 void apply_logging(Config& config, const Json& table, const std::filesystem::path& source,
                    bool global_layer) {
-    reject_unknown(table, "logging", {"level", "log_prompts", "llm_transcript", "transcript_dir"},
+    reject_unknown(table, "logging",
+                   {"level", "log_prompts", "llm_transcript", "transcript_dir", "core_dumps"},
                    source);
     config.logging.level = read_string(table, "level", "logging", config.logging.level, source);
     config.logging.log_prompts =
@@ -584,6 +585,11 @@ void apply_logging(Config& config, const Json& table, const std::filesystem::pat
                                               config.logging.llm_transcript, source);
     config.logging.transcript_dir = read_string(table, "transcript_dir", "logging",
                                                 config.logging.transcript_dir, source);
+    if (table.contains("core_dumps") && !global_layer) {
+        fail(source, "'logging.core_dumps' is global-layer only");
+    }
+    config.logging.core_dumps = read_bool(table, "core_dumps", "logging",
+                                          config.logging.core_dumps, source);
 }
 
 void apply_session(Config& config, const Json& table, const std::filesystem::path& source) {
@@ -955,8 +961,10 @@ void apply_mcp_server(McpServerSettings& server, const Json& table,
     server.url = read_string(table, "url", "mcp.server", server.url, source);
     server.protocol_version =
         read_string(table, "protocol_version", "mcp.server", server.protocol_version, source);
-    server.default_verdict =
-        read_string(table, "default_verdict", "mcp.server", server.default_verdict, source);
+    if (const auto value = read_optional_string(table, "default_verdict", "mcp.server", source);
+        value.has_value()) {
+        server.default_verdict = *value;
+    }
     server.call_timeout_ms =
         read_int64(table, "call_timeout_ms", "mcp.server", server.call_timeout_ms, source);
     server.max_result_bytes = static_cast<std::size_t>(read_int64(
@@ -1119,8 +1127,10 @@ void apply_mcp_servers_entry(McpServerSettings& server, const Json& entry, const
     server.url = read_string(entry, "url", table, server.url, source);
     server.protocol_version =
         read_string(entry, "protocol_version", table, server.protocol_version, source);
-    server.default_verdict =
-        read_string(entry, "default_verdict", table, server.default_verdict, source);
+    if (const auto value = read_optional_string(entry, "default_verdict", table, source);
+        value.has_value()) {
+        server.default_verdict = *value;
+    }
     server.call_timeout_ms =
         read_int64(entry, "call_timeout_ms", table, server.call_timeout_ms, source);
     server.max_result_bytes = static_cast<std::size_t>(read_int64(
@@ -1512,6 +1522,7 @@ constexpr std::string_view kDefaultConfigJsonc =
     // opt-in exact LLM wire transcript (global layer only; may contain full prompts):
     "llm_transcript": false,
     "transcript_dir": ""         // "" => <workspace>/.ymh/transcripts
+    // "core_dumps": false         // opt-in; a core may contain prompts, tool output, secrets
   },
   "llm": {
     "default": {
@@ -1929,6 +1940,9 @@ void apply_env_overrides(Config& config) {
     }
     if (const auto value = env_value("YMH_LLM_TRANSCRIPT_DIR")) {
         config.logging.transcript_dir = *value;
+    }
+    if (const auto value = env_value("YMH_CORE_DUMPS")) {
+        config.logging.core_dumps = truthy(*value);
     }
     if (const auto value = env_value("YMH_SKILLS_ENABLED")) {
         config.skills.enabled = truthy(*value);

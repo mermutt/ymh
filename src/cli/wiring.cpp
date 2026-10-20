@@ -166,8 +166,14 @@ PermissionConfig to_permission_config(const Config& config) {
         }
         ToolDefault fallback;
         fallback.prefix = "mcp." + server.id + ".";
-        fallback.verdict = master ? PolicyVerdict::Allow
-                                  : parse_verdict(server.default_verdict, "mcp.default_verdict");
+        const PolicyVerdict implicit_mcp =
+            default_verdict == PolicyVerdict::Deny ? PolicyVerdict::Deny
+                                                   : PolicyVerdict::Allow;
+        fallback.verdict =
+            master ? PolicyVerdict::Allow
+                   : (server.default_verdict.has_value()
+                          ? parse_verdict(*server.default_verdict, "mcp.default_verdict")
+                          : implicit_mcp);
         fallback.id = "mcp." + server.id + ".default";
         permissions.tool_defaults.push_back(std::move(fallback));
     }
@@ -234,7 +240,9 @@ McpConfig to_mcp_config(const Config& config) {
         server.allowed_tools = settings.allowed_tools;
         server.denied_tools = settings.denied_tools;
         server.default_verdict =
-            parse_verdict(settings.default_verdict, "mcp.default_verdict");
+            settings.default_verdict.has_value()
+                ? parse_verdict(*settings.default_verdict, "mcp.default_verdict")
+                : PolicyVerdict::Allow;
         server.call_timeout = std::chrono::milliseconds{settings.call_timeout_ms};
         server.max_result_bytes = settings.max_result_bytes;
         mcp.servers.push_back(std::move(server));

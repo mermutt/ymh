@@ -26,6 +26,7 @@
 #include "ymh/prompt/system_prompt.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/text.hpp"
+#include "ymh/session/tool_result_text.hpp"
 #include "ymh/tools/tool.hpp"
 #include "ymh/tools/tool_context.hpp"
 #include "ymh/tools/tool_registry.hpp"
@@ -963,7 +964,7 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         denied.id      = call.id;
         denied.name    = call.name;
         denied.outcome = payload::ToolOutcome::Denied;
-        denied.output  = reason.empty() ? std::string{"permission denied"} : reason;
+        denied.output  = denial_text(call.name, reason);
         denied.error   = denied.output;
         denied.source.call = denied.id;
         plan.run     = false;

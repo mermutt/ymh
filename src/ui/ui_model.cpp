@@ -7,6 +7,7 @@
 
 #include "ymh/config/config.hpp"
 #include "ymh/llm/redaction.hpp"
+#include "ymh/session/tool_result_text.hpp"
 
 namespace ymh::ui {
 
@@ -1773,6 +1774,16 @@ void UiModel::apply(const UiEvent& event) {
                 }
                 dirty.mark(e.session, UiDirtyFlag::Tools | UiDirtyFlag::Conversation);
             } else if constexpr (std::is_same_v<T, ToolFinished>) {
+                const bool denied = e.outcome == payload::ToolOutcome::Denied;
+                std::string denied_text;
+                if (denied) {
+                    payload::ToolResult result;
+                    result.name    = e.name;
+                    result.outcome = e.outcome;
+                    result.output  = e.output;
+                    result.error   = e.error;
+                    denied_text = tool_message_content(result);
+                }
                 const std::size_t index = state.tools.find(e.id);
                 if (index != kNoEntry) {
                     ToolCallView& call = state.tools.calls[index];
@@ -1782,7 +1793,9 @@ void UiModel::apply(const UiEvent& event) {
                     call.notice = e.context.form == ContextForm::Notice
                                       ? std::optional<ContextFormed>{e.context}
                                       : std::nullopt;
-                    if (!e.output.empty()) {
+                    if (denied) {
+                        call.output = denied_text;
+                    } else if (!e.output.empty()) {
                         call.output = e.output;
                         if (call.output.size() > kMaxToolOutput) {
                             call.output.resize(kMaxToolOutput);
@@ -1792,7 +1805,9 @@ void UiModel::apply(const UiEvent& event) {
                 }
                 for (ConversationEntry& entry : state.conversation.entries) {
                     if (entry.role == ConversationRole::Tool && entry.tool_call_id == e.id) {
-                        if (!e.output.empty()) {
+                        if (denied) {
+                            entry.text = denied_text;
+                        } else if (!e.output.empty()) {
                             entry.text = e.output;
                             if (entry.text.size() > kMaxToolConversationOutput) {
                                 entry.text.resize(kMaxToolConversationOutput);

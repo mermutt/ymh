@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/core/version.hpp"
+#include "ymh/policy/path_target.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/ui/render/diff_renderer.hpp"
 #include "ymh/ui/render/markdown_renderer.hpp"
@@ -349,6 +350,9 @@ Element render_tool_entry(const ConversationEntry& entry, const ToolModel* tools
     StyledLine header;
     if (call != nullptr && call->outcome != payload::ToolOutcome::Ok) {
         header.push_back({"✗ ", ftxui::Color::Red, false});
+    }
+    if (call != nullptr && call->outcome == payload::ToolOutcome::Denied) {
+        header.push_back({"DENIED ", ftxui::Color::Red, true});
     }
     header.push_back({"▸ ", ftxui::Color::Yellow, false});
     header.push_back({name, theme.tool_name, true});
@@ -1134,6 +1138,16 @@ Element render_status(const UiModel& model, const SessionUiState* active, const 
     return status_line;
 }
 
+std::string always_label(std::string_view tool) {
+    if (tool == "shell" || tool == "terminal") {
+        return "Always allow (exact command)";
+    }
+    if (tool_has_path_dimension(tool)) {
+        return "Always allow (all in-root paths)";
+    }
+    return "Always allow (this tool)";
+}
+
 Element render_dialog(const UiModel& model, const Theme& theme) {
     constexpr int kMaxPlanPreviewRows = 12;
     const PermissionDialogModel& dialog = model.dialog;
@@ -1152,7 +1166,7 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
     }
     rows.push_back(ftxui::separator());
     if (dialog.force_ask) {
-        const char* options[] = {"Allow once", "Deny"};
+        const std::string options[] = {"Allow once", "Deny"};
         for (int index = 0; index < 2; ++index) {
             Element row = ftxui::text(options[index]);
             if (index == dialog.selected) {
@@ -1161,10 +1175,10 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
             rows.push_back(row);
         }
     } else {
-        const char* options[] = {
+        const std::string options[] = {
             "Allow once",
             "Allow for session",
-            "Always allow",
+            always_label(dialog.tool),
             "Deny",
         };
         for (int index = 0; index < 4; ++index) {
@@ -1176,6 +1190,10 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
         }
     }
     rows.push_back(ftxui::text("↑/↓ select · Enter confirm · Esc cancel") | ftxui::dim);
+    rows.push_back(
+        ftxui::text(dialog.force_ask ? "[O] allow once | [D] deny"
+                                     : "[A] always | [O] once | [S] session | [D] deny") |
+        ftxui::dim);
     (void)theme;
     return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) |
            ftxui::clear_under | ftxui::center;

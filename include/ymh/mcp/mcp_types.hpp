@@ -190,7 +190,10 @@ struct McpServerConfig {
     std::vector<std::string> allowed_tools;
     std::vector<std::string> denied_tools;
 
-    PolicyVerdict            default_verdict{PolicyVerdict::Ask};
+    // 93-MD1: declaration only; McpManager does not read this field. The
+    // effective value is the global-layer server settings lowered by the
+    // daemon into PermissionConfig::tool_defaults (15 AM-3).
+    PolicyVerdict            default_verdict{PolicyVerdict::Allow};
     std::chrono::milliseconds call_timeout{60'000};
     std::size_t              max_result_bytes{1u * 1024u * 1024u};
 };

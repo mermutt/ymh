@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "ymh/core/text.hpp"
+#include "ymh/session/tool_result_text.hpp"
 
 namespace ymh {
 namespace {
@@ -501,7 +502,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 message.context      = value.context;
                 ContentBlock block;
                 block.kind = ContentBlockKind::Text;
-                block.text = value.output;
+                block.text = tool_message_content(value);
                 message.content.push_back(std::move(block));
                 // 32 C26: a same-`id` replacement (the pruner's) replaces the
                 // projected Tool message in place, so exactly one is counted.

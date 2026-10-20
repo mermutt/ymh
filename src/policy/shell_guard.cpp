@@ -1266,12 +1266,92 @@ bool token_is_known_uri(std::string_view text, std::string_view& scheme) {
     return false;
 }
 
+struct ExpansionScan {
+    bool        unknown = false;
+    std::string sanitized;
+};
+
+bool is_neutral_special_parameter_char(char c) {
+    return c == '?' || c == '$' || c == '#' || c == '@' || c == '*' ||
+           c == '!' || c == '-' || (c >= '1' && c <= '9');
+}
+
+ExpansionScan scan_expansions(std::string_view s) {
+    ExpansionScan out;
+    out.sanitized.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '`') {
+            out.unknown = true;
+            out.sanitized.push_back(s[i]);
+            continue;
+        }
+        if (s[i] != '$' || i + 1 >= s.size()) {
+            out.sanitized.push_back(s[i]);
+            continue;
+        }
+        const char c = s[i + 1];
+        if (c == '0') {
+            out.unknown = true;
+            continue;
+        }
+        if (is_neutral_special_parameter_char(c)) {
+            ++i;
+            continue;
+        }
+        if (c == '{') {
+            const std::size_t close = s.find('}', i + 2);
+            if (close != std::string_view::npos) {
+                const std::string_view inner = s.substr(i + 2, close - i - 2);
+                if (inner.size() == 1 && inner[0] == '0') {
+                    out.unknown = true;
+                    i = close;
+                    continue;
+                }
+                if (inner.size() == 1 && is_neutral_special_parameter_char(inner[0])) {
+                    i = close;
+                    continue;
+                }
+            }
+        }
+        out.unknown = true;
+        out.sanitized.push_back(s[i]);
+    }
+    return out;
+}
+
+std::optional<std::string_view> option_equals_value(std::string_view s) {
+    if (s.size() < 2 || s.front() != '-') {
+        return std::nullopt;
+    }
+    const std::size_t eq = s.find('=');
+    if (eq == std::string_view::npos) {
+        return std::nullopt;
+    }
+    return s.substr(eq + 1);
+}
+
 std::optional<ShellTargetScope> classify_scope_path(
     std::string_view text, const Token& token, const std::filesystem::path& root,
     const std::filesystem::path& cwd, bool force_path, bool git_context) {
     std::string s{text};
     if (s.empty()) {
         return std::nullopt;
+    }
+    if (is_home_ref(s, token.single_quoted)) {
+        return ShellTargetScope::Outside;
+    }
+    if (const auto value = option_equals_value(s); value.has_value()) {
+        return classify_scope_path(*value, token, root, cwd, false, git_context);
+    }
+    if (token.had_unexpanded) {
+        ExpansionScan scan = scan_expansions(s);
+        if (scan.unknown) {
+            return ShellTargetScope::Unknown;
+        }
+        s = std::move(scan.sanitized);
+        if (s.empty()) {
+            return std::nullopt;
+        }
     }
 
     // URI schemes: `file:` is a local target; other known schemes are neutral.
@@ -1365,13 +1445,6 @@ std::optional<ShellTargetScope> classify_scope_path(
             return ShellTargetScope::Unknown;
         }
         return std::nullopt;
-    }
-
-    if (is_home_ref(s, token.single_quoted)) {
-        return ShellTargetScope::Outside;
-    }
-    if (token.had_unexpanded && s.find('$') != std::string::npos) {
-        return ShellTargetScope::Unknown;
     }
 
     const bool path_punctuation =

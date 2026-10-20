@@ -218,6 +218,7 @@ struct LoggingSettings {
     bool        log_prompts = false;
     bool        llm_transcript = false;  // 74-D2/74-D3: opt-in, global-layer only
     std::string transcript_dir;          // 74-D4, empty => <workspace>/.ymh/transcripts
+    bool        core_dumps = false;      // 92-D1: opt-in, global-layer only, default OFF
 };
 
 struct RetrySettings {
@@ -327,7 +328,11 @@ struct McpServerSettings {
     std::string              protocol_version;
     std::vector<std::string> allowed_tools;
     std::vector<std::string> denied_tools;
-    std::string              default_verdict = "ask";
+    // 93-MD2/MD3/MD11: nullopt = key absent (implicit: Allow normally, Deny
+    // under an explicit global Deny); a value is the explicit per-server
+    // override. Enabling a global-layer server is the consent to run its tools;
+    // narrow per server with "ask"/"deny" or a permissions rule (90-D18).
+    std::optional<std::string> default_verdict = std::nullopt;
     std::int64_t             call_timeout_ms = 60'000;
     std::size_t              max_result_bytes = 1u * 1024u * 1024u;
 };

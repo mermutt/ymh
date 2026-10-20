@@ -147,7 +147,8 @@ public:
     // "tab", "tab-reverse", "backspace", "delete".
     virtual void open_permission_dialog(const SessionId& session,
                                         const PermissionRequestId& request,
-                                        std::string tool, std::string summary) = 0;
+                                        std::string tool, std::string summary,
+                                        bool force_ask = false) = 0;
     virtual bool dispatch_key(const std::string& key) = 0;
     // 66-D3 test seam: drives an arbitrary FTXUI event through the real
     // `handle_event`, so a bracketed-paste run (open marker, body, close marker)

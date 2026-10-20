@@ -195,6 +195,7 @@ add_library(ymh_session STATIC
     src/session/session_manager.cpp
     src/session/plan_mode.cpp
     src/session/checkpoints.cpp
+    src/session/tool_result_text.cpp
 )
 add_library(ymh::session ALIAS ymh_session)
 
@@ -684,6 +685,7 @@ target_link_libraries(ymh_transport
 # ---------------------------------------------------------------------------
 
 add_library(ymh_host STATIC
+    src/host/core_dump.cpp
     src/host/host_runtime.cpp
     src/host/workspace_host.cpp
 )

@@ -41,6 +41,7 @@
 #include "ymh/cli/wiring.hpp"
 #include "ymh/core/event.hpp"
 #include "ymh/execution/asio_executor.hpp"
+#include "ymh/host/core_dump.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/host/host_runtime.hpp"
@@ -820,6 +821,13 @@ HostExitCode WorkspaceHost::Impl::startup() {
     write_self_ignoring_gitignore(state_dir);
 
     ::signal(SIGPIPE, SIG_IGN);
+
+    // 92-D3: raise RLIMIT_CORE before the first thread or runtime object.
+    // Non-fatal: a failure never blocks daemon readiness.
+    if (!config_.foreground) {
+        (void)apply_core_dump_policy(config_.config.logging.core_dumps,
+                                     canonical_root_, stderr);
+    }
 
     boot_id_ = config_.boot_id.value_or(HostBootId{generate_uuid_v4()});
     pid_     = host_pid();

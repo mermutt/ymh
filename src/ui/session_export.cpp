@@ -15,6 +15,7 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/session/events.hpp"
+#include "ymh/session/tool_result_text.hpp"
 
 namespace ymh::ui {
 namespace {
@@ -231,8 +232,12 @@ std::string render_session_markdown(const SessionHeader& header, const EventRang
                     out << ", truncated";
                 }
                 out << ")</summary>\n\n";
-                out << code_block(result.output);
-                if (result.error.has_value() && !result.error->empty()) {
+                out << code_block(tool_message_content(result));
+                const bool duplicate_denial_error =
+                    result.outcome == payload::ToolOutcome::Denied &&
+                    result.error.has_value() && *result.error == result.output;
+                if (result.error.has_value() && !result.error->empty() &&
+                    !duplicate_denial_error) {
                     out << "\n_Error: " << *result.error << "_\n";
                 }
                 out << "\n</details>\n\n";
