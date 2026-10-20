@@ -90,7 +90,9 @@ RepoPtr open_repository(const std::filesystem::path& path) {
     ensure_libgit2_initialized();
     git_repository* repo = nullptr;
     const std::string text = path.string();
-    const int rc = git_repository_open_ext(&repo, text.c_str(), 0, nullptr);
+    // 90-D15: never search ancestor directories for a repository.
+    const int rc = git_repository_open_ext(
+        &repo, text.c_str(), GIT_REPOSITORY_OPEN_NO_SEARCH, nullptr);
     if (rc != 0) {
         throw ToolError{ToolErrorCode::NotFound, "not a git repository: " + text};
     }
@@ -246,7 +248,7 @@ DiffPtr create_diff(git_repository* repo, const GitQuery& query) {
 } // namespace
 
 Task<GitStatus> LibGit2GitService::status(const GitQuery& query) {
-    RepoPtr repo = open_repository(query.path);
+    RepoPtr repo = open_repository(query.root.empty() ? query.path : query.root);
 
     git_status_options options = GIT_STATUS_OPTIONS_INIT;
     options.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
@@ -285,7 +287,7 @@ Task<GitStatus> LibGit2GitService::status(const GitQuery& query) {
 }
 
 Task<GitDiff> LibGit2GitService::diff(const GitQuery& query) {
-    RepoPtr repo = open_repository(query.path);
+    RepoPtr repo = open_repository(query.root.empty() ? query.path : query.root);
     DiffPtr diff = create_diff(repo.get(), query);
 
     BufGuard buffer;

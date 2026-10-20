@@ -98,12 +98,22 @@ std::string bounded_summary(const PermissionRequest& request, bool truncated) {
                 summary += " ";
                 summary += command->get<std::string>();
             } else if (request.path.has_value()) {
-                summary += " ";
-                summary += request.path->generic_string();
+                // 90-D16: never expose the absolute workspace path; the root
+                // itself is reported by the tool name alone.
+                const std::filesystem::path relative =
+                    request.path->lexically_relative(request.root);
+                if (!relative.empty() && relative != "." && !relative.is_absolute()) {
+                    summary += " ";
+                    summary += relative.generic_string();
+                }
             }
         } else if (request.path.has_value()) {
-            summary += " ";
-            summary += request.path->generic_string();
+            const std::filesystem::path relative =
+                request.path->lexically_relative(request.root);
+            if (!relative.empty() && relative != "." && !relative.is_absolute()) {
+                summary += " ";
+                summary += relative.generic_string();
+            }
         }
     } catch (...) {
         truncated = true;

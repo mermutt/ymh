@@ -259,6 +259,7 @@ add_library(ymh_execution STATIC
     src/execution/glob.cpp
     src/execution/output.cpp
     src/execution/filesystem.cpp
+    src/execution/path_safety.cpp
     src/execution/deadline.cpp
     src/execution/process.cpp
     src/execution/environment.cpp
@@ -290,6 +291,7 @@ target_link_libraries(ymh_execution
 
 add_library(ymh_policy STATIC
     src/policy/permission_policy.cpp
+    src/policy/path_target.cpp
     src/policy/shell_guard.cpp
 )
 add_library(ymh::policy ALIAS ymh_policy)

@@ -17,6 +17,12 @@
 
 namespace ymh {
 
+enum class SandboxMode : std::uint8_t {
+    Workspace,     // v1 default: root-confined FS; daemon uid; caps apply
+    ReadOnly,      // inspection only: no writes, no subprocesses, no PTYs
+    Unrestricted,  // explicit opt-out: resolve() skips root containment
+};
+
 // 89-D17/89-D14. `Enforced` => L2 on (the child cannot undo the ruleset);
 // `Unavailable` => the coupling (89-D14) promotes a recognized destructive
 // in-root call to `Confirm`, never `Allow`; `NotApplicable` => the configured
@@ -34,6 +40,8 @@ struct ConfinementPolicy {
     std::filesystem::path                root;
     std::optional<std::filesystem::path> home;
     std::optional<std::filesystem::path> tmpdir;
+    std::optional<std::filesystem::path> tmp_root;
+    bool                                 workspace_writable = true;
     std::vector<std::filesystem::path>   ro_paths;
 };
 
@@ -83,7 +91,8 @@ void set_confinement_status_fd(int fd) noexcept;
 // the tool call). `policy().root` is the workspace root; `ro_paths` is `{ "/" }`.
 class SpawnConfinement {
 public:
-    explicit SpawnConfinement(const std::filesystem::path& workspace_root);
+    explicit SpawnConfinement(const std::filesystem::path& workspace_root,
+                              SandboxMode sandbox = SandboxMode::Workspace);
     ~SpawnConfinement();
 
     SpawnConfinement(SpawnConfinement&&) noexcept;

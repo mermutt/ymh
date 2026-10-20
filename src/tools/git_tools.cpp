@@ -59,12 +59,15 @@ public:
     }
 
     Task<ToolResult> execute(const ToolContext& context,
-                             const ToolArguments& arguments) override {
+                             const ToolArguments& /*arguments*/) override {
         if (context.expired()) {
             throw ToolError{ToolErrorCode::Timeout, "git_status deadline expired"};
         }
         GitQuery query;
-        query.path = resolve_base(context, arguments);
+        // 90-A14: `git_status` has no path argument; an undocumented `path`
+        // is ignored and the repository-open base is the workspace root.
+        query.root = context.root();
+        query.path.clear();
 
         const GitStatus status = context.execution().git().status(query).get();
         if (context.expired()) {
@@ -102,6 +105,7 @@ public:
             throw ToolError{ToolErrorCode::Timeout, "git_diff deadline expired"};
         }
         GitQuery query;
+        query.root = context.root();
         query.path = resolve_base(context, arguments);
         query.staged = arguments.value.value("staged", false);
         query.ref = arguments.value.value("ref", std::string{});

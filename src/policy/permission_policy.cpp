@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ymh/execution/glob.hpp"
+#include "ymh/execution/path_safety.hpp"
 #include "ymh/policy/shell_guard.hpp"
 
 namespace ymh {
@@ -83,15 +84,20 @@ bool rule_greater(const PolicyRule& left, const PolicyRule& right) {
     return effect_rank(left.effect) > effect_rank(right.effect);
 }
 
-void validate_rule(const PolicyRule& rule) {
-    if (rule.tool.empty() && rule.path.empty() && rule.command.empty()) {
-        throw PolicyConfigError{"rule has no match dimensions: " + rule.id};
+void validate_path_pattern(std::string_view path);
+
+void validate_policy_rule(const PolicyRule& rule) {
+    if (rule.literal) {
+        // `remember`-derived exact grants are not globs, but their path
+        // dimension (if any) still obeys the root-relative contract.
+        if (rule.tool.empty() && rule.path.empty() && rule.command.empty()) {
+            throw PolicyConfigError{"rule has no match dimensions: " + rule.id};
+        }
+        validate_glob(rule.tool);
+        validate_path_pattern(rule.path);
+        return;
     }
-    validate_glob(rule.tool);
-    validate_glob(rule.path);
-    if (!rule.literal) {
-        validate_glob(rule.command);
-    }
+    validate_rule(rule.tool, rule.path, rule.command);
 }
 
 bool rule_sort_less(const PolicyRule& left, const PolicyRule& right) {
@@ -104,14 +110,24 @@ bool rule_sort_less(const PolicyRule& left, const PolicyRule& right) {
     return effect_rank(left.effect) < effect_rank(right.effect);
 }
 
-std::string path_pattern(const PermissionRequest& request) {
+// 90-D4/90-D5: lexical only; no `std::filesystem::relative` (which may stat).
+std::optional<std::string> root_relative_target(const PermissionRequest& request) {
     if (!request.path.has_value()) {
-        return {};
+        return std::nullopt;
     }
-    std::error_code ec;
     const std::filesystem::path relative =
-        std::filesystem::relative(*request.path, request.root, ec);
-    return ec ? request.path->generic_string() : relative.generic_string();
+        request.path->lexically_relative(request.root);
+    if (relative.empty()) {
+        return std::string{"."};
+    }
+    if (relative.is_absolute()) {
+        return std::nullopt;
+    }
+    const std::string text = relative.generic_string();
+    if (text == ".." || text.starts_with("../")) {
+        return std::nullopt;
+    }
+    return text;
 }
 
 std::string command_pattern(const PermissionRequest& request) {
@@ -145,23 +161,47 @@ std::string command_pattern(const PermissionRequest& request) {
     return {};
 }
 
-bool rule_matches(const PolicyRule& rule, const PermissionRequest& request) {
+bool rule_matches(const PolicyRule& rule, const PermissionRequest& request,
+                  TargetClass target_class) {
     if (!rule.tool.empty() && !glob_match(rule.tool, request.tool)) {
         return false;
     }
     if (!rule.path.empty()) {
-        if (!request.path.has_value() ||
-            !path_glob_match(rule.path, path_pattern(request))) {
+        if (tool_has_path_dimension(request.tool)) {
+            if (target_class != TargetClass::InRoot || !request.path.has_value()) {
+                return false;
+            }
+            const std::optional<std::string> relative = root_relative_target(request);
+            if (!relative.has_value() || !path_glob_match(rule.path, *relative)) {
+                return false;
+            }
+        } else if (request.tool == "shell" || request.tool == "terminal") {
+            if (target_class != TargetClass::InRoot || rule.path != "**") {
+                return false;
+            }
+        } else {
             return false;
         }
     }
+    if (rule.target_class != TargetClass::Any &&
+        rule.target_class != target_class) {
+        return false;
+    }
     if (!rule.command.empty()) {
-        const std::string command = command_pattern(request);
-        if (rule.literal) {
+        const bool shell_tool = request.tool == "shell" || request.tool == "terminal";
+        if (rule.prefix) {
+            const std::string text = shell_guard_text(request);
+            if (!is_simple_shell_command(text) ||
+                command_prefix(text) != rule.command) {
+                return false;
+            }
+        } else if (rule.literal) {
+            const std::string command =
+                shell_tool ? shell_guard_text(request) : command_pattern(request);
             if (command != rule.command) {
                 return false;
             }
-        } else if (!glob_match(rule.command, command)) {
+        } else if (!glob_match(rule.command, command_pattern(request))) {
             return false;
         }
     }
@@ -177,14 +217,33 @@ std::uint64_t fnv1a64(std::string_view text) {
     return hash;
 }
 
-std::string grant_id(const std::string& tool, const std::string& command) {
+std::string hash_hex(std::string_view command) {
     static constexpr char kHex[] = "0123456789abcdef";
     const std::uint64_t   hash   = fnv1a64(command);
-    std::string           id     = "grant:" + tool + ":";
+    std::string           id;
     for (int shift = 60; shift >= 0; shift -= 4) {
         id.push_back(kHex[(hash >> shift) & 0xFU]);
     }
     return id;
+}
+
+std::string grant_id(const std::string& tool, const std::string& command) {
+    return "grant:" + tool + ":" + hash_hex(command);
+}
+
+char class_letter(TargetClass target_class) {
+    switch (target_class) {
+        case TargetClass::InRoot: return 'i';
+        case TargetClass::Outside: return 'o';
+        case TargetClass::Unknown: return 'u';
+        case TargetClass::Any: return 'a';
+    }
+    return 'a';
+}
+
+std::string session_grant_id(const PolicyRule& grant) {
+    return "grant:" + grant.tool + ":" + class_letter(grant.target_class) + ":" +
+           (grant.prefix ? "p:" : "e:") + hash_hex(grant.command);
 }
 
 } // namespace
@@ -221,21 +280,71 @@ void validate_glob(const std::string& pattern) {
     }
 }
 
+namespace {
+
+void validate_path_pattern(std::string_view path) {
+    if (path.empty()) {
+        return;
+    }
+    if (path.front() == '/' || path.front() == '~') {
+        throw PolicyConfigError{"path rule must be root-relative: " + std::string{path}};
+    }
+    if (path.starts_with("./")) {
+        throw PolicyConfigError{"path rule must not start with './': " + std::string{path}};
+    }
+    if (path.find('[') != std::string_view::npos ||
+        path.find(']') != std::string_view::npos) {
+        throw PolicyConfigError{"path rule has no character classes: " + std::string{path}};
+    }
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        const std::size_t slash = path.find('/', start);
+        const std::size_t end = slash == std::string_view::npos ? path.size() : slash;
+        const std::string_view segment = path.substr(start, end - start);
+        if (segment == "..") {
+            throw PolicyConfigError{"path rule must not contain '..': " + std::string{path}};
+        }
+        if (segment == "." && path != ".") {
+            throw PolicyConfigError{"path rule must not contain '.' segments: " +
+                                    std::string{path}};
+        }
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    validate_glob(std::string{path});
+}
+
+} // namespace
+
 void validate_rule(std::string_view tool, std::string_view command) {
-    if (tool.empty() && command.empty()) {
+    validate_rule(tool, {}, command);
+}
+
+void validate_rule(std::string_view tool, std::string_view path,
+                   std::string_view command) {
+    if (tool.empty() && path.empty() && command.empty()) {
         throw PolicyConfigError{"rule has no match dimensions"};
+    }
+    if (!path.empty() && tool.empty()) {
+        throw PolicyConfigError{"rule with a path must also set tool"};
     }
     if (!command.empty() && tool.empty()) {
         throw PolicyConfigError{"rule with a command must also set tool"};
     }
     validate_glob(std::string{tool});
+    validate_path_pattern(path);
     validate_glob(std::string{command});
 }
 
 RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* store)
-    : config_(std::move(config)), generation_{1}, store_(store) {
+    : config_(std::move(config)),
+      generation_{1},
+      store_(store),
+      tmp_root_(canonical_tmp_root()) {
     for (const PolicyRule& rule : config_.rules) {
-        validate_rule(rule);
+        validate_policy_rule(rule);
     }
     for (const ToolDefault& fallback : config_.tool_defaults) {
         if (fallback.prefix.empty() || fallback.prefix.back() != '.') {
@@ -245,6 +354,45 @@ RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* 
     if (store_ != nullptr) {
         local_grants_ = store_->load();
     }
+    // 90-A15/90-D9: normalize every loaded grant (defense in depth, so a
+    // non-file test store cannot inject a policy-wide grant). The file shape
+    // is unchanged; a path-tool grant with no command loads as InRoot.
+    auto normalize = [](PolicyRule& grant) {
+        if (grant.tool.empty() ||
+            grant.tool.find_first_of("*?[") != std::string::npos) {
+            return false;
+        }
+        if (grant.tool == "shell" || grant.tool == "terminal") {
+            if (grant.command.empty()) {
+                return false;
+            }
+            if (!grant.literal) {
+                bool has_literal = false;
+                for (char c : grant.command) {
+                    if (c != '*' && c != '?') {
+                        has_literal = true;
+                        break;
+                    }
+                }
+                if (!has_literal) {
+                    return false;
+                }
+            }
+            grant.target_class = TargetClass::Any;
+        } else if (tool_has_path_dimension(grant.tool)) {
+            if (!grant.command.empty()) {
+                return false;
+            }
+            grant.target_class = TargetClass::InRoot;
+        } else {
+            grant.target_class = TargetClass::Any;
+        }
+        return true;
+    };
+    local_grants_.erase(
+        std::remove_if(local_grants_.begin(), local_grants_.end(),
+                       [&](PolicyRule& grant) { return !normalize(grant); }),
+        local_grants_.end());
     reorder();
 }
 
@@ -274,20 +422,23 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         reason->clear();
     }
 
-    const std::string guard_text = shell_guard_text(request);
-    ShellCommandRisk  guard_risk = ShellCommandRisk::None;
-    if (!guard_text.empty()) {
-        // 89-D14 coupling: `kernel_confinement == false` makes the classifier
-        // promote a recognized in-root destructive command to `Confirm`, so the
-        // rule fold below can never silently `Allow` it (`L1.None => L2.on`).
-        guard_risk = classify_shell_command(guard_text, request.root, request.root,
-                                            request.kernel_confinement);
-        if (guard_risk == ShellCommandRisk::Forbid) {
-            if (reason != nullptr) {
-                *reason = "shell-guard:outside-root";
-            }
-            return PolicyVerdict::Deny;
+    // 90-D5/90-D6: one request-level classification; the L1 risk is exactly
+    // the old `classify_shell_command` value plus the additive target scope and
+    // protected flag. `classify_shell_request` owns the terminal-open cwd.
+    const ShellClassification classification =
+        classify_shell_request(request, tmp_root_);
+    if (request_is_tmp_exempt(request, classification, tmp_root_)) {
+        if (reason != nullptr) {
+            *reason = "permission:temp-root-exempt";
         }
+        return PolicyVerdict::Allow;
+    }
+    const ShellCommandRisk    guard_risk     = classification.risk;
+    if (guard_risk == ShellCommandRisk::Forbid) {
+        if (reason != nullptr) {
+            *reason = "shell-guard:outside-root";
+        }
+        return PolicyVerdict::Deny;
     }
 
     if (request.sandbox == SandboxMode::ReadOnly && tool_is_mutating(request)) {
@@ -303,6 +454,39 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         return PolicyVerdict::Ask;
     }
 
+    // 90-D13/H1: protected paths are a hard deny after the 89 guard, ReadOnly,
+    // Confirm, and force_ask, and before the rule fold and every grant.
+    if (request.path.has_value() &&
+        path_is_protected(request.root, *request.path)) {
+        if (reason != nullptr) {
+            *reason = "permission:protected-path";
+        }
+        return PolicyVerdict::Deny;
+    }
+    if (classification.protected_target) {
+        if (reason != nullptr) {
+            *reason = "permission:protected-path";
+        }
+        return PolicyVerdict::Deny;
+    }
+
+    TargetClass target_class = TargetClass::Any;
+    if (request.path.has_value()) {
+        target_class = path_is_within_root(request.root, *request.path)
+                           ? TargetClass::InRoot
+                           : TargetClass::Outside;
+    } else if (tool_has_path_dimension(request.tool)) {
+        target_class = TargetClass::Unknown;
+    } else if (request.tool == "shell" || request.tool == "terminal") {
+        switch (classification.scope) {
+            case ShellTargetScope::InRoot: target_class = TargetClass::InRoot; break;
+            case ShellTargetScope::Outside: target_class = TargetClass::Outside; break;
+            case ShellTargetScope::Unknown:
+            case ShellTargetScope::NotApplicable:
+            default: target_class = TargetClass::Unknown; break;
+        }
+    }
+
     std::vector<PolicyRule> candidates;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -315,7 +499,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
 
     const PolicyRule* winner = nullptr;
     for (const PolicyRule& rule : candidates) {
-        if (!rule_matches(rule, request)) {
+        if (!rule_matches(rule, request, target_class)) {
             continue;
         }
         if (winner == nullptr || rule_greater(rule, *winner)) {
@@ -337,7 +521,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
                 candidate.layer != PolicyRule::Layer::LocalGrant &&
                 candidate.layer != PolicyRule::Layer::SessionGrant &&
                 candidate.layer != PolicyRule::Layer::Profile &&
-                rule_matches(candidate, request)) {
+                rule_matches(candidate, request, target_class)) {
                 return PolicyVerdict::Deny;
             }
         }
@@ -370,14 +554,81 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
         return {};
     }
 
+    // 90-D7/90-D9: protected targets can never create a grant.
+    if (request.path.has_value() &&
+        path_is_protected(request.root, *request.path)) {
+        return {};
+    }
+
+    ShellClassification classification{};
+    const bool shell_tool = request.tool == "shell" || request.tool == "terminal";
+    if (shell_tool) {
+        classification = classify_shell_request(request, tmp_root_);
+        if (request_is_tmp_exempt(request, classification, tmp_root_)) {
+            return {};
+        }
+        if (classification.protected_target) {
+            return {};
+        }
+    }
+
     PolicyRule grant;
-    grant.tool     = request.tool;
-    grant.command  = command_pattern(request);
-    grant.effect   = PolicyVerdict::Allow;
-    grant.id       = grant_id(grant.tool, grant.command);
-    grant.literal  = true;
-    grant.layer    = scope == GrantScope::Always ? PolicyRule::Layer::LocalGrant
-                                                 : PolicyRule::Layer::SessionGrant;
+    grant.tool    = request.tool;
+    grant.effect  = PolicyVerdict::Allow;
+    grant.layer   = scope == GrantScope::Always ? PolicyRule::Layer::LocalGrant
+                                                : PolicyRule::Layer::SessionGrant;
+
+    if (tool_has_path_dimension(request.tool)) {
+        // InRoot path-tool grant; an outside/unknown target creates no grant.
+        if (!request.path.has_value() ||
+            !path_is_within_root(request.root, *request.path)) {
+            return {};
+        }
+        grant.target_class = TargetClass::InRoot;
+        grant.command.clear();
+        // No command dimension: retain the historical `literal` flag so the
+        // durable file entry shape is unchanged (90-D9).
+        grant.literal = true;
+    } else if (shell_tool) {
+        const std::string raw = shell_guard_text(request);
+        if (raw.empty()) {
+            return {};
+        }
+        TargetClass target = TargetClass::Unknown;
+        if (classification.scope == ShellTargetScope::InRoot) {
+            target = TargetClass::InRoot;
+        } else if (classification.scope == ShellTargetScope::Outside) {
+            target = TargetClass::Outside;
+        }
+        // 90-D9: a durable `Always` grant is exact for command-bearing tools
+        // and keeps the shipped tool+command shape (class Any); only the
+        // in-memory Session grant carries the in-root/outside class.
+        grant.target_class = scope == GrantScope::Always ? TargetClass::Any : target;
+        grant.command      = raw;
+        const bool terminal_write =
+            request.tool == "terminal" && !request.arguments.is_object()
+                ? false
+                : (request.tool == "terminal" &&
+                   request.arguments.value("action", std::string{}) == "write");
+        // 90-D7: only a Session answer for one simple in-root command becomes
+        // an executable-prefix grant; Always stays exact (90-D9).
+        if (scope == GrantScope::Session && target == TargetClass::InRoot &&
+            !terminal_write && is_simple_shell_command(raw)) {
+            const std::string prefix = command_prefix(raw);
+            if (!prefix.empty()) {
+                grant.prefix = true;
+                grant.command = prefix;
+            }
+        }
+        if (!grant.prefix) {
+            grant.literal = true;
+        }
+    } else {
+        grant.target_class = TargetClass::Any;   // non-path tool: tool-wide
+    }
+
+    grant.id = scope == GrantScope::Session ? session_grant_id(grant)
+                                            : grant_id(grant.tool, grant.command);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

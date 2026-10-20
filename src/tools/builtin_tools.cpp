@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ymh/execution/deadline.hpp"
+#include "ymh/execution/path_safety.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/tools/git_tools.hpp"
 #include "ymh/tools/tool_context.hpp"
@@ -37,6 +38,21 @@ std::filesystem::path resolve_required_path(const ToolContext& context,
         throw ToolError{ToolErrorCode::InvalidArguments, "path must be a string"};
     }
     return context.resolve(value["path"].get<std::string>());
+}
+
+// 90-A17/90-D13: canonical protection independent of `resolve()`, so it also
+// holds under `SandboxMode::Unrestricted`.
+std::filesystem::path safety_path(const std::filesystem::path& path) {
+    std::error_code error;
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, error);
+    return error ? path.lexically_normal() : canonical;
+}
+
+void reject_protected_path(const ToolContext& context,
+                           const std::filesystem::path& path) {
+    if (path_is_protected(context.root(), safety_path(path))) {
+        throw ToolError{ToolErrorCode::PathEscape, "protected path"};
+    }
 }
 
 std::filesystem::path resolve_optional_base(const ToolContext& context,
@@ -122,6 +138,7 @@ public:
     Task<ToolResult> execute(const ToolContext& context,
                              const ToolArguments& arguments) override {
         const std::filesystem::path path = resolve_required_path(context, arguments);
+        reject_protected_path(context, path);
         const FileData data = context.execution().fs().read(path).get();
 
         ToolResult result;
@@ -168,6 +185,7 @@ public:
     Task<ToolResult> execute(const ToolContext& context,
                              const ToolArguments& arguments) override {
         const std::filesystem::path path = resolve_required_path(context, arguments);
+        reject_protected_path(context, path);
         const std::string content = arguments.value.at("content").get<std::string>();
         context.execution().fs().write(path, Data{content}).get();
 
@@ -210,6 +228,7 @@ public:
     Task<ToolResult> execute(const ToolContext& context,
                              const ToolArguments& arguments) override {
         const std::filesystem::path path = resolve_required_path(context, arguments);
+        reject_protected_path(context, path);
         const std::string old_string =
             arguments.value.at("old_string").get<std::string>();
         const std::string new_string =
@@ -282,6 +301,7 @@ public:
         GrepQuery query;
         query.pattern = arguments.value.at("pattern").get<std::string>();
         query.base = resolve_optional_base(context, arguments);
+        reject_protected_path(context, query.base);
         query.glob = arguments.value.value("glob", std::string{});
         query.line_numbers = arguments.value.value("line_numbers", true);
         query.max_results = config_.search_max_results;
@@ -361,6 +381,7 @@ public:
         GlobQuery query;
         query.pattern = arguments.value.at("pattern").get<std::string>();
         query.base = resolve_optional_base(context, arguments);
+        reject_protected_path(context, query.base);
         query.max_results = config_.search_max_results;
 
         const std::vector<std::filesystem::path> files =
@@ -412,7 +433,7 @@ public:
                             "subprocess cap exhausted"};
         }
 
-        SpawnConfinement confinement(context.root());
+        SpawnConfinement confinement(context.root(), context.execution().mode());
 
         ProcessRequest request;
         request.executable = "/bin/bash";

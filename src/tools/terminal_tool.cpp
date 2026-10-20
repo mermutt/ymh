@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -11,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ymh/execution/deadline.hpp"
+#include "ymh/execution/path_safety.hpp"
 #include "ymh/execution/pty.hpp"
 #include "ymh/tools/tool_context.hpp"
 
@@ -131,7 +133,8 @@ private:
                             "open requires exactly one of command or argv"};
         }
 
-        SpawnConfinement confinement(context.root());
+        auto confinement = std::make_shared<SpawnConfinement>(
+            context.root(), context.execution().mode());
 
         PtyRequest request;
         if (has_command) {
@@ -147,16 +150,61 @@ private:
             request.argv = argv;
         }
 
+        const std::filesystem::path& tmp_root = canonical_tmp_root();
+        std::error_code              root_error;
+        std::filesystem::path        canonical_root =
+            std::filesystem::weakly_canonical(context.root(), root_error);
+        if (root_error) {
+            canonical_root = context.root().lexically_normal();
+        }
+        const bool workspace_under_tmp =
+            !tmp_root.empty() && (canonical_root == tmp_root ||
+                                  path_is_under_tmp_root(tmp_root, canonical_root));
         if (arguments.value.contains("cwd")) {
-            request.cwd = context.resolve(arguments.value["cwd"].get<std::string>());
+            const std::string cwd_text = arguments.value["cwd"].get<std::string>();
+            const std::filesystem::path raw{cwd_text};
+            const std::filesystem::path candidate =
+                (raw.is_absolute() ? raw : (context.root() / raw)).lexically_normal();
+            std::error_code error;
+            const std::filesystem::path canonical =
+                std::filesystem::weakly_canonical(candidate, error);
+            if (!workspace_under_tmp && !tmp_root.empty() && !error &&
+                path_is_under_tmp_root(tmp_root, canonical)) {
+                request.cwd = canonical;
+            } else {
+                request.cwd = context.resolve(cwd_text);
+            }
         } else {
             request.cwd = context.root();
         }
-        request.environment = {{"HOME", confinement.home().string()},
-                               {"TMPDIR", confinement.tmpdir().string()},
+        // 90-D22/HIGH-1: canonicalize independently of `resolve()` (which
+        // skips containment under Unrestricted) and reject an outside or
+        // protected cwd before opening the PTY.
+        {
+            std::error_code error;
+            const std::filesystem::path canonical =
+                std::filesystem::weakly_canonical(request.cwd, error);
+            const std::filesystem::path checked =
+                error ? request.cwd.lexically_normal() : canonical;
+            const bool temp =
+                !workspace_under_tmp && !tmp_root.empty() &&
+                path_is_under_tmp_root(tmp_root, checked);
+            if (!temp &&
+                (!path_is_within(checked, context.root()) ||
+                 path_is_protected(context.root(), checked))) {
+                throw ToolError{ToolErrorCode::PathEscape,
+                                "terminal cwd escapes workspace root"};
+            }
+            if (temp && !std::filesystem::is_directory(checked, error)) {
+                throw ToolError{ToolErrorCode::PathEscape,
+                                "terminal temp cwd is not a directory"};
+            }
+        }
+        request.environment = {{"HOME", confinement->home().string()},
+                               {"TMPDIR", confinement->tmpdir().string()},
                                {"PWD", request.cwd.string()}};
         if (context.execution().confinementStatus() == ConfinementStatus::Enforced) {
-            request.confinement = &confinement.policy();
+            request.confinement = &confinement->policy();
         }
         if (arguments.value.contains("rows")) {
             request.rows = arguments.value["rows"].get<int>();
@@ -173,6 +221,7 @@ private:
             context.execution().pty().open(request, context.cancellation()).get();
         const PtySessionId id = opened->id();
         const int pid = opened->pid();
+        confinements_[id.value] = std::move(confinement);
 
         ToolResult result = makeResult(context);
         result.output = nlohmann::json{{"terminal_id", std::to_string(id.value)},
@@ -290,6 +339,15 @@ private:
             throw ToolError{ToolErrorCode::Timeout, "pty wait timed out"};
         }
 
+        if (arguments.value.contains("terminal_id") &&
+            arguments.value["terminal_id"].is_string()) {
+            try {
+                confinements_.erase(
+                    std::stoull(arguments.value["terminal_id"].get<std::string>()));
+            } catch (const std::exception&) {
+            }
+        }
+
         ToolResult result = makeResult(context);
         result.output = nlohmann::json{{"exit_code", status.exit_code},
                                        {"signalled", status.signalled},
@@ -313,6 +371,7 @@ private:
     }
 
     ToolConfig config_;
+    std::map<std::uint64_t, std::shared_ptr<SpawnConfinement>> confinements_;
 };
 
 } // namespace

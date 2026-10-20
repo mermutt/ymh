@@ -29,6 +29,7 @@
 #include "ymh/execution/environment.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/ids.hpp"
+#include "ymh/policy/path_target.hpp"
 
 namespace ymh {
 
@@ -63,10 +64,11 @@ struct PermissionRequest {
     std::string            tool;          // == payload::ToolCall.name
     nlohmann::json         arguments;     // == payload::ToolCall.arguments
 
-    // Supplied by 07, never recomputed here: the canonical workspace root and,
-    // when the tool targets a path, the resolved root-relative path.
+    // Supplied by 07 / the agent loop, never recomputed here: the canonical
+    // workspace root and, when the tool targets a path, the absolute,
+    // lexically-normalized target (90-A5; no resolve/stat/realpath).
     std::filesystem::path  root;          // canonical (07 X3)
-    std::optional<std::filesystem::path> path;   // resolved, root-relative
+    std::optional<std::filesystem::path> path;   // absolute, lexically normal
 
     SandboxMode            sandbox = SandboxMode::Workspace;
     bool                   destructive = false;
@@ -104,14 +106,26 @@ struct PolicyRule {
     // `command_pattern(request)` exactly, never via `glob_match`. A
     // `remember()`-derived durable grant sets it; config rules leave it false.
     bool          literal = false;
+
+    // 90-D7: matching predicates only; neither enters `specificity_key`.
+    // `target_class == Any` means "no class predicate". `prefix` and `literal`
+    // are mutually exclusive; a prefix grant compares the first executable
+    // word of a simple shell command.
+    TargetClass   target_class = TargetClass::Any;
+    bool          prefix = false;
 };
 
-// 46-D1: exported so the config parser can validate a rule (F-10). Throws
-// `PolicyConfigError` for an empty match dimension, a `command` without `tool`,
-// or a malformed glob. Takes raw strings so the policy layer does not depend on
-// the config layer; the parser translates the error to `ConfigError` (O-M4).
+// 46-D1 / 90-D3: exported so the config parser can validate a rule (F-10).
+// Throws `PolicyConfigError` for an empty match dimension, a `path` or
+// `command` without `tool`, a malformed glob, or an invalid path pattern
+// (leading `/`/`~`, `..` segment, `.` segment except `"."`, `[`/`]`). Takes raw
+// strings so the policy layer does not depend on the config layer; the parser
+// translates the error to `ConfigError` (O-M4). The two-argument form delegates
+// with an empty path.
 void validate_glob(const std::string& pattern);
 void validate_rule(std::string_view tool, std::string_view command);
+void validate_rule(std::string_view tool, std::string_view path,
+                   std::string_view command);
 
 // 46-D2: the durable `Always` grants seam. `load()` is called once by the
 // policy constructor; `append()` is the single best-effort durable write.
@@ -207,6 +221,7 @@ private:
     PermissionConfig   config_;
     PolicyGeneration   generation_;
     GrantStore*        store_ = nullptr;
+    std::filesystem::path tmp_root_;
     std::vector<PolicyRule> ordered_rules_;
     std::vector<PolicyRule> base_rules_;
 

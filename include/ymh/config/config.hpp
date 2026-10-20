@@ -139,11 +139,12 @@ struct WorkspaceSettings {
     std::vector<std::string> workspace_roots;  // first-run discovery roots (§9.10)
 };
 
-// 46-D1: one `permissions.rules` entry. Rev 5 / O-H1: no `path` field — the
-// shipped loop never populates `PermissionRequest::path`, so a path rule would
-// be dead code. `effect` is required; `id` defaults to `config.rule.<n>`.
+// 46-D1 / 90-D1: one `permissions.rules` entry. `path` is an optional
+// root-relative glob; when present it requires `tool` too. `effect` is
+// required; `id` defaults to `config.rule.<n>`.
 struct PermissionRuleSettings {
     std::optional<std::string> tool;
+    std::optional<std::string> path;
     std::optional<std::string> command;
     std::string                effect;
     std::string                id;

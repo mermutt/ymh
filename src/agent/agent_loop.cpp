@@ -1,5 +1,7 @@
 #include "ymh/agent/agent_loop.hpp"
 
+#include "ymh/policy/path_target.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -878,6 +880,9 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
     if (services_.execution != nullptr) {
         request.root = services_.execution->root();
     }
+    // 90-D2: populate the path dimension from the tool arguments. This is a
+    // pure lexical mapping; it never resolves, stats, or canonicalizes.
+    request.path = request_path_target(call.name, call.arguments, request.root);
     request.sandbox = config_.sandbox;
     request.kernel_confinement =
         services_.execution != nullptr &&

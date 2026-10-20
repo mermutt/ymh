@@ -15,6 +15,7 @@
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/errors.hpp"
 #include "ymh/execution/glob.hpp"
+#include "ymh/execution/path_safety.hpp"
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
@@ -168,6 +169,15 @@ Task<FileInfo> LocalFilesystem::stat(const std::filesystem::path& path) {
 
 Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& query) {
     require_contained(query.base);
+    // 90-A13/90-D14: canonical, independent of `resolve()`.
+    {
+        std::error_code canonical_ec;
+        const std::filesystem::path canonical =
+            std::filesystem::weakly_canonical(query.base, canonical_ec);
+        if (!canonical_ec && path_is_protected(root_, canonical)) {
+            throw ToolError{ToolErrorCode::PathEscape, "protected path"};
+        }
+    }
     std::vector<std::filesystem::path> results;
     std::error_code ec;
 
@@ -198,6 +208,13 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
             if (ec) {
                 break;
             }
+            if (path_is_protected(root_, it->path())) {
+                std::error_code entry_ec;
+                if (it->is_directory(entry_ec)) {
+                    it.disable_recursion_pending();
+                }
+                continue;
+            }
             consider(it->path());
         }
     }
@@ -211,6 +228,24 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
 
 Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
     require_contained(query.base);
+    // 90-A13/90-D14: canonical base check, independent of `resolve()`.
+    {
+        std::error_code canonical_ec;
+        const std::filesystem::path canonical =
+            std::filesystem::weakly_canonical(query.base, canonical_ec);
+        if (!canonical_ec && path_is_protected(root_, canonical)) {
+            throw ToolError{ToolErrorCode::PathEscape, "protected path"};
+        }
+    }
+    {
+        std::error_code link_ec;
+        const std::filesystem::file_status link_status =
+            std::filesystem::symlink_status(query.base, link_ec);
+        if (!link_ec && std::filesystem::is_symlink(link_status)) {
+            throw ToolError{ToolErrorCode::PathEscape, "symlink target: " +
+                                                          query.base.string()};
+        }
+    }
     std::regex expression;
     try {
         expression = std::regex(query.pattern, std::regex::ECMAScript);
@@ -239,7 +274,16 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
             const std::filesystem::recursive_directory_iterator end;
             while (it != end) {
                 std::error_code entry_ec;
-                if (it->is_regular_file(entry_ec) && !entry_ec) {
+                const bool protected_entry = path_is_protected(root_, it->path());
+                const bool symlink_entry = it->is_symlink(entry_ec);
+                if (protected_entry || symlink_entry) {
+                    // 90-A13/90-D14: never traverse `.ymh`/`.git`, and never
+                    // follow a symlink entry.
+                    std::error_code dir_ec;
+                    if (it->is_directory(dir_ec)) {
+                        it.disable_recursion_pending();
+                    }
+                } else if (it->is_regular_file(entry_ec) && !entry_ec) {
                     std::error_code size_ec;
                     const std::uintmax_t size = std::filesystem::file_size(it->path(), size_ec);
                     if (!size_ec && size <= kMaxFileBytes) {

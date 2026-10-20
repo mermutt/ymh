@@ -20,12 +20,6 @@
 
 namespace ymh {
 
-enum class SandboxMode : std::uint8_t {
-    Workspace,     // v1 default: root-confined FS; daemon uid; caps apply
-    ReadOnly,      // inspection only: no writes, no subprocesses, no PTYs
-    Unrestricted,  // explicit opt-out: resolve() skips root containment
-};
-
 class ExecutionEnvironment {
 public:
     virtual ~ExecutionEnvironment() = default;

@@ -22,6 +22,9 @@ namespace ymh {
 
 struct GitQuery {
     std::string           ref;
+    // 90-A14/90-D15: `root` is the repository-open base (the workspace root);
+    // `path` is the pathspec/query scope (empty for status).
+    std::filesystem::path root;
     std::filesystem::path path;
     bool                  staged = false;
 };

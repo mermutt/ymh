@@ -175,6 +175,7 @@ PermissionConfig to_permission_config(const Config& config) {
     for (const PermissionRuleSettings& settings : config.permissions.rules) {
         PolicyRule rule;
         rule.tool    = settings.tool.value_or("");
+        rule.path    = settings.path.value_or("");
         rule.command = settings.command.value_or("");
         rule.effect  = parse_verdict(settings.effect, "rules.effect");
         rule.layer   = PolicyRule::Layer::Project;

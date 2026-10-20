@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <unistd.h>
+#include <string>
 
 #if defined(__linux__) && __has_include(<linux/landlock.h>)
 #include <fcntl.h>
@@ -47,7 +48,8 @@ constexpr std::uint64_t kRemoveRights = kFsRemoveFile | kFsRemoveDir;
 constexpr std::uint64_t kRootRights =
     kReadRights | kWriteRights | kMakeRights | kRemoveRights | kFsRefer;
 constexpr std::uint64_t kHomeRights = kReadRights | kWriteRights | kMakeRights | kRemoveRights;
-constexpr std::uint64_t kTmpRights  = kReadRights | kWriteRights | kMakeRights | kRemoveRights;
+constexpr std::uint64_t kTmpRights =
+    kReadRights | kWriteRights | kMakeRights | kRemoveRights | kFsRefer;
 
 // `FS_IOCTL_DEV` is handled but granted to no path, so a device `ioctl` outside
 // the workspace is denied at the kernel boundary (the `dd`/`mkfs` class).
@@ -103,12 +105,16 @@ public:
             confine_fail(errno);
         }
 
-        add_path_rule(ruleset_fd, policy.root, kRootRights);
+        add_path_rule(ruleset_fd, policy.root,
+                      policy.workspace_writable ? kRootRights : kReadRights);
         if (policy.home.has_value()) {
             add_path_rule(ruleset_fd, *policy.home, kHomeRights);
         }
         if (policy.tmpdir.has_value()) {
             add_path_rule(ruleset_fd, *policy.tmpdir, kTmpRights);
+        }
+        if (policy.tmp_root.has_value()) {
+            add_path_rule(ruleset_fd, *policy.tmp_root, kTmpRights);
         }
         for (const std::filesystem::path& ro : policy.ro_paths) {
             add_path_rule(ruleset_fd, ro, kReadRights);

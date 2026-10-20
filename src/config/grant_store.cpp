@@ -87,11 +87,27 @@ std::optional<std::vector<PolicyRule>> parse_grants(
         }
         PolicyRule rule;
         rule.tool = tool->get<std::string>();
+        // 90-A15/H1: no wildcard durable grant.
+        if (rule.tool.find_first_of("*?[") != std::string::npos) {
+            return std::nullopt;
+        }
         if (const Json* command = member(entry, "command"); command != nullptr) {
             if (!command->is_string()) {
                 return std::nullopt;
             }
             rule.command = command->get<std::string>();
+        }
+        // 90-A15: a shell/terminal grant must be bounded; a path-tool grant
+        // has no command dimension (the shipped `Always` shape is empty).
+        if (rule.tool == "shell" || rule.tool == "terminal") {
+            if (rule.command.empty()) {
+                return std::nullopt;
+            }
+        } else if (tool_has_path_dimension(rule.tool)) {
+            if (!rule.command.empty()) {
+                return std::nullopt;
+            }
+            rule.target_class = TargetClass::InRoot;
         }
         bool literal = true;
         if (const Json* match = member(entry, "match"); match != nullptr) {
@@ -115,6 +131,18 @@ std::optional<std::vector<PolicyRule>> parse_grants(
             }
         }
         rule.literal = literal;
+        if (!literal && (rule.tool == "shell" || rule.tool == "terminal")) {
+            bool has_literal = false;
+            for (char c : rule.command) {
+                if (c != '*' && c != '?') {
+                    has_literal = true;
+                    break;
+                }
+            }
+            if (!has_literal) {
+                return std::nullopt;   // 90-A15/N16: match-all shell grant
+            }
+        }
         rule.effect  = PolicyVerdict::Allow;
         rule.layer   = PolicyRule::Layer::LocalGrant;
         if (const Json* id = member(entry, "id"); id != nullptr && id->is_string()) {

@@ -422,7 +422,8 @@ void apply_handoff(Config& config, const Json& table, const std::filesystem::pat
         static_cast<std::int64_t>(handoff.keep_recent_turns), source));
 }
 
-void apply_agent(Config& config, const Json& table, const std::filesystem::path& source) {
+void apply_agent(Config& config, const Json& table, const std::filesystem::path& source,
+                 bool global_layer) {
     reject_unknown(table, "agent",
                    {"model", "max_steps", "max_segments", "max_turn_steps", "reasoning_effort",
                     "system_prompt", "compaction", "compaction_threshold_tokens", "plan",
@@ -440,6 +441,11 @@ void apply_agent(Config& config, const Json& table, const std::filesystem::path&
     config.agent.reasoning_effort = read_optional_string(table, "reasoning_effort", "agent", source);
     config.agent.system_prompt =
         read_string(table, "system_prompt", "agent", config.agent.system_prompt, source);
+    // 90-D18 / 90-A19: the sandbox baseline is global-layer only, because a
+    // workspace `unrestricted` value would widen `effective_sandbox_mode`.
+    if (!global_layer && member(table, "sandbox") != nullptr) {
+        fail(source, "'agent.sandbox' is global-layer only");
+    }
     config.agent.sandbox = read_string(table, "sandbox", "agent", config.agent.sandbox, source);
     validate_sandbox_value(config.agent.sandbox, source);
     config.agent.compaction.threshold_tokens = static_cast<std::size_t>(read_int64(
@@ -473,16 +479,11 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
     reject_unknown(table, "permissions",
                    {"shell", "write", "read", "default", "rules", "presets", "default_preset"},
                    source);
-    // 52-D15: a permission preset is a deployment-level capability bundle. A
-    // workspace layer (e.g. a cloned repo's `.ymh/config.jsonc`) must not be
-    // able to define or select one, or it could widen itself to allow-all.
+    // 52-D15 / 90-D18: the whole permission table is a deployment-level
+    // capability bundle. A workspace layer (e.g. a cloned repo's
+    // `.ymh/config.jsonc`) must not be able to define, select, or widen it.
     if (!global_layer) {
-        if (member(table, "presets") != nullptr) {
-            fail(source, "'permissions.presets' is global-layer only");
-        }
-        if (member(table, "default_preset") != nullptr) {
-            fail(source, "'permissions.default_preset' is global-layer only");
-        }
+        fail(source, "'permissions' is global-layer only");
     }
     config.permissions.shell =
         read_string(table, "shell", "permissions", config.permissions.shell, source);
@@ -539,9 +540,14 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
         if (!entry.is_object()) {
             fail(source, "invalid type for 'permissions.rules[" + std::to_string(index) + "]'");
         }
-        reject_unknown(entry, "permissions.rules", {"tool", "command", "effect", "id"}, source);
+        reject_unknown(entry, "permissions.rules",
+                       {"tool", "path", "command", "effect", "id"}, source);
         PermissionRuleSettings rule;
         rule.tool    = read_optional_string(entry, "tool", "permissions.rules", source);
+        rule.path    = read_optional_string(entry, "path", "permissions.rules", source);
+        if (rule.path.has_value() && rule.path->empty()) {
+            fail(source, "'permissions.rules.path' must not be empty");
+        }
         rule.command = read_optional_string(entry, "command", "permissions.rules", source);
         if (member(entry, "effect") == nullptr) {
             fail(source, "missing 'permissions.rules.effect'");
@@ -553,7 +559,8 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
         rule.id = read_string(entry, "id", "permissions.rules",
                               "config.rule." + std::to_string(index), source);
         try {
-            validate_rule(rule.tool.value_or(""), rule.command.value_or(""));
+            validate_rule(rule.tool.value_or(""), rule.path.value_or(""),
+                          rule.command.value_or(""));
         } catch (const PolicyConfigError& error) {
             fail(source, error.what());
         }
@@ -1380,7 +1387,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         apply_ui(config, *ui, source);
     }
     if (const Json* agent = section("agent"); agent != nullptr) {
-        apply_agent(config, *agent, source);
+        apply_agent(config, *agent, source, global_layer);
     }
     if (const Json* workspace = section("workspace"); workspace != nullptr) {
         apply_workspace(config, *workspace, source);
@@ -1484,10 +1491,20 @@ constexpr std::string_view kDefaultConfigJsonc =
     "root": "."                  // workspace root (relative to the process cwd)
     // optional: "workspace_roots": []       // discovery roots for workspace selection
   },
+  // The whole permissions table (and agent.sandbox) is global-layer only;
+  // a workspace .ymh/config.jsonc containing either is a ConfigError.
   "permissions": {
     "shell": "ask",              // "allow" | "ask" | "deny"
     "write": "ask",
-    "read": "allow"
+    "read": "allow"              // set "ask" to make outside reads ask too
+    // Optional path-scoped in-workspace auto-approval. `path` is a
+    // root-relative glob; it matches path tools and, with exactly "**",
+    // in-root shell/terminal. Protected `.ymh/**`/`.git/**` are always denied.
+    // "rules": [
+    //   {"tool": "*", "path": "**", "effect": "allow", "id": "workspace.in-root"},
+    //   {"tool": "*", "path": ".ymh/**", "effect": "deny", "id": "protected.ymh"},
+    //   {"tool": "*", "path": ".git/**", "effect": "deny", "id": "protected.git"}
+    // ]
   },
   "logging": {
     "level": "info",             // "debug" | "info" | "warn" | "error"

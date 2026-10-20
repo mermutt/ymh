@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "ymh/execution/errors.hpp"
+#include "ymh/execution/path_safety.hpp"
 
 namespace ymh {
 namespace {
@@ -94,7 +95,8 @@ std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
     return final;
 }
 
-SpawnConfinement::SpawnConfinement(const std::filesystem::path& workspace_root) {
+SpawnConfinement::SpawnConfinement(const std::filesystem::path& workspace_root,
+                                   SandboxMode                  sandbox) {
     static std::atomic<std::uint64_t> counter{0};
     const std::string unique =
         std::to_string(::getpid()) + "-" + std::to_string(counter.fetch_add(1));
@@ -109,9 +111,22 @@ SpawnConfinement::SpawnConfinement(const std::filesystem::path& workspace_root) 
     std::filesystem::create_directories(home_, ec);
     std::filesystem::create_directories(tmp_, ec);
 
-    policy_.root    = workspace_root;
-    policy_.home    = home_;
-    policy_.tmpdir  = tmp_;
+    policy_.root               = workspace_root;
+    policy_.home               = home_;
+    policy_.tmpdir             = tmp_;
+    policy_.workspace_writable = sandbox != SandboxMode::ReadOnly;
+    const std::filesystem::path& tmp_root = canonical_tmp_root();
+    ec.clear();
+    const std::filesystem::path  canonical_root =
+        std::filesystem::weakly_canonical(workspace_root, ec);
+    const std::filesystem::path  effective_root =
+        ec ? workspace_root.lexically_normal() : canonical_root;
+    if (tmp_root.empty() || effective_root == tmp_root ||
+        path_is_under_tmp_root(tmp_root, effective_root)) {
+        policy_.tmp_root = std::nullopt;
+    } else {
+        policy_.tmp_root = tmp_root;
+    }
     policy_.ro_paths = {std::filesystem::path{"/"}};
 }
 
