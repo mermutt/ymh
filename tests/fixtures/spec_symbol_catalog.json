@@ -1617,6 +1617,12 @@
       "section": "3.2"
     },
     {
+      "symbol": "config::permissions.rules.path",
+      "category": "config_key",
+      "spec": "90-path-scoped-permissions-errata.md",
+      "section": "4.6"
+    },
+    {
       "symbol": "config::permissions.rules.effect",
       "category": "config_key",
       "spec": "46-permissions-ui-errata.md",

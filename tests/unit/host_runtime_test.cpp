@@ -199,7 +199,7 @@ PermissionRequest ask_request(const SessionId& session, std::string tool = "writ
     request.tool = std::move(tool);
     request.arguments = nlohmann::json::object();
     request.root = "/tmp/ws";
-    request.path = std::filesystem::path("src/x");
+    request.path = request.root / "src/x";
     request.sandbox = SandboxMode::Workspace;
     return request;
 }

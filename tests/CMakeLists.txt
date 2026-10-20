@@ -37,6 +37,13 @@ add_executable(ymh_tests
     unit/errata89_clamp_test.cpp
     unit/errata89_l2_absent_test.cpp
     unit/errata89_corpus_test.cpp
+    unit/errata90_path_target_test.cpp
+    unit/errata90_protected_path_test.cpp
+    unit/errata90_grant_loader_test.cpp
+    unit/errata90_path_rules_test.cpp
+    unit/errata90_shell_scope_test.cpp
+    unit/errata90_session_grant_test.cpp
+    unit/errata90_temp_root_test.cpp
     unit/errata46_localcode_test.cpp
     unit/errata46_deadline_test.cpp
     unit/errata46_ui_test.cpp
@@ -172,6 +179,12 @@ add_executable(ymh_tests
     integration/errata89_b1_spawn_census_test.cpp
     integration/errata89_b2_danger_test.cpp
     integration/errata89_canary_test.cpp
+    integration/errata90_agent_loop_path_test.cpp
+    integration/errata90_grep_symlink_test.cpp
+    integration/errata90_git_no_search_test.cpp
+    integration/errata90_path_broker_test.cpp
+    integration/errata90_temp_root_agent_test.cpp
+    integration/errata90_temp_root_l2_test.cpp
 )
 
 add_executable(fake_mcp_server support/fake_mcp_server.cpp)

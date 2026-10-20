@@ -112,10 +112,11 @@ struct AgentEnv {
              InstructionLoader* instructions = nullptr,
              GrantStore* grant_store = nullptr,
              ToolConfig tool_config = {},
-             PermissionPolicy* policy_override = nullptr)
+             PermissionPolicy* policy_override = nullptr,
+             SandboxMode sandbox = SandboxMode::Workspace)
         : workspace(prefix),
           sessions(store, bus),
-          env(workspace.path(), SandboxMode::Workspace, tool_config),
+          env(workspace.path(), sandbox, tool_config),
           provider(std::move(provider)),
           runtime(),
           adapter_handle(register_test_adapter(runtime, this->provider)),

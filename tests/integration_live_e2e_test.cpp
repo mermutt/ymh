@@ -83,7 +83,7 @@ class LiveWorkspace {
 public:
     explicit LiveWorkspace(const std::string& prefix) : root_(prefix) {
         root_.write("note.txt", std::string{"The secret word is "} + kSecret + ".\n");
-        root_.write(".ymh/config.jsonc", kLiveConfig);
+        root_.write(".config/ymh/config.jsonc", kLiveConfig);
         state_env_.emplace("XDG_STATE_HOME", root_.state_dir().string());
         home_env_.emplace("HOME", root_.path().string());
         config_env_.emplace("XDG_CONFIG_HOME", root_.config_dir().string());

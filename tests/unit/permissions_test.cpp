@@ -168,7 +168,7 @@ TEST(Policy, InvalidRulesFailLoudAtLoad) {
 
 // 46-D2 / O-H1: a grant carries `tool` (+ `command`) only, never a path, so a
 // session grant on a path tool is tool-wide within the workspace.
-TEST(Policy, SessionGrantIsToolWide) {
+TEST(Policy, SessionGrantIsInRootClassWide) {
     RulePermissionPolicy policy(PermissionConfig{});
     ymh::test::TempWorkspace workspace("policy_grant");
     const PermissionRequest grant_request =
@@ -182,6 +182,9 @@ TEST(Policy, SessionGrantIsToolWide) {
     EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file",
                                           workspace.path() / "docs" / "x")),
               PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file",
+                                          workspace.path() / ".." / "outside")),
+              PolicyVerdict::Ask);
 }
 
 TEST(PermissionHandle, ReturnsRecordedNonAskDecision) {

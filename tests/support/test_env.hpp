@@ -17,6 +17,7 @@
 #include "ymh/core/event_bus.hpp"
 #include "ymh/core/logger.hpp"
 #include "ymh/execution/environment.hpp"
+#include "ymh/execution/path_safety.hpp"
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -26,20 +27,43 @@
 
 namespace ymh::test {
 
-inline std::filesystem::path make_temp_dir(const std::string& prefix) {
-    const auto base =
-        std::filesystem::temp_directory_path() /
-        (prefix + "_" + std::to_string(::getpid()) + "_" +
-         std::to_string(
-             std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::filesystem::create_directories(base);
+// Spec 90 (Rev 16/18, LOW-1): a temp-root test needs a workspace outside
+// canonical /tmp; socket tests still need the short path under TMPDIR.
+inline const std::filesystem::path& test_workspace_base() {
+    static const std::filesystem::path base = [] {
+        std::error_code       error;
+        std::filesystem::path fallback = std::filesystem::current_path(error);
+        if (error || fallback.empty()) {
+            fallback = std::filesystem::path{"."};
+        }
+        fallback = (fallback / ".ymh-test-workspaces").lexically_normal();
+        std::filesystem::create_directories(fallback, error);
+        return fallback;
+    }();
     return base;
+}
+
+inline std::filesystem::path make_temp_dir_in(const std::filesystem::path& base,
+                                              const std::string& prefix) {
+    const auto path =
+        base / (prefix + "_" + std::to_string(::getpid()) + "_" +
+                std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(path);
+    return path;
+}
+
+inline std::filesystem::path make_temp_dir(const std::string& prefix) {
+    return make_temp_dir_in(std::filesystem::temp_directory_path(), prefix);
 }
 
 class TempWorkspace {
 public:
     explicit TempWorkspace(const std::string& prefix)
         : path_(make_temp_dir(prefix)) {}
+
+    TempWorkspace(const std::string& prefix, const std::filesystem::path& base)
+        : path_(make_temp_dir_in(base, prefix)) {}
 
     ~TempWorkspace() {
         std::error_code ec;
@@ -150,8 +174,13 @@ struct ToolEnv {
                      SandboxMode mode = SandboxMode::Workspace,
                      ToolConfig config = {},
                      ResourceCaps caps = {},
-                     PtyService* pty = nullptr)
-        : workspace(prefix), env(workspace.path(), mode, config, pty), governor(caps) {
+                     PtyService* pty = nullptr,
+                     const std::filesystem::path& workspace_base = {})
+        : workspace(prefix, workspace_base.empty()
+                                ? std::filesystem::temp_directory_path()
+                                : workspace_base),
+          env(workspace.path(), mode, config, pty),
+          governor(caps) {
         header.id = make_session_id();
         header.cwd = workspace.path();
         header.createdAt = 0;

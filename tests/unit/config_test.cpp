@@ -1425,4 +1425,52 @@ TEST(Config, JobsUnknownKeyRejected) {
     EXPECT_THROW((void)load_config(paths), ConfigError);
 }
 
+TEST(Config, PermissionsPathRuleParses) {
+    test::TempWorkspace workspace("config_permissions_path");
+    workspace.write("global.jsonc",
+                    "{\"permissions\":{\"rules\":[{\"tool\":\"write_file\","
+                    "\"path\":\"src/**\",\"effect\":\"allow\"}]}}\n");
+    ConfigPaths paths;
+    paths.global    = workspace.path() / "global.jsonc";
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    ASSERT_EQ(config.permissions.rules.size(), 1u);
+    ASSERT_TRUE(config.permissions.rules[0].path.has_value());
+    EXPECT_EQ(*config.permissions.rules[0].path, "src/**");
+}
+
+TEST(Config, WorkspacePermissionsRejected) {
+    for (const char* body : {
+             "{\"permissions\":{\"default\":\"allow\"}}",
+             "{\"permissions\":{\"read\":\"allow\"}}",
+             "{\"permissions\":{\"write\":\"allow\"}}",
+             "{\"permissions\":{\"shell\":\"allow\"}}",
+             "{\"permissions\":{\"rules\":[{\"tool\":\"*\",\"effect\":\"allow\"}]}}",
+             "{\"permissions\":{\"presets\":{}}}",
+             "{\"permissions\":{\"default_preset\":\"workspace-write\"}}",
+             "{\"agent\":{\"sandbox\":\"unrestricted\"}}"}) {
+        test::TempWorkspace workspace("config_ws_permissions");
+        workspace.write(".ymh/config.jsonc", std::string{body} + "\n");
+        ConfigPaths paths;
+        paths.global    = write_global(workspace);
+        paths.workspace = workspace_config_path(workspace.path());
+        EXPECT_THROW((void)load_config(paths), ConfigError) << body;
+    }
+}
+
+TEST(Config, GlobalPermissionsAndSandboxLoad) {
+    test::TempWorkspace workspace("config_global_permissions");
+    workspace.write("global.jsonc",
+                    "{\"agent\":{\"sandbox\":\"unrestricted\"},"
+                    "\"permissions\":{\"default\":\"ask\",\"read\":\"ask\","
+                    "\"rules\":[{\"tool\":\"*\",\"path\":\"**\",\"effect\":\"allow\"}]}}\n");
+    ConfigPaths paths;
+    paths.global    = workspace.path() / "global.jsonc";
+    paths.workspace = workspace_config_path(workspace.path());
+    const Config config = load_config(paths);
+    EXPECT_EQ(config.agent.sandbox, "unrestricted");
+    EXPECT_EQ(config.permissions.read, "ask");
+    ASSERT_EQ(config.permissions.rules.size(), 1u);
+}
+
 } // namespace

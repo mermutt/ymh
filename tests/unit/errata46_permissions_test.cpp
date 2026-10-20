@@ -31,12 +31,14 @@ PermissionRequest request_for(const std::filesystem::path& root,
                               std::string tool,
                               std::string command = std::string(),
                               bool force_ask = false,
-                              SandboxMode sandbox = SandboxMode::Workspace) {
+                              SandboxMode sandbox = SandboxMode::Workspace,
+                              std::optional<std::filesystem::path> path = std::nullopt) {
     PermissionRequest request;
     request.call    = "call-1";
     request.session = SessionId{"session-1"};
     request.tool    = std::move(tool);
     request.root    = root;
+    request.path    = std::move(path);
     request.sandbox = sandbox;
     request.force_ask = force_ask;
     request.arguments = nlohmann::json::object();
@@ -184,12 +186,24 @@ TEST(Errata46D1, UI46_D1_CommandOnlyRuleRequiresTool) {
                  ConfigError);
 }
 
-TEST(Errata46D1, UI46_D1_PathKeyRejected) {
+TEST(Errata46D1, UI46_D1_PathKeyAccepted) {
     test::TempWorkspace workspace("d1_path_key");
+    Config              config;
+    EXPECT_NO_THROW(apply_document(
+        workspace.path() / "c.jsonc",
+        R"JSONC({"permissions":{"rules":[{"tool":"write_file","path":"src/**","effect":"allow"}]}})JSONC",
+        config));
+    ASSERT_EQ(config.permissions.rules.size(), 1u);
+    ASSERT_TRUE(config.permissions.rules[0].path.has_value());
+    EXPECT_EQ(*config.permissions.rules[0].path, "src/**");
+}
+
+TEST(Errata46D1, UI46_D1_PathKeyWithoutToolRejected) {
+    test::TempWorkspace workspace("d1_path_key_no_tool");
     Config              config;
     EXPECT_THROW(apply_document(
                      workspace.path() / "c.jsonc",
-                     R"JSONC({"permissions":{"rules":[{"tool":"write_file","path":"src/**","effect":"allow"}]}})JSONC",
+                     R"JSONC({"permissions":{"rules":[{"path":"src/**","effect":"allow"}]}})JSONC",
                      config),
                  ConfigError);
 }
@@ -473,15 +487,26 @@ TEST(Errata46D2, UI46_D2_GrantCommandIsLiteral) {
               PolicyVerdict::Ask);
 }
 
-TEST(Errata46D2, UI46_D2_PathToolGrantIsToolWide) {
+TEST(Errata46D2, UI46_D2_PathToolGrantIsInRootWide) {
     FakeGrantStore      store;
     RulePermissionPolicy policy(PermissionConfig{}, &store);
     test::TempWorkspace  workspace("d2_tool_wide");
-    policy.remember(request_for(workspace.path(), "write_file"),
+    const auto           inside = workspace.path() / "src" / "x";
+    policy.remember(request_for(workspace.path(), "write_file", "", false,
+                                SandboxMode::Workspace, inside),
                     payload::PermissionDecisionKind::Allow, GrantScope::Always);
 
-    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file")), PolicyVerdict::Allow);
-    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file")), PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file", "", false,
+                                          SandboxMode::Workspace, inside)),
+              PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file", "", false,
+                                          SandboxMode::Workspace,
+                                          workspace.path() / "docs" / "y")),
+              PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file", "", false,
+                                          SandboxMode::Workspace,
+                                          workspace.path() / ".." / "outside")),
+              PolicyVerdict::Ask);
 }
 
 TEST(Errata46D2, UI46_D2_StoreInjectedBeforeRuntime) {
@@ -609,14 +634,19 @@ TEST(Errata46D2, UI46_D2_ConfigDenyOverridesDurableGrant) {
 
     RulePermissionPolicy policy(config, &store);
     test::TempWorkspace  workspace("d2_config_deny");
-    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file")), PolicyVerdict::Deny);
+    const auto           inside = workspace.path() / "src" / "x";
+    EXPECT_EQ(policy.evaluate(request_for(workspace.path(), "write_file", "", false,
+                                          SandboxMode::Workspace, inside)),
+              PolicyVerdict::Deny);
 
     // A session grant is intentionally out of scope of the veto.
     FakeGrantStore session_store;
     RulePermissionPolicy session_policy(config, &session_store);
-    session_policy.remember(request_for(workspace.path(), "write_file"),
+    session_policy.remember(request_for(workspace.path(), "write_file", "", false,
+                                        SandboxMode::Workspace, inside),
                             payload::PermissionDecisionKind::Allow, GrantScope::Session);
-    EXPECT_EQ(session_policy.evaluate(request_for(workspace.path(), "write_file")),
+    EXPECT_EQ(session_policy.evaluate(request_for(workspace.path(), "write_file", "", false,
+                                                  SandboxMode::Workspace, inside)),
               PolicyVerdict::Allow);
 }
 

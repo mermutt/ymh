@@ -129,7 +129,7 @@ std::map<std::string, std::string> child_env(const ShortTempRoot& root,
 // `tests/unit/ui_event_adapter_test.cpp:HostNoticeSessionLifecycleCarriesSessionId`.
 TEST(OwnershipTwoSupervisor, SessionCreatedBroadcastReachesAttachedClients) {
     ShortTempRoot root("ymh-own-vis");
-    root.write(".ymh/config.jsonc", kAllowAll);
+    root.write(".config/ymh/config.jsonc", kAllowAll);
     root.write("fake.json", kFakeText);
 
     const std::string workspace_id =
@@ -204,7 +204,7 @@ TEST(OwnershipTwoSupervisor, AutomationGuardKeepsDaemonThroughSupervisorExit) {
     ShortTempRoot root("ymh-own-automation");
     const std::filesystem::path workspace = root.path() / "alpha";
     std::filesystem::create_directories(workspace);
-    root.write("alpha/.ymh/config.jsonc", kAllowAll);
+    root.write(".config/ymh/config.jsonc", kAllowAll);
     root.write("alpha/fake.json", kFakeSlowTool);
 
     const std::string workspace_id =
@@ -280,7 +280,7 @@ TEST(OwnershipTwoSupervisor, AutomationGuardKeepsDaemonThroughSupervisorExit) {
 // and the registry rows are unchanged (focus isolation).
 TEST(OwnershipTwoSupervisor, PeerReplayAndFollowUpLeaveOwnerFocusUnchanged) {
     ShortTempRoot root("ymh-own-switch");
-    root.write(".ymh/config.jsonc", kAllowAll);
+    root.write(".config/ymh/config.jsonc", kAllowAll);
     root.write("fake.json", kFakeText);
 
     const std::string workspace_id =

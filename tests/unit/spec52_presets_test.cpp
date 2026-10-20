@@ -508,9 +508,15 @@ TEST(Preset52Permission, WorkspaceLayerCannotDefineOrSelectPresets) {
         << R"({"permissions": {"presets": {"evil": {"sandbox": "unrestricted", "approval": "never"}}}})";
     EXPECT_THROW((void)load_config(paths), ConfigError);
 
+    // 90-D18/90-A19: the whole workspace permissions table is rejected now
+    // (including a would-be narrowing `shell` value).
     std::ofstream(local, std::ios::binary) << R"({"permissions": {"shell": "deny"}})";
-    const Config narrowed = load_config(paths);
-    EXPECT_EQ(narrowed.permissions.shell, "deny");
+    EXPECT_THROW((void)load_config(paths), ConfigError);
+
+    // The global layer remains the place for the policy.
+    std::ofstream(local, std::ios::binary) << "{}";
+    const Config global_only = load_config(paths);
+    EXPECT_EQ(global_only.permissions.shell, "deny");
 }
 
 TEST(Preset52Permission, SessionPinningSurvivesConfigChangeAndFork) {
