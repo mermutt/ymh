@@ -24,6 +24,7 @@
 #include "ymh/session/events.hpp"
 #include "ymh/session/session.hpp"
 #include "ymh/session/session_manager.hpp"
+#include "ymh/session/tool_result_text.hpp"
 
 namespace {
 
@@ -265,6 +266,71 @@ TEST(DeriveMessages, ProjectsUserAssistantToolAndInjected) {
     EXPECT_EQ(messages[2].content.front().text, "file contents");
     EXPECT_EQ(messages[3].role, Role::System);
     EXPECT_EQ(messages[3].content.front().text, "context");
+}
+
+TEST(DeriveMessages, DeniedToolResultProjectsCanonicalText) {
+    const SessionId session = make_session_id();
+    payload::ToolResult result;
+    result.id      = "call-1";
+    result.name    = "mcp.github.search";
+    result.outcome = payload::ToolOutcome::Denied;
+    result.output  = denial_text(result.name, "user");
+    result.error   = result.output;
+
+    const EventRange events{record(1, session, result)};
+    const std::vector<Message> messages = deriveMessages(SessionHeader{}, events);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages[0].role, Role::Tool);
+    EXPECT_NE(messages[0].content.front().text.find("DENIED:"), std::string::npos);
+    EXPECT_NE(messages[0].content.front().text.find("NOT executed"), std::string::npos);
+}
+
+TEST(DeriveMessages, LegacyBareTokenIsRepaired) {
+    const SessionId session = make_session_id();
+    payload::ToolResult result;
+    result.id      = "call-1";
+    result.name    = "mcp.github.search";
+    result.outcome = payload::ToolOutcome::Denied;
+    result.output  = "user";
+    result.error   = "user";
+
+    const EventRange events{record(1, session, result)};
+    const std::vector<Message> messages = deriveMessages(SessionHeader{}, events);
+    ASSERT_EQ(messages.size(), 1u);
+    const std::string text = messages[0].content.front().text;
+    EXPECT_NE(text.find("DENIED:"), std::string::npos);
+    EXPECT_NE(text.find("the user denied it"), std::string::npos);
+    EXPECT_NE(text, "user");
+}
+
+TEST(DeriveMessages, DenialProjectionIsDeterministic) {
+    const SessionId session = make_session_id();
+    payload::ToolResult result;
+    result.id      = "call-1";
+    result.name    = "x";
+    result.outcome = payload::ToolOutcome::Denied;
+    result.output  = "user";
+
+    const EventRange events{record(1, session, result)};
+    const auto first  = deriveMessages(SessionHeader{}, events);
+    const auto second = deriveMessages(SessionHeader{}, events);
+    ASSERT_EQ(first.size(), second.size());
+    EXPECT_EQ(first[0].content.front().text, second[0].content.front().text);
+}
+
+TEST(DeriveMessages, ErrorProjectionUnchanged) {
+    const SessionId session = make_session_id();
+    payload::ToolResult result;
+    result.id      = "call-1";
+    result.name    = "read";
+    result.outcome = payload::ToolOutcome::Error;
+    result.output  = "boom";
+    result.error   = "boom";
+
+    const EventRange events{record(1, session, result)};
+    const std::vector<Message> messages = deriveMessages(SessionHeader{}, events);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages[0].content.front().text, "boom");
 }
 
 TEST(DeriveMessages, CancelledTurnSynthesizesCancelledToolResult) {

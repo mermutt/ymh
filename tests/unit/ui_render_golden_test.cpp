@@ -388,6 +388,38 @@ TEST(UiRenderGolden, PermissionDialogOverlay) {
     EXPECT_EQ(rendered.find("1) Allow once"), std::string::npos);
 }
 
+TEST(UiRenderGolden, PermissionHotkeyHintsRendered) {
+    const auto render_for = [](std::string tool, bool force_ask) {
+        UiModel model = build_model();
+        UiEventAdapter adapter(model);
+        PermissionRequest request;
+        request.session = kSession;
+        request.tool = std::move(tool);
+        request.arguments = {{"path", "x"}};
+        adapter.onPermissionRequest(kSession, PermissionRequestId{"p1"}, request);
+        model.dialog.force_ask = force_ask;
+        model.dialog.selected = force_ask ? 1 : 0;
+        return normalize(render_to_ansi(model, TerminalSize{100, 30}, Theme{false}));
+    };
+
+    const std::string shell = render_for("shell", false);
+    EXPECT_NE(shell.find("Always allow (exact command)"), std::string::npos);
+    EXPECT_NE(shell.find("[A] always | [O] once | [S] session | [D] deny"),
+              std::string::npos);
+
+    const std::string write = render_for("write_file", false);
+    EXPECT_NE(write.find("Always allow (all in-root paths)"), std::string::npos);
+
+    const std::string mcp = render_for("mcp.foo.bar", false);
+    EXPECT_NE(mcp.find("Always allow (this tool)"), std::string::npos);
+
+    const std::string forced = render_for("shell", true);
+    EXPECT_NE(forced.find("[O] allow once | [D] deny"), std::string::npos);
+    EXPECT_EQ(forced.find("[A] always"), std::string::npos);
+    EXPECT_EQ(forced.find("[S] session"), std::string::npos);
+    EXPECT_EQ(forced.find("Always allow"), std::string::npos);
+}
+
 TEST(UiRenderGolden, LayoutModes) {
     EXPECT_EQ(calculate_layout(60), LayoutMode::Narrow);
     EXPECT_EQ(calculate_layout(90), LayoutMode::Normal);
@@ -716,6 +748,37 @@ TEST(UiRenderGolden, CollapsedToolShowsOnlyHeaderNoBody) {
     EXPECT_NE(rendered.find("▸ read_file"), std::string::npos);
     EXPECT_EQ(rendered.find("(expanded)"), std::string::npos);
     EXPECT_EQ(rendered.find("file-body"), std::string::npos);
+}
+
+TEST(UiRenderGolden, DeniedToolRendersBadge) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->tools.calls.size(), 1u);
+    state->tools.calls[0].outcome = payload::ToolOutcome::Denied;
+    state->tools.calls[0].output =
+        "DENIED: tool 'read_file' was NOT executed; permission was not granted "
+        "(reason: the user denied it). The tool did not run and produced no tool output; "
+        "do not report this call as successful.";
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_NE(rendered.find("DENIED"), std::string::npos);
+    EXPECT_NE(rendered.find("read_file"), std::string::npos);
+}
+
+TEST(UiRenderGolden, ErrorToolDoesNotRenderDenied) {
+    UiModel model = build_model();
+    SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->tools.calls.size(), 1u);
+    state->tools.calls[0].outcome = payload::ToolOutcome::Error;
+
+    const std::string rendered =
+        normalize(render_to_ansi(model, TerminalSize{100, 24}, Theme{false}));
+    SCOPED_TRACE(rendered);
+    EXPECT_EQ(rendered.find("DENIED"), std::string::npos);
 }
 
 TEST(UiRenderGolden, ExpandAllFoldsShowsBodies) {

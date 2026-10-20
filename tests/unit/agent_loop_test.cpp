@@ -1065,13 +1065,51 @@ TEST(AgentLoop, DeniedToolYieldsDeniedResultAndContinues) {    PermissionConfig 
     bool             sawDenied = false;
     for (const EventRecord& record : events) {
         if (record.event.type == EventType::ToolResult) {
-            EXPECT_EQ(record.event.payload.get<payload::ToolResult>().outcome,
-                      payload::ToolOutcome::Denied);
+            const payload::ToolResult& result =
+                record.event.payload.get<payload::ToolResult>();
+            EXPECT_EQ(result.outcome, payload::ToolOutcome::Denied);
+            EXPECT_EQ(result.output.rfind("DENIED:", 0), 0u);
+            EXPECT_NE(result.output.find("NOT executed"), std::string::npos);
+            EXPECT_NE(result.output.find("do not report this call as successful"),
+                      std::string::npos);
+            EXPECT_TRUE(result.error.has_value());
+            EXPECT_EQ(*result.error, result.output);
             sawDenied = true;
         }
     }
     EXPECT_TRUE(sawDenied);
     EXPECT_EQ(count_type(events, EventType::TurnEnded), 1u);
+}
+
+TEST(AgentLoop, UserDenialRendersUserDenied) {
+    PermissionConfig permission;
+    permission.default_verdict = PolicyVerdict::Ask;
+
+    AgentEnv env("agent_deny_user",
+                 std::make_unique<FakeLLM>(script_of(
+                     {tool_step("read_file", {{"path", "a.txt"}}), text_step("ok")})),
+                 AgentConfig{}, permission, {}, true, 4, nullptr, true);
+    env.workspace.write("a.txt", "x");
+    ASSERT_NE(env.gate, nullptr);
+    env.gate->set_attention_hook([&env](const PermissionRequestId& id, const PermissionRequest&) {
+        env.gate->decide(id, payload::PermissionDecisionKind::Deny, GrantScope::Once, "user");
+    });
+
+    auto agent_owner = env.createAgent();
+    ASSERT_EQ(agent_owner->send(user_message("go")), InboxResult::Accepted);
+
+    auto session_owner = env.sessionOf(*agent_owner);
+    bool sawDenied = false;
+    for (const EventRecord& record : session_owner->events()) {
+        if (record.event.type == EventType::ToolResult) {
+            const payload::ToolResult& result =
+                record.event.payload.get<payload::ToolResult>();
+            EXPECT_EQ(result.outcome, payload::ToolOutcome::Denied);
+            EXPECT_NE(result.output.find("the user denied it"), std::string::npos);
+            sawDenied = true;
+        }
+    }
+    EXPECT_TRUE(sawDenied);
 }
 
 // AL-U3/AL5/AL-F5: while a body is parked mid-turn, `hasPendingWork()` is true

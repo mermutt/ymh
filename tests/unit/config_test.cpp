@@ -946,6 +946,92 @@ TEST(Config, LlmTranscriptEnvOverride) {
     ::unsetenv("YMH_LLM_TRANSCRIPT_DIR");
 }
 
+TEST(Config, CoreDumpsDefaultsOffAndParsesGlobally) {
+    Config defaults;
+    EXPECT_FALSE(defaults.logging.core_dumps);
+
+    test::TempWorkspace workspace("config_core_dumps");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc", "{ \"logging\": { \"core_dumps\": true } }\n");
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace.path() / "absent.jsonc";
+    EXPECT_TRUE(load_config(paths).logging.core_dumps);
+}
+
+TEST(Config, CoreDumpsEnvOverride) {
+    test::TempWorkspace workspace("config_core_dumps_env");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc", "{ \"logging\": { \"core_dumps\": false } }\n");
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace.path() / "absent.jsonc";
+
+    for (const char* value : {"1", "true", "yes", "on"}) {
+        ScopedEnv env("YMH_CORE_DUMPS", value);
+        EXPECT_TRUE(load_config(paths).logging.core_dumps) << value;
+    }
+    for (const char* value : {"0", "false", "no", "off", "maybe", ""}) {
+        ScopedEnv env("YMH_CORE_DUMPS", value);
+        EXPECT_FALSE(load_config(paths).logging.core_dumps) << value;
+    }
+    ::unsetenv("YMH_CORE_DUMPS");
+    EXPECT_FALSE(load_config(paths).logging.core_dumps);
+}
+
+TEST(Config, CoreDumpsRejectedInWorkspaceLayer) {
+    test::TempWorkspace workspace("config_core_dumps_ws");
+    workspace.write(".ymh/config.jsonc", "{ \"logging\": { \"core_dumps\": true } }\n");
+
+    ConfigPaths paths;
+    paths.global    = write_global(workspace);
+    paths.workspace = workspace_config_path(workspace.path());
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError for a workspace-layer logging.core_dumps";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("'logging.core_dumps' is global-layer only"),
+                  std::string::npos)
+            << error.what();
+    }
+}
+
+TEST(Config, CoreDumpsNonBoolRejected) {
+    test::TempWorkspace workspace("config_core_dumps_type");
+    const std::filesystem::path global = workspace.path() / "global.jsonc";
+    workspace.write("global.jsonc", "{ \"logging\": { \"core_dumps\": \"yes\" } }\n");
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace.path() / "absent.jsonc";
+    try {
+        (void)load_config(paths);
+        FAIL() << "expected ConfigError for a non-bool logging.core_dumps";
+    } catch (const ConfigError& error) {
+        EXPECT_NE(std::string{error.what()}.find("invalid type for 'logging.core_dumps'"),
+                  std::string::npos)
+            << error.what();
+    }
+}
+
+TEST(Config, ScaffoldContainsCommentedCoreDumps) {
+    test::TempWorkspace workspace("config_scaffold_core_dumps");
+    const std::filesystem::path global = workspace.path() / "xdg" / "ymh" / "config.jsonc";
+    ASSERT_TRUE(scaffold_config(workspace.path(), global).ok);
+
+    const std::string body = read_file(global);
+    EXPECT_NE(body.find("\"core_dumps\": false"), std::string::npos);
+    EXPECT_NE(body.find("prompts"), std::string::npos);
+    EXPECT_NE(body.find("secrets"), std::string::npos);
+
+    ConfigPaths paths;
+    paths.global    = global;
+    paths.workspace = workspace_config_path(workspace.path());
+    Config expected;
+    apply_env_overrides(expected);
+    EXPECT_TRUE(same_config(load_config(paths), expected));
+}
+
 TEST(Config, ApplyJsoncRequiredFlag) {
     test::TempWorkspace workspace("config_required_flag");
     const std::filesystem::path absent = workspace.path() / "absent.jsonc";

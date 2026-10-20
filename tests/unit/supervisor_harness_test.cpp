@@ -568,6 +568,118 @@ TEST(SupervisorHarnessTest, RB12_PermissionDialogResolvesOnlyOnEnter) {
     EXPECT_FALSE(harness->last_dialog_resolution().has_value());
 }
 
+TEST(SupervisorHarnessTest, PermHotkeysFourOptionMapping) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+
+    struct Case {
+        const char* key;
+        payload::PermissionDecisionKind decision;
+        GrantScope scope;
+    };
+    const Case cases[] = {
+        {"A", payload::PermissionDecisionKind::AllowAlways, GrantScope::Always},
+        {"a", payload::PermissionDecisionKind::AllowAlways, GrantScope::Always},
+        {"O", payload::PermissionDecisionKind::Allow, GrantScope::Once},
+        {"o", payload::PermissionDecisionKind::Allow, GrantScope::Once},
+        {"S", payload::PermissionDecisionKind::Allow, GrantScope::Session},
+        {"s", payload::PermissionDecisionKind::Allow, GrantScope::Session},
+        {"D", payload::PermissionDecisionKind::Deny, GrantScope::Once},
+        {"d", payload::PermissionDecisionKind::Deny, GrantScope::Once},
+    };
+    for (const Case& expected : cases) {
+        harness->open_permission_dialog(SessionId{"perm-session"},
+                                        PermissionRequestId{"perm-1"}, "shell", "rm -rf build");
+        ASSERT_TRUE(harness->model().dialog.open) << expected.key;
+        EXPECT_TRUE(harness->dispatch_key(expected.key)) << expected.key;
+        EXPECT_FALSE(harness->model().dialog.open) << expected.key;
+        ASSERT_TRUE(harness->last_dialog_resolution().has_value()) << expected.key;
+        EXPECT_EQ(harness->last_dialog_resolution()->first, expected.decision)
+            << expected.key;
+        EXPECT_EQ(harness->last_dialog_resolution()->second, expected.scope)
+            << expected.key;
+    }
+}
+
+TEST(SupervisorHarnessTest, PermHotkeysNoSelectionMove) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    harness->open_permission_dialog(SessionId{"perm-session"}, PermissionRequestId{"perm-1"},
+                                    "shell", "rm -rf build");
+    ASSERT_TRUE(harness->model().dialog.open);
+    ASSERT_EQ(harness->model().dialog.selected, 0);
+    EXPECT_TRUE(harness->dispatch_key("A"));
+    EXPECT_EQ(harness->model().dialog.selected, 0);
+    ASSERT_TRUE(harness->last_dialog_resolution().has_value());
+    EXPECT_EQ(harness->last_dialog_resolution()->first,
+              payload::PermissionDecisionKind::AllowAlways);
+}
+
+TEST(SupervisorHarnessTest, PermHotkeysForceAskOnlyOnceAndDeny) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    const auto open_forced = [&] {
+        harness->open_permission_dialog(SessionId{"perm-session"},
+                                        PermissionRequestId{"perm-1"}, "shell", "plan", true);
+        ASSERT_TRUE(harness->model().dialog.open);
+        ASSERT_TRUE(harness->model().dialog.force_ask);
+        ASSERT_EQ(harness->model().dialog.selected, 1);
+    };
+
+    open_forced();
+    EXPECT_TRUE(harness->dispatch_key("A"));
+    EXPECT_TRUE(harness->model().dialog.open);
+    EXPECT_FALSE(harness->last_dialog_resolution().has_value());
+    EXPECT_TRUE(harness->dispatch_key("S"));
+    EXPECT_TRUE(harness->model().dialog.open);
+    EXPECT_FALSE(harness->last_dialog_resolution().has_value());
+    EXPECT_TRUE(harness->dispatch_key("O"));
+    EXPECT_FALSE(harness->model().dialog.open);
+    ASSERT_TRUE(harness->last_dialog_resolution().has_value());
+    EXPECT_EQ(harness->last_dialog_resolution()->first,
+              payload::PermissionDecisionKind::Allow);
+    EXPECT_EQ(harness->last_dialog_resolution()->second, GrantScope::Once);
+
+    open_forced();
+    EXPECT_TRUE(harness->dispatch_key("D"));
+    ASSERT_TRUE(harness->last_dialog_resolution().has_value());
+    EXPECT_EQ(harness->last_dialog_resolution()->first,
+              payload::PermissionDecisionKind::Deny);
+}
+
+TEST(SupervisorHarnessTest, PermHotkeysOtherPrintableSwallowed) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    harness->open_permission_dialog(SessionId{"perm-session"}, PermissionRequestId{"perm-1"},
+                                    "shell", "rm -rf build");
+    ASSERT_TRUE(harness->model().dialog.open);
+    for (const std::string key : {"y", "n", "1", "2", "3", "0", "x", "/"}) {
+        EXPECT_TRUE(harness->dispatch_key(key)) << key;
+        EXPECT_TRUE(harness->model().dialog.open) << key;
+        EXPECT_EQ(harness->model().dialog.selected, 0) << key;
+        EXPECT_FALSE(harness->last_dialog_resolution().has_value()) << key;
+    }
+}
+
+TEST(SupervisorHarnessTest, PermHotkeysEscapeAndCtrlCDeny) {
+    SupervisorRunOptions options;
+    options.identity = harness_identity();
+    std::unique_ptr<SupervisorHarness> harness = make_supervisor_harness(std::move(options));
+    for (const std::string key : {"escape", "ctrl-c"}) {
+        harness->open_permission_dialog(SessionId{"perm-session"},
+                                        PermissionRequestId{"perm-1"}, "shell", "x");
+        EXPECT_TRUE(harness->dispatch_key(key));
+        ASSERT_TRUE(harness->last_dialog_resolution().has_value()) << key;
+        EXPECT_EQ(harness->last_dialog_resolution()->first,
+                  payload::PermissionDecisionKind::Deny);
+        EXPECT_EQ(harness->last_dialog_resolution()->second, GrantScope::Once);
+    }
+}
+
 // User-reported (2026-09-17): the exit popup must open on Terminate and the
 // arrow keys must move the highlight. ↑/↓ were previously swallowed while only
 // ←/→/Tab toggled, so a user pressing ↓ saw nothing happen. `quit_requested()`

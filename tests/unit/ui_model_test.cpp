@@ -223,6 +223,35 @@ TEST(UiModel, TracksToolCallAndResult) {
     EXPECT_TRUE(any_flag(model.dirty.peek(kSession) & UiDirtyFlag::Tools));
 }
 
+TEST(UiModel, DeniedToolFinishedRepairsLegacyBareToken) {
+    UiModel model = make_model();
+    model.apply(UiEvent{ToolStarted{kSession, "t1", "mcp.foo.bar", "{}"}});
+    model.apply(UiEvent{ToolFinished{kSession, "t1", "mcp.foo.bar",
+                                     payload::ToolOutcome::Denied, "user", false,
+                                     std::string{"user"}}});
+
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->tools.calls.size(), 1u);
+    EXPECT_NE(state->tools.calls[0].output.find("DENIED:"), std::string::npos);
+    EXPECT_NE(state->tools.calls[0].output.find("the user denied it"), std::string::npos);
+    ASSERT_EQ(state->conversation.entries.size(), 1u);
+    EXPECT_NE(state->conversation.entries[0].text.find("DENIED:"), std::string::npos);
+}
+
+TEST(UiModel, ErrorToolFinishedIsNotReplaced) {
+    UiModel model = make_model();
+    model.apply(UiEvent{ToolStarted{kSession, "t1", "read_file", "{}"}});
+    model.apply(UiEvent{ToolFinished{kSession, "t1", "read_file",
+                                     payload::ToolOutcome::Error, "boom", false,
+                                     std::string{"boom"}}});
+
+    const SessionUiState* state = model.session(kSession);
+    ASSERT_NE(state, nullptr);
+    ASSERT_EQ(state->tools.calls.size(), 1u);
+    EXPECT_EQ(state->tools.calls[0].output, "boom");
+}
+
 TEST(UiModel, PermissionRequestAndResolution) {
     UiModel model = make_model();
     UiEventAdapter adapter(model);

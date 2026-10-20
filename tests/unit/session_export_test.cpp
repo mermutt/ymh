@@ -190,6 +190,55 @@ int main() {}
     EXPECT_EQ(markdown, expected);
 }
 
+TEST(SessionExport, DeniedResultExportsCanonicalTextOnce) {
+    EventRange events;
+    events.push_back(record(1, 1700000000000, EventType::TurnStarted,
+                            payload::TurnStarted{1, payload::TurnOrigin::User}));
+    events.push_back(record(2, 1700000001000, EventType::ToolCall,
+                            payload::ToolCall{"call-1", 1, 1, "mcp.github.search",
+                                              {{"query", "x"}}, at_ms(1700000001000)}));
+    const std::string denial =
+        "DENIED: tool 'mcp.github.search' was NOT executed; permission was not granted "
+        "(reason: the user denied it). The tool did not run and produced no tool output; "
+        "do not report this call as successful.";
+    payload::ToolResult denied;
+    denied.id      = "call-1";
+    denied.name    = "mcp.github.search";
+    denied.outcome = payload::ToolOutcome::Denied;
+    denied.output  = denial;
+    denied.error   = denial;
+    events.push_back(record(3, 1700000002000, EventType::ToolResult, denied));
+
+    const std::string markdown = render_session_markdown(make_header(), events);
+    EXPECT_NE(markdown.find("Output (denied)"), std::string::npos);
+    EXPECT_NE(markdown.find("DENIED:"), std::string::npos);
+    EXPECT_NE(markdown.find("do not report this call as successful"), std::string::npos);
+    EXPECT_EQ(markdown.find("_Error:"), std::string::npos);
+    const std::size_t first = markdown.find("DENIED:");
+    ASSERT_NE(first, std::string::npos);
+    EXPECT_EQ(markdown.find("DENIED:", first + 1), std::string::npos);
+    EXPECT_NE(markdown.find("\"query\""), std::string::npos);
+}
+
+TEST(SessionExport, LegacyDeniedExportIsCanonical) {
+    EventRange events;
+    events.push_back(record(1, 1700000000000, EventType::TurnStarted,
+                            payload::TurnStarted{1, payload::TurnOrigin::User}));
+    events.push_back(record(2, 1700000001000, EventType::ToolCall,
+                            payload::ToolCall{"call-1", 1, 1, "read", {}, at_ms(1700000001000)}));
+    payload::ToolResult denied;
+    denied.id      = "call-1";
+    denied.name    = "read";
+    denied.outcome = payload::ToolOutcome::Denied;
+    denied.output  = "user";
+    denied.error   = "user";
+    events.push_back(record(3, 1700000002000, EventType::ToolResult, denied));
+
+    const std::string markdown = render_session_markdown(make_header(), events);
+    EXPECT_NE(markdown.find("DENIED:"), std::string::npos);
+    EXPECT_NE(markdown.find("the user denied it"), std::string::npos);
+}
+
 TEST(SessionExport, LlmRequestHeaderProducesNoRow) {
     const std::string baseline = render_session_markdown(make_header(), make_events());
 

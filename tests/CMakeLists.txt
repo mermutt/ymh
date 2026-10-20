@@ -3,6 +3,8 @@ add_executable(ymh_tests
     unit/event_bus_test.cpp
     unit/event_test.cpp
     unit/session_test.cpp
+    unit/denial_text_test.cpp
+    unit/mcp_permission_defaults_test.cpp
     unit/persistence_test.cpp
     unit/checkpoints_test.cpp
     unit/llm_types_test.cpp
@@ -44,6 +46,8 @@ add_executable(ymh_tests
     unit/errata90_shell_scope_test.cpp
     unit/errata90_session_grant_test.cpp
     unit/errata90_temp_root_test.cpp
+    unit/errata94_shell_scope_test.cpp
+    unit/errata94_always_grant_test.cpp
     unit/errata46_localcode_test.cpp
     unit/errata46_deadline_test.cpp
     unit/errata46_ui_test.cpp
@@ -77,6 +81,8 @@ add_executable(ymh_tests
     unit/workspace_runtime_test.cpp
     unit/host_runtime_test.cpp
     unit/workspace_host_test.cpp
+    unit/core_dump_test.cpp
+    unit/core_dump_host_smoke_test.cpp
     unit/workspace_registry_test.cpp
     unit/errata88_doctor_test.cpp
     unit/transport_frame_test.cpp
