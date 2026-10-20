@@ -186,6 +186,18 @@ public:
             std::string(protocol::notify::kPermissionRequest), std::move(body)}));
     }
 
+    void push_resolved(const protocol::PermissionResolvedNotice& notice) {
+        nlohmann::json body;
+        protocol::to_json(body, notice);
+        broadcast(protocol::encode(protocol::Notification{
+            std::string(protocol::notify::kPermissionResolved), std::move(body)}));
+    }
+
+    void push_unknown_method(const std::string& method) {
+        broadcast(protocol::encode(protocol::Notification{
+            method, nlohmann::json::object()}));
+    }
+
 private:
     void accept_loop() {
         while (running_.load()) {
@@ -368,6 +380,7 @@ struct Collected {
     std::condition_variable cv;
     std::vector<protocol::SessionEnvelope> envelopes;
     std::vector<protocol::PermissionRequest> permissions;
+    std::vector<protocol::PermissionResolvedNotice> resolutions;
     std::vector<SupervisorLinkState> states;
 
     void add_envelope(const protocol::SessionEnvelope& envelope) {
@@ -378,6 +391,11 @@ struct Collected {
     void add_permission(const protocol::PermissionRequest& request) {
         const std::lock_guard lock(mutex);
         permissions.push_back(request);
+        cv.notify_all();
+    }
+    void add_resolution(const protocol::PermissionResolvedNotice& notice) {
+        const std::lock_guard lock(mutex);
+        resolutions.push_back(notice);
         cv.notify_all();
     }
     void add_state(SupervisorLinkState state) {
@@ -392,6 +410,10 @@ struct Collected {
     bool wait_permissions(std::size_t count, std::chrono::milliseconds timeout) {
         std::unique_lock lock(mutex);
         return cv.wait_for(lock, timeout, [&] { return permissions.size() >= count; });
+    }
+    bool wait_resolutions(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, timeout, [&] { return resolutions.size() >= count; });
     }
 };
 
@@ -418,6 +440,10 @@ SupervisorSink sink_for(Collected& collected) {
     sink.on_permission = [&collected](const protocol::PermissionRequest& request) {
         collected.add_permission(request);
     };
+    sink.on_permission_resolved =
+        [&collected](const protocol::PermissionResolvedNotice& notice) {
+            collected.add_resolution(notice);
+        };
     sink.on_state = [&collected](SupervisorLinkState state, const std::string&) {
         collected.add_state(state);
     };
@@ -616,6 +642,37 @@ TEST(SupervisorConnection, RejectsAttachIdentityMismatch) {
     // The mismatch retry loop alternates Dead with a transient Connecting while
     // it re-handshakes, so wait for the rejected state instead of sampling it.
     EXPECT_TRUE(connection.waitForState(SupervisorLinkState::Dead, 2s));
+    connection.stop();
+}
+
+// 95-T8 / 95-D5: `permission.resolved` reaches the sink; unknown notification
+// names are ignored (never dispatched as a permission resolution).
+TEST(SupervisorConnection, Errata95DispatchesPermissionResolvedAndIgnoresUnknown) {
+    test::ShortTempRoot root("ymh_sup95");
+    const std::filesystem::path socket_path = root.host_socket();
+    std::filesystem::create_directories(socket_path.parent_path());
+    ScriptedServer server(socket_path);
+    Collected collected;
+
+    SupervisorConnection connection(config_for(socket_path), sink_for(collected));
+    connection.start();
+    ASSERT_TRUE(connection.waitForState(SupervisorLinkState::Attached, 3s));
+
+    protocol::PermissionResolvedNotice notice;
+    notice.request_id = "perm-1";
+    notice.session = kSession;
+    notice.decision = protocol::PermissionAnswer::Allow;
+    notice.scope = protocol::PermissionScope::Session;
+    notice.reason = "user";
+    server.push_unknown_method("permission.unknown");
+    server.push_resolved(notice);
+    ASSERT_TRUE(collected.wait_resolutions(1, 3s));
+    EXPECT_EQ(collected.resolutions.front().request_id, "perm-1");
+    EXPECT_EQ(collected.resolutions.front().session.value, kSession.value);
+    EXPECT_EQ(collected.resolutions.front().decision, protocol::PermissionAnswer::Allow);
+    EXPECT_EQ(collected.resolutions.front().scope, protocol::PermissionScope::Session);
+    EXPECT_EQ(collected.resolutions.front().reason, "user");
+    EXPECT_EQ(collected.resolutions.size(), 1u);
     connection.stop();
 }
 

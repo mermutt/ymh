@@ -1543,4 +1543,173 @@ TEST(TransportServer, CP_U14_FakeRestoreCodeCompiles) {
     EXPECT_EQ(*harness.host.last_restore_turn, 3u);
 }
 
+// 95-T2 / 95-D2: request and resolution share one predicate: A/B subscribed
+// Interactive receive exactly one of each; C Interactive-unsubscribed and D
+// Automation receive neither.
+TEST(TransportServer, Errata95PermissionResolutionFanOutMatchesRequest) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    Peer* a = harness.open();
+    harness.hello(*a, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*a);
+    Peer* b = harness.open();
+    harness.hello(*b, protocol::ServerProfile::Interactive, kInstanceB);
+    harness.drain(*b);
+    Peer* c = harness.open();
+    harness.hello(*c, protocol::ServerProfile::Interactive,
+                  "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    harness.drain(*c);
+    Peer* automation = harness.open();
+    harness.hello(*automation, protocol::ServerProfile::Automation,
+                  "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    harness.drain(*automation);
+
+    protocol::StreamFrom from;
+    from.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*a, Harness::request(2, protocol::method::kEventSubscribe,
+                                      Harness::subscribe_params(session, from)));
+    harness.send(*b, Harness::request(2, protocol::method::kEventSubscribe,
+                                      Harness::subscribe_params(session, from)));
+    harness.send(*automation, Harness::request(2, protocol::method::kEventSubscribe,
+                                               Harness::subscribe_params(session, from)));
+    harness.drain(*a);
+    harness.drain(*b);
+    harness.drain(*c);
+    harness.drain(*automation);
+
+    protocol::PermissionRequest request;
+    request.request_id = "perm-1";
+    request.session = session;
+    request.tool = "shell";
+    request.expires_at_ms = 1;
+    harness.server->onPermissionRequest(request);
+
+    protocol::PermissionResolvedNotice notice;
+    notice.request_id = "perm-1";
+    notice.session = session;
+    notice.decision = protocol::PermissionAnswer::Allow;
+    notice.scope = protocol::PermissionScope::Session;
+    notice.reason = "user";
+    harness.server->onPermissionResolved(notice);
+
+    const auto count_permission = [](const std::vector<nlohmann::json>& frames,
+                                     std::string_view method) {
+        std::size_t count = 0;
+        for (const auto& frame : frames) {
+            if (frame.value("method", std::string{}) == method) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    const auto to_a = harness.drain(*a);
+    const auto to_b = harness.drain(*b);
+    const auto to_c = harness.drain(*c);
+    const auto to_automation = harness.drain(*automation);
+    EXPECT_EQ(count_permission(to_a, protocol::notify::kPermissionRequest), 1u);
+    EXPECT_EQ(count_permission(to_b, protocol::notify::kPermissionRequest), 1u);
+    EXPECT_EQ(count_permission(to_a, protocol::notify::kPermissionResolved), 1u);
+    EXPECT_EQ(count_permission(to_b, protocol::notify::kPermissionResolved), 1u);
+    EXPECT_EQ(count_permission(to_c, protocol::notify::kPermissionRequest), 0u);
+    EXPECT_EQ(count_permission(to_c, protocol::notify::kPermissionResolved), 0u);
+    EXPECT_EQ(count_permission(to_automation, protocol::notify::kPermissionRequest), 0u);
+    EXPECT_EQ(count_permission(to_automation, protocol::notify::kPermissionResolved), 0u);
+}
+
+// 95-T9/T10 / 95-F6: with two attached clients, A's answer wins, the
+// resolution reaches B, and B's later answer is a benign InvalidParams.
+TEST(TransportServer, Errata95TwoClientsResolutionAndLosingAnswer) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    Peer* a = harness.open();
+    harness.hello(*a, protocol::ServerProfile::Interactive, kInstanceA);
+    harness.drain(*a);
+    Peer* b = harness.open();
+    harness.hello(*b, protocol::ServerProfile::Interactive, kInstanceB);
+    harness.drain(*b);
+
+    protocol::StreamFrom from;
+    from.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*a, Harness::request(2, protocol::method::kEventSubscribe,
+                                      Harness::subscribe_params(session, from)));
+    harness.send(*b, Harness::request(2, protocol::method::kEventSubscribe,
+                                      Harness::subscribe_params(session, from)));
+    harness.drain(*a);
+    harness.drain(*b);
+
+    harness.server->onPermissionRequest(protocol::PermissionRequest{
+        "perm-9", session, "shell", nlohmann::json::object(), "", 1, false});
+    harness.host.known_permissions.insert("perm-9");
+    harness.drain(*a);
+    harness.drain(*b);
+
+    harness.send(*a, Harness::request(
+                        3, protocol::method::kPermissionDecide,
+                        nlohmann::json{{"request_id", "perm-9"},
+                                       {"decision", "allow"},
+                                       {"scope", "session"}}));
+    const auto a_reply = harness.drain(*a);
+    ASSERT_EQ(a_reply.size(), 1u);
+    EXPECT_TRUE(a_reply[0].contains("result"));
+
+    protocol::PermissionResolvedNotice notice;
+    notice.request_id = "perm-9";
+    notice.session = session;
+    notice.decision = protocol::PermissionAnswer::Allow;
+    notice.scope = protocol::PermissionScope::Session;
+    notice.reason = "user";
+    harness.server->onPermissionResolved(notice);
+    const auto b_notice = harness.drain(*b);
+    ASSERT_EQ(b_notice.size(), 1u);
+    EXPECT_EQ(b_notice[0].at("method").get<std::string>(),
+              std::string(protocol::notify::kPermissionResolved));
+    const auto parsed = b_notice[0].at("params").get<protocol::PermissionResolvedNotice>();
+    EXPECT_EQ(parsed.request_id, "perm-9");
+    EXPECT_EQ(parsed.session.value, session.value);
+    EXPECT_EQ(parsed.decision, protocol::PermissionAnswer::Allow);
+    EXPECT_EQ(parsed.scope, protocol::PermissionScope::Session);
+
+    // B loses the race: the daemon no longer knows the id -> InvalidParams.
+    harness.host.known_permissions.erase("perm-9");
+    harness.send(*b, Harness::request(
+                        4, protocol::method::kPermissionDecide,
+                        nlohmann::json{{"request_id", "perm-9"},
+                                       {"decision", "deny"},
+                                       {"scope", "once"}}));
+    const auto b_reply = harness.drain(*b);
+    ASSERT_EQ(b_reply.size(), 1u);
+    ASSERT_TRUE(b_reply[0].contains("error"));
+    EXPECT_EQ(b_reply[0].at("error").at("code").get<int>(), -32602);
+}
+
+// 95-T11 / 95-D7: a client attaching after the resolution receives neither the
+// request nor the notice (no stale re-delivery).
+TEST(TransportServer, Errata95LateAttachSeesNoResolvedRequest) {
+    Harness harness;
+    const SessionId session = harness.host.seed("s1");
+    protocol::PermissionRequest request;
+    request.request_id = "perm-late";
+    request.session = session;
+    request.tool = "shell";
+    request.expires_at_ms = 1;
+    harness.server->onPermissionRequest(request);
+    protocol::PermissionResolvedNotice notice;
+    notice.request_id = "perm-late";
+    notice.session = session;
+    harness.server->onPermissionResolved(notice);
+
+    Peer* late = harness.open();
+    harness.hello(*late, protocol::ServerProfile::Interactive, kInstanceA);
+    protocol::StreamFrom from;
+    from.kind = protocol::StreamFrom::Kind::Now;
+    harness.send(*late, Harness::request(2, protocol::method::kEventSubscribe,
+                                         Harness::subscribe_params(session, from)));
+    const auto frames = harness.drain(*late);
+    for (const auto& frame : frames) {
+        const std::string method = frame.value("method", std::string{});
+        EXPECT_NE(method, std::string(protocol::notify::kPermissionRequest));
+        EXPECT_NE(method, std::string(protocol::notify::kPermissionResolved));
+    }
+}
+
 } // namespace

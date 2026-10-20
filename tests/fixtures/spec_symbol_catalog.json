@@ -459,6 +459,12 @@
       "section": "7.6"
     },
     {
+      "symbol": "protocol::notify::kPermissionResolved",
+      "category": "wire_notification",
+      "spec": "95-permission-resolution-broadcast.md",
+      "section": "2"
+    },
+    {
       "symbol": "protocol::notify::kHostEvent",
       "category": "wire_notification",
       "spec": "05-transport.md",
@@ -595,6 +601,12 @@
       "category": "protocol_type",
       "spec": "05-transport.md",
       "section": "7.6"
+    },
+    {
+      "symbol": "protocol::PermissionResolvedNotice",
+      "category": "protocol_type",
+      "spec": "95-permission-resolution-broadcast.md",
+      "section": "2"
     },
     {
       "symbol": "protocol::HostStatus",
