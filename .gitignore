@@ -24,3 +24,7 @@ __pycache__/
 # ymh per-workspace state (sessions.db, sessions.lock, host.sock, host.log)
 .ymh/
 build-tsan/
+
+# 96-D1/D6: automatic build-version stamp and its transient write temps
+.version_info
+.version_info.tmp-*

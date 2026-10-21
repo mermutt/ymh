@@ -1,0 +1,4 @@
+#pragma once
+
+// 96-D8: generated at configure time from `.version_info`; never hand-edited.
+#define YMH_VERSION "@YMH_DISPLAY_VERSION@"

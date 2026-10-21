@@ -1,11 +1,23 @@
 cmake_minimum_required(VERSION 3.22)
 
+# 96-D17: stamp the build before `project()`. `CMAKE_CURRENT_SOURCE_DIR` and
+# `CMAKE_BINARY_DIR` are already defined here; `project(VERSION 0.003)` stays as
+# CMake's compatibility version and is no longer displayed (96-D8).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_stamp.cmake")
+ymh_stamp_version("${CMAKE_CURRENT_SOURCE_DIR}/.version_info" YMH_DISPLAY_VERSION)
+
 project(
     ymh
     VERSION 0.003
     DESCRIPTION "Terminal coding-agent harness"
     LANGUAGES CXX
 )
+
+# 96-D8: the display string contains `#`, which CMake strips from compile
+# definitions, so a generated header carries it to every consumer.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/ymh")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_version.hpp.in"
+               "${CMAKE_BINARY_DIR}/generated/ymh/build_version.hpp" @ONLY)
 
 # ---------------------------------------------------------------------------
 # Language / build configuration
@@ -380,12 +392,12 @@ add_library(ymh_mcp STATIC
 add_library(ymh::mcp ALIAS ymh_mcp)
 
 # 72-A6: the MCP client's `clientInfo.version` is the same single-sourced
-# YMH_VERSION (it previously sent a stray hardcoded "0.1.0").
-target_compile_definitions(ymh_mcp PRIVATE YMH_VERSION="${PROJECT_VERSION}")
-
+# YMH_VERSION, now supplied by the generated header (96-D8).
 target_include_directories(ymh_mcp
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        "${CMAKE_BINARY_DIR}/generated"
 )
 
 target_link_libraries(ymh_mcp
@@ -762,6 +774,8 @@ add_library(ymh::ui ALIAS ymh_ui)
 target_include_directories(ymh_ui
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        "${CMAKE_BINARY_DIR}/generated"
 )
 
 target_link_libraries(ymh_ui
@@ -787,9 +801,8 @@ target_link_libraries(ymh_ui
         ymh::warnings
 )
 
-# 72-A2: the header renderer (`src/ui/ui_render.cpp`) reads YMH_VERSION; keep
-# the same single source (PROJECT_VERSION) as the CLI and the executable.
-target_compile_definitions(ymh_ui PRIVATE YMH_VERSION="${PROJECT_VERSION}")
+# 72-A2: the header renderer (`src/ui/ui_render.cpp`) reads YMH_VERSION from the
+# same generated header (96-D8) as the CLI and the MCP client.
 
 # ---------------------------------------------------------------------------
 # CLI library (§41, §42)
@@ -807,6 +820,8 @@ add_library(ymh::cli ALIAS ymh_cli)
 target_include_directories(ymh_cli
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        "${CMAKE_BINARY_DIR}/generated"
 )
 
 target_link_libraries(ymh_cli
@@ -832,7 +847,7 @@ target_link_libraries(ymh_cli
         ymh::warnings
 )
 
-target_compile_definitions(ymh_cli PRIVATE YMH_VERSION="${PROJECT_VERSION}")
+# 96-D8: YMH_VERSION comes from the generated header via the include path above.
 
 # ---------------------------------------------------------------------------
 # Executable
@@ -844,7 +859,6 @@ target_link_libraries(ymh
         ymh::cli
         ymh::warnings
 )
-target_compile_definitions(ymh PRIVATE YMH_VERSION="${PROJECT_VERSION}")
 
 # ---------------------------------------------------------------------------
 # Tests
