@@ -1237,6 +1237,10 @@ bool HostRuntime::decidePermission(const std::string& request_id,
     });
 }
 
+std::optional<SessionId> HostRuntime::permissionSession(const std::string& request_id) {
+    return broker_.session_of(request_id);
+}
+
 nlohmann::json HostRuntime::listSkills() {
     return translate([&]() -> nlohmann::json { return skill_list_json(runtime_.skills()); });
 }

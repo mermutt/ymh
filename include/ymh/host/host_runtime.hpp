@@ -218,6 +218,8 @@ public:
 
     bool decidePermission(const std::string& request_id, protocol::PermissionAnswer decision,
                           protocol::PermissionScope scope) override;
+    // 97-D6: forwards the broker's pending-request -> session lookup.
+    std::optional<SessionId> permissionSession(const std::string& request_id) override;
 
     bool                     sessionExists(const SessionId& id) const override;
     std::vector<EventRecord> readEvents(const SessionId& id, Sequence after,

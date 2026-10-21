@@ -460,6 +460,17 @@ std::size_t PermissionBroker::pendingCount() const noexcept {
     return state->pending.size();
 }
 
+std::optional<SessionId> PermissionBroker::session_of(const std::string& request_id) const {
+    std::shared_ptr<State> state = state_;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    for (const auto& request : state->pending) {
+        if (!request->resolved && request->wire.request_id == request_id) {
+            return request->core.session;
+        }
+    }
+    return std::nullopt;
+}
+
 void PermissionBroker::set_subscriber_count(SubscriberCount count) {
     std::shared_ptr<State> state = state_;
     std::lock_guard<std::mutex> lock(state->mutex);

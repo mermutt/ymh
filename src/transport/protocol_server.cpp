@@ -544,6 +544,18 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
         } else if (method_name == method::kPermissionDecide) {
             const PermissionDecisionParams params =
                 object_params(request.params).get<PermissionDecisionParams>();
+            // 97-D6: a decision is accepted only from a connection subscribed to
+            // the request's session. Unknown/expired ids are unchanged; a
+            // non-subscriber gets InvalidParams (no new RpcCode).
+            const std::optional<SessionId> session = host_.permissionSession(params.request_id);
+            if (!session.has_value()) {
+                throw RpcException(code_value(RpcCode::InvalidParams),
+                                   "unknown or expired permission request_id");
+            }
+            if (!is_subscribed_interactive(conn, *session)) {
+                throw RpcException(code_value(RpcCode::InvalidParams),
+                                   "not subscribed to this session");
+            }
             if (!host_.decidePermission(params.request_id, params.decision, params.scope)) {
                 throw RpcException(code_value(RpcCode::InvalidParams),
                                    "unknown or expired permission request_id");

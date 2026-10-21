@@ -26,6 +26,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -90,6 +91,11 @@ public:
     [[nodiscard]] std::vector<protocol::PermissionRequest> pending(SessionId session) const;
 
     [[nodiscard]] std::size_t pendingCount() const noexcept;
+
+    // 97-D6: the session a still-pending request belongs to, or nullopt for an
+    // unknown/expired id. Used by the transport to require an Interactive
+    // subscription to that session before accepting a decision.
+    [[nodiscard]] std::optional<SessionId> session_of(const std::string& request_id) const;
 
     // 24-D3/AL13: resolve every still-pending Ask with `Deny{reason}` and mark
     // it resolved. The coordinator calls this on the coordinator thread BEFORE

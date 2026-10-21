@@ -38,6 +38,9 @@ struct SupervisorRunOptions {
     std::string version;
 
     bool                      no_prompt{false};       // --yes; skip the exit prompt
+    // 97-D7: `--new` forces a fresh session even when the workspace daemon has
+    // live sessions. Without it a second instance joins the last-used live one.
+    bool                      force_new_session{false};
     std::chrono::milliseconds scan_interval{2'000};   // 16 §3.2 daemon-set scan
 
     // 16 §4.1 C-L5 / §4.3: the exit path's bounded `host.ownership` probe and

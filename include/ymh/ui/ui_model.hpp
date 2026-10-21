@@ -400,6 +400,16 @@ struct OpeningState {
     std::chrono::steady_clock::time_point since;
 };
 
+// 97-D1: one permission request waiting for this session's dialog. A session
+// can have several outstanding asks (parallel tool calls), so they are stored
+// FIFO rather than overwritten; 97-D3/D4 drain the queue.
+struct PendingPermission {
+    PermissionRequestId request;
+    std::string         tool;
+    std::string         summary;
+    bool                force_ask = false;
+};
+
 struct SessionUiState {
     SessionId id;
     WorkspaceId workspace;
@@ -412,6 +422,10 @@ struct SessionUiState {
     SubagentModel      subagents;
     ConversationScroll scroll;
     std::vector<CommandHint> command_hints;
+    // 97-D1: prompts waiting to be shown for THIS session (FIFO). Filled when a
+    // request is not the viewed session's, a dialog is already open, or the UI
+    // is not in Conversation; drained by `openPendingPermissionIfAny`.
+    std::deque<PendingPermission> pending_permissions;
     // 45-D2: index into `command_hints` of the entry Tab completes. The renderer
     // paints it brighter; it is reset to 0 whenever the hint set is rebuilt and
     // moved by ArrowUp/ArrowDown.
@@ -970,6 +984,10 @@ struct UiModel {
                                                   const PermissionRequestId& id) const;
     void               closePermissionDialogForSession(const SessionId& session);
     void               closePermissionDialogForWorkspace(const WorkspaceId& workspace);
+    // 97-D3: if the viewed session has a stored prompt and no modal is up, open
+    // the queue's front in the dialog. Idempotent and cheap; called from the
+    // supervisor's two dispatch tails and after a resolution.
+    void               openPendingPermissionIfAny();
 
     // 77-D3: if `workspace` is modeled, ensure the session cell/state and mark it
     // opening with `title`, then focus it. No-op for an unmodeled workspace (no

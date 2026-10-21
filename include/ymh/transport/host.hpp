@@ -156,6 +156,9 @@ public:
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,
                                   PermissionScope scope) = 0;
+    // 97-D6: the session a pending permission request belongs to (nullopt when
+    // unknown/expired), so `permission.decide` can require a subscription to it.
+    virtual std::optional<SessionId> permissionSession(const std::string& request_id) = 0;
 
     virtual bool sessionExists(const SessionId& id) const = 0;
     virtual std::vector<EventRecord> readEvents(const SessionId& id, Sequence after,

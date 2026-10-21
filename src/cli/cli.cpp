@@ -577,6 +577,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     options.initial_workspace = *canonical;
     options.config = config;
     options.verbose = verbose;
+    options.force_new_session = new_session;
     options.version = YMH_VERSION;
     options.lifecycle = &lifecycle;
     options.registry = registry.get();

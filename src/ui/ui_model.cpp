@@ -1507,6 +1507,22 @@ void UiModel::setSessionReadOnly(const SessionId& id, bool read_only) {
 }
 
 void UiModel::eraseSession(const WorkspaceId& workspace, const SessionId& id) {
+    // 97-D3: an erased session cannot keep showing its prompt. Restore the
+    // interrupted mode and close the dialog before the workspace-missing early
+    // return, so a missing workspace row cannot strand `mode == Dialog`.
+    if (dialog.open && dialog.session == id) {
+        const UiMode restore =
+            dialog.prev_mode == UiMode::Dialog ? UiMode::Conversation : dialog.prev_mode;
+        dialog.open      = false;
+        dialog.session   = SessionId{};
+        dialog.request   = PermissionRequestId{};
+        dialog.tool.clear();
+        dialog.summary.clear();
+        dialog.force_ask = false;
+        dialog.selected  = 0;
+        dialog.prev_mode = UiMode::Conversation;
+        mode             = restore;
+    }
     sessions.erase(id);
     const auto workspace_it = workspaces.find(workspace);
     if (workspace_it == workspaces.end()) {
@@ -1608,6 +1624,27 @@ void UiModel::pushNotice(std::string text) {
 }
 
 void UiModel::eraseWorkspace(const WorkspaceId& workspace) {
+    // 97-D3: close the dialog and drop its queue BEFORE the workspace-missing
+    // early return, so erasing the dialog's workspace never strands the UI in
+    // Dialog with no dialog open.
+    if (dialog.open) {
+        const auto dialog_state = sessions.find(dialog.session);
+        if (dialog_state != sessions.end() && dialog_state->second.workspace == workspace) {
+            const UiMode restore =
+                dialog.prev_mode == UiMode::Dialog ? UiMode::Conversation : dialog.prev_mode;
+            dialog.open      = false;
+            dialog.session   = SessionId{};
+            dialog.request   = PermissionRequestId{};
+            dialog.tool.clear();
+            dialog.summary.clear();
+            dialog.force_ask = false;
+            dialog.selected  = 0;
+            dialog.prev_mode = UiMode::Conversation;
+            mode             = restore;
+            dialog_state->second.pending_permissions.clear();
+            dialog_state->second.attention.needsInput = false;
+        }
+    }
     const auto it = workspaces.find(workspace);
     if (it == workspaces.end()) {
         return;
@@ -1649,28 +1686,65 @@ bool UiModel::permission_dialog_open_for(const SessionId& session,
 }
 
 void UiModel::closePermissionDialogForSession(const SessionId& session) {
-    if (!dialog.open || dialog.session != session) {
-        return;
+    const bool was_open = dialog.open && dialog.session == session;
+    if (was_open) {
+        const UiMode prev = dialog.prev_mode;
+        dialog.open = false;
+        mode = prev;
     }
-    const UiMode prev = dialog.prev_mode;
-    dialog.open = false;
-    mode = prev;
+    // 97-D5: clear a stored prompt even when no dialog is open.
     const auto it = sessions.find(session);
     if (it != sessions.end()) {
+        it->second.pending_permissions.clear();
         it->second.attention.needsInput = false;
     }
     dirty.mark(session, UiDirtyFlag::Attention);
 }
 
 void UiModel::closePermissionDialogForWorkspace(const WorkspaceId& workspace) {
-    if (!dialog.open) {
+    bool owned = false;
+    if (dialog.open) {
+        const auto it = sessions.find(dialog.session);
+        owned = it != sessions.end() && it->second.workspace == workspace;
+    }
+    if (owned) {
+        const UiMode prev = dialog.prev_mode;
+        dialog.open = false;
+        mode = prev;
+        dirty.mark(dialog.session, UiDirtyFlag::Attention);
+    }
+    // 97-D5: clear every queued prompt in the affected workspace, dialog or not.
+    for (auto& [id, state] : sessions) {
+        if (state.workspace != workspace) {
+            continue;
+        }
+        state.pending_permissions.clear();
+        state.attention.needsInput = false;
+        dirty.mark(id, UiDirtyFlag::Attention);
+    }
+}
+
+void UiModel::openPendingPermissionIfAny() {
+    if (mode != UiMode::Conversation || dialog.open) {
         return;
     }
-    const auto it = sessions.find(dialog.session);
-    if (it == sessions.end() || it->second.workspace != workspace) {
+    SessionUiState* viewed = viewedSession();
+    if (viewed == nullptr || viewed->pending_permissions.empty()) {
         return;
     }
-    closePermissionDialogForSession(dialog.session);
+    PendingPermission pending = std::move(viewed->pending_permissions.front());
+    viewed->pending_permissions.pop_front();
+    dialog.open      = true;
+    dialog.session   = viewed->id;
+    dialog.request   = pending.request;
+    dialog.tool      = std::move(pending.tool);
+    dialog.summary   = std::move(pending.summary);
+    dialog.force_ask = pending.force_ask;
+    dialog.selected  = pending.force_ask ? 1 : 0;
+    dialog.prev_mode = mode;
+    viewed->attention.needsInput = true;
+    mode = UiMode::Dialog;
+    dirty.mark(viewed->id, UiDirtyFlag::Attention);
 }
 
 void UiModel::apply(const UiEvent& event) {
@@ -1867,28 +1941,67 @@ void UiModel::apply(const UiEvent& event) {
             } else if constexpr (std::is_same_v<T, DiffUpdated>) {
                 dirty.mark(e.session, UiDirtyFlag::Diff);
             } else if constexpr (std::is_same_v<T, PermissionRequested>) {
-                dialog.open = true;
-                dialog.session = e.session;
-                dialog.request = e.request;
-                dialog.tool = e.tool;
-                dialog.summary = e.summary;
-                dialog.force_ask = e.force_ask;
-                dialog.selected = e.force_ask ? 1 : 0;
-                dialog.prev_mode = mode;
-                state.attention.needsInput = true;
-                mode = UiMode::Dialog;
+                // 97-D2: a re-post of the open request (late-subscriber
+                // re-broadcast) must not reset the selection or prev_mode, and
+                // an already-queued id must not be enqueued twice.
+                if (dialog.open && dialog.request == e.request) {
+                    return;
+                }
+                const auto queued = std::find_if(
+                    state.pending_permissions.begin(), state.pending_permissions.end(),
+                    [&e](const PendingPermission& pending) { return pending.request == e.request; });
+                if (queued != state.pending_permissions.end()) {
+                    return;
+                }
+                const SessionUiState* viewed = viewedSession();
+                const bool showing = viewed != nullptr && viewed->id == e.session &&
+                                     !dialog.open && mode == UiMode::Conversation;
+                if (showing) {
+                    dialog.open      = true;
+                    dialog.session   = e.session;
+                    dialog.request   = e.request;
+                    dialog.tool      = e.tool;
+                    dialog.summary   = e.summary;
+                    dialog.force_ask = e.force_ask;
+                    dialog.selected  = e.force_ask ? 1 : 0;
+                    dialog.prev_mode = mode;
+                    state.attention.needsInput = true;
+                    mode = UiMode::Dialog;
+                } else {
+                    // 97-D1/D2: not viewed (or a modal is up, or not in
+                    // Conversation): store it for this session's dialog.
+                    state.pending_permissions.push_back(
+                        PendingPermission{e.request, e.tool, e.summary, e.force_ask});
+                    state.attention.needsInput = true;
+                }
                 dirty.mark(e.session, UiDirtyFlag::Attention);
             } else if constexpr (std::is_same_v<T, PermissionResolved>) {
                 // 95-D6a: session + request must both match, and the dialog
-                // must still be open. Attention is cleared only inside the
-                // guard so a stale notice cannot clear a newer prompt's.
-                if (dialog.open && dialog.session == e.session && dialog.request == e.request) {
+                // must still be open, to close it. 97-D4: every matching queued
+                // entry is erased; attention clears only when the queue is
+                // empty and this session's own dialog is not holding a prompt.
+                const bool was_open =
+                    dialog.open && dialog.session == e.session && dialog.request == e.request;
+                if (was_open) {
                     const UiMode prev = dialog.prev_mode;
                     dialog.open = false;
                     mode = prev;
-                    state.attention.needsInput = false;
+                }
+                auto resolved = sessions.find(e.session);
+                if (resolved != sessions.end()) {
+                    auto& queue = resolved->second.pending_permissions;
+                    queue.erase(std::remove_if(queue.begin(), queue.end(),
+                                               [&e](const PendingPermission& pending) {
+                                                   return pending.request == e.request;
+                                               }),
+                                queue.end());
+                    if (queue.empty() && !(dialog.open && dialog.session == e.session)) {
+                        resolved->second.attention.needsInput = false;
+                    }
                 }
                 dirty.mark(e.session, UiDirtyFlag::Attention);
+                // 97-D4: open the next queued prompt for the viewed session.
+                openPendingPermissionIfAny();
             } else if constexpr (std::is_same_v<T, AgentStateChanged>) {
                 state.agent_state = e.newState;
                 state.status.agent_state = e.newState;
@@ -2100,6 +2213,20 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
     const auto workspace_it = workspaces.find(workspace);
     if (workspace_it == workspaces.end()) {
         return;
+    }
+    // 97-D3/97-I11: never leave a dialog open for a session that is about to
+    // stop being viewed. Demote the open request to its session's queue front
+    // (the broker still holds it; no decision is sent) and return to
+    // Conversation. `sessions.find` never creates a ghost row.
+    if (dialog.open) {
+        const auto dialog_state = sessions.find(dialog.session);
+        if (dialog_state != sessions.end()) {
+            dialog_state->second.pending_permissions.push_front(
+                PendingPermission{dialog.request, dialog.tool, dialog.summary, dialog.force_ask});
+            dialog_state->second.attention.needsInput = true;
+            dirty.mark(dialog_state->first, UiDirtyFlag::Attention);
+        }
+        dialog.open = false;
     }
     // 48-D2.4: a session switch clears the outgoing session's Esc arm.
     const auto previous_workspace = workspaces.find(activeWorkspaceId);

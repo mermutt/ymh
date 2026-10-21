@@ -1901,6 +1901,9 @@ private:
         // entry, before the "workspace no longer open" early return, so a single
         // decrement covers both exits.
         release_resume(workspace);
+        // 97-D7: an explicit resume has decided this workspace's attachment; a
+        // later refresh must create if this session is deleted, never join.
+        attach_decided_.insert(workspace);
         if (model_.workspaces.count(workspace) == 0) {
             surface_notice(workspace, session,
                            "session resumed in a workspace that is no longer open");
@@ -2538,11 +2541,12 @@ private:
     // session (its pinned contract) and tags each with a `live` flag; only live
     // entries become cells and are subscribed. The focus/create decision is
     // scoped to the user's ACTIVE workspace: a background workspace is only
-    // observed (its live sessions render as leaves) and never steals focus. A
-    // fresh launch always creates a clean, empty session (46-D7 / 50-D2.1), even
-    // when a live session exists; the reply is gated while a resume is in flight
-    // so a list reply that lands between a resume submit and its reply can never
-    // create a stray session.
+    // observed (its live sessions render as leaves) and never steals focus.
+    // 97-D7: a launch with live sessions joins the LAST-USED one (max
+    // `updated_at_ms`, tie: highest ordinal); `--new` or no live session creates
+    // a fresh one. The reply is gated while a resume is in flight so a list reply
+    // that lands between a resume submit and its reply cannot create a stray
+    // session. `attach_decided_` makes the decision once per launch.
     void refresh_sessions(const WorkspaceId& workspace) {
         const auto connection = connections_.find(workspace);
         if (connection == connections_.end()) {
@@ -2550,7 +2554,13 @@ private:
         }
         submit_session_list(
             workspace, [this, workspace](SupervisorReply reply) {
-                std::vector<std::pair<SessionId, std::string>> live;
+                struct LiveSessionRow {
+                    SessionId    id;
+                    std::string  title;
+                    std::int64_t updated_at_ms = 0;
+                    std::int64_t ordinal       = 0;
+                };
+                std::vector<LiveSessionRow> live;
                 if (reply.ok && reply.result.is_array()) {
                     for (const nlohmann::json& entry : reply.result) {
                         const std::string id = entry.value("id", std::string{});
@@ -2563,48 +2573,67 @@ private:
                             continue;
                         }
                         if (entry.value("live", false)) {
-                            const std::string title = entry.value("title", std::string{});
-                            live.emplace_back(SessionId{id}, title);
+                            live.push_back(LiveSessionRow{
+                                SessionId{id}, entry.value("title", std::string{}),
+                                entry.value("updated_at_ms", std::int64_t{0}),
+                                entry.value("ordinal", std::int64_t{0})});
                         }
                     }
                 }
                 const auto connection_it = connections_.find(workspace);
                 if (connection_it != connections_.end()) {
                     for (const auto& entry : live) {
-                        connection_it->second->track(entry.first);
+                        connection_it->second->track(entry.id);
                     }
                 }
-                enqueue([this, workspace, live] {
+                enqueue([this, workspace, live = std::move(live)] {
                     const auto it = model_.workspaces.find(workspace);
                     if (it == model_.workspaces.end()) {
                         return;
                     }
-                    for (const auto& [session, title] : live) {
-                        SessionUiState& state = model_.ensureSessionIn(workspace, session);
+                    for (const auto& entry : live) {
+                        SessionUiState& state = model_.ensureSessionIn(workspace, entry.id);
                         if (state.status.model.empty()) {
                             state.status.model = display_model(
                                 options_.config, effective_model(options_.config));
                         }
-                        model_.ensureCellIn(workspace, session);
-                        model_.setCellTitle(workspace, session, title);
+                        model_.ensureCellIn(workspace, entry.id);
+                        model_.setCellTitle(workspace, entry.id, entry.title);
+                    }
+                    // 97-D7: a reconnect/reattach that already has a session has
+                    // already decided; it must never join a different one later.
+                    if (!it->second.activeSessionId().value.empty()) {
+                        attach_decided_.insert(workspace);
                     }
                     if (it->second.activeSessionId().value.empty() &&
                         model_.activeWorkspaceId == workspace &&
                         resume_in_flight_.count(workspace) == 0) {
-                        // 50-D2.1: a fresh launch always creates. The condition
-                        // reaching this branch (active workspace, no active
-                        // session, no resume in flight) is precisely the
-                        // fresh-launch/reconnect case, so never auto-focus a
-                        // pre-existing live session. Opening an existing session
-                        // is explicit only (`/sessions`, Ctrl-S, `--resume <id>`).
-                        // A reconnect has a non-empty `activeSessionId` and never
-                        // reaches this branch, so no spurious sessions appear
-                        // (50-I10). The created session's context is refreshed by
-                        // `apply_create_reply`, so the removed plain-attach
-                        // `refresh_status_context` (25 review M3) is superseded.
-                        // Attach (existing daemon) and spawn paths both converge
-                        // here, so auto-create the first session.
-                        create_session(workspace, std::string{});
+                        if (options_.force_new_session || live.empty()) {
+                            // 97-D7: `--new` or a first launch creates.
+                            attach_decided_.insert(workspace);
+                            create_session(workspace, std::string{});
+                        } else if (attach_decided_.insert(workspace).second) {
+                            // 97-D7: join the last-used live session. Ordinal is
+                            // creation order, so it is only a tie-break; the
+                            // last-use key is `updated_at_ms`.
+                            const LiveSessionRow* newest = nullptr;
+                            for (const auto& entry : live) {
+                                if (newest == nullptr ||
+                                    entry.updated_at_ms > newest->updated_at_ms ||
+                                    (entry.updated_at_ms == newest->updated_at_ms &&
+                                     entry.ordinal > newest->ordinal)) {
+                                    newest = &entry;
+                                }
+                            }
+                            if (newest != nullptr) {
+                                activate_session(workspace, newest->id);
+                                refresh_status_context(workspace, newest->id);
+                            }
+                        } else {
+                            // The active session was deleted: create, never join
+                            // another pre-existing live session.
+                            create_session(workspace, std::string{});
+                        }
                     }
                 });
             });
@@ -2799,6 +2828,9 @@ private:
         animation_active_.store(model_.aggregate.flash.isFlashing() ||
                                 model_.has_streaming_reasoning() ||
                                 model_.active_session_working());
+        // 97-D3/97-I12: every dispatch batch ends by opening the viewed
+        // session's queued prompt if the mode now allows it.
+        model_.openPendingPermissionIfAny();
     }
 
     SessionUiState* active() {
@@ -4403,6 +4435,9 @@ private:
         // here (rather than at the first event of a later input batch) keeps a
         // delayed deliberate keystroke from being swallowed.
         sync_modal_composer();
+        // 97-D3/97-I12: every input dispatch ends by opening the viewed
+        // session's queued prompt if the mode now allows it.
+        model_.openPendingPermissionIfAny();
         return handled;
     }
 
@@ -4802,6 +4837,11 @@ private:
     // unguarded decrement would wrap a zero entry to `SIZE_MAX` and close the
     // gate forever. The gate is `count(workspace) == 0`.
     std::map<WorkspaceId, std::size_t> resume_in_flight_;
+    // 97-D7: workspaces for which this supervisor has already chosen between
+    // joining a live session and creating one. Once decided, a later
+    // `session.list` refresh (e.g. after the active session is deleted) creates
+    // instead of joining a different pre-existing session.
+    std::set<WorkspaceId> attach_decided_;
     // 77-D4: authoritative per-session daemon turn status ("Idle" | "Running")
     // recorded from the session.resume reply. Read after every applied replay
     // envelope (OL-X3), at replay completion, and at the expiry escape. UI thread.
