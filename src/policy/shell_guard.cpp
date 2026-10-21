@@ -1772,10 +1772,15 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
     for (std::size_t k = b; k < e; ++k) {
         if (toks[k].kind == TokKind::Redirect && k + 1 < e &&
             toks[k + 1].kind == TokKind::Word) {
-            const auto scope = classify_scope_path(toks[k + 1].text, toks[k + 1], root, cur,
-                                                   true, false);
-            if (scope.has_value()) {
-                note_scope(result, *scope);
+            // 98-D1: an exact `/dev/null` sink of an output redirect is not a
+            // workspace target; any other target (including /dev/fd/*) is.
+            if (!(is_output_only_redirect(toks[k].text) &&
+                  toks[k + 1].text == "/dev/null")) {
+                const auto scope = classify_scope_path(toks[k + 1].text, toks[k + 1], root,
+                                                       cur, true, false);
+                if (scope.has_value()) {
+                    note_scope(result, *scope);
+                }
             }
             ++k;
         }
@@ -1872,6 +1877,11 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
     const bool git_context = false;
     for (std::size_t k = cw + 1; k < e; ++k) {
         if (toks[k].kind == TokKind::Redirect) {
+            // 98-D1: skip a run of operators (`&>>` is two tokens) and the
+            // target word; the redirect loop above already classified it.
+            while (k < e && toks[k].kind == TokKind::Redirect) {
+                ++k;
+            }
             continue;
         }
         if (toks[k].kind != TokKind::Word) {
