@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -20,6 +21,7 @@
 #include <ftxui/screen/string.hpp>
 
 #include "ymh/core/event.hpp"
+#include "ymh/core/version.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/ui/command_registry.hpp"
@@ -84,6 +86,37 @@ std::string normalize(const std::string& input) {
         result += lines[index];
     }
     return result;
+}
+
+std::string version_label() {
+    return std::string{"ymh (v"} + YMH_VERSION + ")";
+}
+
+// 96-D9: the raw goldens below were authored against the frozen `v0.003`
+// label. Substitute the live stamp label and re-balance the filler run so the
+// 72-column frame stays aligned for any counter width.
+std::string with_version_label(std::string golden) {
+    constexpr std::string_view kFrozen = "ymh (v0.003)";
+    const std::string label = version_label();
+    for (std::size_t at = golden.find(kFrozen); at != std::string::npos;
+         at = golden.find(kFrozen, at + label.size())) {
+        golden.replace(at, kFrozen.size(), label);
+        const std::size_t line_end = golden.find('\n', at);
+        const std::size_t border = golden.rfind("│", line_end);
+        if (border == std::string::npos || border <= at) {
+            continue;
+        }
+        const long delta = static_cast<long>(label.size()) - static_cast<long>(kFrozen.size());
+        if (delta > 0) {
+            const std::size_t available = border - (at + label.size());
+            const std::size_t remove =
+                std::min<std::size_t>(static_cast<std::size_t>(delta), available);
+            golden.erase(border - remove, remove);
+        } else if (delta < 0) {
+            golden.insert(border, static_cast<std::size_t>(-delta), ' ');
+        }
+    }
+    return golden;
 }
 
 std::vector<std::string> split_lines(const std::string& text) {
@@ -329,7 +362,7 @@ TEST(UiRenderGolden, ConversationSnapshot) {
     const std::string rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     std::cerr << "\n---GOLDEN-BEGIN---\n" << rendered << "\n---GOLDEN-END---\n";
     SCOPED_TRACE(rendered);
-    EXPECT_EQ(rendered, std::string(kGolden));
+    EXPECT_EQ(rendered, with_version_label(kGolden));
 }
 
 // 86-U12 (golden): a chip renders as its literal token bytes through the
@@ -351,7 +384,7 @@ TEST(UiRenderGolden, OpeningRowSnapshot) {
     const std::string rendered = normalize(render_to_ansi(model, TerminalSize{72, 20}, Theme{false}));
     std::cerr << "\n---OPENING-GOLDEN-BEGIN---\n" << rendered << "\n---OPENING-GOLDEN-END---\n";
     SCOPED_TRACE(rendered);
-    EXPECT_EQ(rendered, std::string(kOpeningGolden));
+    EXPECT_EQ(rendered, with_version_label(kOpeningGolden));
 }
 
 TEST(UiRenderGolden, RenderIsPure) {
@@ -999,7 +1032,7 @@ TEST(UiRenderGolden, HeaderTruncatesLongSessionTitle) {
     // 67-D1: the right slot is ellipsized to the cells left of the workspace
     // title, so the header never exceeds the terminal width and the left slot
     // stays visible.
-    EXPECT_NE(header.find("ymh (v0.003) · /work"), std::string::npos);
+    EXPECT_NE(header.find(version_label() + " · /work"), std::string::npos);
     EXPECT_NE(header.find("…"), std::string::npos);
     EXPECT_EQ(header.find(long_title), std::string::npos);
     EXPECT_NE(header.find("│"), std::string::npos);
@@ -1020,8 +1053,8 @@ TEST(UiRenderGolden, HeaderShowsSessionTitleRightAligned) {
     EXPECT_EQ(header.substr(at), "golden-title│");
 }
 
-// 72-D3/72-U1: the header's top-left product label carries the build version,
-// single-sourced from `project(ymh VERSION ...)` via `YMH_VERSION`.
+// 72-D3/72-U1, 96-D9: the header's top-left product label carries the build
+// version, single-sourced from the generated `ymh/build_version.hpp` header.
 TEST(UiRenderGolden, HeaderShowsVersionLabel) {
     const std::string rendered =
         normalize(render_to_ansi(build_model(), TerminalSize{72, 20}, Theme{false}));
@@ -1029,10 +1062,10 @@ TEST(UiRenderGolden, HeaderShowsVersionLabel) {
     const std::size_t second = rendered.find('\n', first + 1);
     const std::string header = rendered.substr(first + 1, second - first - 1);
     SCOPED_TRACE(header);
-    EXPECT_NE(header.find("ymh (v0.003)"), std::string::npos);
+    EXPECT_NE(header.find(version_label()), std::string::npos);
     // The label is the header's top-left product mark, immediately after the
     // left border cell, followed by the workspace cwd.
-    EXPECT_NE(header.find("ymh (v0.003) · /work"), std::string::npos);
+    EXPECT_NE(header.find(version_label() + " · /work"), std::string::npos);
 }
 
 TEST(UiRenderGolden, HeaderHidesPlaceholderTitle) {
@@ -2228,7 +2261,7 @@ TEST(UiRenderGolden, G53_StatusWithModel) {
     const std::string rendered =
         normalize(render_to_ansi(model, TerminalSize{80, 24}, Theme{false}));
     SCOPED_TRACE(rendered);
-    EXPECT_NE(rendered.find("ymh (v0.003) · /eager/work"), std::string::npos);
+    EXPECT_NE(rendered.find(version_label() + " · /eager/work"), std::string::npos);
     EXPECT_NE(rendered.find("first eager prompt"), std::string::npos);
     EXPECT_NE(rendered.find("build · balanced"), std::string::npos);
     EXPECT_EQ(rendered.find("no workspace attached"), std::string::npos);

@@ -21,6 +21,7 @@ add_executable(ymh_tests
     unit/llm_live_test.cpp
     unit/path_safety_test.cpp
     unit/output_test.cpp
+    unit/version_stamp_test.cpp
     unit/errata83_output_isolation_test.cpp
     unit/retention_test.cpp
     unit/repeat_tool_reminder_test.cpp
@@ -201,6 +202,8 @@ target_link_libraries(fake_mcp_server PRIVATE nlohmann_json::nlohmann_json ymh::
 target_include_directories(ymh_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        # 96-D8: the generated header carries the configure-time stamp.
+        ${CMAKE_BINARY_DIR}/generated
         # 66-U7: the private FTXUI input-parser header, so the bracketed-paste
         # root-cause mapping is tested against the real parser. Dev-side only;
         # the path tracks the FetchContent source tree.
@@ -211,6 +214,7 @@ target_compile_definitions(ymh_tests PRIVATE
     YMH_TEST_BINARY="$<TARGET_FILE:ymh>"
     YMH_FAKE_MCP_SERVER="$<TARGET_FILE:fake_mcp_server>"
     YMH_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    YMH_GENERATED_VERSION_HEADER="${CMAKE_BINARY_DIR}/generated/ymh/build_version.hpp"
 )
 
 target_link_libraries(ymh_tests
@@ -244,6 +248,19 @@ target_link_libraries(ymh_tests
 
 include(GoogleTest)
 gtest_discover_tests(ymh_tests)
+
+# 96 §8: T1-T9 and T11-T17 drive the stamp module in `cmake -P` script mode.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME version_stamp
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/version_stamp_test.py"
+                --cmake "${CMAKE_COMMAND}"
+    )
+else()
+    message(WARNING "no Python3 interpreter: the version_stamp tests are not registered")
+endif()
 
 # Dev-side design/tracker drift tripwire. It is registered only when the design
 # docs are present, i.e. on the merged tree where docs/ and tests/ coexist; it is
