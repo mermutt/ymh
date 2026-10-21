@@ -270,8 +270,7 @@ std::vector<Message> ContextCompactor::build_summary_prompt(
 
 std::string ContextCompactor::bound_summary(const std::string& summary) const {
     constexpr std::size_t kPerMessageOverhead = 4;
-    // 75-D3: keep this divisor in lockstep with DefaultTokenEstimator.
-    constexpr std::size_t kBytesPerToken = 3;
+    constexpr std::size_t kBytesPerToken = 4;
     if (policy_.max_summary_tokens <= kPerMessageOverhead) {
         return {};
     }

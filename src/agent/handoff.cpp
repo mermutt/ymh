@@ -370,7 +370,7 @@ SummarizerRoute summarizer_route(const std::string& model, const Session& sessio
 
 std::string bound_summary(const std::string& summary, const HandoffPolicy& policy) {
     constexpr std::size_t kPerMessageOverhead = 4;
-    constexpr std::size_t kBytesPerToken      = 3;
+    constexpr std::size_t kBytesPerToken      = 4;
     if (policy.max_summary_tokens <= kPerMessageOverhead) {
         return {};
     }

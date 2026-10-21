@@ -13,8 +13,7 @@
 namespace ymh {
 namespace {
 
-// 75-D3: mirrors DefaultTokenEstimator's divisor (see 75-context-budget-errata).
-constexpr std::size_t kSchemaBytesPerToken = 3;
+constexpr std::size_t kSchemaBytesPerToken = 4;
 constexpr std::size_t kSchemaOverhead = 8;
 
 Message system_message(std::string_view text) {
