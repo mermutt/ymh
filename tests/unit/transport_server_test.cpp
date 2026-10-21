@@ -1640,6 +1640,7 @@ TEST(TransportServer, Errata95TwoClientsResolutionAndLosingAnswer) {
     harness.server->onPermissionRequest(protocol::PermissionRequest{
         "perm-9", session, "shell", nlohmann::json::object(), "", 1, false});
     harness.host.known_permissions.insert("perm-9");
+    harness.host.permission_sessions["perm-9"] = session;
     harness.drain(*a);
     harness.drain(*b);
 

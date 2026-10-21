@@ -518,12 +518,14 @@ void open_dialog(UiEventAdapter& adapter, const SessionId& session,
 // T6 / 95-D6a: only an open dialog with the same session AND request closes.
 TEST(Errata95, T6UiCloseGuardIsSessionAndRequestKeyed) {
     UiModel model = make_model();
-    model.mode = UiMode::Dashboard;
+    // 97-D2: a prompt opens only from Conversation; the dialog is viewed-session
+    // owned. Enter Conversation before raising it.
+    model.mode = UiMode::Conversation;
     UiEventAdapter adapter(model);
     const PermissionRequestId id{"perm-1"};
     open_dialog(adapter, kSession, id);
     ASSERT_TRUE(model.dialog.open);
-    ASSERT_EQ(model.dialog.prev_mode, UiMode::Dashboard);
+    ASSERT_EQ(model.dialog.prev_mode, UiMode::Conversation);
 
     // Same id, different session: no-op (95-F7).
     adapter.onPermissionResolved(kOtherSession, id, payload::PermissionDecisionKind::Deny);
@@ -531,13 +533,13 @@ TEST(Errata95, T6UiCloseGuardIsSessionAndRequestKeyed) {
     EXPECT_EQ(model.dialog.session.value, kSession.value);
     EXPECT_TRUE(model.session(kSession)->attention.needsInput);
 
-    // Duplicate after a close: no-op (the earlier close restored Dashboard).
+    // Duplicate after a close: no-op (the earlier close restored Conversation).
     adapter.onPermissionResolved(kSession, id, payload::PermissionDecisionKind::Allow);
     EXPECT_FALSE(model.dialog.open);
-    EXPECT_EQ(model.mode, UiMode::Dashboard);
+    EXPECT_EQ(model.mode, UiMode::Conversation);
     adapter.onPermissionResolved(kSession, id, payload::PermissionDecisionKind::Allow);
     EXPECT_FALSE(model.dialog.open);
-    EXPECT_EQ(model.mode, UiMode::Dashboard);
+    EXPECT_EQ(model.mode, UiMode::Conversation);
 }
 
 // T6b / 95-D6b: final state Idle; a late notice while open does not resurrect
@@ -580,7 +582,8 @@ TEST(Errata95, T6bStateTransitionsAreConditional) {
 // restore `prev_mode`.
 TEST(Errata95, T15LinkLossAndSessionCloseCleanup) {
     UiModel model = make_model();
-    model.mode = UiMode::Dashboard;
+    // 97-D2: the dialog opens only for the viewed session in Conversation.
+    model.mode = UiMode::Conversation;
     UiEventAdapter adapter(model);
     const PermissionRequestId id{"perm-1"};
     open_dialog(adapter, kSession, id);
@@ -593,12 +596,15 @@ TEST(Errata95, T15LinkLossAndSessionCloseCleanup) {
     // Matching workspace: closes and restores the interrupted mode.
     model.closePermissionDialogForWorkspace(kWorkspace);
     EXPECT_FALSE(model.dialog.open);
-    EXPECT_EQ(model.mode, UiMode::Dashboard);
+    EXPECT_EQ(model.mode, UiMode::Conversation);
     EXPECT_FALSE(model.session(kSession)->attention.needsInput);
 
-    // Wrong session: no-op.
+    // View the other session first (a prompt for a non-viewed session queues
+    // instead of opening under 97-D2).
+    model.focusSession(kOtherSession);
     open_dialog(adapter, kOtherSession, PermissionRequestId{"perm-2"});
     ASSERT_TRUE(model.dialog.open);
+    // Wrong session: no-op.
     model.closePermissionDialogForSession(kSession);
     EXPECT_TRUE(model.dialog.open);
     model.closePermissionDialogForSession(kOtherSession);

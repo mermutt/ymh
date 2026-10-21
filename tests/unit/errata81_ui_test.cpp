@@ -228,18 +228,22 @@ TEST(Errata81, OverlayPrevModeRestores) {
     model.activeWorkspaceId = WorkspaceId{"ws"};
     WorkspaceModel workspace = live_workspace(WorkspaceId{"ws"}, "ws");
     model.workspaces.emplace(workspace.id, workspace);
-    model.mode = UiMode::Dashboard;
+    // 97-D2: a prompt opens only while viewing the session in Conversation; the
+    // recorded prev_mode is therefore Conversation (the dialog path D13 guards
+    // still restores exactly what it interrupted).
+    model.focusSession(kS1);
+    ASSERT_EQ(model.mode, UiMode::Conversation);
 
     UiEventAdapter adapter(model);
     PermissionRequest request;
     request.session = kS1;
     adapter.onPermissionRequest(kS1, PermissionRequestId{"p1"}, request);
-    EXPECT_EQ(model.dialog.prev_mode, UiMode::Dashboard);
+    EXPECT_EQ(model.dialog.prev_mode, UiMode::Conversation);
     EXPECT_EQ(model.mode, UiMode::Dialog);
 
     adapter.onPermissionResolved(kS1, PermissionRequestId{"p1"},
                                  payload::PermissionDecisionKind::Allow);
-    EXPECT_EQ(model.mode, UiMode::Dashboard);
+    EXPECT_EQ(model.mode, UiMode::Conversation);
     EXPECT_FALSE(model.dialog.open);
 }
 

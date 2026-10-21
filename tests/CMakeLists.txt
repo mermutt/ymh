@@ -35,6 +35,7 @@ add_executable(ymh_tests
     unit/permissions_test.cpp
     unit/permission_broker_test.cpp
     unit/errata95_permission_broadcast_test.cpp
+    unit/errata97_permission_prompt_test.cpp
     unit/errata46_permissions_test.cpp
     unit/errata89_shell_guard_test.cpp
     unit/errata89_landlock_test.cpp

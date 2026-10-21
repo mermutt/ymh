@@ -1776,7 +1776,7 @@ TEST(SupervisorHarnessTest, UI45_D10_ResumeFailureKeepsUsableFocus) {
 // live daemon. `on_scan` installs the connection; `seed_active_workspace` makes
 // it the focus target.
 struct D7Fixture {
-    explicit D7Fixture(const std::string& name)
+    explicit D7Fixture(const std::string& name, bool force_new = false)
         : root(name), registry(WorkspaceRegistry::open(harness_registry_config(root.path()))) {
         std::filesystem::create_directories(root.path() / "ws");
         row       = registry->registerWorkspace(root.path() / "ws", "ws");
@@ -1784,6 +1784,7 @@ struct D7Fixture {
         SupervisorRunOptions options;
         options.registry = registry.get();
         options.identity = harness_identity();
+        options.force_new_session = force_new;
         harness          = make_supervisor_harness(std::move(options));
         harness->on_scan({spec_for(row, "boot-a")});
         harness->drain_actions();
@@ -1902,9 +1903,9 @@ TEST(SupervisorHarnessTest, UI46_D7_ResumeInFlightBeatsListReply) {
               resumed);
 }
 
-// 50-D2.1 / 50-I7: a fresh launch always creates. A pre-existing live session is
-// never auto-focused; opening one is explicit only (`/sessions`, Ctrl-S,
-// `--resume`). This supersedes the old 46-D7.1 auto-focus assertion.
+// 97-D7 (supersedes 50-D2.1): a second instance attaching to a daemon with a
+// live session joins that session instead of creating a blank one. (The test
+// name is retained from the superseded behavior so history stays greppable.)
 TEST(SupervisorHarnessTest, UI50_D2_FreshAttachDoesNotFocusLiveSession) {
     D7Fixture     fixture("ymh50d2live");
     const SessionId live{"live-session"};
@@ -1914,16 +1915,20 @@ TEST(SupervisorHarnessTest, UI50_D2_FreshAttachDoesNotFocusLiveSession) {
     fixture.harness->on_link_state(fixture.workspace, SupervisorLinkState::Attached, "test");
     drain_fully(*fixture.harness);
 
-    EXPECT_NE(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(), live)
-        << "a fresh attach auto-focused a pre-existing live session";
+    EXPECT_EQ(fixture.harness->model().workspaces.at(fixture.workspace).activeSessionId(),
+              live)
+        << "a fresh attach did not join the live session";
+    EXPECT_EQ(fixture.harness->submitted_count(std::string(protocol::method::kSessionCreate)),
+              0u)
+        << "a fresh attach with a live session still created a new one";
 }
 
-// 50-D2.1: fresh attach with exactly one live session creates a NEW session (a
-// `session.create` is submitted) instead of focusing the live one. The dropped
+// 97-D7: `--new` is the explicit override; it creates a NEW session (a
+// `session.create` is submitted) even when a live one exists. The dropped
 // connection makes the create reply synchronously, so the attempt is observable
-// without a daemon.
+// without a daemon. (Name retained from the superseded 50-D2.1 behavior.)
 TEST(SupervisorHarnessTest, UI50_D2_FreshAttachWithLiveSessionCreatesNew) {
-    D7Fixture     fixture("ymh50d2createnew");
+    D7Fixture     fixture("ymh50d2createnew", /*force_new=*/true);
     const SessionId live{"live-session"};
     fixture.harness->drop_connection(fixture.workspace);
     fixture.harness->install_session_list_reply(stored_session_list(live, true), 0);

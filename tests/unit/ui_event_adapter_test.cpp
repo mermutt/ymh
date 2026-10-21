@@ -115,6 +115,8 @@ TEST(UiEventAdapter, MismatchedEnvelopeSessionIsIgnored) {
 
 TEST(UiEventAdapter, PermissionOverWireOpensDialog) {
     UiModel model = make_model();
+    // 97-D2: a prompt opens only for the viewed session; view B first.
+    model.focusSessionIn(kWorkspaceB, kSessionB);
     UiEventAdapter adapter(model);
     protocol::PermissionRequest request;
     request.request_id = "req-7";

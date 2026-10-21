@@ -46,6 +46,9 @@ public:
     std::shared_ptr<const std::vector<protocol::ClientInstanceId>> owner_snapshot{
         std::make_shared<const std::vector<protocol::ClientInstanceId>>()};
     std::set<std::string> known_permissions;
+    // 97-D6: request id -> owning session, so the decide branch can require a
+    // subscription to that session.
+    std::map<std::string, SessionId> permission_sessions;
 
     // Test seam (D14): when set to a method name, the corresponding host method
     // throws a non-RpcException `std::runtime_error` before doing any work. Used
@@ -327,6 +330,12 @@ public:
                           protocol::PermissionScope) override {
         calls.push_back("permission.decide");
         return known_permissions.count(request_id) > 0;
+    }
+
+    std::optional<SessionId> permissionSession(const std::string& request_id) override {
+        const auto it = permission_sessions.find(request_id);
+        return it == permission_sessions.end() ? std::nullopt
+                                               : std::optional<SessionId>{it->second};
     }
 
     nlohmann::json listSkills() override {
