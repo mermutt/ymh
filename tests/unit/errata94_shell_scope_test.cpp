@@ -165,3 +165,24 @@ TEST(ShellScope94, PathRuleMatchesAfterFix) {
     RulePermissionPolicy policy(in_root_allow());
     EXPECT_EQ(policy.evaluate(shell_request(root, command)), PolicyVerdict::Allow);
 }
+
+// 98-D1: an exact /dev/null output sink is not a workspace target.
+TEST(ShellScope98, NullDeviceRedirectIsInRoot) {
+    ymh::test::TempWorkspace workspace("p98_null");
+    const auto root = workspace.path();
+    EXPECT_EQ(classify(root, "cat a.md b.md 2>/dev/null").scope, ShellTargetScope::InRoot);
+    EXPECT_EQ(classify(root, "cat a.md >/dev/null").scope, ShellTargetScope::InRoot);
+    EXPECT_EQ(classify(root, "cat a.md &>>/dev/null").scope, ShellTargetScope::InRoot);
+    RulePermissionPolicy policy(in_root_allow());
+    EXPECT_EQ(policy.evaluate(shell_request(root, "cat a.md b.md 2>/dev/null")),
+              PolicyVerdict::Allow);
+}
+
+// 98-D2: device aliases, device arguments, and outside targets stay classified.
+TEST(ShellScope98, DeviceAliasesAndOutsideTargetsStayOutside) {
+    ymh::test::TempWorkspace workspace("p98_out");
+    const auto root = workspace.path();
+    EXPECT_NE(classify(root, "cat a.md >/dev/fd/3").scope, ShellTargetScope::InRoot);
+    EXPECT_NE(classify(root, "cat /dev/sda").scope, ShellTargetScope::InRoot);
+    EXPECT_NE(classify(root, "cat a.md > /etc/x").scope, ShellTargetScope::InRoot);
+}
