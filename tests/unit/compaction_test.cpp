@@ -352,8 +352,8 @@ TEST(ContextCompactorTest, TruncatesSummaryAtTokenBound) {
         compactor.compact(*fixture.session, fixture.session->deriveMessages(), CancellationToken{});
     ASSERT_EQ(result.outcome, CompactionOutcome::Compacted);
     ASSERT_TRUE(result.compaction.has_value());
-    EXPECT_EQ(result.compaction->summary.size(), 3u);
-    EXPECT_EQ(result.compaction->summary, "abc");
+    EXPECT_EQ(result.compaction->summary.size(), 4u);
+    EXPECT_EQ(result.compaction->summary, "abcd");
 }
 
 TEST(ContextCompactorTest, OversizedSummaryBytesFails) {
