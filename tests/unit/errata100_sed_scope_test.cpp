@@ -54,10 +54,11 @@ TEST(Errata100, T6SubstitutionFlags) {
     EXPECT_EQ(scope_of("sed 's/a/b/w out'"), ShellTargetScope::Unknown);
 }
 
-// T7: script files, file operands, and in-place writes stay Unknown (v1).
-TEST(Errata100, T7FileOperandsAndInPlace) {
+// T7: script files and in-place writes stay Unknown; a plain in-root operand
+// is InRoot (spec 101).
+TEST(Errata100, T7ScriptFilesAndInPlace) {
     EXPECT_EQ(scope_of("sed -f script.sed"), ShellTargetScope::Unknown);
-    EXPECT_EQ(scope_of("sed -n p x.cpp"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p x.cpp"), ShellTargetScope::InRoot);
     EXPECT_EQ(scope_of("sed -i 's/a/b/' x.cpp"), ShellTargetScope::Unknown);
 }
 
@@ -116,6 +117,53 @@ TEST(Errata100, T12TerminalAndAwk) {
 
     EXPECT_EQ(scope_of("sed -n '80,130p'", false), ShellTargetScope::Unknown);
     EXPECT_EQ(scope_of("awk '{print}'"), ShellTargetScope::Unknown);
+}
+
+
+// 101-I1 / T13: the motivating in-root file operand.
+TEST(Errata101, T13InRootFileOperandPipeline) {
+    const char* command =
+        "cd /w && echo \"=== active_wl ===\" && sed -n '820,826p;918,924p' "
+        "tg/traffic_gen.cpp && echo \"=== trace ===\" && grep -n \"CMD\" "
+        "tg/traffic_gen.cpp";
+    EXPECT_EQ(scope_of(command), ShellTargetScope::InRoot);
+
+    PermissionConfig config;
+    config.default_verdict = PolicyVerdict::Ask;
+    PolicyRule rule;
+    rule.tool   = "*";
+    rule.path   = "**";
+    rule.effect = PolicyVerdict::Allow;
+    config.rules.push_back(rule);
+    RulePermissionPolicy policy(config);
+
+    PermissionRequest request;
+    request.tool               = "shell";
+    request.root               = "/w";
+    request.kernel_confinement = true;
+    request.arguments          = nlohmann::json{{"command", command}};
+    EXPECT_EQ(policy.evaluate(request), PolicyVerdict::Allow);
+}
+
+// 101-I2 / T14: plain operands are classified by their path.
+TEST(Errata101, T14PlainOperandScope) {
+    EXPECT_EQ(scope_of("sed -n p x.cpp"), ShellTargetScope::InRoot);
+    EXPECT_EQ(scope_of("sed -n p /etc/passwd"), ShellTargetScope::Outside);
+}
+
+// 101-I3/I4 / T15: anything that can expand, glob, or hit a URI heuristic stays
+// Unknown, as do -i and -f.
+TEST(Errata101, T15UnsafeOperands) {
+    EXPECT_EQ(scope_of("sed -n p ~root/x"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p {a,b}/x"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p $(x)"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p 'x*'"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p https://../../etc/passwd"),
+              ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p a:b"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -n p 'a\\b'"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -i p x.cpp"), ShellTargetScope::Unknown);
+    EXPECT_EQ(scope_of("sed -f s.sed x.cpp"), ShellTargetScope::Unknown);
 }
 
 } // namespace ymh
