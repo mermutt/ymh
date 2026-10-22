@@ -1911,11 +1911,29 @@ bool sed_script_read_only(std::string_view s, bool had_unexpanded,
     return true;
 }
 
+bool sed_operand_safe(std::string_view s, bool had_unexpanded) {
+    if (had_unexpanded) {
+        return false;
+    }
+    // 101-D1: `:` would hit classify_scope_path's URI/scp heuristics; the rest
+    // are the shell-expansion/globbing characters.
+    for (char c : s) {
+        if (c == '$' || c == '`' || c == '*' || c == '?' || c == '[' ||
+            c == '{' || c == '}' || c == '~' || c == '\\' || c == ':' ||
+            c == '\n') {
+            return false;
+        }
+    }
+    return true;
+}
+
 ScopeResult classify_sed_segment(const std::vector<Token>& toks, std::size_t b,
-                                 std::size_t e) {
-    bool saw_script = false;
-    bool ok         = true;
-    bool end_opts   = false;
+                                 std::size_t e, const std::filesystem::path& root,
+                                 const std::filesystem::path& cur) {
+    ScopeResult result;
+    bool        saw_script = false;
+    bool        ok         = true;
+    bool        end_opts   = false;
     for (std::size_t k = b + 1; k < e; ++k) {
         if (toks[k].kind != TokKind::Word) {
             continue;
@@ -1975,11 +1993,23 @@ ScopeResult classify_sed_segment(const std::vector<Token>& toks, std::size_t b,
                                             tok.single_quoted);
             continue;
         }
-        // 100-D3: any file operand (including a post-`--` `-e`) is out of v1.
-        return sed_unknown_scope();
+        // 101-D1: a plain operand is classified by its path; anything that can
+        // expand, glob, or hit a URI heuristic stays Unknown.
+        if (w == "-") {
+            continue;
+        }
+        if (!sed_operand_safe(tok.text, tok.had_unexpanded)) {
+            return sed_unknown_scope();
+        }
+        const auto operand_scope =
+            classify_scope_path(tok.text, tok, root, cur, false, false);
+        if (operand_scope.has_value()) {
+            note_scope(result, *operand_scope);
+        }
     }
-    ScopeResult result;
-    result.scope = ok ? ShellTargetScope::InRoot : ShellTargetScope::Unknown;
+    if (!ok) {
+        result.scope = ShellTargetScope::Unknown;
+    }
     return result;
 }
 
@@ -2040,7 +2070,7 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
     }
 
     if (executable == "sed") {
-        return relaxed_sed ? classify_sed_segment(toks, cw, e)
+        return relaxed_sed ? classify_sed_segment(toks, cw, e, root, cur)
                            : sed_unknown_scope();
     }
 
