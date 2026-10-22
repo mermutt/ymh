@@ -4,7 +4,7 @@
 Status: verified (Rev 18)
 Revision: 18
 Verification status: adversarial reviewer (independent, Rev 18): GATE PASS (0 HIGH / 0 MEDIUM, 5 LOW); Oracle confirm PASS
-Revision note: Rev 9 adds the TEMP-ROOT EXEMPTION; Rev 12 simplifies it; Rev 13 makes it write-only; Rev 16 bounds it to direct, non-recursive /tmp file writes; Rev 17 fixes the Rev 16 gate findings; Rev 18 fixes the Rev 17 gate findings. The Rev 9..15 amendments failed their gates; Rev 15 was re-gated (0 HIGH / 1 MEDIUM / 5 LOW); Rev 16 was re-gated (0 HIGH / 1 MEDIUM / 5 LOW); Rev 17 and Rev 18 apply those findings and are not re-gated (see sec 17). The invariant/failure-mode IDs are PS1-PS33 / PS-F1-PS-F67, and the /tmp guard override is part of the verified scope.
+Revision note: Rev 9 adds the TEMP-ROOT EXEMPTION; Rev 12 simplifies it; Rev 13 makes it write-only; Rev 16 bounds it to direct, non-recursive /tmp file writes; Rev 17 fixes the Rev 16 gate findings; Rev 18 fixes the Rev 17 gate findings. **Amendment (103, verified Rev 10):** the read exclusion is relaxed for the closed neutral read-only set (`md5sum` family, `stat`, `cmp`) with canonical in-root, non-protected operands; all other reads remain non-exempt. The Rev 9..15 amendments failed their gates; Rev 15 was re-gated (0 HIGH / 1 MEDIUM / 5 LOW); Rev 16 was re-gated (0 HIGH / 1 MEDIUM / 5 LOW); Rev 17 and Rev 18 apply those findings and are not re-gated (see sec 17). The invariant/failure-mode IDs are PS1-PS33 / PS-F1-PS-F67, and the /tmp guard override is part of the verified scope.
 Tracker: DESIGN_STATUS.md row 90 matches this header at Rev 18 (verified;
          PS1-PS33 / PS-F1-PS-F67 and the /tmp guard override).
 Component: 90 (errata) -- makes the dormant `path` rule dimension live, so a
@@ -22,8 +22,9 @@ Component: 90 (errata) -- makes the dormant `path` rule dimension live, so a
            spec-89 shell safety guard **except** for the Rev 9 TEMP-ROOT
            EXEMPTION, which bypasses L1 only for a direct, non-recursive
            write/delete/create `shell`/`terminal` invocation whose every visible
-           target is strictly under canonical `/tmp` (sec 4.8); reads keep the normal read policy
-           and every other request keeps the full L1/L2 order.
+           target is strictly under canonical `/tmp` (sec 4.8); reads outside
+           the 103 neutral set keep the normal read policy and every other
+           request keeps the full L1/L2 order.
 Depends on: 09-permissions.md (verified; `PermissionPolicy`, `PolicyVerdict`,
            `PermissionRequest`, the rule fold), 46-permissions-ui-errata.md
            (verified; config-gated auto-allow, grant layers, O-H1/O-M1, 46-I5/
@@ -73,22 +74,26 @@ Supersedes: 46 O-H1's no-path disposition for `permissions.rules` (the
    scope-aware grant or remove it. This errata keeps it and makes it
    class-scoped; it is never a guard bypass.
 
-3. **Shell writes to `/tmp` are always allowed (Rev 9; write-only in Rev 13).**
+3. **Shell writes to `/tmp` are always allowed (Rev 9; write-only in Rev 13;
+   neutral reads in 103).**
    Verbatim: "writes to /tmp shall always be allowed regardless of all the
    other permission settings". A **direct, non-recursive, regular-file/new-path write/delete/create**
    `shell`/`terminal` invocation (the declared `terminal open` cwd is the one
-   existing-directory exception) whose every visible filesystem target is
-   provably strictly under the canonical `/tmp` root is **Allow**, exempt from the outside/above ask
+   existing-directory exception) whose every visible **write** target is
+   provably strictly under the canonical `/tmp` root, and whose reads are
+   either absent or 103-neutral in-root, is **Allow**, exempt from the
+   outside/above ask
    path, the spec-89 L1 destructive-outside `Forbid`/`Confirm` attributable to
    those targets, `ReadOnly`, `force_ask`, and every global permission setting.
    The exemption is **per target** and shell/terminal only: one `/tmp` operand
    never launders a non-temp/ambiguous operand or an untargeted destructive
-   construct. **Reads are not exempt** (Rev 13): `cat /tmp/x`, read-only
-   shell/terminal commands, and path tools keep the normal policy
-   (shell reads use `permissions.shell`/`default`/the guard; `permissions.read`
-   seeds path tools, not shell). Recognized read verbs and
-   read-only/mixed invocations are non-exempt; see sec 4.8.2 for the
-   read/write classification. **Path tools are NOT exempt** (Rev 12):
+   construct. **Reads are not exempt, except the 103 neutral set** (Rev 13;
+   103): `cat /tmp/x`, read-only shell/terminal commands, and path tools keep
+   the normal policy (shell reads use `permissions.shell`/`default`/the guard;
+   `permissions.read` seeds path tools, not shell). A closed read-only set
+   (`md5sum` family, `stat`, `cmp`) with canonical in-root, non-protected
+   operands is neutral (103-D1/D2/D3); every other read and read-only/mixed
+   invocation is non-exempt; see sec 4.8.2 for the read/write classification. **Path tools are NOT exempt** (Rev 12):
    `read_file`/`write_file`/`edit_file`/`grep`/`glob`/`git_*` remain
    workspace-root-confined and a `/tmp` path still throws `PathEscape`; use
    `shell` for `/tmp` writes. `$TMPDIR` and other temp bases are **not**
@@ -160,12 +165,13 @@ recommended config). **Hidden shell reads are best-effort/NotClaimed** (spec
 remembers a class (tool + target class + command prefix for in-workspace
 shell, exact command for outside/unknown shell, tool + in-workspace for path
 tools) instead of one exact string. **Rev 9 adds one bounded exception
-(direct-write-only in Rev 16):** a **direct, non-recursive,
-regular-file/new-path write/delete/create** `shell`/`terminal` invocation whose
-every visible filesystem target is a concrete strict descendant of canonical
-`/tmp` is `Allow`, outside this whole rule/ask/protected
-machinery (sec 4.8); the declared `terminal open` cwd is the one existing-directory
-exception; reads and path tools are not exempt.
+(direct-write-only in Rev 16; neutral reads in 103):** a **direct,
+non-recursive, regular-file/new-path write/delete/create** `shell`/`terminal`
+invocation whose every visible **write** target is a concrete strict
+descendant of canonical `/tmp`, and whose reads are absent or 103-neutral
+in-root, is `Allow`, outside this whole rule/ask/protected machinery
+(sec 4.8); the declared `terminal open` cwd is the one existing-directory
+exception; reads outside the 103 neutral set and path tools are not exempt.
 
 ### 1.5 Precedence and non-negotiables
 
@@ -189,7 +195,9 @@ This errata is additive. Except for the explicit Rev 9 temp-root exemption
   invocation whose every visible filesystem target is strictly under canonical
   `/tmp` returns `Allow` before
   every branch above (sec 4.8, 90-D23); the declared `terminal open` cwd is the
-  one existing-directory exception; reads keep the normal read policy. It is the only construct in this spec that can override a
+  one existing-directory exception; reads outside the 103 neutral set keep the
+  normal read policy, and neutral reads must canonicalize in-root (103-D2). It
+  is the only construct in this spec that can override a
   guard `Forbid`/`Confirm`, `ReadOnly`, or `force_ask`, and it cannot be
   disabled by any `permissions.*` key or `agent.sandbox`. Path tools are not
   exempt. Bare, wildcard, brace-bearing, unexpanded, untargeted-`Forbid`, and
@@ -259,7 +267,7 @@ add a row.
 | `write_file`, `edit_file` (tool-mediated writes; `edit_file` reads its target) | **Matched** (`edit_file`) / **Enforced** (`write_file` has no read capability) | **Matched** | **Enforced** (no delete capability) | **Enforced** (no exec capability) |
 | `shell`/`terminal` **visible** operands/redirections | **Matched** (best-effort classifier) | **Matched** (policy; L2 is the kernel backstop) | **Matched** (policy; L2 is the kernel backstop) | **NotClaimed** (arbitrary exec; 89 SG-F22) |
 | `shell`/`terminal` **hidden** reads via interpreters/unknown syntax | **NotClaimed** (best-effort; planned follow-up, OQ-90-9) | **Enforced\*** (L2 write boundary) | **Enforced\*** (L2 delete boundary) | **NotClaimed** (arbitrary exec; 89 SG-F22) |
-| `shell`/`terminal` **visible target(s), every one strictly under canonical `/tmp`**, on a **direct, non-recursive, regular-file/new-path write/delete/create** invocation (no internal `..`, brace/glob/unresolved, recursive/following form, directory/non-regular target other than the terminal-open cwd, or read operation) | **Normal policy** (reads are not exempt) | **Allow** | **Allow** | **Matched** (visible target; L2 `/tmp` grant; hidden exec NotClaimed) |
+| `shell`/`terminal` **visible target(s), every one strictly under canonical `/tmp`**, on a **direct, non-recursive, regular-file/new-path write/delete/create** invocation (no internal `..`, brace/glob/unresolved, recursive/following form, directory/non-regular target other than the terminal-open cwd, or non-neutral read operation) | **Normal policy**; the 103 neutral read set (canonical in-root, non-protected operands) does not disqualify | **Allow** | **Allow** | **Matched** (visible target; L2 `/tmp` grant; hidden exec NotClaimed) |
 | MCP/LSP | **NotClaimed** (89-D18/15) | **NotClaimed** (89-D18/15) | **NotClaimed** (89-D18/15) | **NotClaimed** (89-D18/15) |
 
 Cell meanings:
@@ -281,11 +289,13 @@ Cell meanings:
 **before** the guard, `ReadOnly`, `force_ask`, the protected check, and the
 fold; it overrides those cells for the same shell/terminal **write** target set.
 A **direct, non-recursive, regular-file/new-path** write/delete/create
-`shell`/`terminal` invocation whose every visible filesystem target is a
-concrete strict descendant of canonical `/tmp` is `Allow` even under
+`shell`/`terminal` invocation whose every visible **write** target is a
+concrete strict descendant of canonical `/tmp`, and whose reads are absent or
+103-neutral in-root, is `Allow` even under
 `default:"deny"`, `shell`/`write`, `ReadOnly`, or `force_ask`; the declared
-`terminal open` cwd is the one existing-directory exception; reads are
-**not** exempt and keep the normal shell/default/guard policy.
+`terminal open` cwd is the one existing-directory exception; reads outside the
+103 neutral set are **not** exempt and keep the normal shell/default/guard
+policy.
 **Path tools are not this row**: they keep the ordinary rows and their
 `PathEscape` bound (sec 4.8.2). The bare `/tmp` root, `/tmp/..`, `/tmpfoo`, a
 shell glob, a brace-bearing token, an unexpanded `$VAR`, an untargeted
@@ -310,7 +320,7 @@ read an arbitrary file.
 |---|---|---|
 | Verdict values `Allow/Ask/Deny` | 09 sec 2.1 | unchanged |
 | Rule total order (specificity -> layer -> effect) | 09 sec 3.4 | unchanged; `path` participates as an existing specificity dimension |
-| L1 guard precedence and L2 confinement | 89 SG1-SG17 | unchanged except the Rev 9/13 exemption bypasses L1 only for a write/delete/create `shell`/`terminal` invocation whose every visible target is a concrete strict `/tmp` descendant; reads keep the normal policy; L2 gains an explicit `/tmp` grant (90-D23/90-D26) |
+| L1 guard precedence and L2 confinement | 89 SG1-SG17 | unchanged except the Rev 9/13 exemption bypasses L1 only for a write/delete/create `shell`/`terminal` invocation whose every visible **write** target is a concrete strict `/tmp` descendant; reads outside the 103 neutral set keep the normal policy (103 neutral reads are in-root); L2 gains an explicit `/tmp` grant (90-D23/90-D26) |
 | `ReadOnly` hard deny | 09 Q7 / 07 sec 6.8 | **amended**: a fully-`/tmp` write/delete/create shell/terminal invocation is `Allow` even under `ReadOnly`; a workspace at/under `/tmp` disables the exemption, so a temp-exempt spawn keeps a read-only workspace root (90-A25/90-D26) |
 | `force_ask` forced review | 25-D4 / 25-A11 | **amended**: a fully-`/tmp` write/delete/create shell/terminal invocation is `Allow` before `force_ask` (90-D23/A25) |
 | `ExecutionEnvironment::resolve` / path tools | 07 X2/X3 | **not amended by Rev 12**: path tools stay workspace-root-confined and `/tmp` still throws `PathEscape`; the temp exemption is `shell`/`terminal` only (90-A26/PS31) |
@@ -356,10 +366,11 @@ read an arbitrary file.
 | 90-A22 | 89 / shell scope (N18) | `src/policy/shell_guard.cpp:588-655`, `:721-740` | Add best-effort curl local-file operand parsing: `@path`, `name=@path`, `name=<path`, `name@path` strip the prefix and classify the remainder; `@-` neutral; ambiguous -> `Unknown`. Not a soundness claim (matrix hidden-read cell NotClaimed; planned follow-up OQ-90-9). |
 | 90-A23 | 89 / shell guard (N19/LOW-1/LOW-2) | `src/policy/shell_guard.cpp:588-655`, `:721-740` | Add glob-aware protected detection: a **dot-leading literal-prefix** glob component that matches `.ymh`/`.git` sets `protected_target` (`.ymh*`, `.git*`, `.ym?`, `.*`, `src/.ymh*`); a bare `*`/`**` is not protected; only in-root targets are protected (an outside `.ymh`/`.git` path is `Outside`/Ask). Apply to operands, redirections, `find -delete`, and Session target before `remember`. |
 | 90-A24 | 07 / `terminal` cwd (HIGH-1; temp cwd Rev 10) | `src/tools/terminal_tool.cpp:38`, `:150-153`; `src/policy/shell_guard.cpp:2049-2100` | Add `terminal open` effective-cwd classification: read `arguments["cwd"]`, lexically resolve against root, use it for the scope and L1 risk walk; outside/non-string/ambiguous -> `Outside`/`Unknown` (Ask); in-root `.ymh`/`.git` -> protected; a strictly-temp cwd -> temp (bare open `Unknown`). The tool computes `weakly_canonical(root/cwd)` first; for a canonical cwd strictly under `/tmp` (workspace not at/under `/tmp`) it uses that path directly instead of calling `resolve()` (which would throw `PathEscape`), and otherwise keeps the `resolve()` path. Its independent check rejects a canonical path that is neither in-root nor strict temp, and rejects in-root protected, under both sandbox modes. `terminal write` stays `Unknown`. |
-| 90-A25 | 09 sec 3.4 step 1 / Q7 (`ReadOnly` hard deny) and 25-D4 (`force_ask`) | `src/policy/permission_policy.cpp:416-520`; `docs/design/09-permissions.md:443-495`; 25-D4 | A **direct, non-recursive, regular-file/new-path** write/delete/create `shell`/`terminal` invocation whose every visible target is a concrete strict `/tmp` descendant (the declared `terminal open` cwd is the one existing-directory exception) returns `Allow` **before** the L1 guard, `ReadOnly`, `Confirm`, `force_ask`, and the protected check; the exemption cannot be disabled by `permissions.*` or `agent.sandbox` (90-D23/PS29). Reads and path tools are not exempt. The existing order is unchanged for every non-exempt request. |
+| 90-A25 | 09 sec 3.4 step 1 / Q7 (`ReadOnly` hard deny) and 25-D4 (`force_ask`) | `src/policy/permission_policy.cpp:416-520`; `docs/design/09-permissions.md:443-495`; 25-D4 | A **direct, non-recursive, regular-file/new-path** write/delete/create `shell`/`terminal` invocation whose every visible **write** target is a concrete strict `/tmp` descendant (the declared `terminal open` cwd is the one existing-directory exception; 103 neutral reads are canonical in-root) returns `Allow` **before** the L1 guard, `ReadOnly`, `Confirm`, `force_ask`, and the protected check; the exemption cannot be disabled by `permissions.*` or `agent.sandbox` (90-D23/PS29). Reads outside the 103 neutral set and path tools are not exempt. The existing order is unchanged for every non-exempt request. |
 | 90-A26 | 07 X2 (no escape in root-confined modes) and `resolve()` | `src/execution/environment.cpp:64-95`; `src/execution/filesystem.cpp:41-46`; `docs/design/07-tools-execution.md:1313` | **Withdrawn by Rev 12**: `resolve()` and `LocalFilesystem` are **unchanged**; path tools remain workspace-root-confined and `/tmp` still throws `PathEscape`. There is no path-tool temp exemption (90-D23/PS31). |
 | 90-A27 | 89 SG2/SG13 (guard precedence) and 89-D17/L2 policy | `src/policy/permission_policy.cpp:416-520`; `src/execution/landlock.cpp:41-115`; `include/ymh/execution/confinement.hpp:30-38` | L1 `Forbid`/`Confirm` is bypassed only for a fully-`/tmp`, direct non-recursive write/delete/create `shell`/`terminal` request (90-D23). L2 gains `ConfinementPolicy::tmp_root` (canonical `/tmp` only) and grants `kTmpRights` (including `FS_REFER`); a `ReadOnly` temp-exempt spawn uses a read-only workspace root, and a workspace at/under `/tmp` disables the grant. The guard catalogue and other L2 rights are unchanged. |
-| 90-A28 | 89 / shell guard redirection classifier (LOW-3/LOW-4) | `src/policy/shell_guard.cpp:119-121`, `:588-655`, `:721-740` | Split `is_output_redirect` into an output-only form (`>`, `>>`, `>\|`, `&>`) and a read+write `<>` form; only the output-only form feeds redirection-first. Restrict redirection-first to the harmless producers `printf`, `echo`, `:`, `true`; an unknown producer with or without a `/tmp` redirection is not a write and is not exempt. `<>` contributes a read role and is never output-only. |
+| 90-A28 | 89 / shell guard redirection classifier (LOW-3/LOW-4) | `src/policy/shell_guard.cpp:119-121`, `:588-655`, `:721-740` | Split `is_output_redirect` into an output-only form (`>`, `>>`, `>\|`, `&>`) and a read+write `<>` form; only the output-only form feeds redirection-first. Restrict redirection-first to the harmless producers `printf`, `echo`, `:`, `true`
+plus the 103 neutral read-only set (`md5sum` family, `stat`, `cmp`); an unknown producer with or without a `/tmp` redirection is not a write and is not exempt. `<>` contributes a read role and is never output-only. |
 
 ## 4. Definitions and target model
 
@@ -629,13 +640,15 @@ enum class ShellTargetScope : std::uint8_t {
 ```
 
 `classify_shell_command_with_scope(text, root, cwd, kernel_confinement,
-canonical_tmp_root)` returns `{risk, scope, protected_target, tmp_exempt}`. The
+canonical_tmp_root)` returns `{risk, scope, protected_target, tmp_exempt,
+neutral_reads}`. The
 existing `classify_shell_command` delegates to `.risk`, so every existing
 caller and test keeps its behavior; the new argument is the cached canonical
 `/tmp` path (empty disables the check). `tmp_exempt` is the Rev 12 lexical,
-I/O-free flag: the target walk must see at least one visible target, every
-target must be a concrete strict `/tmp` descendant, and any `Forbid`/`Confirm` the guard returns
-must be attributable to those targets. It may therefore be true while
+I/O-free flag: the target walk must see at least one visible **write** target,
+every **write** target must be a concrete strict `/tmp` descendant, any
+neutral read (103-D2) is canonical in-root, and any `Forbid`/`Confirm` the
+guard returns must be attributable to those targets. It may therefore be true while
 `risk == Forbid` for a destructive `/tmp` operand (`rm /tmp/x`), but false
 for an unrelated `Forbid` (fork bomb) or an unconditional-`Forbid` class
 (`mkfs /tmp/y`). Path tools never set it.
@@ -682,7 +695,8 @@ Scope derivation is a pure, I/O-free pass over the same tokens:
    in-root protected `.ymh`/`.git` target sets
    `protected_target=true` even when the scope is `Unknown`.
 
-**The temp-target pass (Rev 9; write-only in Rev 13).** Steps 2/3
+**The temp-target pass (Rev 9; write-only in Rev 13; neutral reads in 103).**
+Steps 2/3
 short-circuit the *scope* and the guard risk, but the same target walk also
 records the visible targets and whether the invocation is a **write operation**.
 `ShellClassification::tmp_exempt` is the classifier's **I/O-free lexical
@@ -690,14 +704,17 @@ precursor**; it is true iff **all** of the following hold:
 
 1. the invocation is a **write/delete/create**, not a read: at least one
    recognized write operation and **zero** recognized read/unknown segments
-   (see the verb table below). A mixed read+write command is not exempt;
-   `cat /tmp/x`, `head`, `grep`, `ls`, `stat`, `wc`, `diff`, `sed` without
-   `-i`, and similar reads keep the normal read policy;
-2. at least one visible filesystem target was found; every visible target
-   is a **concrete** strict descendant of canonical `/tmp`: operands,
-   redirections, `cd`-resolved relative targets, recursively nested command
-   targets, a `terminal open` declared `cwd`, and the filesystem targets in a
-   `terminal write` input. The bare `/tmp` root, `/tmpfoo`, `/tmp2/x`, **any
+   except the 103 neutral read-only operands (the `md5sum` family, `stat`,
+   `cmp`; canonical in-root, non-protected, closed option allowlists;
+   103-D1/D2/D3). A mixed read+write command is not exempt unless every read
+   is neutral; `cat /tmp/x`, `head`, `grep`, `ls`, `wc`, `diff`, `sed`
+   without `-i`, and similar non-neutral reads keep the normal read policy;
+2. at least one visible write target was found; every visible **write**
+   target is a **concrete** strict descendant of canonical `/tmp`: write
+   operands, redirections, `cd`-resolved relative targets, recursively nested
+   command targets, a `terminal open` declared `cwd`, and the filesystem
+   targets in a `terminal write` input. Neutral reads are absent or 103-neutral
+   in-root (103-D2). The bare `/tmp` root, `/tmpfoo`, `/tmp2/x`, **any
    `..` component before normalization** (`/tmp/..`, `/tmp/a/../b`), any
    `{`/`}` (brace expansion), any glob metacharacter (`*`, `?`, `[`), any
    unexpanded `$VAR`/`${VAR}`/`$(...)`/backtick, a truncated parse, and any
@@ -718,17 +735,21 @@ closes the `/tmp/link -> <workspace>/.git` alias), and enforces the
 regular-file/new-path type rule. A caller must not treat the lexical
 `tmp_exempt` flag as the final exemption without that predicate.
 
-The classifier also records `tmp_targets`: **every visible target**, both read
-and write operands plus a `terminal open` cwd, absolute and lexically
-normalized, so the final-verdict check can canonicalize them without re-parsing.
-`cd`/`pushd` is a cwd update, not a target; options and `NAME=value`
-assignments are neutral.
+The classifier also records `tmp_targets`: **every visible target** (write
+operands and any non-neutral read) plus a `terminal open` cwd, absolute and
+lexically normalized, so the final-verdict check can canonicalize them without
+re-parsing; 103 neutral reads are recorded separately in `neutral_reads`.
+`cd`/`pushd` is a cwd update, not a target; options are neutral. A
+`NAME=value` assignment is neutral only when it is neither a prefix to a
+command nor a standalone segment; a prefix/standalone assignment sets
+`has_unknown` (103-D1), because it can change a later segment's resolution or
+cwd.
 
 **Write/read classification (pinned).** A segment can carry **both** roles; the
 invocation is a write-only candidate only when it has at least one write and
-**zero reads**. A read operand means `tmp_exempt` is false and the normal
-shell/default/guard policy applies (`permissions.read` seeds path tools, not
-shell).
+**zero non-neutral reads**. A non-neutral read operand means `tmp_exempt` is
+false and the normal shell/default/guard policy applies (`permissions.read`
+seeds path tools, not shell); 103 neutral reads are exempt inputs.
 
 - **Direct write/delete/create (eligible):** `rm` **without** `-r`/`-R`/
   `--recursive` (unlink), `mkdir`, `touch`, `truncate`, `mv` (direct rename),
@@ -739,11 +760,15 @@ shell).
   **not** a write-only form: it opens for read+write, so it is non-exempt
   (LOW-3).
 - **Read sources:** `cat`/`head`/`tail`/`less`/`more`/`grep`/`rg`/`sed`
-  without `-i`/`awk`/`ls`/`stat`/`file`/`du`/`wc`/`diff`/`cmp`/`find`
-  without a destructive action/`git status`/`diff`/`log`/`show`/`config
-  --get*`, an input redirection (`<`) or a read+write redirection (`<>`), and
-  the **source operands** of `cp`, `install`, `ln`, and `dd if=`. These verbs are mixed read+write and
-  are therefore **not exempt**; their sources still appear in `tmp_targets`.
+  without `-i`/`awk`/`ls`/`file`/`du`/`wc`/`diff`/`find` without a destructive
+  action/`git status`/`diff`/`log`/`show`/`config --get*`, an input
+  redirection (`<`) or a read+write redirection (`<>`), and the **source
+  operands** of `cp`, `install`, `ln`, and `dd if=`. These verbs are mixed
+  read+write and are **not exempt**; non-neutral sources still appear in
+  `tmp_targets` and neutral sources in `neutral_reads`. `stat` and `cmp` are
+  reads but are neutral **only** under 103-D1/D2/D3 (bare command word,
+  canonical in-root non-protected operands, closed option allowlists); every
+  other `stat`/`cmp` use is non-neutral.
 - **Recursive/following forms (never exempt):** `rm -r`/`-R`/`--recursive`,
   `cp -r`/`-R`/`-a`/`--recursive`/`--archive`, all `chmod`/`chown`
   (including `-R`; metadata is not Landlock-mediated), `find -delete`/`-L`/
@@ -755,8 +780,9 @@ shell).
   (MEDIUM-1).
 - **Redirection-first:** a segment with an output-only redirection (`>`, `>>`,
   `>|`, `&>`) is a write only when its producer is one of the known harmless
-  producers `printf`, `echo`, `:`, or `true` (`printf x > /tmp/x`,
-  `echo hi > /tmp/x`); an unknown producer is **not** a write even with an
+  producers `printf`, `echo`, `:`, or `true`, or a 103 neutral read-only verb
+  (bare command word, shell only; `printf x > /tmp/x`, `echo hi > /tmp/x`,
+  `md5sum a > /tmp/x`); an unknown producer is **not** a write even with an
   output redirection (`git checkout main > /tmp/x` is not exempt), so the
   producer's hidden effects are not laundered into `Allow` by the exemption;
   an unknown producer with no output redirection is likewise not a write.
@@ -778,7 +804,8 @@ false, with or without an output redirection. This is deliberately
 conservative: an unrecognized write verb is not exempt, so the residual is
 "more prompts", never a silent recursive write.
 `terminal write` is exempt only when its input text is a recognized **direct
-write-only** operation with at least one `/tmp` target; a read input
+write-only** operation with at least one `/tmp` target and **zero neutral
+reads** (the PTY cwd is unmodeled; 103); a read input
 (`cat /tmp/x`), mixed input, or recursive form is not exempt.
 `terminal open` requires a **non-empty command** and its cwd is a mandatory
 target; an absent cwd defaults to the workspace root and fails; a bare
@@ -1165,10 +1192,14 @@ The exact target behavior is expressed by this `config.jsonc` fragment:
     "write": "ask",
     "shell": "ask",
 
-    // TEMP-ROOT EXEMPTION (Rev 9; direct-write-only in Rev 16): a direct,
-    // non-recursive, regular-file/new-path write/delete/create shell/terminal
-    // invocation whose every visible target is strictly under /tmp is allowed before any of these settings (the declared terminal-open cwd is the one existing-directory exception). No key here
-    // (or `agent.sandbox`) can deny it; reads are not exempt. Path tools are
+    // TEMP-ROOT EXEMPTION (Rev 9; direct-write-only in Rev 16; neutral
+    // reads in 103): a direct, non-recursive, regular-file/new-path
+    // write/delete/create shell/terminal invocation whose every visible
+    // **write** target is strictly under /tmp, and whose reads are absent or
+    // 103-neutral in-root, is allowed before any of these settings (the
+    // declared terminal-open cwd is the one existing-directory exception).
+    // No key here (or `agent.sandbox`) can deny it; non-neutral reads are not
+    // exempt. Path tools are
     // not exempt; $TMPDIR is ignored. The bare root, glob/brace/internal-../
     // ambiguous targets, mixed commands, and untargeted Forbid constructs
     // keep the normal verdict (Ask, or a guard Deny) (sec 4.8).
@@ -1327,9 +1358,10 @@ is stated in sec 1.6 and the guarantee matrix.
 
 A request is **tmp-exempt** iff it is a **write/delete/create** `shell`,
 command-bearing `terminal open`, or `terminal write` (sec 4.4's write/read
-classification: at least one recognized write, zero reads/unknown segments),
-and **every visible filesystem target token** in it is provably a concrete
-strict descendant of canonical `/tmp`:
+classification: at least one recognized write, zero non-neutral reads/unknown
+segments), and **every visible write target token** in it is provably a
+concrete strict descendant of canonical `/tmp`; reads must be absent or
+103-neutral in-root:
 
 - `shell`: operands, redirections, `cd`-updated relative targets, and
   recursively nested command targets;
@@ -1344,21 +1376,26 @@ strict descendant of canonical `/tmp`:
 At least one target must exist. A target is **not** concrete (and the whole
 invocation is not exempt) if it is:
 
-- the bare `/tmp` root, `/tmpfoo`, `/tmp2/x`, or any target outside `/tmp`;
+- the bare `/tmp` root, `/tmpfoo`, `/tmp2/x`, or any **write** target outside
+  `/tmp` (neutral read targets are checked by 103-D2, not by this rule);
 - any `..` component **before normalization** (`/tmp/..`, `/tmp/a/../b`);
 - any `{`/`}` (brace expansion, quoted or unquoted), any glob metacharacter
   (`*`, `?`, `[`), any unexpanded `$VAR`/`${VAR}`/`$(...)`/backtick, or a
   truncated parse;
 - an interpreter/here-doc/`-exec`/`xargs` payload whose targets cannot be
   enumerated;
-- a protected target, or a mixed command with any non-temp visible target.
+- a protected target, or a mixed command with any non-temp write target or
+  non-neutral read.
 
-`cd`/`pushd` is a cwd update, not a target; options and `NAME=value` assignments
-are neutral; any unknown/interpreter segment blocks the flag (fail-safe). A
-shell **read** whose only visible target is under `/tmp` is **not** exempt:
-`cat /tmp/x`, read-only commands, and mixed read+write commands keep the
-normal shell/default/guard policy; `permissions.read` seeds path tools, not
-shell.
+`cd`/`pushd` is a cwd update, not a target; options are neutral. A
+`NAME=value` assignment is neutral only when it is neither a prefix to a
+command nor a standalone segment; a prefix/standalone assignment sets
+`has_unknown` (103-D1). Any unknown/interpreter segment blocks the flag
+(fail-safe). A
+**non-neutral** shell read is **not** exempt: `cat /tmp/x`, read-only commands,
+and mixed read+write commands keep the normal shell/default/guard policy;
+`permissions.read` seeds path tools, not shell. The 103 neutral read-only set
+is allowed only under 103-D1/D2/D3.
 
 **Guard attribution.** The exemption may override a `Forbid`/`Confirm` only
 when that verdict is attributable to the `/tmp` targets. An untargeted
@@ -1404,8 +1441,9 @@ shipped `tool_is_mutating(request)` for every non-exempt request, including
 
 An exempt invocation is `Allow` even under `default:"deny"`,
 `shell`/`write`, `ReadOnly`, `force_ask`, or a guard `Forbid`/`Confirm`
-attributable to the `/tmp` targets. Reads keep the normal shell/default/guard
-policy (`permissions.read` seeds path tools, not shell). It creates no dialog and
+attributable to the `/tmp` targets. Non-neutral reads keep the normal
+shell/default/guard policy (`permissions.read` seeds path tools, not shell);
+the 103 neutral read set is allowed (103-D2). It creates no dialog and
 no grant. The protected-path rules are unchanged: a protected target is not
 `tmp_exempt`, and a workspace at/under `/tmp` disables the exemption
 (sec 4.8.1).
@@ -1735,7 +1773,8 @@ in-root nor strict temp, and rejects an in-root protected path, so a symlink
 alias cannot escape under `Unrestricted` (same pattern as A17; MEDIUM-1).
 
 **90-D23 - TEMP-ROOT EXEMPTION: shell/terminal write invocations wholly under
-canonical `/tmp` are Allow (Rev 9; write-only in Rev 13).**
+canonical `/tmp` are Allow (Rev 9; write-only in Rev 13; neutral reads in
+103).**
 The temp root is canonical `/tmp` only; `$TMPDIR`, `$XDG_RUNTIME_DIR`, other
 temp bases, and protected-root sets are not part of the exemption. A
 recognized **direct, non-recursive, regular-file/new-path** write/delete/create
@@ -1744,20 +1783,23 @@ existing-directory exception) is exempt iff all its **write** targets (destinati
 `terminal write` input targets) and any canonicalized visible target are
 concrete strict descendants of `/tmp`, with no internal `..` before
 normalization, no brace/glob/unresolved expansion, no interpreter payload, no
-protected target, no read/unknown role (a read source such as `cp`/
-`install`/`ln`/`dd if=` makes the request non-exempt), no read+write `<>`,
+protected target, no read/unknown role except the 103 neutral read-only operands
+(a non-neutral read source such as `cp`/`install`/`ln`/`dd if=` still makes the
+request non-exempt), no read+write `<>`,
 no existing directory/FIFO/socket/device target **other than the declared
 `terminal open` cwd** (which must be an existing directory), no recursive/following form (`rm -r`, `cp -r/-a`, `chmod`/`chown`,
 `find -L/-delete`, `rsync`, `install -D`), and any guard `Forbid`/`Confirm`
 attributable to those targets (sec 4.8.2). The final
 check canonicalizes `tmp_targets`; a resolved target outside `/tmp`, inside the
-workspace/protected tree, or a dangling/unresolvable symlink is not exempt. Path tools are **not** exempt and
-stay root-confined. Reads are **not** exempt. An exempt request returns `Allow` before
+workspace/protected tree, or a dangling/unresolvable symlink is not exempt.
+Path tools are **not** exempt and stay root-confined. Reads outside the 103
+neutral set are **not** exempt; neutral reads must canonicalize in-root and be
+non-protected (103-D2). An exempt request returns `Allow` before
 the L1 guard, `ReadOnly`, `force_ask`, the protected check, and the fold; it
 cannot be disabled or reordered by any config key, preset, rule, or grant
-(PS29). The bare root, wildcard/brace/unexpanded targets, mixed commands, bare
-opens, and a workspace at/under `/tmp` keep the normal verdict (`Ask`, or a
-guard `Deny`; PS30). Callers: `RulePermissionPolicy::evaluate` (sec 6) and
+(PS29). The bare root, wildcard/brace/unexpanded targets, mixed commands with a
+non-neutral read/unknown role, bare opens, and a workspace at/under `/tmp` keep
+the normal verdict (`Ask`, or a guard `Deny`; PS30). Callers: `RulePermissionPolicy::evaluate` (sec 6) and
 `remember` (sec 7).
 
 **90-D24 - `canonical_tmp_root` and `path_is_under_tmp_root`.**
@@ -1781,12 +1823,13 @@ alias list, no `$TMPDIR` reader, and no protected-root computation. Callers:
 switch.**
 The evaluate order is `tmp-exempt -> Allow` for shell/terminal, then the
 unchanged `Forbid`/`ReadOnly`/`Confirm`/`force_ask`/protected/fold order. The
-flag is `ShellClassification::tmp_exempt` (write-only); there is no
-`mutating`/`temp_write_only` guard flag. `remember` classifies first and returns
-`{}` for an exempt request (active guard, sec 7.3). Reads never set it. `SandboxMode::ReadOnly` for non-exempt requests
+flag is `ShellClassification::tmp_exempt` (write-only plus 103 neutral reads);
+there is no `mutating`/`temp_write_only` guard flag. `remember` classifies
+first and returns `{}` for an exempt request (active guard, sec 7.3).
+Non-neutral reads never set it. `SandboxMode::ReadOnly` for non-exempt requests
 still uses `tool_is_mutating(request)` (NEW MEDIUM-2). The only way to make an
 exempt request ask is to make a target fail the strict/concrete/write-only
-bound (read, read+write `<>`, recursive/following form, existing directory/
+bound (a non-neutral read, read+write `<>`, recursive/following form, existing directory/
 non-regular target other than the terminal-open cwd, bare root, internal
 `..`, glob, brace, unexpanded, interpreter, mixed, protected, empty canonical
 `/tmp`, resolved workspace/protected path, dangling/unresolvable symlink, or a
@@ -1806,13 +1849,13 @@ the exemption is policy-only and the shell symlink residual is recorded
 (risk 21/PS-F59).
 
 **90-D27 - The temp safety bound is syntactic and deliberately conservative.**
-A target is not exempt when it is a read/unknown invocation, a recursive/
-following form, an existing directory/non-regular target other than the
+A target is not exempt when it is a non-neutral read/unknown invocation, a
+recursive/following form, an existing directory/non-regular target other than the
 terminal-open cwd, the bare `/tmp` root, contains
 any `..` component before normalization, a shell glob or `{`/`}`, is
 `/tmpfoo`, is an unexpanded/truncated expansion, is an
 interpreter/here-doc/`-exec`/`xargs` payload, belongs to a command with any
-non-temp visible target, is a bare `terminal open`, is a `terminal open` whose
+non-temp **write** target or non-neutral read, is a bare `terminal open`, is a `terminal open` whose
 declared cwd is not strictly under `/tmp`, is a `terminal write` whose input
 has no write/`/tmp` target, is a path tool, or resolves (symlink) outside
 `/tmp`, into the workspace/protected tree, or through a dangling/unresolvable
@@ -1827,8 +1870,8 @@ will state that a **direct, non-recursive, regular-file/new-path**
 write/delete/create `shell`/`terminal` invocation wholly under canonical `/tmp`
 is allowed (the declared `terminal open` cwd is the one existing-directory
 exception), that recursive/following forms (`rm -rf`, `chmod -R`,
-`find -L -delete`) ask, that reads and path tools are not exempt (use `shell`
-for direct `/tmp` writes), that `$TMPDIR` is ignored, and that bare/glob/brace/
+`find -L -delete`) ask, that non-neutral reads and path tools are not exempt
+(use `shell` for direct `/tmp` writes; the 103 neutral set is allowed), that `$TMPDIR` is ignored, and that bare/glob/brace/
 internal-`..`/ambiguous targets keep the normal verdict (`Ask`, or a guard
 `Deny`). It will also state that a workspace at/under `/tmp` is not exempt. No
 default behavior changes and no new config key is accepted.
@@ -1920,9 +1963,10 @@ Notes:
   evaluated before the guard (and therefore before
   `ReadOnly`/`force_ask`/protected/the fold). It performs the bounded
   canonical/symlink probe (sec 4.8.3) and returns `Allow` only for a
-  **write/delete/create** `shell`/`terminal` invocation whose every
-  visible target is a concrete strict descendant of canonical `/tmp` and whose
-  guard verdict is attributable to those targets; reads keep the normal read
+  **write/delete/create** `shell`/`terminal` invocation whose every visible
+  **write** target is a concrete strict descendant of canonical `/tmp`, whose
+  reads are absent or 103-neutral in-root, and whose guard verdict is
+  attributable to those targets; non-neutral reads keep the normal read
   policy. Path tools, bare roots, globs, braces,
   `..`/unresolved targets, mixed commands, untargeted `Forbid` constructs, bare
   opens, and a workspace at/under `/tmp` fall through to the normal order.
@@ -2058,12 +2102,13 @@ caller in the shipped tree it lands in.
 | `ymh::path_is_protected` | `bool path_is_protected(const std::filesystem::path& root, const std::filesystem::path& candidate)` (`include/ymh/execution/path_safety.hpp`) | lexical component-wise `.ymh`/`.git` check at **any depth** (sec 4.3.1); no I/O; single shared implementation (LOW-6) | `evaluate` (step 5), `remember`, `read_file`/`write_file`/`edit_file` after independent canonicalization, `LocalFilesystem::grep`/`glob` |
 | `ymh::canonical_tmp_root` | `const std::filesystem::path& canonical_tmp_root()` (`include/ymh/execution/path_safety.hpp`) | cached `weakly_canonical("/tmp")`; empty if `/tmp` is unavailable and then `path_is_under_tmp_root`/`request_is_tmp_exempt` are false; no `$TMPDIR`/XDG/other base | `RulePermissionPolicy::evaluate`/`remember`, `SpawnConfinement`, terminal cwd check |
 | `ymh::path_is_under_tmp_root` | `bool path_is_under_tmp_root(const std::filesystem::path& canonical_tmp_root, const std::filesystem::path& candidate)` | false for an empty root, a relative candidate (the caller resolves relative targets first), or any `..` component before normalization; otherwise lexical, component-wise, absolute, strict (equality false); no I/O; `/tmpfoo`/`/tmp/..`/`/tmp/a/../b` false | `classify_shell_request`, `request_is_tmp_exempt`, terminal cwd check |
-| internal `request_is_tmp_exempt` | `bool request_is_tmp_exempt(const PermissionRequest&, const ShellClassification&, const std::filesystem::path& canonical_tmp_root)` | resolve-time predicate: true iff `shell`/`terminal`, `classification.tmp_exempt` (the lexical precursor), non-empty canonical root, workspace not `/tmp`/under it, and every `tmp_targets` has no dangling/unresolvable symlink component, canonicalizes strict under `/tmp`, and is outside the workspace/protected tree; every target **except the declared `terminal open` cwd** (identified from the request's `cwd`, PS27) must be a regular file or a new path (existing directory/FIFO/socket/device rejected); the terminal cwd must be an existing directory (LOW-2/LOW-5); no read roles, no recursive/following forms; path tools always false; this is where all filesystem I/O for the exemption lives | `evaluate` step 0, `remember` after classification |
-| `ymh::ShellClassification::tmp_exempt` | `bool tmp_exempt = false` | **I/O-free lexical precursor** (not the final verdict): true iff a recognized **direct non-recursive** write/delete/create, **zero read roles** (`<>` is read+write and blocks it), at least one visible target, every target a concrete strict `/tmp` descendant (no internal `..`, brace/glob/unresolved/interpreter), no lexically protected target, no recursive/following form (`rm -r`, `cp -r/-a`, `chmod`/`chown`, `find -L/-delete`, `rsync`, `install -D`), and guard verdict attributable; `request_is_tmp_exempt` adds the canonical/symlink/workspace/type checks (LOW-2/LOW-3/LOW-4/LOW-5) | set by `classify_shell_command_with_scope`/`classify_shell_request`; read by `request_is_tmp_exempt` |
-| `ymh::ShellClassification::tmp_targets` | `std::vector<std::filesystem::path> tmp_targets` | absolute lexically-normalized **all** visible targets (read sources + write destinations + `terminal open` cwd); canonicalized by `request_is_tmp_exempt`; empty for non-temp/unknown. `tmp_exempt` additionally requires zero read roles | set by `classify_shell_command_with_scope`/`classify_shell_request`; read by `request_is_tmp_exempt` |
+| internal `request_is_tmp_exempt` | `bool request_is_tmp_exempt(const PermissionRequest&, const ShellClassification&, const std::filesystem::path& canonical_tmp_root)` | resolve-time predicate: true iff `shell`/`terminal`, `classification.tmp_exempt` (the lexical precursor), non-empty canonical root, workspace not `/tmp`/under it, and every `tmp_targets` has no dangling/unresolvable symlink component, canonicalizes strict under `/tmp`, and is outside the workspace/protected tree; every target **except the declared `terminal open` cwd** (identified from the request's `cwd`, PS27) must be a regular file or a new path (existing directory/FIFO/socket/device rejected); the terminal cwd must be an existing directory (LOW-2/LOW-5); no non-neutral read roles (103 neutral reads are canonicalized in-root and non-protected), no recursive/following forms; path tools always false; this is where all filesystem I/O for the exemption lives | `evaluate` step 0, `remember` after classification |
+| `ymh::ShellClassification::tmp_exempt` | `bool tmp_exempt = false` | **I/O-free lexical precursor** (not the final verdict): true iff a recognized **direct non-recursive** write/delete/create, **zero non-neutral read roles** (`<>` is read+write and still blocks; the 103 neutral set is allowed), at least one visible **write** target, every write target a concrete strict `/tmp` descendant (no internal `..`, brace/glob/unresolved/interpreter), neutral reads canonical in-root (103-D2), no lexically protected target, no recursive/following form (`rm -r`, `cp -r/-a`, `chmod`/`chown`, `find -L/-delete`, `rsync`, `install -D`), and guard verdict attributable; `request_is_tmp_exempt` adds the canonical/symlink/workspace/type checks (LOW-2/LOW-3/LOW-4/LOW-5) | set by `classify_shell_command_with_scope`/`classify_shell_request`; read by `request_is_tmp_exempt` |
+| `ymh::ShellClassification::tmp_targets` | `std::vector<std::filesystem::path> tmp_targets` | absolute lexically-normalized **write** destinations + any **non-neutral** read sources + `terminal open` cwd; canonicalized by `request_is_tmp_exempt`; empty for non-temp/unknown. `tmp_exempt` additionally requires zero non-neutral read roles; 103 neutral reads are in `neutral_reads` | set by `classify_shell_command_with_scope`/`classify_shell_request`; read by `request_is_tmp_exempt` |
+| `ymh::ShellClassification::neutral_reads` | `std::vector<std::filesystem::path> neutral_reads` | **103**: absolute lexically-normalized operands of the closed neutral read-only verb set; canonicalized in-root/non-protected by `request_is_tmp_exempt`; empty for non-temp or non-neutral requests; shell only (terminal open/write never exempt with a read) | set by `classify_shell_command_with_scope`; read by `request_is_tmp_exempt` |
 | `ymh::ConfinementPolicy::tmp_root` / `workspace_writable` | `std::optional<std::filesystem::path> tmp_root; bool workspace_writable = true;` | canonical `/tmp` only; `tmp_root` is `nullopt` when `canonical_tmp_root()` is empty or the workspace is at/under `/tmp`; L2 grant `kTmpRights` (includes `FS_REFER`) and `ReadOnly` root-rights choice (90-D26) | `SpawnConfinement`, `landlock.cpp::apply_or_abort` |
 | `ymh::ShellTargetScope` | `enum class ShellTargetScope : uint8_t { NotApplicable, InRoot, Outside, Unknown }` | shell filesystem target class | `ShellClassification`, `remember`, `classify_target` |
-| `ymh::ShellClassification` | `struct ShellClassification { ShellCommandRisk risk; ShellTargetScope scope; bool protected_target = false; bool tmp_exempt = false; std::vector<std::filesystem::path> tmp_targets; }` | returned by the additive classifier; `tmp_exempt` is the Rev 12 shell/terminal final-verdict flag | `RulePermissionPolicy::evaluate`/`remember` |
+| `ymh::ShellClassification` | `struct ShellClassification { ShellCommandRisk risk; ShellTargetScope scope; bool protected_target = false; bool tmp_exempt = false; std::vector<std::filesystem::path> tmp_targets; std::vector<std::filesystem::path> neutral_reads; }` | returned by the additive classifier; `tmp_exempt` is the Rev 12 shell/terminal final-verdict flag; `neutral_reads` is the 103 shell-only neutral read set | `RulePermissionPolicy::evaluate`/`remember` |
 
 ## 9. C++ interface sketches
 
@@ -2142,6 +2187,8 @@ struct ShellClassification {
                                                    // visible target strict /tmp
     std::vector<std::filesystem::path> tmp_targets; // canonicalized by the
                                                    // final-verdict predicate
+    std::vector<std::filesystem::path> neutral_reads; // 103: shell-only
+                                                   // canonical in-root reads
 };
 
 [[nodiscard]] ShellClassification classify_shell_command_with_scope(
@@ -2252,8 +2299,8 @@ if (request.tool == "shell" || request.tool == "terminal") {
 | **PS26** | **Protected globs are protected (N19/LOW-1/LOW-2).** A dot-leading literal-prefix glob component that matches `.ymh`/`.git` (`.ymh*`, `.git*`, `.ym?`, `.*`, `src/.ymh*`) sets `protected_target`; a bare `*`/`**` is not protected; only in-root targets are protected (outside `.ymh`/`.git` -> `Outside`/Ask). Applies to operands, redirections, `find -delete`, and Session grant targets. `.ymhfoo` remains unprotected. |
 | **PS27** | **`terminal open` cwd is classified and is a mandatory temp target (HIGH-1; Rev 12).** `classify_shell_request` reads `arguments["cwd"]`, lexically resolves it against root, and uses it for scope/risk; outside/non-string/ambiguous -> `Outside`/`Unknown` (Ask); in-root `.ymh`/`.git` -> protected; a cwd under `/tmp` is `Outside` for the path-rule scope but is a temp target for `tmp_exempt`. `terminal open` requires a non-empty command; an absent cwd defaults to the workspace root and therefore cannot be exempt. `terminal write` forces scope `Unknown` but classifies its input. The tool computes `weakly_canonical(root/cwd)` and, for a canonical cwd strictly under `/tmp` (workspace not at/under `/tmp`), assigns it directly **without** `context.resolve` (which would throw `PathEscape`); every other outside/protected cwd is rejected. |
 | **PS28** | **Temp-root definition (Rev 9; simplified in Rev 12).** The temp root is canonical `/tmp` only. `path_is_under_tmp_root(canonical_tmp_root, target)` returns false for an empty `canonical_tmp_root()` and for any `..` component before normalization, then is absolute, lexical, component-wise, and strict: equality is false; `/tmpfoo`, `/tmp2/x`, `/tmp/..`, `/tmp/a/../b`, and `/tmp/../etc/x` are not under `/tmp`. `$TMPDIR`, `$XDG_RUNTIME_DIR`, other bases, and protected-root sets are not used. A relative target is never exempt. An empty `canonical_tmp_root()` disables the exemption. If `/tmp` is a symlink, literal `/tmp` paths are not under the canonical root and the exemption is disabled (fail-closed, intentional). |
-| **PS29** | **Temp-root exemption is shell/terminal direct-write-only, per-target, and first.** A recognized **direct, non-recursive** write/delete/create `shell`/`terminal` invocation whose every visible target (+ canonical `tmp_targets`) is a concrete strict `/tmp` regular-file/new path outside the workspace/protected tree, **with the declared `terminal open` cwd allowed to be an existing directory**, returns `Allow` before the L1 guard, `ReadOnly`, `Confirm`, `force_ask`, the protected check, and the rule fold. It is exempt from the outside/above ask path, the spec-89 destructive-outside `Forbid`/`Confirm` attributable to those targets, and every `permissions.*`/`agent.sandbox` setting (including a `deny` default and `read-only`). Path tools are **not** exempt. It is not exempt for reads (including read+write `<>`), recursive/following forms (`rm -r`, `cp -r/-a`, `chmod`/`chown`, `find -L/-delete`, `rsync`, `install -D`), directory/FIFO/socket/device targets other than the terminal-open cwd, a bare open, a bare root, path tools, a workspace at/under `/tmp`, an empty canonical `/tmp`, a resolved workspace/protected path, a dangling/unresolvable symlink, or any guard verdict attributable to an untargeted/non-temp cause. No config key, preset, rule, Session grant, or `Always` grant can disable, narrow, or reorder it. It produces no grant and no dialog. |
-| **PS30** | **Temp-root safety bound.** Not exempt and therefore keeping the normal verdict (`Ask`, or a guard `Deny`): any read (read-only or mixed read+write, including `cp`/`install`/`ln`/`dd if=` source operands and `<>`), the bare `/tmp` root (equality), `/tmpfoo`, any `..` component before normalization (`/tmp/..`, `/tmp/a/../b`), an empty canonical `/tmp`, any shell/terminal target with a glob metacharacter, any brace-bearing target (`{`/`}`), any unexpanded `$VAR`/`${VAR}`/`$(...)`/backtick or truncated parse, a command with any visible non-temp target, a mixed command, a path tool, a bare `terminal open`, a `terminal open` whose declared cwd is not under `/tmp`, a `terminal write` whose input has no direct `/tmp` target, a recursive/following form (`rm -r`, `cp -r/-a`, `chmod`/`chown`, `find -L/-delete`, `rsync`, `install -D`), an existing directory/FIFO/socket/device target other than the terminal-open cwd, an interpreter/here-doc/`-exec`/`xargs` payload, an untargeted `Forbid`/`Confirm` construct or unconditional-`Forbid` class, a workspace at/under `/tmp`, a canonical target inside the workspace/protected tree (`/tmp/link -> <workspace>/.git`), a dangling/unresolvable symlink target (`/tmp/link -> <missing>`), and a symlink-resolved escape. For path tools a `*` in a filename is literal, not shell-expanded. |
+| **PS29** | **Temp-root exemption is shell/terminal direct-write-only, per-target, and first.** A recognized **direct, non-recursive** write/delete/create `shell`/`terminal` invocation whose every visible **write** target (+ canonical `tmp_targets`; 103 neutral reads are canonical in-root and non-protected) is a concrete strict `/tmp` regular-file/new path outside the workspace/protected tree, **with the declared `terminal open` cwd allowed to be an existing directory**, returns `Allow` before the L1 guard, `ReadOnly`, `Confirm`, `force_ask`, the protected check, and the rule fold. It is exempt from the outside/above ask path, the spec-89 destructive-outside `Forbid`/`Confirm` attributable to those targets, and every `permissions.*`/`agent.sandbox` setting (including a `deny` default and `read-only`). Path tools are **not** exempt. It is not exempt for non-neutral reads (including read+write `<>`); the 103 neutral set is allowed. It is not exempt for recursive/following forms (`rm -r`, `cp -r/-a`, `chmod`/`chown`, `find -L/-delete`, `rsync`, `install -D`), directory/FIFO/socket/device targets other than the terminal-open cwd, a bare open, a bare root, path tools, a workspace at/under `/tmp`, an empty canonical `/tmp`, a resolved workspace/protected path, a dangling/unresolvable symlink, or any guard verdict attributable to an untargeted/non-temp cause. No config key, preset, rule, Session grant, or `Always` grant can disable, narrow, or reorder it. It produces no grant and no dialog. |
+| **PS30** | **Temp-root safety bound.** Not exempt and therefore keeping the normal verdict (`Ask`, or a guard `Deny`): any **non-neutral** read (read-only or mixed read+write, including `cp`/`install`/`ln`/`dd if=` source operands and `<>`; the 103 neutral read set is exempt), the bare `/tmp` root (equality), `/tmpfoo`, any `..` component before normalization (`/tmp/..`, `/tmp/a/../b`), an empty canonical `/tmp`, any shell/terminal target with a glob metacharacter, any brace-bearing target (`{`/`}`), any unexpanded `$VAR`/`${VAR}`/`$(...)`/backtick or truncated parse, a command with any visible non-temp target, a mixed command, a path tool, a bare `terminal open`, a `terminal open` whose declared cwd is not under `/tmp`, a `terminal write` whose input has no direct `/tmp` target, a recursive/following form (`rm -r`, `cp -r/-a`, `chmod`/`chown`, `find -L/-delete`, `rsync`, `install -D`), an existing directory/FIFO/socket/device target other than the terminal-open cwd, an interpreter/here-doc/`-exec`/`xargs` payload, an untargeted `Forbid`/`Confirm` construct or unconditional-`Forbid` class, a workspace at/under `/tmp`, a canonical target inside the workspace/protected tree (`/tmp/link -> <workspace>/.git`), a dangling/unresolvable symlink target (`/tmp/link -> <missing>`), and a symlink-resolved escape. For path tools a `*` in a filename is literal, not shell-expanded. |
 | **PS31** | **Path tools are not exempt (Rev 12/13).** `LocalFilesystem::require_contained()` is unchanged and always root-only. Under `Workspace`/`ReadOnly`, `resolve()` throws `PathEscape` for `/tmp`; under `Unrestricted`, `resolve()` returns the lexical path but `LocalFilesystem` still throws. `read_file`/`write_file`/`edit_file`/`grep`/`glob`/`git_*` stay workspace-root-confined. Use `shell` for `/tmp` writes. |
 | **PS32** | **L2 makes the exemption real where it can.** `ConfinementPolicy` carries `tmp_root` (canonical `/tmp` only; `nullopt` for an empty root or a workspace at/under `/tmp`) and `workspace_writable`; `kTmpRights` includes `FS_REFER`. `Workspace` keeps the root RW, `ReadOnly` grants only `kReadRights`, and the `/tmp` grant cannot cover the workspace because of the workspace-overlap check, so a direct non-recursive temp-exempt spawn cannot hidden-write the workspace under `ReadOnly`; `chmod`/`chown` are not exempt because Landlock does not mediate metadata. Under `Unrestricted` or L2 `Unavailable` the exemption is policy-only; the shell symlink escape is the recorded residual (risk 21). |
 | **PS33** | **No new durable state; bounded I/O only for the temp predicate.** The only new state is the cached canonical `/tmp` path (function-local static), the per-call `tmp_exempt` flag, and `tmp_targets`; nothing is persisted, written to the event log, or sent on the wire. `classify_shell_request` and `path_is_under_tmp_root` are I/O-free; `request_is_tmp_exempt` performs a `symlink_status` probe per path prefix plus one `weakly_canonical` per `tmp_targets` entry (PS3); `canonical_tmp_root()` is computed once. |
@@ -2317,7 +2364,7 @@ fail-to-ASK/lifetime failures are F2/F10; config-shape failures are F6.
 | **PS-F48** | `shell "curl -d @/etc/passwd"`, `--data=@/etc/passwd`, `-F f=@/etc/passwd`, `-F f=</etc/passwd`, `@../../etc/passwd` (N18) | best-effort curl operand parser | outside -> `Outside`/`Ask`; `.ymh`/`.git` -> `protected`; `@-` neutral; hidden syntax remains NotClaimed (planned follow-up OQ-90-9) | F1 |
 | **PS-F49** | `shell "rm -rf .ymh* .git*"`, `.ym?`, `src/.ymh*` (N19) | glob-aware protected scan | `protected_target` -> `Deny` (or guard `Ask` first); a bare `*` is not protected; outside `.ymh`/`.git` -> `Outside`/Ask; `.ymhfoo` literal remains unprotected | F1 |
 | **PS-F50** | `terminal open {"action":"open","cwd":"/tmp","command":"cat x"}` under Workspace and Unrestricted (HIGH-1) | `classify_shell_request` effective-cwd classification | `Outside` -> `Ask` (never auto-approved); under Workspace the later `resolve()` may also `PathEscape`; no outside read under Unrestricted without a prompt. **Rev 9:** `cwd:"/tmp"` is the bare root, not exempt; `cat x` resolves to `/tmp/x` (temp), so the command target is temp but the outside `/tmp` cwd keeps the request `Ask` (PS30). | F1 |
-| **PS-F51** | `shell "touch /tmp/x"` / `rm /tmp/x` with L2 off (Rev 9; direct-write-only Rev 16) | `tmp_exempt`: every visible target a concrete strict `/tmp` descendant and guard verdict attributable; direct non-recursive | `Allow` before L1; the destructive-outside `Forbid` attributable to `/tmp/x` is overridden (PS29). `rm -rf /tmp/x` is recursive -> not exempt, so the outside-root `Forbid` stands -> `Deny` (PS-F66) | F1 |
+| **PS-F51** | `shell "touch /tmp/x"` / `rm /tmp/x` with L2 off (Rev 9; direct-write-only Rev 16) | `tmp_exempt`: every visible **write** target a concrete strict `/tmp` descendant (103 neutral reads are canonical in-root) and guard verdict attributable; direct non-recursive | `Allow` before L1; the destructive-outside `Forbid` attributable to `/tmp/x` is overridden (PS29). `rm -rf /tmp/x` is recursive -> not exempt, so the outside-root `Forbid` stands -> `Deny` (PS-F66) | F1 |
 | **PS-F52** | `shell "rm -rf /tmp"` / `rm -rf /tmp/` / `/tmp/..` | bare root or `..` escape after normalization; `rm` with an outside-root operand | not exempt; the L1 `Forbid` -> `Deny` (outside-root/bare-root destructive form), never an unconditional `Allow` (PS30) | F1 |
 | **PS-F53** | `shell "rm -rf /tmp/*"`, `/tmp/x*`, `/tmp/?.txt`, `/tmp/{x,/etc/passwd}`, `$TMPDIR/x` | glob, brace, or unexpanded target | not exempt; `rm -rf /tmp/*` is an outside-root `Forbid` -> `Deny`; the non-`rm` forms keep the normal guard/policy verdict (`Ask` unless the guard denies); no expansion-based allow (PS30) | F1 |
 | **PS-F54** | `shell "cp /etc/passwd /tmp/x"`, `rm -rf /tmp/x ~/y`, or `sh -c 'touch /tmp/x; rm src/y'` | mixed visible target set | not exempt; `cp`/`rm` with an outside destination/operand hit the L1 `Forbid` -> `Deny`; a mixed command with no guard `Forbid` keeps normal policy (`Ask` under the recommended config) (PS30) | F1 |
@@ -2330,7 +2377,7 @@ fail-to-ASK/lifetime failures are F2/F10; config-shape failures are F6.
 | **PS-F61** | `$TMPDIR` set to `/var/tmp` or `/etc`; `shell "touch $TMPDIR/x"` | `$TMPDIR` is not admitted; unexpanded variable target | `/var/tmp` is not a temp root; the literal `$TMPDIR/x` is unexpanded -> not exempt (PS28/PS30) | F1/F6 |
 | **PS-F62** | `shell "touch /tmp/x; :(){ :\|:& };:"` or `touch /tmp/x; mkfs /tmp/y` | one `/tmp` target, but guard `Forbid` is untargeted/unconditional | not exempt; `Deny` (the unrelated `Forbid` is never laundered by the `/tmp` operand) (PS30) | F1 |
 | **PS-F63** | `terminal open {cwd:"/etc", command:"touch /tmp/x"}` or `{cwd:<root>, ...}` | cwd is a mandatory temp target | not exempt; normal policy/`Ask`; the tool also rejects the non-temp cwd (PS27/PS30) | F1 |
-| **PS-F64** | `shell "cat /tmp/x"`, `cp /tmp/a /tmp/b`, `dd if=/tmp/a of=/tmp/b`, `install /tmp/a /tmp/b`, or `cat /tmp/x > /tmp/y` | recognized read or mixed read+write (source operands are reads); `tmp_exempt` requires zero reads | not exempt; normal shell/default/guard policy (`permissions.read` gates path tools, not shell) (PS29/PS30/MEDIUM-1/LOW-3) | F1 |
+| **PS-F64** | `shell "cat /tmp/x"`, `cp /tmp/a /tmp/b`, `dd if=/tmp/a of=/tmp/b`, `install /tmp/a /tmp/b`, or `cat /tmp/x > /tmp/y` | recognized read or mixed read+write (source operands are reads); `tmp_exempt` requires zero non-neutral reads (103 neutral reads are allowed) | not exempt; normal shell/default/guard policy (`permissions.read` gates path tools, not shell) (PS29/PS30/MEDIUM-1/LOW-3) | F1 |
 | **PS-F65** | `touch /tmp/x 2>/dev/null` | `/dev/null` is a non-temp visible target | not exempt; normal verdict (conservative; device whitelist is L1-only) (PS30/LOW-8) | F1 |
 | **PS-F66** | `rm -rf /tmp/d`, `cp -a /tmp/a /tmp/b`, `chmod -R /tmp/d`, `find -L /tmp/d -delete`, `rsync /tmp/a /tmp/b`, `install -D /tmp/a /tmp/b` (Rev 16) | recursive/following form; target is a directory tree, not a direct regular-file operand | not exempt; `rm -rf`, `cp -a`, `chmod -R`, and `find -L -delete` are guard-recognized outside-root destructive forms -> L1 `Forbid` -> `Deny`; `rsync` and `install -D` are not guard-recognized -> normal `Ask`/policy; a child symlink into the workspace/protected tree is never followed by the exemption (MEDIUM-1/PS30) | F1 |
 | **PS-F67** | `rm /tmp/d` or `mv /tmp/d /tmp/e` where `/tmp/d` is an existing directory | canonical target is an existing directory; the `rm`/`mv` operand/destination is outside the workspace | not exempt; the L1 `Forbid` -> `Deny` (direct regular-file/new-path only) (PS29/PS30) | F1 |
@@ -2346,7 +2393,7 @@ fail-to-ASK/lifetime failures are F2/F10; config-shape failures are F6.
 | Root-relative path rule in the approval policy | **ymh-only extension** (non-mirror): dsh's approval policy is tool/command-oriented; ymh adds `permissions.rules[].path` | Deliberate divergence: the user requirement is path-scoped, and the 09 fold already defines a path dimension (`docs/design/09-permissions.md:454-458`); this errata makes it reachable. The extension is config-only and cannot weaken the guard. Anchor: `docs/design/46-permissions-ui-errata.md:429-439` (the O-H1 shape this supersedes), 89 SG10. |
 | Class-scoped Session approval | **ymh refinement** (non-mirror): dsh approvals are per-call/policy; ymh's Session is an in-memory class grant (`tool` + `TargetClass` + prefix/exact) | Deliberate divergence: the shipped exact-string Session was unusable for shell (90-C5); the class is still in-memory, per-session, and below the guard. Anchor: `src/policy/permission_policy.cpp:535-657` (the exact grant this replaces), `docs/design/46-permissions-ui-errata.md:3467` (46-I6). |
 | Shell command classification before approval | `classify_shell_command` (89 L1) plus the additive `ShellTargetScope` | Mirror plus a matching-only scope: dsh has no path-scope classifier; ymh reuses the existing tokenizer and keeps L1/L2 authoritative. Anchor: `docs/design/89-shell-command-safety-guard-errata.md:853-875` (SG1-SG17), `src/policy/shell_guard.cpp:1945`/`:2036`. |
-| Temp-root shell/terminal exemption (Rev 9; direct-write-only in Rev 16) | **ymh-only non-mirror**: a **direct, non-recursive, regular-file/new-path write/delete/create** `shell`/`terminal` invocation whose every visible filesystem target (read and write operands) is a concrete strict descendant of canonical `/tmp` is `Allow` | Deliberate user scope decision: "writes to /tmp shall always be allowed regardless of all the other permission settings". dsh's per-call approval has no `/tmp` dimension, so there is nothing to mirror. The divergence is bounded to **direct, non-recursive** write/delete/create shell/terminal invocations with concrete strict `/tmp` regular-file/new-path targets; reads, recursive/following forms, directory targets other than the declared terminal-open cwd, and path tools stay normal/root-confined, and bare roots, internal `..`, globs, braces, unexpanded targets, mixed/read commands, untargeted `Forbid` constructs, and a workspace at/under `/tmp` keep the normal verdict (90-D23/PS30). `$TMPDIR` is not admitted. Anchor: decision 90-D23; `docs/design/09-permissions.md:443-495`; `src/policy/shell_guard.cpp:2036-2116`. |
+| Temp-root shell/terminal exemption (Rev 9; direct-write-only in Rev 16; neutral reads in 103) | **ymh-only non-mirror**: a **direct, non-recursive, regular-file/new-path write/delete/create** `shell`/`terminal` invocation whose every visible filesystem target (write operands, plus non-neutral reads) is a concrete strict descendant of canonical `/tmp` is `Allow`; a closed read-only set (`md5sum` family, `stat`, `cmp`) with canonical in-root, non-protected operands is neutral | Deliberate user scope decision: "writes to /tmp shall always be allowed regardless of all the other permission settings". dsh's per-call approval has no `/tmp` dimension, so there is nothing to mirror. The divergence is bounded to **direct, non-recursive** write/delete/create shell/terminal invocations with concrete strict `/tmp` regular-file/new-path targets; **only** the 103-D1 read-only set with canonical in-root (non-protected) operands is neutral, while other reads, recursive/following forms, directory targets other than the declared terminal-open cwd, and path tools stay normal/root-confined, and bare roots, internal `..`, globs, braces, unexpanded targets, non-neutral read/mixed commands, untargeted `Forbid` constructs, and a workspace at/under `/tmp` keep the normal verdict (90-D23/PS30, 103-D1..D6). `$TMPDIR` is not admitted. Anchor: decision 90-D23; `docs/design/09-permissions.md:443-495`; `src/policy/shell_guard.cpp:2036-2116`. |
 | MCP tool approval | No path dimension; MCP tools fall through to their configured tool default | **Architectural absence, not a gap**: MCP tool schemas are external and the request has no path producer, so a path rule cannot match. The seam is `request.path == nullopt`; the missing consumer is any MCP path argument. Anchor: `src/agent/agent_loop.cpp:871-889`, `src/cli/wiring.cpp:163-173`. |
 | Durable always-allow | Tool + command only; no path | Retained non-mirror of a finer durable path grant: the durable store is a workspace-scoped JSONC file with a frozen schema; extending it needs a schema bump, and the user's ask is met by config rules plus Session. Anchor: `docs/design/46-permissions-ui-errata.md:3466` (46-I5), `:3494` (46-I33), OQ-90-1. |
 
@@ -2364,7 +2411,7 @@ All non-mirror cells carry a concrete anchor per 56-D6
 | `PermissionRequest::path` | `std::optional<std::filesystem::path>` | per call, `AgentLoop` request build (`src/agent/agent_loop.cpp:885`) | at call end | call frame -> `evaluate` / `broker` | no |
 | target class | `TargetClass`, local in `evaluate` | per call | at call return | call frame | no |
 | root-relative pattern | `std::string`, local in `rule_matches` | per call | at call return | call frame | no |
-| `ShellClassification` / `ShellTargetScope` / `protected_target` / `tmp_exempt` | value, local in `evaluate` and `remember` | per call (one classifier call) | at call return | call frame | no |
+| `ShellClassification` / `ShellTargetScope` / `protected_target` / `tmp_exempt` / `neutral_reads` | value, local in `evaluate` and `remember` | per call (one classifier call) | at call return | call frame | no |
 | shell git subcommand class | per-call classification (sec 4.4.1) | per call | at call return | call frame | no |
 | protected-path decision | `bool`, local from `path_is_protected`/`protected_target` | per call | at call return | call frame | no |
 | tool-level canonical path | `std::filesystem::path`, local in read/write/edit/grep/glob | per call | at call end | tool call frame | no |
@@ -2377,7 +2424,7 @@ All non-mirror cells carry a concrete anchor per 56-D6
 | config sample comment | static text in `src/config/config.cpp` | build | n/a | n/a | n/a |
 | canonical `/tmp` path | `std::filesystem::path`, function-local static in `canonical_tmp_root()` | first call (startup/policy construction) | process exit | process-wide cache | no (recomputed) |
 | `ConfinementPolicy::tmp_root` / `SpawnConfinement` | `std::optional<std::filesystem::path>` (`nullopt` for empty/overlap), copied into the per-spawn policy | each `SpawnConfinement` construction (shell/terminal call) | at spawn end / `SpawnConfinement` destruction | the tool call frame | no |
-| `ShellClassification::tmp_exempt` / `tmp_targets` | `bool` + `std::vector<std::filesystem::path>`, per-call classification | per call | at call return | `evaluate`/`remember` call frame | no |
+| `ShellClassification::tmp_exempt` / `tmp_targets` / `neutral_reads` | `bool` + two `std::vector<std::filesystem::path>`, per-call classification | per call | at call return | `evaluate`/`remember` call frame | no |
 | temp-root exemption verdict | `bool`/`Allow` branch, local in `evaluate` | per call | at call return | call frame | no |
 
 No new cache, timer, background thread, or durable artifact is introduced. The
@@ -3341,7 +3388,7 @@ Rev 12)
     permissions (a
     `0700` directory is still denied by the kernel/OS; a world-readable file is
     readable, and `kTmpRights` includes read/exec as well as write/delete/make).
-    **Reads are not exempt**: `cat /tmp/x` keeps normal shell/default/guard policy (`permissions.read` gates path tools, not shell).
+    **Reads outside the 103 neutral set are not exempt**: `cat /tmp/x` keeps normal shell/default/guard policy (`permissions.read` gates path tools, not shell).
     **Path tools are not exempt**: `write_file /tmp/x` still throws `PathEscape`;
     use `shell` for `/tmp` writes. `$TMPDIR`/`$XDG_RUNTIME_DIR` are ignored, so
     a deployment cannot widen the root. If `/tmp` is itself a symlink, a literal
@@ -3514,9 +3561,9 @@ Rev 12)
 
 - **Rev 13 (applies the Rev 12 re-gate findings; not re-gated).** MEDIUM-1:
   the exemption is restricted to recognized write/delete/create shell/terminal
-  invocations; reads keep the normal `read:"deny"`/`read:"ask"` policy, with a
-  pinned read/write verb classification and an honest residual for unknown
-  verbs. MEDIUM-2: `path_is_under_tmp_root` returns false for an empty
+  invocations; reads keep the normal `read:"deny"`/`read:"ask"` policy (103
+  revises this for its closed neutral read-only set), with a pinned read/write
+  verb classification and an honest residual for unknown verbs. MEDIUM-2: `path_is_under_tmp_root` returns false for an empty
   `canonical_tmp_root()`; tests added. MEDIUM-3: `request_is_tmp_exempt`
   canonicalizes `tmp_targets`; a resolved target outside `/tmp` or inside the
   workspace/protected tree (including `/tmp/link -> <workspace>/.git`) is not
@@ -3576,7 +3623,8 @@ Rev 12)
   MEDIUM-2/3: `canonical_temp_roots(workspace, protected_roots)` rejects a candidate equal to,
   inside, or an ancestor of the workspace; the `ReadOnly` workspace invariant is
   restated as conditional on that exclusion. MEDIUM-4: reads are not exempt
-  (path tools and shell), so the protected read deny remains. LOW-1: stale
+  (path tools and shell), so the protected read deny remains; 103 adds only
+  the closed neutral read-only set. LOW-1: stale
   anchors corrected (config sample `:1496-1508`, path call `:885`,
   `command_pattern`/`remember`/`evaluate`, git classifier `:1445-1680`, dsh
   evaluation anchor). LOW-2: `kTmpRights` includes `FS_REFER`. LOW-3: the
