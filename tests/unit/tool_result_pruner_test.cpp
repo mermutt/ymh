@@ -38,10 +38,13 @@ struct PrunerFixture {
         session = std::make_unique<Session>(header, store, bus);
     }
 
-    Sequence append_result(std::string id, std::string output) {
+    Sequence append_result(std::string id, std::string output,
+                           std::string name = "read",
+                           payload::ToolOutcome outcome = payload::ToolOutcome::Ok) {
         payload::ToolResult result;
         result.id          = std::move(id);
-        result.name        = "read";
+        result.name        = std::move(name);
+        result.outcome     = outcome;
         result.output      = std::move(output);
         result.source.call = result.id;
         return session->append(result);
@@ -132,6 +135,33 @@ TEST(ToolResultPrunerTest, ReplacementKeepsHeadAndTailCodePoints) {
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->output, std::string(4096, 'A') + std::string{kPruneMarker} +
                                   std::string(1024, 'C'));
+}
+
+TEST(ToolResultPrunerTest, SkillLoadsAreExemptButSkillErrorsAreNot) {
+    PrunerFixture fixture;
+    fixture.append_result("skill-ok", std::string(11000, 's'), "skill");
+    fixture.append_result("shell", std::string(9000, 'x'), "shell");
+    fixture.append_result("skill-err", std::string(9000, 'e'), "skill",
+                          payload::ToolOutcome::Error);
+
+    ToolResultPruner pruner;
+    const PruneResult result = pruner.prune_session(*fixture.session);
+    EXPECT_EQ(result.pruned, 2u);
+
+    const EventRange events = fixture.session->events();
+    const auto       skill  = latest_result(events, "skill-ok");
+    ASSERT_TRUE(skill.has_value());
+    EXPECT_EQ(skill->output.size(), 11000u);
+    EXPECT_EQ(skill->output.find(kPruneMarker), std::string::npos);
+    EXPECT_FALSE(prune_before_replacement(events, "skill-ok").has_value());
+
+    const auto shell = latest_result(events, "shell");
+    ASSERT_TRUE(shell.has_value());
+    EXPECT_NE(shell->output.find(kPruneMarker), std::string::npos);
+
+    const auto err = latest_result(events, "skill-err");
+    ASSERT_TRUE(err.has_value());
+    EXPECT_NE(err->output.find(kPruneMarker), std::string::npos);
 }
 
 TEST(ToolResultPrunerTest, ContextPrunePrecedesSameIdReplacementAndOriginalRemains) {
