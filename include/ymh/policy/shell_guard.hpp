@@ -39,6 +39,9 @@ struct ShellClassification {
     bool             protected_target = false;
     bool             tmp_exempt = false;
     std::vector<std::filesystem::path> tmp_targets;
+    // 103: shell-only neutral read operands; canonicalized in-root and
+    // non-protected by request_is_tmp_exempt. Empty for terminal requests.
+    std::vector<std::filesystem::path> neutral_reads;
 };
 
 // 89-D9/89-D7: the shell text the guard classifies plus the cwd it resolves

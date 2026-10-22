@@ -2205,6 +2205,7 @@ ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
 
 struct TempInfo {
     std::vector<std::filesystem::path> targets;
+    std::vector<std::filesystem::path> neutral_reads;
     bool                               has_write = false;
     bool                               has_read = false;
     bool                               has_unknown = false;
@@ -2213,7 +2214,7 @@ struct TempInfo {
     bool                               untargeted_forbid = false;
 };
 
-enum class TempRole : std::uint8_t { Write, Read, Neutral };
+enum class TempRole : std::uint8_t { Write, Read, Neutral, NeutralRead };
 
 bool temp_has_dotdot(std::string_view raw) {
     std::size_t start = 0;
@@ -2250,6 +2251,27 @@ bool temp_token_concrete(const Token& token) {
 void temp_add_target(TempInfo& info, const Token& token,
                      const std::filesystem::path& cwd,
                      const std::filesystem::path& root, TempRole role) {
+    if (role == TempRole::NeutralRead) {
+        if (!temp_token_concrete(token)) {
+            info.has_unknown = true;
+            return;
+        }
+        const std::filesystem::path candidate{token.text};
+        std::filesystem::path       absolute =
+            candidate.is_absolute() ? candidate : (cwd / candidate);
+        absolute = absolute.lexically_normal();
+        if (!lexically_inside(root, absolute)) {
+            info.has_unknown = true;
+            return;
+        }
+        if (path_is_protected(root, absolute)) {
+            info.protected_target = true;
+            info.has_unknown = true;
+            return;
+        }
+        info.neutral_reads.push_back(absolute);
+        return;
+    }
     if (!temp_token_concrete(token)) {
         info.concrete = false;
         return;
@@ -2272,6 +2294,150 @@ void temp_add_target(TempInfo& info, const Token& token,
 bool temp_path_like(std::string_view text) {
     return !text.empty() && (text[0] == '/' || text[0] == '.' ||
                              text.find('/') != std::string_view::npos);
+}
+
+enum class NeutralVerbKind : std::uint8_t { Checksum, Stat, Cmp };
+
+bool temp_neutral_verb(std::string_view executable, NeutralVerbKind& kind) {
+    static constexpr std::string_view kChecksums[] = {
+        "md5sum", "sha1sum", "sha224sum", "sha256sum",
+        "sha384sum", "sha512sum", "b2sum", "cksum"};
+    for (const std::string_view name : kChecksums) {
+        if (executable == name) {
+            kind = NeutralVerbKind::Checksum;
+            return true;
+        }
+    }
+    if (executable == "stat") {
+        kind = NeutralVerbKind::Stat;
+        return true;
+    }
+    if (executable == "cmp") {
+        kind = NeutralVerbKind::Cmp;
+        return true;
+    }
+    return false;
+}
+
+bool temp_numeric(std::string_view value) {
+    if (value.empty()) {
+        return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](char c) {
+        return std::isdigit(static_cast<unsigned char>(c)) != 0 || c == ':';
+    });
+}
+
+bool temp_checksum_flag(std::string_view flag) {
+    static constexpr std::string_view kFlags[] = {
+        "-b", "-t", "--binary", "--text", "--tag", "--quiet", "--status",
+        "--warn", "--strict", "-z", "--zero", "--help", "--version"};
+    return std::any_of(std::begin(kFlags), std::end(kFlags),
+                       [flag](std::string_view allowed) { return flag == allowed; });
+}
+
+void temp_collect_neutral(const std::vector<Token>& toks, std::size_t cw,
+                          std::size_t e, const std::filesystem::path& cur,
+                          const std::filesystem::path& root, TempInfo& info,
+                          NeutralVerbKind kind) {
+    std::size_t operands  = 0;
+    bool        end_options = false;
+    for (std::size_t k = cw + 1; k < e; ++k) {
+        const Token& token = toks[k];
+        if (token.kind == TokKind::Redirect) {
+            ++k;
+            continue;
+        }
+        if (token.kind != TokKind::Word) {
+            info.has_unknown = true;
+            continue;
+        }
+        const std::string& word = token.text;
+        if (!end_options && word == "--") {
+            end_options = true;
+            continue;
+        }
+        if (!end_options && is_option(word)) {
+            if (kind == NeutralVerbKind::Checksum) {
+                if (temp_checksum_flag(word)) {
+                    continue;
+                }
+                info.has_unknown = true;
+                return;
+            }
+            if (kind == NeutralVerbKind::Stat) {
+                if (word == "-L" || word == "--dereference") {
+                    info.has_unknown = true;
+                    return;
+                }
+                if (word == "-f" || word == "--file-system" || word == "-t" ||
+                    word == "--terse" || word == "--help" || word == "--version") {
+                    continue;
+                }
+                if (word == "-c" || word == "--printf") {
+                    if (k + 1 >= e || toks[k + 1].kind != TokKind::Word ||
+                        !temp_token_concrete(toks[k + 1])) {
+                        info.has_unknown = true;
+                        return;
+                    }
+                    ++k;
+                    continue;
+                }
+                if (word.starts_with("--format=") || word.starts_with("--printf=")) {
+                    Token value = token;
+                    value.text  = word.substr(word.find('=') + 1);
+                    if (!temp_token_concrete(value)) {
+                        info.has_unknown = true;
+                        return;
+                    }
+                    continue;
+                }
+                info.has_unknown = true;
+                return;
+            }
+            if (word == "-b" || word == "-l" || word == "-s" || word == "-v" ||
+                word == "--print-bytes" || word == "--verbose" ||
+                word == "--quiet" || word == "--silent" || word == "--help" ||
+                word == "--version") {
+                continue;
+            }
+            if (word == "-i" || word == "-n") {
+                if (k + 1 >= e || toks[k + 1].kind != TokKind::Word ||
+                    !temp_numeric(toks[k + 1].text)) {
+                    info.has_unknown = true;
+                    return;
+                }
+                ++k;
+                continue;
+            }
+            if (word.starts_with("--ignore-initial=") || word.starts_with("--bytes=")) {
+                if (!temp_numeric(word.substr(word.find('=') + 1))) {
+                    info.has_unknown = true;
+                    return;
+                }
+                continue;
+            }
+            info.has_unknown = true;
+            return;
+        }
+        if (!end_options && word == "-") {
+            info.has_unknown = true;
+            return;
+        }
+        if (!temp_token_concrete(token)) {
+            info.has_unknown = true;
+            return;
+        }
+        temp_add_target(info, token, cur, root, TempRole::NeutralRead);
+        ++operands;
+    }
+    if (kind == NeutralVerbKind::Cmp) {
+        if (operands != 2) {
+            info.has_unknown = true;
+        }
+    } else if (operands == 0) {
+        info.has_unknown = true;
+    }
 }
 
 bool temp_option_takes_value(std::string_view option,
@@ -2371,14 +2537,27 @@ void temp_segment(const std::vector<Token>& toks, std::size_t b, std::size_t e,
         if (output_redirect) {
             info.has_unknown = true;
         }
+        for (std::size_t k = b; k < e; ++k) {
+            if (toks[k].kind == TokKind::Word && is_env_assignment(toks[k].text)) {
+                info.has_unknown = true;
+                break;
+            }
+        }
+        return;
+    }
+    if (cw != b) {
+        info.has_unknown = true;
         return;
     }
     const std::string executable = basename_of(toks[cw].text);
+    NeutralVerbKind neutral_kind{};
+    const bool      neutral_verb =
+        toks[cw].text == executable && temp_neutral_verb(executable, neutral_kind);
     const bool harmless_producer = executable == "printf" || executable == "echo" ||
                                    executable == ":" || executable == "true";
 
     if (output_redirect) {
-        if (harmless_producer) {
+        if (harmless_producer || neutral_verb) {
             info.has_write = true;
         } else {
             info.has_unknown = true;
@@ -2394,6 +2573,11 @@ void temp_segment(const std::vector<Token>& toks, std::size_t b, std::size_t e,
             temp_add_target(info, toks[index], cur, root, role);
         }
     };
+
+    if (neutral_verb) {
+        temp_collect_neutral(toks, cw, e, cur, root, info, neutral_kind);
+        return;
+    }
 
     if (executable == "cd" || executable == "pushd") {
         std::optional<std::size_t> operand;
@@ -2799,6 +2983,7 @@ ShellClassification classify_shell_command_with_scope(
     const TempInfo temp = temp_pass(text, root, effective, canonical_tmp_root);
     out.tmp_exempt = temp_pass_eligible(temp, canonical_tmp_root);
     out.tmp_targets = temp.targets;
+    out.neutral_reads = temp.neutral_reads;
     out.protected_target = protected_target || temp.protected_target;
 
     if (out.risk == ShellCommandRisk::Forbid) {
@@ -2934,9 +3119,11 @@ ShellClassification classify_shell_request(
         }
         const TempInfo temp = temp_pass(text.text, root, effective, canonical_tmp_root);
         out.tmp_targets = temp.targets;
+        out.neutral_reads = temp.neutral_reads;
         out.tmp_targets.push_back(effective.lexically_normal());
         out.tmp_exempt = temp_pass_eligible(temp, canonical_tmp_root) &&
-                         !text.text.empty() && cwd_concrete &&
+                         temp.neutral_reads.empty() && !text.text.empty() &&
+                         cwd_concrete &&
                          path_is_under_tmp_root(canonical_tmp_root, effective);
         out.protected_target = protected_target || temp.protected_target;
         if (cwd_unknown) {
@@ -2964,6 +3151,7 @@ ShellClassification classify_shell_request(
                                             request.tool == "shell");
     if (terminal_write) {
         out.scope = ShellTargetScope::Unknown;
+        out.tmp_exempt = out.tmp_exempt && out.neutral_reads.empty();
     }
     return out;
 }
@@ -3031,6 +3219,21 @@ bool request_is_tmp_exempt(
                 return false;
             }
         } else if (exists && !std::filesystem::is_regular_file(status)) {
+            return false;
+        }
+    }
+    for (const std::filesystem::path& raw : classification.neutral_reads) {
+        if (!raw.is_absolute() || temp_has_dotdot(raw.string())) {
+            return false;
+        }
+        std::filesystem::path canonical;
+        if (!temp_resolve_canonical(raw, canonical)) {
+            return false;
+        }
+        if (!lexically_inside(root, canonical)) {
+            return false;
+        }
+        if (path_is_protected(root, canonical)) {
             return false;
         }
     }
