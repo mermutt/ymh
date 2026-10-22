@@ -94,6 +94,12 @@ PruneResult ToolResultPruner::prune_session(Session& session) {
     for (const auto& [id, entry] : surface) {
         const Sequence             seq      = entry.first;
         const payload::ToolResult& original = entry.second;
+        // 102-D1: a successful skill load is a bounded instruction document,
+        // not output noise; a skill *error* still echoes the model's name and
+        // keeps the normal threshold.
+        if (original.name == "skill" && original.outcome == payload::ToolOutcome::Ok) {
+            continue;
+        }
         if (code_point_length(original.output) <= config_.threshold_code_points) {
             continue;
         }
