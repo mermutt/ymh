@@ -72,7 +72,8 @@ struct ShellText {
     const std::filesystem::path& root,
     const std::filesystem::path& cwd,
     bool kernel_confinement,
-    const std::filesystem::path& canonical_tmp_root = {});
+    const std::filesystem::path& canonical_tmp_root = {},
+    bool relaxed_sed = false);
 
 // 90-D22: request-level wrapper. Computes the declared `terminal open` cwd
 // first, then classifies; empty text is NotApplicable for a non-shell tool and

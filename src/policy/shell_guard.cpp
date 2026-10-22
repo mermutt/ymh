@@ -1759,12 +1759,234 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
 }
 
 ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
-                       const std::filesystem::path& cwd, bool kernel_confinement);
+                       const std::filesystem::path& cwd, bool kernel_confinement,
+                       bool relaxed_sed = false);
+
+
+// 100-D2..D4: a stdin-only `sed` whose script can only read the input stream
+// and write stdout. Any file operand, -i, -f, or a script command that can
+// touch the filesystem returns Unknown.
+ScopeResult sed_unknown_scope() {
+    ScopeResult result;
+    result.scope = ShellTargetScope::Unknown;
+    return result;
+}
+
+bool sed_skip_to(std::string_view s, std::size_t& i, char delim) {
+    while (i < s.size()) {
+        if (s[i] == '\\') {
+            i += 2;
+            continue;
+        }
+        if (s[i] == delim) {
+            ++i;
+            return true;
+        }
+        ++i;
+    }
+    return false;
+}
+
+bool sed_address(std::string_view s, std::size_t& i) {
+    if (i >= s.size()) {
+        return false;
+    }
+    if (s[i] >= '0' && s[i] <= '9') {
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+            ++i;
+        }
+        return true;
+    }
+    if (s[i] == '/') {
+        ++i;
+        return sed_skip_to(s, i, '/');
+    }
+    return false;
+}
+
+bool sed_label_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+bool sed_script_read_only(std::string_view s, bool had_unexpanded,
+                          bool single_quoted) {
+    if (had_unexpanded) {
+        return false;
+    }
+    // 100-D2: these are the only ways a (partly) unquoted token can glob,
+    // brace-expand, expand a variable, or continue a line. `,` stays allowed
+    // because it is the address-range separator.
+    for (char c : s) {
+        if (c == '$' || c == '`' || c == '*' || c == '?' || c == '[' ||
+            c == '{' || c == '}' || c == '\\') {
+            return false;
+        }
+    }
+    if (!single_quoted && !s.empty() && s.front() == '~') {
+        return false;
+    }
+    const auto ws = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+    std::size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (ws(s[i]) || s[i] == ';' || s[i] == '{' || s[i] == '}')) {
+            ++i;
+        }
+        if (i >= s.size()) {
+            break;
+        }
+        if (s[i] == '#') {
+            while (i < s.size() && s[i] != '\n') {
+                ++i;
+            }
+            continue;
+        }
+        const std::size_t save = i;
+        if (sed_address(s, i)) {
+            if (i < s.size() && s[i] == ',') {
+                ++i;
+                if (!sed_address(s, i)) {
+                    return false;
+                }
+            }
+        } else {
+            i = save;
+        }
+        while (i < s.size() && ws(s[i])) {
+            ++i;
+        }
+        if (i < s.size() && s[i] == '!') {
+            ++i;
+            while (i < s.size() && ws(s[i])) {
+                ++i;
+            }
+        }
+        if (i >= s.size()) {
+            return false;
+        }
+        const char c = s[i];
+        if (c == 's') {
+            ++i;
+            if (i >= s.size()) {
+                return false;
+            }
+            const char delim = s[i];
+            ++i;
+            if (!sed_skip_to(s, i, delim) || !sed_skip_to(s, i, delim)) {
+                return false;
+            }
+            while (i < s.size() && !ws(s[i]) && s[i] != ';' && s[i] != '}') {
+                const char flag = s[i];
+                if (flag == 'e' || flag == 'w' || flag == 'W') {
+                    return false;
+                }
+                if (flag != 'g' && flag != 'p' && flag != 'i' && flag != 'I' &&
+                    flag != 'm' && flag != 'M' && !(flag >= '0' && flag <= '9')) {
+                    return false;
+                }
+                ++i;
+            }
+        } else if (c == 'b' || c == 't' || c == 'T' || c == ':') {
+            ++i;
+            while (i < s.size() && ws(s[i])) {
+                ++i;
+            }
+            while (i < s.size() && sed_label_char(s[i])) {
+                ++i;
+            }
+        } else if (c == 'q' || c == 'Q') {
+            ++i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+                ++i;
+            }
+        } else if (std::string_view{"pPdDnN=lhHgGxz"}.find(c) !=
+                   std::string_view::npos) {
+            ++i;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+ScopeResult classify_sed_segment(const std::vector<Token>& toks, std::size_t b,
+                                 std::size_t e) {
+    bool saw_script = false;
+    bool ok         = true;
+    bool end_opts   = false;
+    for (std::size_t k = b + 1; k < e; ++k) {
+        if (toks[k].kind != TokKind::Word) {
+            continue;
+        }
+        const Token&       tok = toks[k];
+        const std::string& w   = tok.text;
+        if (!end_opts && w == "--") {
+            end_opts = true;
+            continue;
+        }
+        if (!end_opts && w.size() > 1 && w.front() == '-') {
+            if (w == "-n" || w == "--quiet" || w == "--silent" || w == "-E" ||
+                w == "-r" || w == "--regexp-extended" || w == "-s" ||
+                w == "--separate" || w == "-u" || w == "--unbuffered" ||
+                w == "-z" || w == "--null-data" || w == "--posix" ||
+                w == "--debug" || w == "--sandbox") {
+                continue;
+            }
+            if (w == "-i" || w.rfind("-i", 0) == 0 || w == "--in-place" ||
+                w.rfind("--in-place=", 0) == 0) {
+                return sed_unknown_scope();
+            }
+            if (w == "-f" || w == "--file" || w.rfind("-f", 0) == 0 ||
+                w.rfind("--file=", 0) == 0) {
+                return sed_unknown_scope();
+            }
+            if (w == "-e" || w == "--expression") {
+                if (k + 1 >= e || toks[k + 1].kind != TokKind::Word) {
+                    return sed_unknown_scope();
+                }
+                saw_script = true;
+                ok = ok && sed_script_read_only(toks[k + 1].text,
+                                                toks[k + 1].had_unexpanded,
+                                                toks[k + 1].single_quoted);
+                ++k;
+                continue;
+            }
+            if (w.rfind("-e", 0) == 0) {
+                saw_script = true;
+                ok = ok && sed_script_read_only(std::string_view{w}.substr(2),
+                                                tok.had_unexpanded,
+                                                tok.single_quoted);
+                continue;
+            }
+            if (w.rfind("--expression=", 0) == 0) {
+                saw_script = true;
+                ok = ok && sed_script_read_only(
+                               std::string_view{w}.substr(13), tok.had_unexpanded,
+                               tok.single_quoted);
+                continue;
+            }
+            return sed_unknown_scope();
+        }
+        if (!saw_script) {
+            saw_script = true;
+            ok = ok && sed_script_read_only(tok.text, tok.had_unexpanded,
+                                            tok.single_quoted);
+            continue;
+        }
+        // 100-D3: any file operand (including a post-`--` `-e`) is out of v1.
+        return sed_unknown_scope();
+    }
+    ScopeResult result;
+    result.scope = ok ? ShellTargetScope::InRoot : ShellTargetScope::Unknown;
+    return result;
+}
 
 ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b,
                                    std::size_t e, const std::filesystem::path& root,
                                    std::filesystem::path& cur, bool cwd_known,
-                                   bool kernel_confinement) {
+                                   bool kernel_confinement, bool relaxed_sed) {
     ScopeResult result;
     if (b >= e) {
         return result;
@@ -1817,8 +2039,13 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
         return result;
     }
 
+    if (executable == "sed") {
+        return relaxed_sed ? classify_sed_segment(toks, cw, e)
+                           : sed_unknown_scope();
+    }
+
     static constexpr std::string_view kInterpreterUnknown[] = {
-        "python", "python3", "node", "nodejs", "ruby", "perl", "php", "lua", "awk", "sed"};
+        "python", "python3", "node", "nodejs", "ruby", "perl", "php", "lua", "awk"};
     for (std::string_view interpreter : kInterpreterUnknown) {
         if (executable == interpreter) {
             note_scope(result, ShellTargetScope::Unknown);
@@ -1854,7 +2081,7 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
                         note_scope(result, ShellTargetScope::Unknown);
                     } else {
                         const ScopeResult inner = scope_impl(toks[k + 1].text, root, cur,
-                                                             kernel_confinement);
+                                                             kernel_confinement, relaxed_sed);
                         note_scope(result, inner.scope);
                         result.protected_target = result.protected_target || inner.protected_target;
                     }
@@ -1906,7 +2133,8 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
 }
 
 ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
-                       const std::filesystem::path& cwd, bool kernel_confinement) {
+                       const std::filesystem::path& cwd, bool kernel_confinement,
+                       bool relaxed_sed) {
     ScopeResult result;
     if (text.empty()) {
         return result;
@@ -1928,7 +2156,8 @@ ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
             ++j;
         }
         const ScopeResult segment =
-            classify_segment_scope(s.tokens, i, j, root, cur, cwd_known, kernel_confinement);
+            classify_segment_scope(s.tokens, i, j, root, cur, cwd_known,
+                                   kernel_confinement, relaxed_sed);
         note_scope(result, segment.scope);
         result.protected_target = result.protected_target || segment.protected_target;
         i = j;
@@ -2518,7 +2747,7 @@ bool has_unterminated_quote(std::string_view text) {
 ShellClassification classify_shell_command_with_scope(
     std::string_view text, const std::filesystem::path& root,
     const std::filesystem::path& cwd, bool kernel_confinement,
-    const std::filesystem::path& canonical_tmp_root) {
+    const std::filesystem::path& canonical_tmp_root, bool relaxed_sed) {
     ShellClassification out;
     if (text.empty()) {
         out.scope = ShellTargetScope::NotApplicable;
@@ -2527,7 +2756,8 @@ ShellClassification classify_shell_command_with_scope(
     const std::filesystem::path effective = cwd.empty() ? root : cwd;
     out.risk = classify_impl(text, root, effective, kernel_confinement, 0);
 
-    const ScopeResult scope = scope_impl(text, root, effective, kernel_confinement);
+    const ScopeResult scope =
+        scope_impl(text, root, effective, kernel_confinement, relaxed_sed);
     bool              protected_target = scope.protected_target;
     const Scan        scanned = scan(text);
     for (const Token& token : scanned.tokens) {
@@ -2662,7 +2892,8 @@ ShellClassification classify_shell_request(
         }
         out.risk = classify_impl(text.text, root, effective, request.kernel_confinement, 0);
         const ScopeResult scope = scope_impl(text.text, root, effective,
-                                             request.kernel_confinement);
+                                             request.kernel_confinement,
+                                             request.tool == "shell");
         bool protected_target = scope.protected_target || cwd_protected;
         const Scan scanned = scan(text.text);
         for (const Token& token : scanned.tokens) {
@@ -2699,7 +2930,8 @@ ShellClassification classify_shell_request(
 
     out = classify_shell_command_with_scope(text.text, root, default_cwd,
                                             request.kernel_confinement,
-                                            canonical_tmp_root);
+                                            canonical_tmp_root,
+                                            request.tool == "shell");
     if (terminal_write) {
         out.scope = ShellTargetScope::Unknown;
     }
