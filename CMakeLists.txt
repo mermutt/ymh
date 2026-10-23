@@ -45,6 +45,8 @@ include(GNUInstallDirs)
 
 option(YMH_BUILD_TESTS "Build the ymh test suite" ON)
 option(YMH_BUNDLED_SPDLOG "Build and statically link spdlog/fmt" ON)
+option(YMH_BUNDLED_CMARK_GFM "Build and statically link cmark-gfm + extensions" ON)
+option(YMH_BUNDLED_LIBGIT2 "Build and statically link libgit2" ON)
 
 # The test suite lives on the `dev` branch. A standalone code checkout (the
 # `main` branch, or an office export) has no tests/ directory: tests are then
@@ -188,12 +190,76 @@ find_package(Threads REQUIRED)
 
 # --- libgit2 (Git tools, §29) / cmark-gfm (Markdown, §22) -------------------
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
-pkg_check_modules(CMARK_GFM REQUIRED IMPORTED_TARGET libcmark-gfm)
-# Ubuntu/Debian ship the cmark-gfm extensions as a separate package with its own
-# pkg-config module; Arch folds them into libcmark-gfm and has no such module.
-# Optional on purpose: requiring it would break Arch.
-pkg_check_modules(CMARK_GFM_EXTENSIONS IMPORTED_TARGET libcmark-gfm-extensions)
+# libgit2 sets CMAKE_C_STANDARD=90 in the cache (C90); cmark-gfm needs C99
+# (`inline`). Keep both third-party fetches at C99 and restore afterwards.
+set(_ymh_saved_c_standard "${CMAKE_C_STANDARD}")
+set(CMAKE_C_STANDARD 99 CACHE STRING "" FORCE)
+if(YMH_BUNDLED_LIBGIT2)
+    # 105: libgit2's CMake policy scope leaves CMP0077 old, so every knob is a
+    # cache-FORCE entry; a normal variable would be silently discarded.
+    set(_ymh_saved_build_shared_libs "${BUILD_SHARED_LIBS}")
+    set(_ymh_saved_pic "${CMAKE_POSITION_INDEPENDENT_CODE}")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_CLI OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+    set(USE_SSH OFF CACHE STRING "" FORCE)
+    set(USE_HTTPS OFF CACHE STRING "" FORCE)
+    set(USE_GSSAPI OFF CACHE BOOL "" FORCE)
+    set(USE_NSEC OFF CACHE BOOL "" FORCE)
+    set(USE_BUNDLED_ZLIB ON CACHE BOOL "" FORCE)
+    set(REGEX_BACKEND builtin CACHE STRING "" FORCE)
+    set(USE_SHA1 CollisionDetection CACHE STRING "" FORCE)
+    set(USE_SHA256 builtin CACHE STRING "" FORCE)
+    set(SONAME OFF CACHE BOOL "" FORCE)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    FetchContent_Declare(
+        libgit2
+        GIT_REPOSITORY https://github.com/libgit2/libgit2.git
+        GIT_TAG v1.9.7
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(libgit2)
+    set(CMAKE_POSITION_INDEPENDENT_CODE "${_ymh_saved_pic}")
+    if(_ymh_saved_build_shared_libs STREQUAL "")
+        unset(BUILD_SHARED_LIBS CACHE)
+    else()
+        set(BUILD_SHARED_LIBS "${_ymh_saved_build_shared_libs}" CACHE BOOL "" FORCE)
+    endif()
+else()
+    pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
+endif()
+
+if(YMH_BUNDLED_CMARK_GFM)
+    # cmark-gfm's CMake 3.0 floor needs a policy minimum on CMake 4; its knobs
+    # are cache-FORCE for the same CMP0077 reason as libgit2.
+    set(CMARK_STATIC ON CACHE BOOL "" FORCE)
+    set(CMARK_SHARED OFF CACHE BOOL "" FORCE)
+    set(CMARK_TESTS OFF CACHE BOOL "" FORCE)
+    set(CMARK_LIB_FUZZER OFF CACHE BOOL "" FORCE)
+    set(CMARK_FUZZ_QUADRATIC OFF CACHE BOOL "" FORCE)
+    set(_ymh_saved_cmake_policy "${CMAKE_POLICY_VERSION_MINIMUM}")
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    FetchContent_Declare(
+        cmark_gfm
+        GIT_REPOSITORY https://github.com/github/cmark-gfm.git
+        GIT_TAG 0.29.0.gfm.13
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(cmark_gfm)
+    set(CMAKE_POLICY_VERSION_MINIMUM "${_ymh_saved_cmake_policy}")
+else()
+    pkg_check_modules(CMARK_GFM REQUIRED IMPORTED_TARGET libcmark-gfm)
+    # Ubuntu/Debian ship the extensions as a separate pkg-config module; Arch
+    # folds them into libcmark-gfm and has no such module.
+    pkg_check_modules(CMARK_GFM_EXTENSIONS IMPORTED_TARGET libcmark-gfm-extensions)
+endif()
+if(_ymh_saved_c_standard STREQUAL "")
+    unset(CMAKE_C_STANDARD CACHE)
+else()
+    set(CMAKE_C_STANDARD "${_ymh_saved_c_standard}" CACHE STRING "" FORCE)
+endif()
 
 # ---------------------------------------------------------------------------
 # Core library
@@ -318,9 +384,18 @@ target_link_libraries(ymh_execution
         nlohmann_json::nlohmann_json
     PRIVATE
         asio::asio
-        PkgConfig::LIBGIT2
         ymh::warnings
 )
+
+if(YMH_BUNDLED_LIBGIT2)
+    target_include_directories(ymh_execution PRIVATE
+        "${libgit2_SOURCE_DIR}/include"
+        "${libgit2_BINARY_DIR}/include"
+    )
+    target_link_libraries(ymh_execution PRIVATE libgit2package)
+else()
+    target_link_libraries(ymh_execution PRIVATE PkgConfig::LIBGIT2)
+endif()
 
 # ---------------------------------------------------------------------------
 # Permissions & policy library (component 09)
@@ -766,14 +841,26 @@ target_link_libraries(ymh_render
     PUBLIC
         ftxui::component
     PRIVATE
-        PkgConfig::CMARK_GFM
         ymh::warnings
 )
 
-# Link the separately-packaged extensions module only where it exists (Ubuntu/
-# Debian); on Arch the core module already pulls the extensions transitively.
-if(CMARK_GFM_EXTENSIONS_FOUND)
-    target_link_libraries(ymh_render PRIVATE PkgConfig::CMARK_GFM_EXTENSIONS)
+if(YMH_BUNDLED_CMARK_GFM)
+    target_include_directories(ymh_render PRIVATE
+        "${cmark_gfm_SOURCE_DIR}/src"
+        "${cmark_gfm_BINARY_DIR}/src"
+        "${cmark_gfm_SOURCE_DIR}/extensions"
+    )
+    target_link_libraries(ymh_render PRIVATE
+        libcmark-gfm-extensions_static
+        libcmark-gfm_static
+    )
+else()
+    target_link_libraries(ymh_render PRIVATE PkgConfig::CMARK_GFM)
+    # Link the separately-packaged extensions module only where it exists
+    # (Ubuntu/Debian); on Arch the core module already pulls them transitively.
+    if(CMARK_GFM_EXTENSIONS_FOUND)
+        target_link_libraries(ymh_render PRIVATE PkgConfig::CMARK_GFM_EXTENSIONS)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

@@ -208,7 +208,10 @@ std::string relative_pathspec(git_repository* repo, const std::filesystem::path&
 }
 
 DiffPtr create_diff(git_repository* repo, const GitQuery& query) {
-    git_diff_options options = GIT_DIFF_OPTIONS_INIT;
+    git_diff_options options{};
+    options.version = GIT_DIFF_OPTIONS_VERSION;
+    options.ignore_submodules = GIT_SUBMODULE_IGNORE_UNSPECIFIED;
+    options.context_lines = 3;
     std::string pathspec = relative_pathspec(repo, query.path);
     char* pathspec_data = pathspec.empty() ? nullptr : pathspec.data();
     if (pathspec_data != nullptr) {
@@ -250,7 +253,8 @@ DiffPtr create_diff(git_repository* repo, const GitQuery& query) {
 Task<GitStatus> LibGit2GitService::status(const GitQuery& query) {
     RepoPtr repo = open_repository(query.root.empty() ? query.path : query.root);
 
-    git_status_options options = GIT_STATUS_OPTIONS_INIT;
+    git_status_options options{};
+    options.version = GIT_STATUS_OPTIONS_VERSION;
     options.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
     options.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED |
                     GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
