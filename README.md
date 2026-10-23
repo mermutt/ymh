@@ -23,7 +23,8 @@ Architecture and component specs live in `docs/design/`.
 - **CMake ≥ 3.22**, **Ninja**, and a C++23 compiler (**GCC 13+ / Clang 16+**;
   the project is developed against GCC 16, and Ubuntu 24.04's default `g++` is
   GCC 13.2, which clears the floor). Ubuntu 22.04's stock CMake 3.22.1 is
-  sufficient.
+  sufficient. With GCC 13, build at `-O2` (e.g. `RelWithDebInfo`): GCC 13's
+  `-O3` can emit a false `-Wmaybe-uninitialized` in the stream variant code.
 - **System libraries**, resolved by CMake `find_package` / `pkg-config` and so
   installed from apt as `-dev` packages: SQLite3, nlohmann_json, and libcurl.
   `pkg-config` itself is also required; the threading runtime is part of
