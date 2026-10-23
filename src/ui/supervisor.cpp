@@ -4965,7 +4965,7 @@ public:
         if (it == app_.last_method_params_.end()) {
             return std::nullopt;
         }
-        return it->second;
+        return std::make_optional(it->second);
     }
 
     [[nodiscard]] const std::map<WorkspaceId, std::string>& pending_creates() const override {
