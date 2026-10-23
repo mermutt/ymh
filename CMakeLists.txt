@@ -44,6 +44,7 @@ include(GNUInstallDirs)
 # ---------------------------------------------------------------------------
 
 option(YMH_BUILD_TESTS "Build the ymh test suite" ON)
+option(YMH_BUNDLED_SPDLOG "Build and statically link spdlog/fmt" ON)
 
 # The test suite lives on the `dev` branch. A standalone code checkout (the
 # `main` branch, or an office export) has no tests/ directory: tests are then
@@ -84,7 +85,8 @@ endif()
 #
 # Declared eagerly so the full dependency set is configured in one place, but
 # only the pieces required by the current wave are linked. SQLite3 / nlohmann /
-# spdlog / fmt / CURL come from the system via find_package.
+# spdlog/fmt are bundled (static, PIC, bundled fmt) by default; CURL and the
+# remaining dependencies come from the system via find_package.
 # ---------------------------------------------------------------------------
 
 # --- FTXUI (TUI; arrives with the UI wave) ---------------------------------
@@ -157,8 +159,30 @@ if(NOT TARGET SQLite3::SQLite3)
     add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
 endif()
 find_package(nlohmann_json REQUIRED)
-find_package(spdlog REQUIRED)
-find_package(fmt REQUIRED)
+if(YMH_BUNDLED_SPDLOG)
+    # 104: static spdlog + bundled fmt; no libspdlog/libfmt runtime soname.
+    set(SPDLOG_BUILD_ALL OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_PIC ON CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_EXAMPLE_HO OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_TESTS_HO OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
+    set(SPDLOG_FMT_EXTERNAL_HO OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.17.0
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(spdlog)
+else()
+    find_package(spdlog REQUIRED)
+    find_package(fmt REQUIRED)
+endif()
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
