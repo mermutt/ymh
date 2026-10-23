@@ -382,7 +382,8 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
         if (!request.cwd.empty()) {
             if (::chdir(request.cwd.c_str()) != 0) {
                 const int saved = errno;
-                (void)::write(errsig.write_fd, &saved, sizeof(saved));
+                [[maybe_unused]] const auto write_result =
+                    ::write(errsig.write_fd, &saved, sizeof(saved));
                 _exit(127);
             }
         }
@@ -417,7 +418,8 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
         ::execvp(request.executable.c_str(), argv.data());
 
         const int saved = errno;
-        (void)::write(errsig.write_fd, &saved, sizeof(saved));
+        [[maybe_unused]] const auto write_result =
+            ::write(errsig.write_fd, &saved, sizeof(saved));
         _exit(127);
     }
 
@@ -559,7 +561,8 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         ::setpgid(0, 0);
         if (!request.cwd.empty() && ::chdir(request.cwd.c_str()) != 0) {
             const int saved = errno;
-            (void)::write(errsig.write_fd, &saved, sizeof(saved));
+            [[maybe_unused]] const auto write_result =
+            ::write(errsig.write_fd, &saved, sizeof(saved));
             _exit(127);
         }
         ::dup2(in.read_fd, STDIN_FILENO);
@@ -597,7 +600,8 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
         const int saved = errno;
-        (void)::write(errsig.write_fd, &saved, sizeof(saved));
+        [[maybe_unused]] const auto write_result =
+            ::write(errsig.write_fd, &saved, sizeof(saved));
         _exit(127);
     }
 
