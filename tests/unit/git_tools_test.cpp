@@ -111,6 +111,10 @@ TEST(GitTools, DiffShowsUnstagedChange) {
     ASSERT_EQ(result.outcome, payload::ToolOutcome::Ok);
     EXPECT_NE(result.output.find("diff --git"), std::string::npos);
     EXPECT_NE(result.output.find("+two"), std::string::npos);
+    // GIT_DIFF_OPTIONS defaults: three context lines and the "unspecified"
+    // submodule setting, not zero-initialized fields.
+    EXPECT_NE(result.output.find("@@ -1 +1,2 @@"), std::string::npos);
+    EXPECT_NE(result.output.find(" one\n"), std::string::npos);
 }
 
 TEST(GitTools, DiffShowsStagedChange) {

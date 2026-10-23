@@ -25,28 +25,32 @@ Architecture and component specs live in `docs/design/`.
   GCC 13.2, which clears the floor). Ubuntu 22.04's stock CMake 3.22.1 is
   sufficient.
 - **System libraries**, resolved by CMake `find_package` / `pkg-config` and so
-  installed from apt as `-dev` packages: SQLite3, nlohmann_json, libcurl,
-  libgit2, and cmark-gfm. `pkg-config` itself is also required; the threading
-  runtime is part of libc/libstdc++ and needs no package. spdlog and fmt are
+  installed from apt as `-dev` packages: SQLite3, nlohmann_json, and libcurl.
+  `pkg-config` itself is also required; the threading runtime is part of
+  libc/libstdc++ and needs no package. spdlog, fmt, cmark-gfm, and libgit2 are
   **not** system dependencies in the default build.
 - **Fetched automatically by CMake `FetchContent`** on the first configure
   (network required), so they need **no apt package**: FTXUI v6.1.9, Asio
   1.38.2, CLI11 v2.5.0, GoogleTest v1.17.0 (GoogleTest only when tests are
-  enabled, which is the default via `YMH_BUILD_TESTS=ON`), and **spdlog
-  v1.17.0 with bundled fmt**, built as a PIC static archive. The default `ymh`
-  binary therefore has no `libspdlog`/`libfmt` runtime dependency. Pass
-  `-DYMH_BUNDLED_SPDLOG=OFF` to use the distro's shared spdlog/fmt instead.
+  enabled, which is the default via `YMH_BUILD_TESTS=ON`), **spdlog v1.17.0
+  with bundled fmt**, **cmark-gfm 0.29.0.gfm.13 (+ extensions)**, and
+  **libgit2 v1.9.7**, all built as PIC static archives. The default `ymh`
+  binary therefore has no `libspdlog`/`libfmt`/`libcmark-gfm`/`libgit2`
+  runtime dependencies. Pass `-DYMH_BUNDLED_SPDLOG=OFF`,
+  `-DYMH_BUNDLED_CMARK_GFM=OFF`, or `-DYMH_BUNDLED_LIBGIT2=OFF` to use the
+  distro's shared packages instead.
 
 ### Ubuntu 24.04 LTS (noble)
 
 ```sh
 sudo apt update && sudo apt install -y \
     cmake ninja-build g++ pkg-config \
-    libsqlite3-dev nlohmann-json3-dev \
-    libcurl4-openssl-dev libgit2-dev libcmark-gfm-dev libcmark-gfm-extensions-dev
+    libsqlite3-dev nlohmann-json3-dev libcurl4-openssl-dev
 
-# Optional, only for -DYMH_BUNDLED_SPDLOG=OFF:
+# Optional, only when the matching -DYMH_BUNDLED_*=OFF is used:
 #   libspdlog-dev libfmt-dev
+#   libgit2-dev
+#   libcmark-gfm-dev libcmark-gfm-extensions-dev
 ```
 
 Every `lib*-dev` entry is a development package; the matching runtime `.so`
@@ -56,9 +60,9 @@ cmark-gfm.
 
 The system build pins no minimum version for these (`find_package` and
 `pkg_check_modules` are called unversioned), and noble's shipped versions
-satisfy them all: SQLite3 3.45.1, nlohmann_json 3.11.3, libcurl 8.5.0,
-libgit2 1.7.2, cmark-gfm 0.29.0.gfm.6. The bundled spdlog is pinned to
-v1.17.0 and its fmt is internal. Every package
+satisfy them all: SQLite3 3.45.1, nlohmann_json 3.11.3, libcurl 8.5.0. The
+bundled libraries are pinned: spdlog v1.17.0 (internal fmt), cmark-gfm
+0.29.0.gfm.13, libgit2 v1.9.7. Every package
 above is in the default Ubuntu 24.04 repositories, so no PPA, version pin, or
 source build is needed. The one caveat is `libcmark-gfm-dev`, which lives in
 the **`universe`** component: desktop installs enable it by default, while a
