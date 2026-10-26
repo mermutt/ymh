@@ -1,5 +1,7 @@
 #include "ymh/session/tool_result_text.hpp"
 
+#include "ymh/core/text.hpp"
+
 namespace ymh {
 namespace {
 
@@ -72,7 +74,7 @@ std::string denial_text(std::string_view tool, std::string_view reason) {
 
 std::string tool_message_content(const payload::ToolResult& result) {
     if (result.outcome != payload::ToolOutcome::Denied) {
-        return result.output;
+        return sanitize_utf8(result.output);
     }
     if (is_canonical_denial(result.output)) {
         return result.output;

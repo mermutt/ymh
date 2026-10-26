@@ -11,6 +11,7 @@
 // 19/RN8 contract.
 
 #include <cstddef>
+#include <string>
 #include <string_view>
 
 namespace ymh {
@@ -77,6 +78,71 @@ namespace detail {
 }
 
 } // namespace detail
+
+// Replaces invalid UTF-8 with U+FFFD so a tool result can be stored as a
+// JSON string. Valid sequences (including multibyte and 4-byte code points)
+// are copied byte-for-byte.
+[[nodiscard]] inline std::string sanitize_utf8(std::string_view text) {
+    static constexpr std::string_view kReplacement = "\xEF\xBF\xBD";
+    std::string out;
+    out.reserve(text.size());
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[index]);
+        if (lead < 0x80) {
+            out.push_back(text[index]);
+            ++index;
+            continue;
+        }
+        std::size_t length = 0;
+        char32_t    value  = 0;
+        if (lead >= 0xC2 && lead <= 0xDF) {
+            length = 2;
+            value  = static_cast<char32_t>(lead & 0x1FU);
+        } else if (lead >= 0xE0 && lead <= 0xEF) {
+            length = 3;
+            value  = static_cast<char32_t>(lead & 0x0FU);
+        } else if (lead >= 0xF0 && lead <= 0xF4) {
+            length = 4;
+            value  = static_cast<char32_t>(lead & 0x07U);
+        } else {
+            out.append(kReplacement);
+            ++index;
+            continue;
+        }
+        if (index + length > text.size()) {
+            out.append(kReplacement);
+            ++index;
+            continue;
+        }
+        bool valid = true;
+        for (std::size_t offset = 1; offset < length; ++offset) {
+            const auto byte = static_cast<unsigned char>(text[index + offset]);
+            if ((byte & 0xC0U) != 0x80U) {
+                valid = false;
+                break;
+            }
+            value = static_cast<char32_t>((value << 6) | (byte & 0x3FU));
+        }
+        if (valid) {
+            const bool overlong = (length == 2 && value < 0x80) ||
+                                  (length == 3 && value < 0x800) ||
+                                  (length == 4 && value < 0x10000);
+            const bool surrogate = value >= 0xD800 && value <= 0xDFFF;
+            if (overlong || surrogate || value > 0x10FFFF) {
+                valid = false;
+            }
+        }
+        if (!valid) {
+            out.append(kReplacement);
+            ++index;
+            continue;
+        }
+        out.append(text.substr(index, length));
+        index += length;
+    }
+    return out;
+}
 
 // Trims leading/trailing Unicode `White_Space` (UTF-8), excluding U+000A.
 [[nodiscard]] inline std::string_view trim_unicode_whitespace(std::string_view text) noexcept {

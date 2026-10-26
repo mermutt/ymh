@@ -1,5 +1,7 @@
 #include "ymh/agent/handoff.hpp"
 
+#include "ymh/core/text.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -469,10 +471,10 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
                 if (result.outcome == payload::ToolOutcome::Ok) {
                     break;
                 }
-                const std::string detail =
+                const std::string detail = sanitize_utf8(
                     result.error.has_value() && !result.error->empty()
                         ? *result.error
-                        : tool_outcome_name(result.outcome);
+                        : std::string{tool_outcome_name(result.outcome)});
                 facts.errors.push_back(result.name + ": " + detail);
                 break;
             }

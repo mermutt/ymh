@@ -1,5 +1,7 @@
 #include "ymh/tools/tool.hpp"
 
+#include "ymh/core/text.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
@@ -261,6 +263,10 @@ bool schema_validate(const nlohmann::json& schema, const nlohmann::json& argumen
 }
 
 void retain_tool_result(ToolResult& result, std::size_t max_bytes) {
+    result.output = sanitize_utf8(result.output);
+    if (result.error.has_value()) {
+        result.error = sanitize_utf8(*result.error);
+    }
     const bool input_truncated = result.truncated;
 
     TextRetainer retainer(TextRetentionStrategy::HeadTail, retention_budget(max_bytes));

@@ -1,5 +1,7 @@
 #include "ymh/session/events.hpp"
 
+#include "ymh/core/text.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
@@ -487,14 +489,14 @@ void to_json(nlohmann::json& json, const ToolResult& value) {
         {"id", value.id},
         {"name", value.name},
         {"outcome", std::string{tool_outcome_name(value.outcome)}},
-        {"output", value.output},
+        {"output", sanitize_utf8(value.output)},
         {"truncated", kind != OmittedKind::None},
         {"omitted_kind", std::string{omitted_kind_name(kind)}},
         {"omitted_count", value.omitted_count},
         {"duration_ms", value.duration.count()},
     };
     if (value.error.has_value()) {
-        json["error"] = *value.error;
+        json["error"] = sanitize_utf8(*value.error);
     }
     if (!source_is_default(value.source, MessageSource::Kind::Tool)) {
         json["source"] = value.source;

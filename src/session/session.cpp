@@ -638,6 +638,14 @@ Sequence Session::appendEvent(Event event) {
 }
 
 Sequence Session::appendEventLocked(Event event) {
+    if (event.type == EventType::ToolResult && event.payload.is_object()) {
+        for (const char* key : {"output", "error"}) {
+            auto field = event.payload.find(key);
+            if (field != event.payload.end() && field->is_string()) {
+                *field = sanitize_utf8(field->get<std::string>());
+            }
+        }
+    }
     if (event.session_id.value != header_.id.value) {
         throw std::invalid_argument("appendEvent: event does not belong to this session");
     }
