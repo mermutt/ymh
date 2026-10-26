@@ -51,6 +51,7 @@ add_executable(ymh_tests
     unit/errata90_temp_root_test.cpp
     unit/errata103_temp_reads_test.cpp
     unit/errata107_literal_loops_test.cpp
+    unit/utf8_sanitize_test.cpp
     unit/errata94_shell_scope_test.cpp
     unit/errata94_always_grant_test.cpp
     unit/errata100_sed_scope_test.cpp
