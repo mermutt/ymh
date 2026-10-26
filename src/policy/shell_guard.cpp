@@ -7,6 +7,8 @@
 #include "ymh/policy/shell_guard.hpp"
 
 #include <optional>
+#include <regex>
+#include <sstream>
 
 #include "ymh/execution/glob.hpp"
 #include "ymh/execution/path_safety.hpp"
@@ -2958,6 +2960,286 @@ bool has_unterminated_quote(std::string_view text) {
     return single || double_q;
 }
 
+
+bool loop_var_reserved(std::string_view name) {
+    static constexpr std::string_view kExact[] = {
+        "PATH", "HOME", "IFS", "CDPATH", "BASH_ENV", "ENV", "SHELL", "PWD",
+        "USER", "LOGNAME", "TERM", "TMP", "TEMP", "TMPDIR"};
+    static constexpr std::string_view kPrefix[] = {
+        "LD_", "LC_", "GIT_", "XDG_", "PYTHON", "BASH", "ZSH", "SSH_"};
+    for (const std::string_view value : kExact) {
+        if (name == value) {
+            return true;
+        }
+    }
+    for (const std::string_view value : kPrefix) {
+        if (name.starts_with(value)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool loop_value_literal(std::string_view value) {
+    if (value.empty() || value.size() > 1024 || value.front() == '-') {
+        return false;
+    }
+    for (const char raw : value) {
+        const auto c = static_cast<unsigned char>(raw);
+        if (std::isalnum(c) != 0 || c == '_' || c == '.' || c == '/' || c == '+' ||
+            c == '-' || c == ':') {
+            continue;
+        }
+        return false;
+    }
+    return value.find("..") == std::string_view::npos;
+}
+
+std::string loop_replace_var(std::string_view text, std::string_view name,
+                             std::string_view value) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '$') {
+            out.push_back(text[i]);
+            continue;
+        }
+        if (i + 1 < text.size() && text[i + 1] == '{') {
+            const std::size_t close = text.find('}', i + 2);
+            if (close != std::string_view::npos && text.substr(i + 2, close - i - 2) == name) {
+                out.append(value);
+                i = close;
+                continue;
+            }
+        } else {
+            std::size_t end = i + 1;
+            while (end < text.size() &&
+                   (std::isalnum(static_cast<unsigned char>(text[end])) != 0 ||
+                    text[end] == '_')) {
+                ++end;
+            }
+            if (text.substr(i + 1, end - i - 1) == name) {
+                out.append(value);
+                i = end - 1;
+                continue;
+            }
+        }
+        out.push_back(text[i]);
+    }
+    return out;
+}
+
+std::vector<std::string> loop_segments(std::string_view text) {
+    std::vector<std::string> out;
+    std::string              current;
+    bool                     double_quoted = false;
+    auto flush = [&]() {
+        if (!current.empty()) {
+            out.push_back(current);
+            current.clear();
+        }
+    };
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '"') {
+            double_quoted = !double_quoted;
+            current.push_back(c);
+            continue;
+        }
+        if (!double_quoted) {
+            if (c == ';' || c == '\n') {
+                flush();
+                continue;
+            }
+            if ((c == '&' || c == '|') && i + 1 < text.size() &&
+                text[i + 1] == c) {
+                flush();
+                ++i;
+                continue;
+            }
+            if (c == '&' || c == '|') {
+                flush();
+                continue;
+            }
+        }
+        current.push_back(c);
+    }
+    flush();
+    return out;
+}
+
+bool loop_token_absolute_in_root(std::string_view token, const std::filesystem::path& root) {
+    if (token.empty() || token.front() != '/') {
+        return true;
+    }
+    return lexically_inside(root, std::filesystem::path{std::string{token}});
+}
+
+bool loop_segment_safe(std::string_view segment, const std::filesystem::path& root) {
+    std::string text{segment};
+    const std::size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return true;
+    }
+    const std::size_t end = text.find_last_not_of(" \t\r\n");
+    text = text.substr(begin, end - begin + 1);
+    if (text.empty()) {
+        return true;
+    }
+    std::istringstream stream(text);
+    std::vector<std::string> words;
+    for (std::string word; stream >> word;) {
+        words.push_back(std::move(word));
+    }
+    if (words.empty() || words.front() == "$" || words.front().starts_with("$")) {
+        return false;
+    }
+    const std::string& command = words.front();
+    if (command != "echo" && command != "git") {
+        return false;
+    }
+    std::size_t index = 1;
+    if (command == "git") {
+        if (words.size() < 2 || words[1] != "diff") {
+            return false;
+        }
+        index = 2;
+    }
+    bool saw_separator = false;
+    bool saw_filter    = false;
+    for (; index < words.size(); ++index) {
+        const std::string& word = words[index];
+        if (command == "git" && word == "--") {
+            if (saw_separator) {
+                return false;
+            }
+            saw_separator = true;
+            continue;
+        }
+        if (command == "git" && word.starts_with("--diff-filter=")) {
+            if (saw_filter || saw_separator) {
+                return false;
+            }
+            const std::string value = word.substr(std::string{"--diff-filter="}.size());
+            if (value.empty() ||
+                !std::all_of(value.begin(), value.end(),
+                             [](char c) { return std::isalpha(static_cast<unsigned char>(c)) != 0; })) {
+                return false;
+            }
+            saw_filter = true;
+            continue;
+        }
+        if (!word.empty() && word.front() == '-') {
+            return false;
+        }
+        if (!loop_token_absolute_in_root(word, root)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool loop_body_safe(std::string_view body, std::string_view var,
+                    const std::filesystem::path& root) {
+    if (body.find('\'') != std::string_view::npos ||
+        body.find('{') != std::string_view::npos ||
+        body.find('}') != std::string_view::npos ||
+        body.find('*') != std::string_view::npos ||
+        body.find('?') != std::string_view::npos ||
+        body.find('[') != std::string_view::npos ||
+        body.find(']') != std::string_view::npos ||
+        body.find('~') != std::string_view::npos ||
+        body.find('\\') != std::string_view::npos ||
+        body.find("..") != std::string_view::npos ||
+        body.find('#') != std::string_view::npos ||
+        body.find('`') != std::string_view::npos ||
+        body.find("$(") != std::string_view::npos ||
+        body.find('>') != std::string_view::npos ||
+        body.find('<') != std::string_view::npos) {
+        return false;
+    }
+    const std::string stripped = loop_replace_var(body, var, {});
+    if (stripped.find('$') != std::string::npos) {
+        return false;
+    }
+    static const std::regex kControl(R"(\b(for|do|done)\b)");
+    if (std::regex_search(std::string{body}, kControl)) {
+        return false;
+    }
+    for (const std::string& segment : loop_segments(body)) {
+        if (!loop_segment_safe(segment, root)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<std::string> normalize_literal_loops(
+    std::string_view text, const std::filesystem::path& root,
+    const std::filesystem::path& cwd) {
+    static const std::regex kLoop(
+        R"(for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;]+);\s*do\s+([\s\S]*?)\s*done)");
+    std::smatch match;
+    const std::string input{text};
+    try {
+        if (!std::regex_search(input, match, kLoop)) {
+            return std::nullopt;
+        }
+    } catch (const std::regex_error&) {
+        return std::nullopt;
+    }
+    const std::string var  = match[1].str();
+    const std::string list = match[2].str();
+    const std::string body = match[3].str();
+    const std::string suffix = input.substr(static_cast<std::size_t>(match.position() + match.length()));
+    if (loop_var_reserved(var) || body.empty()) {
+        return std::nullopt;
+    }
+    std::istringstream values_stream(list);
+    std::vector<std::string> values;
+    for (std::string value; values_stream >> value;) {
+        values.push_back(std::move(value));
+    }
+    if (values.empty() || values.size() > 32) {
+        return std::nullopt;
+    }
+    for (const std::string& value : values) {
+        if (!loop_value_literal(value)) {
+            return std::nullopt;
+        }
+        const std::filesystem::path path{value};
+        const std::filesystem::path absolute =
+            (path.is_absolute() ? path : (cwd / path)).lexically_normal();
+        if (!lexically_inside(root, absolute)) {
+            return std::nullopt;
+        }
+    }
+    if (!loop_body_safe(body, var, root) || !loop_body_safe(suffix, var, root)) {
+        return std::nullopt;
+    }
+    std::string expanded;
+    for (const std::string& value : values) {
+        const std::string part = loop_replace_var(body, var, value);
+        if (!loop_body_safe(part, {}, root)) {
+            return std::nullopt;
+        }
+        if (!expanded.empty()) {
+            expanded += "; ";
+        }
+        expanded += part;
+    }
+    std::string tail = loop_replace_var(suffix, var, values.back());
+    if (!loop_body_safe(tail, {}, root)) {
+        return std::nullopt;
+    }
+    const std::string prefix = input.substr(0, static_cast<std::size_t>(match.position()));
+    std::string       result = prefix + expanded + tail;
+    if (result.size() > 8192) {
+        return std::nullopt;
+    }
+    return result;
+}
+
 ShellClassification classify_shell_command_with_scope(
     std::string_view text, const std::filesystem::path& root,
     const std::filesystem::path& cwd, bool kernel_confinement,
@@ -2968,19 +3250,21 @@ ShellClassification classify_shell_command_with_scope(
         return out;
     }
     const std::filesystem::path effective = cwd.empty() ? root : cwd;
-    out.risk = classify_impl(text, root, effective, kernel_confinement, 0);
+    const std::string analysis =
+        normalize_literal_loops(text, root, effective).value_or(std::string{text});
+    out.risk = classify_impl(analysis, root, effective, kernel_confinement, 0);
 
     const ScopeResult scope =
-        scope_impl(text, root, effective, kernel_confinement, relaxed_sed);
+        scope_impl(analysis, root, effective, kernel_confinement, relaxed_sed);
     bool              protected_target = scope.protected_target;
-    const Scan        scanned = scan(text);
+    const Scan        scanned = scan(analysis);
     for (const Token& token : scanned.tokens) {
         if (scan_token_protected(token.text, root, effective)) {
             protected_target = true;
             break;
         }
     }
-    const TempInfo temp = temp_pass(text, root, effective, canonical_tmp_root);
+    const TempInfo temp = temp_pass(analysis, root, effective, canonical_tmp_root);
     out.tmp_exempt = temp_pass_eligible(temp, canonical_tmp_root);
     out.tmp_targets = temp.targets;
     out.neutral_reads = temp.neutral_reads;
@@ -3105,19 +3389,21 @@ ShellClassification classify_shell_request(
                 }
             }
         }
-        out.risk = classify_impl(text.text, root, effective, request.kernel_confinement, 0);
-        const ScopeResult scope = scope_impl(text.text, root, effective,
+        const std::string analysis =
+            normalize_literal_loops(text.text, root, effective).value_or(text.text);
+        out.risk = classify_impl(analysis, root, effective, request.kernel_confinement, 0);
+        const ScopeResult scope = scope_impl(analysis, root, effective,
                                              request.kernel_confinement,
                                              request.tool == "shell");
         bool protected_target = scope.protected_target || cwd_protected;
-        const Scan scanned = scan(text.text);
+        const Scan scanned = scan(analysis);
         for (const Token& token : scanned.tokens) {
             if (scan_token_protected(token.text, root, effective)) {
                 protected_target = true;
                 break;
             }
         }
-        const TempInfo temp = temp_pass(text.text, root, effective, canonical_tmp_root);
+        const TempInfo temp = temp_pass(analysis, root, effective, canonical_tmp_root);
         out.tmp_targets = temp.targets;
         out.neutral_reads = temp.neutral_reads;
         out.tmp_targets.push_back(effective.lexically_normal());
