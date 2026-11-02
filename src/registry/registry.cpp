@@ -921,7 +921,10 @@ HostLiveness WorkspaceRegistry::probeLiveness(WorkspaceId workspace) const {
     if (!record.has_value() || !record->host.has_value()) {
         return HostLiveness::Absent;
     }
-    const WorkspaceLockProbe probe = probeWorkspaceLock(record->canonicalPath);
+    // 111-D4: a probe must not create `<ws>/.ymh/sessions.lock` (this method is
+    // documented read-only and is called on merely-browsed workspaces). A
+    // missing lock file means "no live daemon", exactly like a free lock.
+    const WorkspaceLockProbe probe = probeWorkspaceLock(record->canonicalPath, false);
     return probe.held ? HostLiveness::Live : HostLiveness::Stale;
 }
 

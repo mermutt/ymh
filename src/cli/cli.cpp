@@ -49,6 +49,7 @@
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
 #include "ymh/mcp/mcp_types.hpp"
+#include "ymh/registry/liveness.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/transport/host_connection.hpp"
@@ -447,7 +448,18 @@ int run_workspace_stop(const std::vector<std::string>& args, bool force, std::os
         return 1;
     }
     if (!record->host.has_value()) {
-        err << "ymh: workspace is not running\n";
+        // 111-D2: the requested state is already reached; stopping a stopped
+        // workspace is an idempotent no-op, not an error.
+        out << "not running " << record->id.value << '\n';
+        return 0;
+    }
+    // 111-D2: a claim whose sidecar lock is free outlived its daemon (SIGKILL,
+    // reboot). `stop` must not clear claims (88-D1: remediation is explicit),
+    // so name the sanctioned command instead of surfacing a raw connect error.
+    if (!probeWorkspaceLock(record->canonicalPath, false).held) {
+        err << "ymh: workspace " << record->id.value << " has a stale host claim (recorded pid "
+            << record->host->pid << " is not running)\n"
+            << "ymh: clear it with: ymh workspace reap " << record->id.value << " --yes\n";
         return 1;
     }
 
@@ -473,7 +485,10 @@ int run_workspace_stop(const std::vector<std::string>& args, bool force, std::os
             protocol::method::kHostShutdown, {{"reason", "workspace_stop"}});
         connection.close();
     } catch (const std::exception& stop_error) {
-        err << "ymh: cannot stop daemon: " << stop_error.what() << '\n';
+        // 111-D2: the lock is held but the advertised socket refuses, i.e. a
+        // wedged or mis-registered daemon; point at the read-only inspector.
+        err << "ymh: cannot stop daemon: " << stop_error.what() << '\n'
+            << "ymh: inspect ownership with: ymh doctor --workspace " << record->id.value << '\n';
         return 1;
     }
     out << "stopped " << record->id.value << '\n';
@@ -1291,7 +1306,8 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     CLI::App*   workspace_add = workspace->add_subcommand("add", "Register a workspace");
     std::string workspace_path;
     workspace_add->add_option("path", workspace_path, "Workspace path")->required();
-    CLI::App*   workspace_list = workspace->add_subcommand("list", "List registered workspaces");
+    CLI::App*   workspace_list =
+        workspace->add_subcommand("list", "List registered workspaces and their daemon state");
     CLI::App*   workspace_stop = workspace->add_subcommand("stop", "Stop a workspace daemon");
     std::string workspace_stop_target;
     bool        workspace_stop_force = false;
