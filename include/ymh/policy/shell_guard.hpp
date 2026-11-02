@@ -36,7 +36,17 @@ enum class ShellTargetScope : std::uint8_t {
 struct ShellClassification {
     ShellCommandRisk risk = ShellCommandRisk::None;
     ShellTargetScope scope = ShellTargetScope::NotApplicable;
+    // True when any target is protected: `path_protected` (a real path under
+    // `.git`/`.ymh`) or `git_metadata_write` (refs by subcommand name). Kept as
+    // the single "did we touch something protected" bit for observers.
     bool             protected_target = false;
+    // 110-D1: a real path target under `.git`/`.ymh`. Stays a hard deny.
+    bool             path_protected = false;
+    // 110-D1: a git subcommand that writes refs/index/config by name. Unlike a
+    // protected path target this is deferrable: an explicit allow rule or a
+    // session/durable grant may approve it, so `git branch <name>` and
+    // `git checkout -b` are not unconditionally denied.
+    bool             git_metadata_write = false;
     bool             tmp_exempt = false;
     std::vector<std::filesystem::path> tmp_targets;
     // 103: shell-only neutral read operands; canonicalized in-root and

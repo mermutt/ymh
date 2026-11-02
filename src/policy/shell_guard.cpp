@@ -1098,6 +1098,10 @@ ShellCommandRisk classify_impl(std::string_view             text,
 struct ScopeResult {
     ShellTargetScope scope = ShellTargetScope::InRoot;
     bool             protected_target = false;
+    // 110-D1: git metadata written by subcommand name (branch/checkout/stash/
+    // remote/config/push/fetch). Recoverable and approvable, unlike a direct
+    // path target inside `.git`/`.ymh`.
+    bool             metadata_write = false;
 };
 
 std::string basename_of(std::string_view word) {
@@ -1519,9 +1523,15 @@ bool scan_token_protected(const std::string& token_text, const std::filesystem::
     return flush();
 }
 
+// 110-D1: `metadata_write` is a subcommand that writes refs/tracking config
+// *by name* — recoverable, and approvable. `hard_protected` is anything that
+// must stay denied: a `-C`/`--git-dir`/`--work-tree` operand into `.git`/`.ymh`,
+// and the destructive or config-surface subcommands (clean, config write,
+// submodule, worktree, remote mutation, stash -u).
 struct GitScope {
     std::optional<ShellTargetScope> scope;
-    bool                            protected_target = false;
+    bool                            metadata_write = false;
+    bool                            hard_protected = false;
 };
 
 GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
@@ -1543,7 +1553,7 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             return false;
         }
         if (path_components_protected(target.lexically_relative(root))) {
-            out.protected_target = true;
+            out.hard_protected = true;
         }
         git_cwd = target;
         return true;
@@ -1600,7 +1610,7 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
     if (out.scope == ShellTargetScope::Outside || out.scope == ShellTargetScope::Unknown) {
         return out;
     }
-    if (out.protected_target) {
+    if (out.hard_protected) {
         return out;
     }
 
@@ -1654,25 +1664,25 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             out.scope = ShellTargetScope::Outside;
             return out;
         }
-        out.protected_target = true;
+        out.hard_protected = true;
         return out;
     }
     if (sub == "clean") {
-        out.protected_target = true;
+        out.hard_protected = true;
         return out;
     }
     if (sub == "submodule") {
         if (args.empty() || args.front() == "status" || args.front() == "summary") {
             return out;
         }
-        out.protected_target = true;
+        out.hard_protected = true;
         return out;
     }
     if (sub == "worktree") {
         if (!args.empty() && args.front() == "list") {
             return out;
         }
-        out.protected_target = true;
+        out.hard_protected = true;
         return out;
     }
     if (sub == "remote") {
@@ -1680,7 +1690,7 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             "add", "remove", "rename", "set-url", "set-branches"};
         for (std::string_view mutation : kMutations) {
             if (!args.empty() && args.front() == mutation) {
-                out.protected_target = true;
+                out.hard_protected = true;
                 return out;
             }
         }
@@ -1698,7 +1708,7 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             }
         }
         if (untracked) {
-            out.protected_target = true;
+            out.hard_protected = true;
         }
         return out;
     }
@@ -1725,20 +1735,20 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
                 value == "-t" || value.starts_with("--set-upstream-to") ||
                 value == "--unset-upstream" || value == "--edit-description" ||
                 value == "-u") {
-                out.protected_target = true;
+                out.metadata_write = true;
                 return out;
             }
             if (value.size() > 2 && value[0] == '-' && value[1] != '-') {
                 const char option = value[1];
                 if (option == 'm' || option == 'M' || option == 'c' || option == 'C' ||
                     option == 'u' || option == 't') {
-                    out.protected_target = true;
+                    out.metadata_write = true;
                     return out;
                 }
             }
         }
         if (positional() && !no_track && !listing) {
-            out.protected_target = true;
+            out.metadata_write = true;
         }
         return out;
     }
@@ -1766,19 +1776,19 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             }
         }
         if (tracking || (creation && !no_track)) {
-            out.protected_target = true;
+            out.metadata_write = true;
         }
         return out;
     }
     if (sub == "fetch" || sub == "pull") {
         if (any_arg("--set-upstream")) {
-            out.protected_target = true;
+            out.metadata_write = true;
         }
         return out;
     }
     if (sub == "push") {
         if (any_arg("--set-upstream") || any_arg("-u")) {
-            out.protected_target = true;
+            out.metadata_write = true;
         }
         return out;
     }
@@ -2159,6 +2169,7 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
                                                              kernel_confinement, relaxed_sed);
                         note_scope(result, inner.scope);
                         result.protected_target = result.protected_target || inner.protected_target;
+                        result.metadata_write   = result.metadata_write || inner.metadata_write;
                     }
                     return result;
                 }
@@ -2172,7 +2183,8 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
         if (git.scope.has_value()) {
             note_scope(result, *git.scope);
         }
-        result.protected_target = result.protected_target || git.protected_target;
+        result.protected_target = result.protected_target || git.hard_protected;
+        result.metadata_write   = result.metadata_write || git.metadata_write;
         return result;
     }
 
@@ -2235,6 +2247,7 @@ ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
                                    kernel_confinement, relaxed_sed);
         note_scope(result, segment.scope);
         result.protected_target = result.protected_target || segment.protected_target;
+        result.metadata_write   = result.metadata_write || segment.metadata_write;
         i = j;
     }
     if (s.truncated) {
@@ -3311,7 +3324,9 @@ ShellClassification classify_shell_command_with_scope(
     out.tmp_exempt = temp_pass_eligible(temp, canonical_tmp_root);
     out.tmp_targets = temp.targets;
     out.neutral_reads = temp.neutral_reads;
-    out.protected_target = protected_target || temp.protected_target;
+    out.path_protected     = protected_target || temp.protected_target;
+    out.git_metadata_write = scope.metadata_write;
+    out.protected_target   = out.path_protected || out.git_metadata_write;
 
     if (out.risk == ShellCommandRisk::Forbid) {
         out.scope = ShellTargetScope::Outside;
@@ -3454,7 +3469,9 @@ ShellClassification classify_shell_request(
                          temp.neutral_reads.empty() && !text.text.empty() &&
                          cwd_concrete &&
                          path_is_under_tmp_root(canonical_tmp_root, effective);
-        out.protected_target = protected_target || temp.protected_target;
+        out.path_protected     = protected_target || temp.protected_target;
+    out.git_metadata_write = scope.metadata_write;
+    out.protected_target   = out.path_protected || out.git_metadata_write;
         if (cwd_unknown) {
             out.scope = ShellTargetScope::Unknown;
         } else if (cwd_outside) {

@@ -444,18 +444,18 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     if (request.sandbox == SandboxMode::ReadOnly && tool_is_mutating(request)) {
         return PolicyVerdict::Deny;
     }
-    if (guard_risk == ShellCommandRisk::Confirm) {
-        if (reason != nullptr) {
-            *reason = "shell-guard:unbounded-in-root";
-        }
-        return PolicyVerdict::Ask;
-    }
+    // 110-D2: `Confirm` (an in-root shell effect that cannot be bounded) and a
+    // git metadata write no longer short-circuit the rule fold: they are the
+    // default when the fold does not decide, so an explicit allow rule, the
+    // operator's `permissions.shell`, or a session/durable grant can approve
+    // them. `Forbid`, ReadOnly, force_ask, and a protected path stay hard.
+    const bool guard_confirm = guard_risk == ShellCommandRisk::Confirm;
     if (request.force_ask) {
         return PolicyVerdict::Ask;
     }
 
-    // 90-D13/H1: protected paths are a hard deny after the 89 guard, ReadOnly,
-    // Confirm, and force_ask, and before the rule fold and every grant.
+    // 90-D13/H1: paths inside `.git`/`.ymh` are a hard deny after the 89 guard,
+    // ReadOnly, and force_ask, and before the rule fold and every grant.
     if (request.path.has_value() &&
         path_is_protected(request.root, *request.path)) {
         if (reason != nullptr) {
@@ -463,7 +463,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         }
         return PolicyVerdict::Deny;
     }
-    if (classification.protected_target) {
+    if (classification.path_protected) {
         if (reason != nullptr) {
             *reason = "permission:protected-path";
         }
@@ -527,6 +527,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         }
     }
 
+    PolicyVerdict folded = config_.default_verdict;
     if (winner == nullptr) {
         const ToolDefault* fallback = nullptr;
         for (const ToolDefault& candidate : config_.tool_defaults) {
@@ -537,9 +538,35 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
                 fallback = &candidate;
             }
         }
-        return fallback != nullptr ? fallback->verdict : config_.default_verdict;
+        folded = fallback != nullptr ? fallback->verdict : config_.default_verdict;
+    } else {
+        folded = winner->effect;
     }
-    return winner->effect;
+
+    if (folded == PolicyVerdict::Deny) {
+        return PolicyVerdict::Deny;
+    }
+    if (folded == PolicyVerdict::Allow) {
+        // 110-D2: a guard-flagged call needs an *explicit* decision to proceed
+        // (a matching rule — including the `permissions.shell` rule — or a
+        // session/durable grant). The bare no-match fallback does not silence
+        // the guard, so an unconfigured deployment keeps its prompts.
+        const bool guard_active = guard_confirm || classification.git_metadata_write;
+        if (!guard_active || winner != nullptr) {
+            return PolicyVerdict::Allow;
+        }
+    }
+    // The fold did not clear the guard; the prompt says why.
+    if (guard_confirm) {
+        if (reason != nullptr) {
+            *reason = "shell-guard:unbounded-in-root";
+        }
+    } else if (classification.git_metadata_write) {
+        if (reason != nullptr) {
+            *reason = "permission:protected-path";
+        }
+    }
+    return PolicyVerdict::Ask;
 }
 
 PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
@@ -567,7 +594,7 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
         if (request_is_tmp_exempt(request, classification, tmp_root_)) {
             return {};
         }
-        if (classification.protected_target) {
+        if (classification.path_protected) {
             return {};
         }
     }
