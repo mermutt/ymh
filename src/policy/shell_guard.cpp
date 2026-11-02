@@ -1605,11 +1605,33 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
     }
 
     const std::string sub = toks[i].text;
+    // 109-D1: a redirect's operand is not a subcommand argument. The scanner
+    // emits `2>&1` as Word("2"), Redirect(">&"), Word("1"), so both the fd
+    // prefix and the target must be dropped; otherwise `git branch -a 2>&1`
+    // parses as a branch named "1" and is denied as a ref write.
     std::vector<std::string> args;
+    bool                     drop_redirect_operand = false;
     for (std::size_t k = i + 1; k < e; ++k) {
-        if (toks[k].kind == TokKind::Word) {
-            args.push_back(toks[k].text);
+        if (toks[k].kind == TokKind::Redirect) {
+            drop_redirect_operand = true;
+            continue;
         }
+        if (toks[k].kind != TokKind::Word) {
+            continue;
+        }
+        if (drop_redirect_operand) {
+            drop_redirect_operand = false;
+            continue;
+        }
+        // An fd prefix (`2` in `2>`, `2>&1`) is written without a space before
+        // the operator; a bare number followed by a redirect is never an
+        // argument (branch names that are all digits are still kept when no
+        // redirect follows).
+        if (k + 1 < e && toks[k + 1].kind == TokKind::Redirect &&
+            toks[k].text.find_first_not_of("0123456789") == std::string::npos) {
+            continue;
+        }
+        args.push_back(toks[k].text);
     }
     auto any_arg = [&](std::string_view needle) {
         return std::find(args.begin(), args.end(), needle) != args.end();
@@ -1682,7 +1704,21 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
     }
     if (sub == "branch") {
         const bool no_track = any_arg("--no-track");
+        bool       listing  = false;
         for (const std::string& value : args) {
+            // 109-D2: these selectors make positionals *patterns/commits* for a
+            // listing, not new branch names. `git branch --list 'rel*'`,
+            // `--contains HEAD` and `--merged main` must stay read-only.
+            if (value == "-l" || value == "--list" || value == "-a" || value == "--all" ||
+                value == "-r" || value == "--remotes" || value == "--contains" ||
+                value == "--merged" || value == "--no-merged" || value == "--points-at" ||
+                value == "--format" || value == "--sort" || value == "--column" ||
+                value == "--no-column" || value == "--omit-empty" || value == "--show-current" ||
+                value.starts_with("--contains=") || value.starts_with("--merged=") ||
+                value.starts_with("--no-merged=") || value.starts_with("--points-at=") ||
+                value.starts_with("--format=") || value.starts_with("--sort=")) {
+                listing = true;
+            }
             if (value == "-m" || value == "-M" || value == "-c" || value == "-C" ||
                 value == "--move" || value == "--copy" || value == "-d" ||
                 value == "-D" || value == "--delete" || value == "--track" ||
@@ -1701,7 +1737,7 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
                 }
             }
         }
-        if (positional() && !no_track) {
+        if (positional() && !no_track && !listing) {
             out.protected_target = true;
         }
         return out;
@@ -1746,9 +1782,16 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
         }
         return out;
     }
+    // 109-D3: read-only data-plane subcommands. Anything outside this list (and
+    // the classified subcommands above) falls through to `Unknown`, so an
+    // unlisted read-only command can only be as safe as its arguments look.
     static constexpr std::string_view kDataPlane[] = {
         "status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree",
         "cat-file", "blame", "grep", "describe", "shortlog", "whatchanged",
+        "show-ref", "merge-base", "rev-list", "for-each-ref", "name-rev",
+        "merge-tree", "verify-commit", "verify-tag", "check-ignore",
+        "check-attr", "count-objects", "diff-tree", "diff-index", "diff-files",
+        "show-branch", "cherry", "ls-remote", "var", "version", "help",
         "add", "commit", "restore", "reset", "merge", "rebase", "cherry-pick",
         "revert", "gc", "prune", "repack", "tag"};
     for (std::string_view candidate : kDataPlane) {

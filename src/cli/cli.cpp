@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -197,6 +198,34 @@ void scaffold_for_invocation(const CliInvocation& invocation,
     (void)scaffold_config(root, target, &category_logger(LogCategory::Filesystem));
 }
 
+std::string_view verdict_name(PolicyVerdict verdict) {
+    switch (verdict) {
+        case PolicyVerdict::Allow: return "allow";
+        case PolicyVerdict::Ask:   return "ask";
+        case PolicyVerdict::Deny:  return "deny";
+    }
+    return "?";
+}
+
+std::string iso8601_utc(std::chrono::system_clock::time_point point) {
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(point);
+    std::tm           utc{};
+    gmtime_r(&seconds, &utc);
+    char buffer[32];
+    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return "?";
+    }
+    return buffer;
+}
+
+std::string file_mtime_iso8601(const std::filesystem::path& path, std::error_code& error) {
+    const auto modified = std::filesystem::last_write_time(path, error);
+    if (error) {
+        return {};
+    }
+    return iso8601_utc(std::chrono::clock_cast<std::chrono::system_clock>(modified));
+}
+
 int run_config_command(const CliInvocation& invocation, std::ostream& out, std::ostream& err) {
     if (invocation.config_args.size() != 1 || invocation.config_args[0] != "path") {
         err << "ymh: usage: ymh config path\n";
@@ -206,6 +235,49 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
     std::error_code             error;
     const bool                  exists = std::filesystem::exists(path, error) && !error;
     out << path.string() << (exists ? " (exists)" : " (missing)") << '\n';
+    if (exists) {
+        error.clear();
+        const std::string modified = file_mtime_iso8601(path, error);
+        const auto        size     = std::filesystem::file_size(path, error);
+        if (!error) {
+            out << "  modified: " << modified << "  size: " << size << " bytes\n";
+        }
+    }
+
+    const std::filesystem::path workspace_path = workspace_config_path(resolve_workspace(invocation));
+    error.clear();
+    const bool workspace_exists = std::filesystem::exists(workspace_path, error) && !error;
+    out << "  workspace: " << workspace_path.string()
+        << (workspace_exists ? " (exists)" : " (missing)") << '\n';
+
+    ConfigPaths paths;
+    paths.global    = path;
+    paths.workspace = workspace_path;
+    try {
+        const Config           config = load_config(paths);
+        const PermissionConfig policy = to_permission_config(config);
+        const auto             effect_of = [&policy](std::string_view id) {
+            for (const PolicyRule& rule : policy.rules) {
+                if (rule.id == id) {
+                    return verdict_name(rule.effect);
+                }
+            }
+            return std::string_view{"?"};
+        };
+        out << "  effective: default=" << verdict_name(policy.default_verdict)
+            << " read=" << effect_of("default.read_file")
+            << " write=" << effect_of("default.write_file")
+            << " shell=" << effect_of("default.shell")
+            << " rules=" << config.permissions.rules.size()
+            << " mcp_servers=" << config.mcp.servers.size() << '\n';
+    } catch (const std::exception& load_error) {
+        out << "  effective: (not loaded)\n";
+        err << "ymh: config error: " << load_error.what() << '\n';
+        return 1;
+    }
+    out << "  note: this file is read once, when a workspace daemon starts;\n"
+           "        after editing it run `ymh workspace stop <path>` (the next start\n"
+           "        re-reads it) — a running daemon keeps the old policy.\n";
     return 0;
 }
 
@@ -569,6 +641,21 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
             workspace.socket_path = refreshed->host->socketPath.string();
             workspace.boot_id = refreshed->host->bootId.value;
             attached.push_back(std::move(workspace));
+        }
+    }
+
+    // 109-D4: policy is frozen when a workspace daemon starts (there is no
+    // config reload). If one is already running, the file we just read may be
+    // newer than the policy in effect; say so instead of letting stale prompts
+    // look like a bug in the rules.
+    if (!attached.empty()) {
+        const std::string note =
+            "config: a workspace daemon is already running; policy edits need a restart "
+            "(`ymh workspace stop <path>`)";
+        if (startup_notice.has_value()) {
+            *startup_notice += "  ·  " + note;
+        } else {
+            startup_notice = note;
         }
     }
 
