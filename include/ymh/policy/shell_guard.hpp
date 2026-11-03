@@ -114,8 +114,9 @@ struct ShellText {
 [[nodiscard]] std::string command_prefix(std::string_view text);
 
 // 89-D6: lexical containment. Relative candidates resolve against `root`.
-// `single_quoted` suppresses $HOME expansion only; the `~` over-approximation
-// is unconditional (SG4).
+// 113-D1: `~`, `~/x`, `$HOME/x` and `${HOME}/x` resolve against the process
+// HOME (an unset HOME and `~user` keep the old conservative `false`); an
+// unquoted `~` under a workspace that lives under HOME is therefore in-root.
 [[nodiscard]] bool path_within_root(const std::filesystem::path& root,
                                     const std::filesystem::path& candidate,
                                     bool single_quoted);

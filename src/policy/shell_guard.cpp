@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -92,6 +93,51 @@ bool is_home_ref(std::string_view s, bool single_quoted) {
     }
     return s == "$HOME" || s.rfind("$HOME/", 0) == 0 ||
            s == "${HOME}" || s.rfind("${HOME}/", 0) == 0;
+}
+
+// 113-D1: a home-relative token (`~`, `~/x`, `$HOME/x`, `${HOME}/x`) resolves
+// against the process HOME so a target under the workspace classifies `InRoot`
+// instead of `Outside`. `~user` stays unresolved, single-quoted text is
+// literal, and an unset/empty HOME keeps the previous `Outside` answer.
+std::optional<std::string> expand_home_ref(std::string_view s, bool single_quoted) {
+    if (single_quoted) {
+        return std::nullopt;
+    }
+    std::string_view rest;
+    if (s == "~") {
+        rest = {};
+    } else if (s.rfind("~/", 0) == 0) {
+        rest = s.substr(1);
+    } else if (s == "$HOME") {
+        rest = {};
+    } else if (s.rfind("$HOME/", 0) == 0) {
+        rest = s.substr(5);
+    } else if (s == "${HOME}") {
+        rest = {};
+    } else if (s.rfind("${HOME}/", 0) == 0) {
+        rest = s.substr(7);
+    } else {
+        return std::nullopt;
+    }
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        return std::nullopt;
+    }
+    std::string out{home};
+    out += rest;
+    return out;
+}
+
+// 113-D3: does a (variable-sanitized) token carry any path evidence? A `$VAR`
+// embedded in prose (`"attempt $i:"`) must not widen the command's scope to
+// `Unknown`; an unexpanded path (`$DEST`, `$LOG`, `*.log`, `$HOME/x`) does.
+bool path_like(std::string_view s) {
+    if (s.empty()) {
+        return false;
+    }
+    return s.find('/') != std::string_view::npos || s.front() == '~' ||
+           s.front() == '$' || s.front() == '.' ||
+           s.find_first_of("*?[") != std::string_view::npos;
 }
 
 bool is_option(std::string_view s) {
@@ -601,12 +647,15 @@ enum class OpRisk : std::uint8_t { Skip, InsideBounded, Broad, Outside, Device, 
 OpRisk classify_operand(const Token& token,
                         const std::filesystem::path& root,
                         const std::filesystem::path& cwd,
-                        bool                         cwd_known) {
-    const std::string s = token.text;
+                        bool                         cwd_known,
+                        const std::filesystem::path& tmp_root) {
+    std::string s = token.text;
     if (s.empty()) {
         return OpRisk::Skip;
     }
-    if (is_home_ref(s, token.single_quoted)) {
+    if (const auto expanded = expand_home_ref(s, token.single_quoted)) {
+        s = *expanded;
+    } else if (is_home_ref(s, token.single_quoted)) {
         return OpRisk::Outside;
     }
     if (token.had_unexpanded) {
@@ -663,6 +712,11 @@ OpRisk classify_operand(const Token& token,
     }
     if (is_dev_whitelist(normalized)) {
         return OpRisk::Skip;
+    }
+    // 113-D4: the canonical tmp root is neutral scratch space, like the
+    // workspace root itself (but never `/tmp` wholesale).
+    if (path_is_under_tmp_root(tmp_root, abs)) {
+        return OpRisk::InsideBounded;
     }
     return lexically_inside(root, abs) ? OpRisk::InsideBounded : OpRisk::Outside;
 }
@@ -838,11 +892,23 @@ bool looks_destructive(std::string_view text) {
     return false;
 }
 
+bool resolve_lexical(const std::filesystem::path& root,
+                     const std::filesystem::path& cwd,
+                     std::string_view             text,
+                     std::filesystem::path&       out);
+
+// 113-D4: an explicit output-redirect target under the canonical tmp root is
+// scratch space, not an outside write. Writes elsewhere stay outside.
+bool temp_redirect_target(const Token& token, const std::filesystem::path& root,
+                          const std::filesystem::path& cwd,
+                          const std::filesystem::path& tmp_root);
+
 ShellCommandRisk classify_impl(std::string_view               text,
                                const std::filesystem::path&   root,
                                const std::filesystem::path&   cwd,
                                bool                           kernel_confinement,
-                               int                            depth);
+                               int                            depth,
+                               const std::filesystem::path&   tmp_root = {});
 
 ShellCommandRisk classify_verb(std::string_view               cmd,
                                const std::vector<Token>&       toks,
@@ -852,14 +918,16 @@ ShellCommandRisk classify_verb(std::string_view               cmd,
                                const std::filesystem::path&    cur,
                                bool                            cwd_known,
                                bool                            kernel_confinement,
-                               int                             depth) {
+                               int                             depth,
+                               const std::filesystem::path&    tmp_root) {
     (void)depth;
     auto operand_risk = [&](std::size_t index, bool inside_is_confirm) {
-        return map_operand(classify_operand(toks[index], root, cur, cwd_known),
-                           inside_is_confirm, kernel_confinement);
+        return map_operand(
+            classify_operand(toks[index], root, cur, cwd_known, tmp_root),
+            inside_is_confirm, kernel_confinement);
     };
     auto redirect_risk = [&](std::size_t index) {
-        const OpRisk o = classify_operand(toks[index], root, cur, cwd_known);
+        const OpRisk o = classify_operand(toks[index], root, cur, cwd_known, tmp_root);
         if (o == OpRisk::Skip) {
             return ShellCommandRisk::None;
         }
@@ -904,7 +972,7 @@ ShellCommandRisk classify_verb(std::string_view               cmd,
         const std::vector<std::size_t> ops = collect_operands(toks, cw, e);
         OpRisk                         o   = OpRisk::Broad;
         if (!ops.empty()) {
-            o = classify_operand(toks[ops.front()], root, cur, cwd_known);
+            o = classify_operand(toks[ops.front()], root, cur, cwd_known, tmp_root);
         }
         if (o == OpRisk::Outside || o == OpRisk::Device) {
             return ShellCommandRisk::Forbid;
@@ -920,7 +988,7 @@ ShellCommandRisk classify_verb(std::string_view               cmd,
             target.text               = toks[k].text.substr(3);
             target.had_unexpanded     = toks[k].had_unexpanded;
             target.single_quoted      = toks[k].single_quoted;
-            const OpRisk o            = classify_operand(target, root, cur, cwd_known);
+            const OpRisk o = classify_operand(target, root, cur, cwd_known, tmp_root);
             if (o == OpRisk::Skip) {
                 return ShellCommandRisk::None;
             }
@@ -945,7 +1013,8 @@ ShellCommandRisk classify_segment(const std::vector<Token>&     toks,
                                   std::filesystem::path&        cur,
                                   bool&                         cwd_known,
                                   bool                          kernel_confinement,
-                                  int                           depth) {
+                                  int                           depth,
+                                  const std::filesystem::path&  tmp_root) {
     ShellCommandRisk best = ShellCommandRisk::None;
 
     for (std::size_t k = b; k < e; ++k) {
@@ -957,7 +1026,9 @@ ShellCommandRisk classify_segment(const std::vector<Token>&     toks,
             ++t;
         }
         if (t < e && toks[t].kind == TokKind::Word) {
-            const OpRisk o = classify_operand(toks[t], root, cur, cwd_known);
+            const OpRisk o = temp_redirect_target(toks[t], root, cur, tmp_root)
+                                 ? OpRisk::InsideBounded
+                                 : classify_operand(toks[t], root, cur, cwd_known, tmp_root);
             best = max_risk(best, map_operand(o, false, kernel_confinement));
         }
     }
@@ -992,6 +1063,9 @@ ShellCommandRisk classify_segment(const std::vector<Token>&     toks,
         }
         if (count != 1 || unknown) {
             cwd_known = false;
+        } else if (const auto expanded = expand_home_ref(operand, false)) {
+            cur       = std::filesystem::path{*expanded}.lexically_normal();
+            cwd_known = true;
         } else if (is_home_ref(operand, false)) {
             cur       = std::filesystem::path{"/"};
             cwd_known = true;
@@ -1027,13 +1101,15 @@ ShellCommandRisk classify_segment(const std::vector<Token>&     toks,
                 return max_risk(best, looks_destructive(inner) ? ShellCommandRisk::Confirm
                                                                : ShellCommandRisk::None);
             }
-            return max_risk(best, classify_impl(inner, root, cur, kernel_confinement, depth + 1));
+            return max_risk(best,
+                            classify_impl(inner, root, cur, kernel_confinement, depth + 1,
+                                          tmp_root));
         }
         return best;
     }
 
     best = max_risk(best, classify_verb(cmd, toks, cw, e, root, cur, cwd_known,
-                                        kernel_confinement, depth));
+                                        kernel_confinement, depth, tmp_root));
     return best;
 }
 
@@ -1041,7 +1117,8 @@ ShellCommandRisk classify_impl(std::string_view             text,
                                const std::filesystem::path& root,
                                const std::filesystem::path& cwd,
                                bool                         kernel_confinement,
-                               int                          depth) {
+                               int                          depth,
+                               const std::filesystem::path& tmp_root) {
     if (text.empty()) {
         return ShellCommandRisk::None;
     }
@@ -1069,7 +1146,7 @@ ShellCommandRisk classify_impl(std::string_view             text,
         }
         best = max_risk(best,
                         classify_segment(s.tokens, i, j, root, cur, cwd_known,
-                                         kernel_confinement, depth));
+                                         kernel_confinement, depth, tmp_root));
         i = j;
     }
 
@@ -1079,7 +1156,9 @@ ShellCommandRisk classify_impl(std::string_view             text,
                 best = max_risk(best, ShellCommandRisk::Confirm);
             }
         } else {
-            best = max_risk(best, classify_impl(sub, root, cur, kernel_confinement, depth + 1));
+            best = max_risk(best,
+                            classify_impl(sub, root, cur, kernel_confinement, depth + 1,
+                                          tmp_root));
         }
     }
 
@@ -1151,6 +1230,23 @@ bool resolve_lexical(const std::filesystem::path& root,
     out = (candidate.is_absolute() ? candidate : (cwd / candidate)).lexically_normal();
     (void)root;
     return true;
+}
+
+bool temp_redirect_target(const Token& token, const std::filesystem::path& root,
+                          const std::filesystem::path& cwd,
+                          const std::filesystem::path& tmp_root) {
+    if (tmp_root.empty() || token.had_unexpanded || token.text.empty()) {
+        return false;
+    }
+    const std::string& s = token.text;
+    if (s.front() == '~' || s.front() == '$' || s.find_first_of("*?[") != std::string::npos) {
+        return false;
+    }
+    std::filesystem::path target;
+    if (!resolve_lexical(root, cwd, s, target)) {
+        return false;
+    }
+    return path_is_under_tmp_root(tmp_root, target);
 }
 
 bool candidate_is_protected(const std::filesystem::path& root,
@@ -1343,7 +1439,9 @@ std::optional<ShellTargetScope> classify_scope_path(
     if (s.empty()) {
         return std::nullopt;
     }
-    if (is_home_ref(s, token.single_quoted)) {
+    if (const auto expanded = expand_home_ref(s, token.single_quoted)) {
+        s = *expanded;
+    } else if (is_home_ref(s, token.single_quoted)) {
         return ShellTargetScope::Outside;
     }
     if (const auto value = option_equals_value(s); value.has_value()) {
@@ -1352,7 +1450,12 @@ std::optional<ShellTargetScope> classify_scope_path(
     if (token.had_unexpanded) {
         ExpansionScan scan = scan_expansions(s);
         if (scan.unknown) {
-            return ShellTargetScope::Unknown;
+            // 113-D3: only a path-shaped template widens the scope; a variable
+            // inside prose ("attempt $i:") is not path evidence.
+            if (force_path || path_like(scan.sanitized)) {
+                return ShellTargetScope::Unknown;
+            }
+            return std::nullopt;
         }
         s = std::move(scan.sanitized);
         if (s.empty()) {
@@ -1533,6 +1636,143 @@ struct GitScope {
     bool                            metadata_write = false;
     bool                            hard_protected = false;
 };
+
+// ---------------------------------------------------------------------------
+// 113-D2: read-only `.git` access. An explicit `.git` target is protected
+// because it is the persistent-code-execution surface (`config`, hooks), but
+// reading metadata (`HEAD`, `MERGE_HEAD`, `refs/**`, `logs/**`) is routine repo
+// inspection. A whitelisted read-only verb may read concrete `.git` files; the
+// control files, `.ymh/**`, directory globs and every write stay protected.
+// ---------------------------------------------------------------------------
+
+bool read_only_executable(std::string_view executable, const std::vector<Token>& toks,
+                          std::size_t b, std::size_t e) {
+    if (executable == "find") {
+        for (std::size_t k = b + 1; k < e; ++k) {
+            if (toks[k].kind != TokKind::Word) {
+                continue;
+            }
+            const std::string& word = toks[k].text;
+            if (word == "-delete" || word == "-exec" || word == "-execdir" ||
+                word == "-ok" || word == "-okdir" || word == "-fprint" ||
+                word == "-fprint0" || word == "-fprintf" || word == "-fls") {
+                return false;
+            }
+        }
+        return true;
+    }
+    static constexpr std::string_view kReadOnly[] = {
+        "ls",       "cat",      "tac",       "head",     "tail",     "grep",
+        "egrep",    "fgrep",    "rg",        "stat",     "file",     "wc",
+        "cmp",      "diff",     "md5sum",    "sha1sum",  "sha256sum", "sha512sum",
+        "b2sum",    "cksum",    "du",        "df",       "readlink", "realpath",
+        "dirname",  "basename", "pwd",       "echo",     "printf",   "test",
+        "true",     "false",    "date",      "id",       "uname",    "whoami",
+        "which",    "type",     "cut",       "tr",       "nl",       "od",
+        "hexdump",  "strings",  "comm",      "join",     "paste",    "rev",
+        "column",   "hostname", "locale",    "seq",      "expr",     "jq"};
+    return std::any_of(std::begin(kReadOnly), std::end(kReadOnly),
+                       [&](std::string_view name) { return executable == name; });
+}
+
+bool git_metadata_readable(std::string_view text, std::string_view executable,
+                           const std::filesystem::path& root,
+                           const std::filesystem::path& cwd) {
+    if (text.empty() || text.front() == '-' || text.find_first_of("*?[") != std::string_view::npos ||
+        text.find_first_of("=@<>:'\"`;&|(){}") != std::string_view::npos) {
+        return false;
+    }
+    std::filesystem::path target;
+    if (!resolve_lexical(root, cwd, text, target)) {
+        return false;
+    }
+    const std::filesystem::path relative = target.lexically_relative(root.lexically_normal());
+    if (relative.empty() || relative.is_absolute() || relative == ".." ||
+        relative.string().rfind("../", 0) == 0) {
+        return false;
+    }
+    bool        inside_git = false;
+    std::string tail;
+    for (const auto& component : relative) {
+        const std::string name = component.string();
+        if (name == ".ymh") {
+            return false;
+        }
+        if (name == ".git") {
+            inside_git = true;
+            tail.clear();
+            continue;
+        }
+        if (inside_git) {
+            if (!tail.empty()) {
+                tail += '/';
+            }
+            tail += name;
+        }
+    }
+    if (!inside_git) {
+        return false;
+    }
+    if (tail.empty()) {
+        // The `.git` directory itself: name listing only, never content walks
+        // (`grep -r .git` would read `config`).
+        static constexpr std::string_view kListVerbs[] = {"ls",  "stat", "du", "tree",
+                                                          "find", "file", "wc", "df"};
+        return std::any_of(std::begin(kListVerbs), std::end(kListVerbs),
+                           [&](std::string_view name) { return executable == name; });
+    }
+    return tail != "config" && tail.rfind("config.", 0) != 0 &&
+           tail.rfind("hooks", 0) != 0 && tail.rfind("credentials", 0) != 0;
+}
+
+bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem::path& root,
+                           const std::filesystem::path& cwd) {
+    std::size_t i = 0;
+    const std::size_t n = toks.size();
+    while (i < n) {
+        if (toks[i].kind == TokKind::Separator || toks[i].kind == TokKind::Structural) {
+            ++i;
+            continue;
+        }
+        std::size_t j = i;
+        while (j < n && toks[j].kind != TokKind::Separator &&
+               toks[j].kind != TokKind::Structural) {
+            ++j;
+        }
+        std::string executable;
+        if (toks[i].kind == TokKind::Word) {
+            executable = basename_of(toks[i].text);
+        }
+        const bool read_only =
+            !executable.empty() && read_only_executable(executable, toks, i, j);
+        for (std::size_t k = i; k < j; ++k) {
+            if (toks[k].kind == TokKind::Redirect) {
+                std::size_t t = k + 1;
+                while (t < j && toks[t].kind == TokKind::Redirect) {
+                    ++t;
+                }
+                if (t < j && toks[t].kind == TokKind::Word &&
+                    scan_token_protected(toks[t].text, root, cwd)) {
+                    return true;
+                }
+                k = t;
+                continue;
+            }
+            if (toks[k].kind != TokKind::Word) {
+                continue;
+            }
+            if (read_only && k != i &&
+                git_metadata_readable(toks[k].text, executable, root, cwd)) {
+                continue;
+            }
+            if (scan_token_protected(toks[k].text, root, cwd)) {
+                return true;
+            }
+        }
+        i = j;
+    }
+    return false;
+}
 
 GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
                                  std::size_t e, const std::filesystem::path& root,
@@ -1815,7 +2055,8 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
 
 ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
                        const std::filesystem::path& cwd, bool kernel_confinement,
-                       bool relaxed_sed = false);
+                       bool relaxed_sed = false,
+                       const std::filesystem::path& tmp_root = {});
 
 
 // 100-D2..D4: a stdin-only `sed` whose script can only read the input stream
@@ -2071,7 +2312,8 @@ ScopeResult classify_sed_segment(const std::vector<Token>& toks, std::size_t b,
 ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b,
                                    std::size_t e, const std::filesystem::path& root,
                                    std::filesystem::path& cur, bool cwd_known,
-                                   bool kernel_confinement, bool relaxed_sed) {
+                                   bool kernel_confinement, bool relaxed_sed,
+                                   const std::filesystem::path& tmp_root) {
     ScopeResult result;
     if (b >= e) {
         return result;
@@ -2082,7 +2324,8 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
             // 98-D1: an exact `/dev/null` sink of an output redirect is not a
             // workspace target; any other target (including /dev/fd/*) is.
             if (!(is_output_only_redirect(toks[k].text) &&
-                  toks[k + 1].text == "/dev/null")) {
+                  (toks[k + 1].text == "/dev/null" ||
+                   temp_redirect_target(toks[k + 1], root, cur, tmp_root)))) {
                 const auto scope = classify_scope_path(toks[k + 1].text, toks[k + 1], root,
                                                        cur, true, false);
                 if (scope.has_value()) {
@@ -2115,8 +2358,11 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
         if (scope.has_value()) {
             note_scope(result, *scope);
             if (*scope == ShellTargetScope::InRoot) {
+                const std::string cd_text =
+                    expand_home_ref(toks[operand].text, toks[operand].single_quoted)
+                        .value_or(toks[operand].text);
                 std::filesystem::path target;
-                if (resolve_lexical(root, cur, toks[operand].text, target)) {
+                if (resolve_lexical(root, cur, cd_text, target)) {
                     cur = target;
                 }
             }
@@ -2159,14 +2405,16 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
                 if (toks[k].kind == TokKind::Word && toks[k].text == "-c" &&
                     toks[k + 1].kind == TokKind::Word) {
                     const ShellCommandRisk inner_risk =
-                        classify_impl(toks[k + 1].text, root, cur, kernel_confinement, 1);
+                        classify_impl(toks[k + 1].text, root, cur, kernel_confinement, 1,
+                                      tmp_root);
                     if (inner_risk == ShellCommandRisk::Forbid) {
                         note_scope(result, ShellTargetScope::Outside);
                     } else if (inner_risk == ShellCommandRisk::Confirm) {
                         note_scope(result, ShellTargetScope::Unknown);
                     } else {
-                        const ScopeResult inner = scope_impl(toks[k + 1].text, root, cur,
-                                                             kernel_confinement, relaxed_sed);
+                        const ScopeResult inner =
+                            scope_impl(toks[k + 1].text, root, cur, kernel_confinement,
+                                       relaxed_sed, tmp_root);
                         note_scope(result, inner.scope);
                         result.protected_target = result.protected_target || inner.protected_target;
                         result.metadata_write   = result.metadata_write || inner.metadata_write;
@@ -2210,6 +2458,10 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
             }
             continue;
         }
+        if (temp_redirect_target(toks[k], root, cur, tmp_root)) {
+            note_scope(result, ShellTargetScope::InRoot);
+            continue;
+        }
         const auto scope = classify_scope_path(word, toks[k], root, cur, false, git_context);
         if (scope.has_value()) {
             note_scope(result, *scope);
@@ -2221,7 +2473,7 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
 
 ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
                        const std::filesystem::path& cwd, bool kernel_confinement,
-                       bool relaxed_sed) {
+                       bool relaxed_sed, const std::filesystem::path& tmp_root) {
     ScopeResult result;
     if (text.empty()) {
         return result;
@@ -2244,7 +2496,7 @@ ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
         }
         const ScopeResult segment =
             classify_segment_scope(s.tokens, i, j, root, cur, cwd_known,
-                                   kernel_confinement, relaxed_sed);
+                                   kernel_confinement, relaxed_sed, tmp_root);
         note_scope(result, segment.scope);
         result.protected_target = result.protected_target || segment.protected_target;
         result.metadata_write   = result.metadata_write || segment.metadata_write;
@@ -2339,7 +2591,10 @@ void temp_add_target(TempInfo& info, const Token& token,
         candidate.is_absolute() ? candidate : (cwd / candidate);
     absolute = absolute.lexically_normal();
     info.targets.push_back(absolute);
-    if (path_is_protected(root, absolute)) {
+    // 113-D2: a *read* operand is judged by `scan_protected_tokens`, which
+    // knows whether the verb may read `.git` metadata; a write target is
+    // always protected.
+    if (role != TempRole::Read && path_is_protected(root, absolute)) {
         info.protected_target = true;
     }
     if (role == TempRole::Write) {
@@ -3308,17 +3563,15 @@ ShellClassification classify_shell_command_with_scope(
     const std::filesystem::path effective = cwd.empty() ? root : cwd;
     const std::string analysis =
         normalize_literal_loops(text, root, effective).value_or(std::string{text});
-    out.risk = classify_impl(analysis, root, effective, kernel_confinement, 0);
+    out.risk = classify_impl(analysis, root, effective, kernel_confinement, 0,
+                             canonical_tmp_root);
 
-    const ScopeResult scope =
-        scope_impl(analysis, root, effective, kernel_confinement, relaxed_sed);
-    bool              protected_target = scope.protected_target;
-    const Scan        scanned = scan(analysis);
-    for (const Token& token : scanned.tokens) {
-        if (scan_token_protected(token.text, root, effective)) {
-            protected_target = true;
-            break;
-        }
+    const ScopeResult scope = scope_impl(analysis, root, effective, kernel_confinement,
+                                         relaxed_sed, canonical_tmp_root);
+    bool protected_target = scope.protected_target;
+    const Scan scanned = scan(analysis);
+    if (scan_protected_tokens(scanned.tokens, root, effective)) {
+        protected_target = true;
     }
     const TempInfo temp = temp_pass(analysis, root, effective, canonical_tmp_root);
     out.tmp_exempt = temp_pass_eligible(temp, canonical_tmp_root);
@@ -3449,17 +3702,15 @@ ShellClassification classify_shell_request(
         }
         const std::string analysis =
             normalize_literal_loops(text.text, root, effective).value_or(text.text);
-        out.risk = classify_impl(analysis, root, effective, request.kernel_confinement, 0);
+        out.risk = classify_impl(analysis, root, effective, request.kernel_confinement, 0,
+                                 canonical_tmp_root);
         const ScopeResult scope = scope_impl(analysis, root, effective,
                                              request.kernel_confinement,
-                                             request.tool == "shell");
+                                             request.tool == "shell", canonical_tmp_root);
         bool protected_target = scope.protected_target || cwd_protected;
         const Scan scanned = scan(analysis);
-        for (const Token& token : scanned.tokens) {
-            if (scan_token_protected(token.text, root, effective)) {
-                protected_target = true;
-                break;
-            }
+        if (scan_protected_tokens(scanned.tokens, root, effective)) {
+            protected_target = true;
         }
         const TempInfo temp = temp_pass(analysis, root, effective, canonical_tmp_root);
         out.tmp_targets = temp.targets;
@@ -3592,6 +3843,9 @@ bool path_within_root(const std::filesystem::path& root,
     const std::string s = candidate.string();
     if (s.empty()) {
         return false;
+    }
+    if (const auto expanded = expand_home_ref(s, single_quoted)) {
+        return lexically_inside(root, std::filesystem::path{*expanded});
     }
     if (is_home_ref(s, single_quoted)) {
         return false;
