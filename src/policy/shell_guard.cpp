@@ -1447,6 +1447,15 @@ std::optional<ShellTargetScope> classify_scope_path(
     if (const auto value = option_equals_value(s); value.has_value()) {
         return classify_scope_path(*value, token, root, cwd, false, git_context);
     }
+    // 115-D1: a remote URI is not a filesystem target, even when a variable
+    // appears inside it (`http://localhost/api/v1/files/$FID`). `file:` URIs
+    // keep the path analysis below.
+    {
+        std::string_view scheme;
+        if (token_is_known_uri(s, scheme) && scheme != "file") {
+            return std::nullopt;
+        }
+    }
     if (token.had_unexpanded) {
         ExpansionScan scan = scan_expansions(s);
         if (scan.unknown) {
@@ -2341,6 +2350,13 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
         return result;
     }
     const std::string executable = basename_of(toks[cw].text);
+
+    // 115-D2: a pure data producer's operands are not path evidence (its
+    // redirect targets were classified above).
+    if (executable == "echo" || executable == "printf" || executable == "true" ||
+        executable == "false" || executable == ":") {
+        return result;
+    }
 
     if (executable == "cd") {
         std::size_t operand = e;
