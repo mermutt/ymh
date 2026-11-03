@@ -147,7 +147,12 @@ protocol::PermissionRequest make_wire(const PermissionRequest& request,
     bool truncated = false;
     wire.arguments = bounded_arguments(request.arguments, config.arguments_max_bytes, truncated);
     wire.summary = bounded_summary(request, truncated);
-    wire.expires_at_ms = wall_now_ms() + config.permission_timeout.count();
+    // 114-D1: `0` means "no deadline" on the wire as well, so a client never
+    // renders an already-expired question when the timeout is disabled.
+    wire.expires_at_ms =
+        config.permission_timeout.count() > 0
+            ? wall_now_ms() + config.permission_timeout.count()
+            : 0;
     wire.force_ask = request.force_ask;
     return wire;
 }

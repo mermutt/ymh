@@ -201,6 +201,10 @@ struct PermissionDefaults {
     // 52-D15: names a `permissions.presets` entry; empty => built-in
     // `workspace-write`. An unknown name is a `ConfigError` (52-F17).
     std::string default_preset;
+    // 114-D1: how long an interactive permission question waits before the
+    // fail-closed `Deny{"timeout"}`. `0` disables the deadline entirely (the
+    // question waits for the human, however long that takes). Must be >= 0.
+    std::int64_t timeout_ms = 5 * 60 * 1000;
 };
 
 // 52-D15: session preset's `permission_preset` > `permissions.default_preset` >

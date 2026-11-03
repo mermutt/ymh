@@ -477,7 +477,8 @@ void apply_workspace(Config& config, const Json& table, const std::filesystem::p
 void apply_permissions(Config& config, const Json& table, const std::filesystem::path& source,
                        bool global_layer) {
     reject_unknown(table, "permissions",
-                   {"shell", "write", "read", "default", "rules", "presets", "default_preset"},
+                   {"shell", "write", "read", "default", "rules", "presets",
+                    "default_preset", "timeout_ms"},
                    source);
     // 52-D15 / 90-D18: the whole permission table is a deployment-level
     // capability bundle. A workspace layer (e.g. a cloned repo's
@@ -493,6 +494,10 @@ void apply_permissions(Config& config, const Json& table, const std::filesystem:
         read_string(table, "read", "permissions", config.permissions.read, source);
     config.permissions.default_verdict = read_string(
         table, "default", "permissions", config.permissions.default_verdict, source);
+    // 114-D1: 0 disables the permission-question deadline (wait for the human).
+    // `read_int64` already rejects negatives.
+    config.permissions.timeout_ms = read_int64(table, "timeout_ms", "permissions",
+                                               config.permissions.timeout_ms, source);
 
     if (const Json* presets = member(table, "presets"); presets != nullptr) {
         if (!presets->is_object()) {

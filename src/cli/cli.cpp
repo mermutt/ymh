@@ -270,7 +270,12 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
             << " write=" << effect_of("default.write_file")
             << " shell=" << effect_of("default.shell")
             << " rules=" << config.permissions.rules.size()
-            << " mcp_servers=" << config.mcp.servers.size() << '\n';
+            << " mcp_servers=" << config.mcp.servers.size()
+            << " ask_timeout="
+            << (policy.permission_timeout.count() == 0
+                    ? std::string{"none"}
+                    : std::to_string(policy.permission_timeout.count() / 1000) + "s")
+            << '\n';
     } catch (const std::exception& load_error) {
         out << "  effective: (not loaded)\n";
         err << "ymh: config error: " << load_error.what() << '\n';

@@ -1,6 +1,7 @@
 #include "ymh/cli/wiring.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <mutex>
@@ -134,6 +135,11 @@ LLMProviderConfig to_provider_config(const Config& config) {
 
 PermissionConfig to_permission_config(const Config& config) {
     PermissionConfig permissions;
+
+    // 114-D1: `permissions.timeout_ms == 0` removes the Ask deadline; the
+    // broker/gate then wait for a human decision (or cancellation).
+    permissions.permission_timeout =
+        std::chrono::milliseconds{config.permissions.timeout_ms};
 
     const PolicyVerdict            default_verdict =
         parse_verdict(config.permissions.default_verdict, "default");
