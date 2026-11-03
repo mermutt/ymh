@@ -2,9 +2,14 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <iostream>
+#include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include "ymh/registry/liveness.hpp"
 #include "ymh/registry/registry.hpp"
@@ -73,7 +78,7 @@ int workspace_list(std::ostream& out, std::ostream& err) {
 int run_workspace_command(const std::vector<std::string>& args, std::ostream& out,
                           std::ostream& err) {
     if (args.empty()) {
-        err << "usage: ymh workspace <add|list|stop|reap> ...\n";
+        err << "usage: ymh workspace <add|list|stop|reap|remove> ...\n";
         return 2;
     }
     if (args[0] == "add") {
@@ -84,6 +89,78 @@ int run_workspace_command(const std::vector<std::string>& args, std::ostream& ou
     }
     err << "ymh: unknown workspace command: " << args[0] << '\n';
     return 2;
+}
+
+int run_workspace_remove(const std::vector<std::string>& args, bool assume_yes, std::ostream& out,
+                         std::ostream& err) {
+    if (args.size() != 2) {
+        err << "ymh: usage: ymh workspace remove <workspace-id|path> [--yes]\n";
+        return 2;
+    }
+
+    std::unique_ptr<WorkspaceRegistry> registry;
+    try {
+        registry = WorkspaceRegistry::open(default_registry_config());
+    } catch (const std::exception& registry_error) {
+        err << "ymh: registry unavailable: " << registry_error.what() << '\n';
+        return 3;
+    }
+
+    std::optional<WorkspaceRecord> record = registry->findById(WorkspaceId{args[1]});
+    if (!record.has_value()) {
+        std::error_code             error;
+        const std::filesystem::path canonical = std::filesystem::canonical(args[1], error);
+        if (!error) {
+            record = registry->findByCanonicalPath(canonical);
+        }
+    }
+    if (!record.has_value()) {
+        err << "ymh: unknown workspace: " << args[1] << '\n';
+        return 2;
+    }
+
+    // 112-D2: a live daemon owns the row; removal is only for a stopped (or
+    // stale-claimed) workspace. `removeWorkspace` re-checks this under the lock.
+    if (registry->probeLiveness(record->id) == HostLiveness::Live) {
+        err << "ymh: workspace " << record->id.value
+            << " is running; stop it first: ymh workspace stop " << record->id.value << '\n';
+        return 1;
+    }
+
+    const std::vector<WorkspaceSessionRecord> sessions = registry->listSessions(record->id);
+    out << record->id.value << '\t' << record->canonicalPath.string() << '\t' << sessions.size()
+        << " session(s)\n";
+    // 51-I24: the registry row and its junctions go; the workspace's `.ymh`
+    // tree (including sessions.db) is left untouched.
+    out << "keeping " << (record->canonicalPath / ".ymh").string() << '\n';
+
+    if (!assume_yes) {
+        if (::isatty(STDIN_FILENO) == 0) {
+            err << "ymh: refusing to remove without --yes (stdin is not a terminal)\n";
+            return 1;
+        }
+        out << "remove the registry row and its session junctions? [y/N] ";
+        out.flush();
+        std::string answer;
+        std::getline(std::cin, answer);
+        if (answer != "y" && answer != "Y" && answer != "yes" && answer != "YES" &&
+            answer != "Yes") {
+            err << "ymh: declined\n";
+            return 1;
+        }
+    }
+
+    try {
+        for (const WorkspaceSessionRecord& session : sessions) {
+            registry->removeSession(record->id, session.sessionId);
+        }
+        registry->removeWorkspace(record->id);
+    } catch (const RegistryError& error) {
+        err << "ymh: workspace remove failed: " << error.what() << '\n';
+        return 1;
+    }
+    out << "removed " << record->id.value << '\n';
+    return 0;
 }
 
 } // namespace ymh

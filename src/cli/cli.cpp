@@ -1320,6 +1320,13 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     bool        workspace_reap_yes = false;
     workspace_reap->add_option("target", workspace_reap_target, "Workspace ID or path")->required();
     workspace_reap->add_flag("--yes", workspace_reap_yes, "Skip the confirmation prompt (88-D8)");
+    CLI::App*   workspace_remove = workspace->add_subcommand(
+        "remove", "Delete a stopped workspace's registry row (keeps <workspace>/.ymh)");
+    std::string workspace_remove_target;
+    bool        workspace_remove_yes = false;
+    workspace_remove->add_option("target", workspace_remove_target, "Workspace ID or path")
+        ->required();
+    workspace_remove->add_flag("--yes", workspace_remove_yes, "Skip the confirmation prompt");
 
     CLI::App* doctor = app.add_subcommand("doctor", "Diagnose workspace ownership integrity");
     add_common(*doctor, invocation);
@@ -1402,6 +1409,10 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
             invocation.workspace_args.emplace_back("reap");
             invocation.workspace_args.push_back(workspace_reap_target);
             invocation.workspace_yes = workspace_reap_yes;
+        } else if (workspace_remove->parsed()) {
+            invocation.workspace_args.emplace_back("remove");
+            invocation.workspace_args.push_back(workspace_remove_target);
+            invocation.workspace_yes = workspace_remove_yes;
         }
         return invocation;
     }
@@ -1574,6 +1585,10 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
             if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "reap") {
                 return run_workspace_reap(invocation.workspace_args, invocation.workspace_yes, out,
                                           err);
+            }
+            if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "remove") {
+                return run_workspace_remove(invocation.workspace_args, invocation.workspace_yes,
+                                            out, err);
             }
             return run_workspace_command(invocation.workspace_args, out, err);
 

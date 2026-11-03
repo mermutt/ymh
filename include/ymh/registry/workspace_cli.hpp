@@ -17,4 +17,15 @@ int run_workspace_command(const std::vector<std::string>& args,
                           std::ostream& out,
                           std::ostream& err);
 
+// 112-D1: `ymh workspace remove <target> [--yes]`. Deletes a *non-running*
+// workspace's registry row after removing its session junction rows (mirrors
+// the switcher's delete cascade, 51-I23); `<workspace>/.ymh/` — including
+// `sessions.db` — is never deleted. A live daemon claim is refused.
+// `args` is `{"remove", "<workspace-id|path>"}`; exit codes follow `reap`
+// (2 usage/unknown target, 3 registry unavailable, 1 refused, 0 removed).
+int run_workspace_remove(const std::vector<std::string>& args,
+                         bool assume_yes,
+                         std::ostream& out,
+                         std::ostream& err);
+
 } // namespace ymh
