@@ -45,6 +45,7 @@
 #include "ymh/core/fs.hpp"
 #include "ymh/core/logging.hpp"
 #include "ymh/core/version.hpp"
+#include "ymh/execution/confinement.hpp"
 #include "ymh/execution/config.hpp"
 #include "ymh/llm/provider_registry.hpp"
 #include "ymh/mcp/mcp_manager.hpp"
@@ -208,6 +209,24 @@ std::string_view verdict_name(PolicyVerdict verdict) {
     return "?";
 }
 
+std::string_view sandbox_name(SandboxMode mode) {
+    switch (mode) {
+        case SandboxMode::Workspace:    return "workspace";
+        case SandboxMode::ReadOnly:     return "read-only";
+        case SandboxMode::Unrestricted: return "unrestricted";
+    }
+    return "?";
+}
+
+std::string_view confinement_name(ConfinementStatus status) {
+    switch (status) {
+        case ConfinementStatus::Enforced:      return "enforced";
+        case ConfinementStatus::Unavailable:   return "unavailable";
+        case ConfinementStatus::NotApplicable: return "not-applicable";
+    }
+    return "?";
+}
+
 std::string iso8601_utc(std::chrono::system_clock::time_point point) {
     const std::time_t seconds = std::chrono::system_clock::to_time_t(point);
     std::tm           utc{};
@@ -276,6 +295,15 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
                     ? std::string{"none"}
                     : std::to_string(policy.permission_timeout.count() / 1000) + "s")
             << '\n';
+        // 116-D1: the sandbox setting and whether L2 kernel confinement is
+        // actually active decide what a `default: allow` deployment still
+        // cannot touch; surface both next to the policy summary.
+        const SandboxMode sandbox = effective_sandbox_mode(config);
+        const ConfinementStatus confinement =
+            sandbox == SandboxMode::Unrestricted ? ConfinementStatus::NotApplicable
+                                                 : kernel_confinement().probe();
+        out << "  sandbox: " << sandbox_name(sandbox)
+            << "  confinement: " << confinement_name(confinement) << '\n';
     } catch (const std::exception& load_error) {
         out << "  effective: (not loaded)\n";
         err << "ymh: config error: " << load_error.what() << '\n';
