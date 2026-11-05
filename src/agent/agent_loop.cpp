@@ -52,6 +52,27 @@ std::string first_line(const std::string& text) {
     return text.substr(0, newline == std::string::npos ? text.size() : newline);
 }
 
+// 117-D1: Claude-family models habitually call the shell tool `bash` (or
+// `Bash`/`sh`) because that is the name in their training harness. ymh
+// registers only `shell`, so an unnormalized call names a tool that (a) does
+// not match any `{"tool":"shell"}` rule (it falls to the fallback Ask) and
+// (b) would fail as `UnknownTool` even if approved. Normalize before the
+// permission request leaves the loop.
+std::string canonical_tool_name(const std::string& name) {
+    if (name.empty() || name.size() > 16) {
+        return name;
+    }
+    std::string lowered;
+    lowered.reserve(name.size());
+    for (char character : name) {
+        lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
+    }
+    if (lowered == "bash" || lowered == "sh") {
+        return "shell";
+    }
+    return name;
+}
+
 // 73-D1: "blank" is empty or whitespace-only. It is a purely structural test;
 // no identity, vendor, model-name, or prompt-wording inspection happens here.
 bool is_blank(std::string_view text) {
@@ -841,7 +862,7 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
     call.id          = assembled.id;
     call.turn        = turn;
     call.step        = step;
-    call.name        = assembled.name;
+    call.name        = canonical_tool_name(assembled.name);
     call.arguments   = assembled.arguments;
     call.requestedAt = std::chrono::system_clock::now();
     session_.append(call);
