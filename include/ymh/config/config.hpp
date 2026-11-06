@@ -151,9 +151,11 @@ struct PermissionRuleSettings {
 };
 
 // 52-D15: one named permission preset. `sandbox` is one of
-// "workspace"|"read-only"|"unrestricted"; `approval` is "ask"|"never".
+// "read-only"|"workspace-write"|"danger-full-access" (119-D1; the legacy
+// "workspace"/"unrestricted" spellings remain accepted aliases, 119-D20);
+// `approval` is "ask"|"never".
 struct PermissionPresetSettings {
-    std::string sandbox  = "workspace";
+    std::string sandbox  = "workspace-write";   // 119-D37
     std::string approval = "ask";
 };
 
@@ -166,8 +168,11 @@ inline constexpr std::string_view kDangerFullAccessPreset = "danger-full-access"
 [[nodiscard]] inline std::map<std::string, PermissionPresetSettings, std::less<>>
 builtin_permission_presets() {
     std::map<std::string, PermissionPresetSettings, std::less<>> presets;
-    presets[std::string{kWorkspaceWritePreset}]   = PermissionPresetSettings{};
-    presets[std::string{kDangerFullAccessPreset}] = PermissionPresetSettings{"unrestricted", "never"};
+    // 119-D37: the seeds move to the new mode names. The legacy strings stay
+    // accepted by the validator/rank so an existing config keeps loading.
+    presets[std::string{kWorkspaceWritePreset}] = PermissionPresetSettings{};
+    presets[std::string{kDangerFullAccessPreset}] =
+        PermissionPresetSettings{"danger-full-access", "never"};
     return presets;
 }
 
@@ -184,6 +189,37 @@ builtin_permission_presets() {
 // narrow the deployment; a wider candidate is clamped, never applied.
 [[nodiscard]] PermissionPresetSettings narrow_permission_preset(
     const PermissionPresetSettings& baseline, const PermissionPresetSettings& candidate);
+
+// 119-D1/D30/D39/D48: the deployment sandbox baseline. Global-layer only: a
+// workspace (cloned repo) value could widen the boundary (90-D18). Wave 0 of
+// spec 119 parses and validates it; the provider/approval behaviour lands in
+// the later waves.
+struct SandboxSettings {
+    // "read-only" | "workspace-write" | "danger-full-access".
+    std::string mode = "workspace-write";
+    // Widest mode a session override/escalation may reach; empty => `mode`.
+    std::string max_mode;
+    // Absolute or `~`-expanded; validated and canonicalized at load.
+    std::vector<std::string> additional_writable_roots;
+    // Names removed from the child environment (119-D47 also unsets
+    // BASH_ENV/ENV/CDPATH unconditionally).
+    std::vector<std::string> env_scrub;
+    // 119-D25: opt into dsh's read-only shell.
+    bool read_only_shell = false;
+    // 119-D39: acknowledge a `~`/`$HOME`/`/` writable root.
+    bool allow_widening_roots = false;
+    // 119-D4/D48: allow a live `sandbox.set` above the deployment baseline
+    // (never above `max_mode`).
+    bool allow_session_widen = false;
+    bool allow_escalation_to_danger_full_access = false;
+    bool allow_partial_auto_approve = false;
+    bool require_full_enforcement = false;
+};
+
+// 119-D1: the deployment approval policy. "ask" | "never".
+struct ApprovalSettings {
+    std::string policy = "ask";
+};
 
 // [permissions] — mapped onto `PermissionConfig` by the CLI wiring.
 struct PermissionDefaults {
@@ -427,6 +463,8 @@ struct Config {
     UiConfig           ui;
     AgentDefaults      agent;
     WorkspaceSettings  workspace;
+    SandboxSettings    sandbox;
+    ApprovalSettings   approval;
     PermissionDefaults permissions;
     LoggingSettings    logging;
     LlmSettings        llm;
@@ -439,6 +477,9 @@ struct Config {
     GoalsSettings      goals;
     JobsSettings       jobs;
     HandoffSettings    handoff;
+    // 119-D38: deprecation/reinterpretation notes collected by the loader; the
+    // CLI prints them and the daemon logs them. Never a model input.
+    std::vector<std::string> warnings;
 };
 
 // Explicit layer sources. `global` is required (21-D12): it must be non-empty

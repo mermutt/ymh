@@ -386,11 +386,35 @@ void apply_plan(Config& config, const Json& table, const std::filesystem::path& 
         read_string(table, "section", "agent.plan", config.agent.plan_section, source);
 }
 
-void validate_sandbox_value(const std::string& value, const std::filesystem::path& source) {
-    if (value != "workspace" && value != "read-only" && value != "unrestricted") {
-        fail(source, "invalid sandbox '" + value +
-                         "' (expected workspace, read-only, or unrestricted)");
+// 119-D1/D20: the canonical mode names, with the legacy spellings accepted as
+// aliases and reported once per load (119-D38).
+std::string normalize_sandbox_mode(const std::string& value,
+                                   std::string_view label,
+                                   const std::filesystem::path& source,
+                                   std::vector<std::string>* warnings) {
+    if (value == "read-only" || value == "workspace-write" || value == "danger-full-access") {
+        return value;
     }
+    if (value == "workspace") {
+        if (warnings != nullptr) {
+            warnings->push_back(std::string{label} +
+                                ": 'workspace' is deprecated; use 'workspace-write'");
+        }
+        return "workspace-write";
+    }
+    if (value == "unrestricted") {
+        if (warnings != nullptr) {
+            warnings->push_back(std::string{label} +
+                                ": 'unrestricted' is deprecated; use 'danger-full-access'");
+        }
+        return "danger-full-access";
+    }
+    fail(source, "invalid sandbox '" + value +
+                     "' (expected read-only, workspace-write, or danger-full-access)");
+}
+
+void validate_sandbox_value(const std::string& value, const std::filesystem::path& source) {
+    (void)normalize_sandbox_mode(value, "sandbox", source, nullptr);
 }
 
 void validate_approval_value(const std::string& value, const std::filesystem::path& source) {
@@ -446,8 +470,14 @@ void apply_agent(Config& config, const Json& table, const std::filesystem::path&
     if (!global_layer && member(table, "sandbox") != nullptr) {
         fail(source, "'agent.sandbox' is global-layer only");
     }
-    config.agent.sandbox = read_string(table, "sandbox", "agent", config.agent.sandbox, source);
-    validate_sandbox_value(config.agent.sandbox, source);
+    if (member(table, "sandbox") != nullptr) {
+        config.agent.sandbox = read_string(table, "sandbox", "agent", config.agent.sandbox, source);
+        validate_sandbox_value(config.agent.sandbox, source);
+        // 119-D20: keep the legacy knob working and mirror it into the new
+        // baseline field, reporting the alias once per load.
+        config.sandbox.mode = normalize_sandbox_mode(config.agent.sandbox, "agent.sandbox", source,
+                                                     &config.warnings);
+    }
     config.agent.compaction.threshold_tokens = static_cast<std::size_t>(read_int64(
         table, "compaction_threshold_tokens", "agent",
         static_cast<std::int64_t>(config.agent.compaction.threshold_tokens), source));
@@ -1361,12 +1391,74 @@ void apply_tools(Config& config, const Json& table, const std::filesystem::path&
         read_int64(table, "timeout_ms", "tools", config.tools.timeout_ms, source);
 }
 
+void apply_sandbox(Config& config, const Json& table, const std::filesystem::path& source,
+                   bool global_layer) {
+    if (!global_layer) {
+        fail(source, "'sandbox' is global-layer only");
+    }
+    reject_unknown(table, "sandbox",
+                   {"mode", "max_mode", "additional_writable_roots", "env_scrub",
+                    "read_only_shell", "allow_widening_roots", "allow_session_widen",
+                    "allow_escalation_to_danger_full_access", "allow_partial_auto_approve",
+                    "require_full_enforcement"},
+                   source);
+    if (member(table, "mode") != nullptr) {
+        config.sandbox.mode = normalize_sandbox_mode(
+            read_string(table, "mode", "sandbox", config.sandbox.mode, source), "sandbox.mode",
+            source, &config.warnings);
+        // Wave 0 keeps the shipped path authoritative: mirror the new value
+        // onto `agent.sandbox` so the existing resolver honours it.
+        config.agent.sandbox = config.sandbox.mode == "read-only"    ? "read-only"
+                               : config.sandbox.mode == "danger-full-access" ? "unrestricted"
+                                                                             : "workspace";
+    }
+    if (member(table, "max_mode") != nullptr) {
+        config.sandbox.max_mode = normalize_sandbox_mode(
+            read_string(table, "max_mode", "sandbox", config.sandbox.max_mode, source),
+            "sandbox.max_mode", source, &config.warnings);
+    }
+    config.sandbox.additional_writable_roots =
+        read_string_array(table, "additional_writable_roots", "sandbox", source);
+    config.sandbox.env_scrub = read_string_array(table, "env_scrub", "sandbox", source);
+    for (const std::string& name : config.sandbox.env_scrub) {
+        if (name.empty() || name.find('=') != std::string::npos) {
+            fail(source, "'sandbox.env_scrub' entries must be variable names");
+        }
+    }
+    config.sandbox.read_only_shell =
+        read_bool(table, "read_only_shell", "sandbox", config.sandbox.read_only_shell, source);
+    config.sandbox.allow_widening_roots = read_bool(
+        table, "allow_widening_roots", "sandbox", config.sandbox.allow_widening_roots, source);
+    config.sandbox.allow_session_widen = read_bool(
+        table, "allow_session_widen", "sandbox", config.sandbox.allow_session_widen, source);
+    config.sandbox.allow_escalation_to_danger_full_access =
+        read_bool(table, "allow_escalation_to_danger_full_access", "sandbox",
+                  config.sandbox.allow_escalation_to_danger_full_access, source);
+    config.sandbox.allow_partial_auto_approve =
+        read_bool(table, "allow_partial_auto_approve", "sandbox",
+                  config.sandbox.allow_partial_auto_approve, source);
+    config.sandbox.require_full_enforcement =
+        read_bool(table, "require_full_enforcement", "sandbox",
+                  config.sandbox.require_full_enforcement, source);
+}
+
+void apply_approval(Config& config, const Json& table, const std::filesystem::path& source,
+                    bool global_layer) {
+    if (!global_layer) {
+        fail(source, "'approval' is global-layer only");
+    }
+    reject_unknown(table, "approval", {"policy"}, source);
+    config.approval.policy =
+        read_string(table, "policy", "approval", config.approval.policy, source);
+    validate_approval_value(config.approval.policy, source);
+}
+
 void apply_document(Config& config, const Json& table, const std::filesystem::path& source,
                     bool global_layer) {
     reject_unknown(table, "",
-                   {"ui", "agent", "workspace", "permissions", "logging", "llm", "mcp", "skills",
-                    "session", "prompt", "tools", "presets", "goals", "jobs", "handoff",
-                    "mcp_servers"},
+                   {"ui", "agent", "workspace", "sandbox", "approval", "permissions", "logging",
+                    "llm", "mcp", "skills", "session", "prompt", "tools", "presets", "goals",
+                    "jobs", "handoff", "mcp_servers"},
                    source);
 
     const auto section = [&](std::string_view name) -> const Json* {
@@ -1401,14 +1493,39 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
     if (const Json* ui = section("ui"); ui != nullptr) {
         apply_ui(config, *ui, source);
     }
-    if (const Json* agent = section("agent"); agent != nullptr) {
-        apply_agent(config, *agent, source, global_layer);
+    const Json* agent_section       = section("agent");
+    const Json* sandbox_section     = section("sandbox");
+    const Json* approval_section    = section("approval");
+    const Json* permissions_section = section("permissions");
+
+    // 119-D30/SB-F19: exactly one baseline source, or one boundary knob.
+    const bool agent_sandbox_key =
+        agent_section != nullptr && member(*agent_section, "sandbox") != nullptr;
+    const bool sandbox_mode_key =
+        sandbox_section != nullptr && member(*sandbox_section, "mode") != nullptr;
+    const bool default_preset_key =
+        permissions_section != nullptr && member(*permissions_section, "default_preset") != nullptr;
+    if (agent_sandbox_key && sandbox_mode_key) {
+        fail(source, "'agent.sandbox' and 'sandbox.mode' are mutually exclusive");
+    }
+    if (sandbox_mode_key && default_preset_key) {
+        fail(source, "'sandbox.mode' and 'permissions.default_preset' are mutually exclusive");
+    }
+
+    if (agent_section != nullptr) {
+        apply_agent(config, *agent_section, source, global_layer);
+    }
+    if (sandbox_section != nullptr) {
+        apply_sandbox(config, *sandbox_section, source, global_layer);
+    }
+    if (approval_section != nullptr) {
+        apply_approval(config, *approval_section, source, global_layer);
     }
     if (const Json* workspace = section("workspace"); workspace != nullptr) {
         apply_workspace(config, *workspace, source);
     }
-    if (const Json* permissions = section("permissions"); permissions != nullptr) {
-        apply_permissions(config, *permissions, source, global_layer);
+    if (permissions_section != nullptr) {
+        apply_permissions(config, *permissions_section, source, global_layer);
     }
     if (const Json* logging = section("logging"); logging != nullptr) {
         apply_logging(config, *logging, source, global_layer);
@@ -1695,6 +1812,38 @@ void apply_mcp_servers_object(McpSettings& mcp, const Json& table,
     }
 }
 
+// 119-D39: component-wise containment (never a string-prefix test).
+bool path_below(const std::filesystem::path& base, const std::filesystem::path& candidate) {
+    auto base_it      = base.begin();
+    auto candidate_it = candidate.begin();
+    for (; base_it != base.end(); ++base_it, ++candidate_it) {
+        if (candidate_it == candidate.end() || *base_it != *candidate_it) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 119-D39: `~`, `~/x`, `$HOME`, `${HOME}` expansion for writable roots.
+std::string expand_home_root(std::string_view raw, const std::optional<std::string>& home) {
+    if (!home.has_value()) {
+        return std::string{raw};
+    }
+    if (raw == "~" || raw == "$HOME" || raw == "${HOME}") {
+        return *home;
+    }
+    if (raw.starts_with("~/")) {
+        return *home + std::string{raw.substr(1)};
+    }
+    if (raw.starts_with("$HOME/")) {
+        return *home + std::string{raw.substr(5)};
+    }
+    if (raw.starts_with("${HOME}/")) {
+        return *home + std::string{raw.substr(7)};
+    }
+    return std::string{raw};
+}
+
 std::optional<std::string> env_value(std::string_view name) {
     const char* raw = std::getenv(std::string{name}.c_str());
     if (raw == nullptr || *raw == '\0') {
@@ -1703,24 +1852,85 @@ std::optional<std::string> env_value(std::string_view name) {
     return std::string{raw};
 }
 
+// 119-D39/D42: validate and canonicalize the declared writable roots once, at
+// load time. A root that is/aliases `/`, `$HOME`, `/home`, `/etc`, `/usr`, or
+// an ancestor of the workspace would silently turn `workspace-write` into
+// `danger-full-access`; `allow_widening_roots` acknowledges it explicitly.
+void validate_sandbox_settings(Config& config, const std::filesystem::path& workspace_root) {
+    if (config.sandbox.additional_writable_roots.empty()) {
+        return;
+    }
+    const std::optional<std::string> home = env_value("HOME");
+    std::filesystem::path            home_path;
+    std::filesystem::path            workspace;
+    std::error_code                  ec;
+    if (home.has_value()) {
+        home_path = std::filesystem::weakly_canonical(*home, ec);
+        if (ec) {
+            home_path = std::filesystem::path{*home}.lexically_normal();
+        }
+    }
+    if (!workspace_root.empty()) {
+        ec.clear();
+        workspace = std::filesystem::weakly_canonical(workspace_root, ec);
+        if (ec) {
+            workspace = workspace_root.lexically_normal();
+        }
+    }
+    for (std::string& raw : config.sandbox.additional_writable_roots) {
+        const std::string expanded = expand_home_root(raw, home);
+        if (expanded.empty() || expanded.front() != '/') {
+            throw ConfigError("sandbox.additional_writable_roots: '" + raw +
+                              "' must be absolute or ~-prefixed");
+        }
+        ec.clear();
+        std::filesystem::path canonical = std::filesystem::weakly_canonical(expanded, ec);
+        if (ec) {
+            canonical = std::filesystem::path{expanded}.lexically_normal();
+        }
+        const bool forbidden_system =
+            canonical == std::filesystem::path{"/"} ||
+            canonical == std::filesystem::path{"/home"} ||
+            canonical == std::filesystem::path{"/etc"} ||
+            canonical == std::filesystem::path{"/usr"};
+        const bool touches_home =
+            !home_path.empty() &&
+            (canonical == home_path || path_below(canonical, home_path));
+        const bool ancestor_of_workspace =
+            !workspace.empty() && canonical != workspace && path_below(canonical, workspace);
+        if (forbidden_system || touches_home || ancestor_of_workspace) {
+            if (!config.sandbox.allow_widening_roots) {
+                throw ConfigError("sandbox.additional_writable_roots: '" + raw +
+                                  "' widens the sandbox; set sandbox.allow_widening_roots");
+            }
+            config.warnings.push_back("sandbox.additional_writable_roots: '" + raw +
+                                      "' widens the sandbox (allowed by allow_widening_roots)");
+        }
+        raw = canonical.string();
+    }
+}
+
+
 int sandbox_rank(std::string_view sandbox) {
     if (sandbox == "read-only") {
         return 0;
     }
-    if (sandbox == "workspace") {
+    if (sandbox == "workspace-write" || sandbox == "workspace") {
         return 1;
     }
-    if (sandbox == "unrestricted") {
+    if (sandbox == "danger-full-access" || sandbox == "unrestricted") {
         return 2;
     }
     throw ConfigError("invalid sandbox '" + std::string{sandbox} + "'");
 }
 
+// 119-D37: under the new `never` semantics, `never` is NARROWER than `ask`
+// (it permits strictly less), so the rank inverts relative to 52-D15.
 int approval_rank(std::string_view approval) {
-    if (approval == "ask") {
+    if (approval == "never") {
         return 0;
     }
-    if (approval == "never") {
+    if (approval == "ask") {
         return 1;
     }
     throw ConfigError("invalid approval '" + std::string{approval} + "'");
@@ -1762,7 +1972,13 @@ PermissionPresetSettings deployment_permission_baseline(const Config& config) {
                                          config.permissions.default_preset);
     }
     PermissionPresetSettings baseline;
-    baseline.sandbox  = config.agent.sandbox;
+    // 119-D1: the new `sandbox.mode` is the baseline. A programmatic Config
+    // that only sets the legacy `agent.sandbox` (tests, old callers) still
+    // wins when the two disagree and the new field is at its default.
+    baseline.sandbox = config.agent.sandbox;
+    if (config.sandbox.mode != "workspace-write" || config.agent.sandbox == "workspace") {
+        baseline.sandbox = config.sandbox.mode;
+    }
     baseline.approval = "ask";
     return baseline;
 }
@@ -1787,13 +2003,14 @@ SandboxMode effective_sandbox_mode(const Config& config) {
     const PermissionPresetSettings effective = narrow_permission_preset(
         PermissionPresetSettings{config.agent.sandbox, "ask"},
         deployment_permission_baseline(config));
-    if (effective.sandbox == "workspace") {
+    // 119-D1: the new names map onto the shipped enum until Wave 1 moves it.
+    if (effective.sandbox == "workspace" || effective.sandbox == "workspace-write") {
         return SandboxMode::Workspace;
     }
     if (effective.sandbox == "read-only") {
         return SandboxMode::ReadOnly;
     }
-    if (effective.sandbox == "unrestricted") {
+    if (effective.sandbox == "unrestricted" || effective.sandbox == "danger-full-access") {
         return SandboxMode::Unrestricted;
     }
     throw ConfigError("invalid sandbox '" + effective.sandbox + "'");
@@ -2002,6 +2219,7 @@ Config load_config(const ConfigPaths& paths) {
     apply_jsonc_file(config, paths.workspace, /*required=*/false);
     apply_env_overrides(config);
     validate_llm_references(config);
+    validate_sandbox_settings(config, paths.workspace);
     return config;
 }
 

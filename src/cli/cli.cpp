@@ -209,15 +209,6 @@ std::string_view verdict_name(PolicyVerdict verdict) {
     return "?";
 }
 
-std::string_view sandbox_name(SandboxMode mode) {
-    switch (mode) {
-        case SandboxMode::Workspace:    return "workspace";
-        case SandboxMode::ReadOnly:     return "read-only";
-        case SandboxMode::Unrestricted: return "unrestricted";
-    }
-    return "?";
-}
-
 std::string_view confinement_name(ConfinementStatus status) {
     switch (status) {
         case ConfinementStatus::Enforced:      return "enforced";
@@ -302,8 +293,18 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
         const ConfinementStatus confinement =
             sandbox == SandboxMode::Unrestricted ? ConfinementStatus::NotApplicable
                                                  : kernel_confinement().probe();
-        out << "  sandbox: " << sandbox_name(sandbox)
+        // 119-D1/D38: report the parsed baseline (canonical mode names), the
+        // effective ceiling, and the approval policy; deprecation notes go to
+        // stderr so the machine-readable summary stays on stdout.
+        const std::string& max_mode =
+            config.sandbox.max_mode.empty() ? config.sandbox.mode : config.sandbox.max_mode;
+        out << "  sandbox: " << config.sandbox.mode
+            << "  approval: " << config.approval.policy
+            << "  max_mode: " << max_mode
             << "  confinement: " << confinement_name(confinement) << '\n';
+        for (const std::string& warning : config.warnings) {
+            err << "note: " << warning << '\n';
+        }
     } catch (const std::exception& load_error) {
         out << "  effective: (not loaded)\n";
         err << "ymh: config error: " << load_error.what() << '\n';
