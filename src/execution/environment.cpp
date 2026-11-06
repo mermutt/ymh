@@ -1,8 +1,10 @@
 #include "ymh/execution/environment.hpp"
 
 #include <atomic>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <unistd.h>
 
@@ -28,6 +30,54 @@ bool component_prefix(const std::filesystem::path& base,
         }
     }
     return true;
+}
+
+// 118-D1: link one real global git file into the throwaway home. The link is
+// read-only in effect: Landlock grants RW only on the workspace root and the
+// throwaway `home`/`tmpdir`, so a write that resolves through the link is denied
+// and the real file is never touched. A missing target is skipped; an existing
+// entry is never replaced.
+void link_git_global(const std::filesystem::path& target,
+                     const std::filesystem::path& link) {
+    std::error_code ec;
+    if (!std::filesystem::exists(target, ec)) {
+        return;
+    }
+    ec.clear();
+    if (std::filesystem::exists(link, ec) || std::filesystem::is_symlink(link, ec)) {
+        return;
+    }
+    ec.clear();
+    std::filesystem::create_directories(link.parent_path(), ec);
+    ec.clear();
+    std::filesystem::create_symlink(target, link, ec);
+}
+
+// 118-D1: the parent's git global config directory. Git resolves the XDG files
+// against `$XDG_CONFIG_HOME` when set, otherwise `$HOME/.config`. The child has
+// neither variable (the spawn env is minimal), so both map onto the throwaway
+// home's `.config/git`.
+std::filesystem::path git_xdg_dir(const std::filesystem::path& real_home) {
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg != nullptr && *xdg != '\0') {
+        const std::filesystem::path candidate{xdg};
+        if (candidate.is_absolute()) {
+            return candidate / "git";
+        }
+    }
+    return real_home / ".config" / "git";
+}
+
+// 118-D1: the files git reads from `$HOME` before it reports `user.name` /
+// `user.email` as unset. `.gitconfig` (legacy) plus the XDG trio; the last one
+// wins in git's own precedence order, which the links preserve untouched.
+void link_git_globals(const std::filesystem::path& real_home,
+                      const std::filesystem::path& spawn_home) {
+    link_git_global(real_home / ".gitconfig", spawn_home / ".gitconfig");
+    const std::filesystem::path xdg = git_xdg_dir(real_home);
+    for (std::string_view name : {"config", "attributes", "ignore"}) {
+        link_git_global(xdg / name, spawn_home / ".config" / "git" / name);
+    }
 }
 
 } // namespace
@@ -110,6 +160,14 @@ SpawnConfinement::SpawnConfinement(const std::filesystem::path& workspace_root,
     tmp_  = base_ / "tmp";
     std::filesystem::create_directories(home_, ec);
     std::filesystem::create_directories(tmp_, ec);
+
+    // 118-D1: the throwaway home keeps *writes* throwaway, but git must still
+    // see the identity the user configured. Without this, `git config user.name`
+    // inside a sandboxed shell is empty and a commit has no author.
+    if (const char* real_home = std::getenv("HOME");
+        real_home != nullptr && *real_home != '\0') {
+        link_git_globals(std::filesystem::path{real_home}, home_);
+    }
 
     policy_.root               = workspace_root;
     policy_.home               = home_;

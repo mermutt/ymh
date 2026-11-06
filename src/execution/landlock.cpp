@@ -41,6 +41,9 @@ constexpr std::uint64_t kFsIoctlDev   = 1ULL << 15;
 
 constexpr std::uint64_t kReadRights = kFsExecute | kFsReadFile | kFsReadDir;
 constexpr std::uint64_t kWriteRights = kFsWriteFile | kFsTruncate;
+// A non-directory rule (`/dev/null`, 118-D2) may not carry `READ_DIR`: the
+// kernel rejects the whole ruleset with EINVAL, so the file rule is explicit.
+constexpr std::uint64_t kDeviceRights = kFsReadFile | kFsWriteFile | kFsTruncate;
 constexpr std::uint64_t kMakeRights =
     kFsMakeChar | kFsMakeDir | kFsMakeReg | kFsMakeSock | kFsMakeFifo;
 constexpr std::uint64_t kRemoveRights = kFsRemoveFile | kFsRemoveDir;
@@ -118,6 +121,18 @@ public:
         }
         for (const std::filesystem::path& ro : policy.ro_paths) {
             add_path_rule(ruleset_fd, ro, kReadRights);
+        }
+        // 118-D2: `/dev/null` is the one writable device a well-behaved command
+        // needs: git opens it O_RDWR at startup (`git --version` dies without
+        // it) and `2>/dev/null` is ubiquitous. It discards every byte, so a
+        // write cannot leak or persist anything. Granted here rather than
+        // through `SpawnConfinement` so every spawn gets it, including a
+        // read-only workspace. A missing node is skipped, never fatal.
+        {
+            std::error_code dev_ec;
+            if (std::filesystem::exists("/dev/null", dev_ec)) {
+                add_path_rule(ruleset_fd, "/dev/null", kDeviceRights);
+            }
         }
 
         if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {

@@ -89,6 +89,12 @@ void set_confinement_status_fd(int fd) noexcept;
 // under a unique directory, plus the `ConfinementPolicy` that names them. The
 // dirs are created at construction and removed at destruction (state lifetime:
 // the tool call). `policy().root` is the workspace root; `ro_paths` is `{ "/" }`.
+//
+// 118-D1: the throwaway home is seeded with read-only links to the parent's
+// global git files (`~/.gitconfig`, `$XDG_CONFIG_HOME/git/{config,attributes,
+// ignore}`), so `git` still sees the user's identity and ignore rules while a
+// write through those links stays denied by Landlock (which grants RW only on
+// `root`/`home`/`tmpdir`).
 class SpawnConfinement {
 public:
     explicit SpawnConfinement(const std::filesystem::path& workspace_root,
