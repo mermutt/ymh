@@ -417,8 +417,14 @@ public:
             "output. Prefer the dedicated tools (read_file, grep, glob) over their shell "
             "equivalents; avoid commands that may produce a very large amount of output, and set "
             "timeout_ms for commands that may run long.",
-            object_schema(nlohmann::json{{"command", string_type()},
-                                         {"timeout_ms", integer_type()}},
+            object_schema(nlohmann::json{
+                              {"command", string_type()},
+                              {"timeout_ms", integer_type()},
+                              {"sandbox_permissions",
+                               nlohmann::json{{"type", "string"},
+                                              {"enum", {"workspace-write",
+                                                        "danger-full-access"}}}},
+                              {"justification", string_type()}},
                           nlohmann::json::array({"command"})),
             true};
     }
@@ -443,8 +449,12 @@ public:
         request.env_mode    = ProcessEnvMode::Inherit;
         request.environment = {{"PWD", context.root().string()}};
         request.env_unset   = {"BASH_ENV", "ENV", "CDPATH"};
+        // 119-D31: prefer the policy resolved for this call (per-session mode,
+        // escalation); the deployment default is the fallback.
         const SandboxPolicy deployment =
-            context.execution().sandboxPolicy().resolveDeployment();
+            context.sandboxPolicy().has_value()
+                ? *context.sandboxPolicy()
+                : context.execution().sandboxPolicy().resolveDeployment();
         if (deployment.mode != SandboxMode::DangerFullAccess) {
             SandboxPolicy policy  = deployment;
             policy.workspace_root = context.root();

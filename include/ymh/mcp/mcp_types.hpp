@@ -227,6 +227,12 @@ struct McpConfig {
     // 50-D3.5: capture each stdio child's raw stderr to a per-server 0600 file
     // under <workspace>/.ymh/mcp/. Off by default; global-layer only.
     bool                         log_child_stderr{false};
+
+    // 73-D3: the directory the daemon was launched from (the supervisor's
+    // invocation cwd). A stdio server's relative `command` is resolved against
+    // it, so a relative interpreter/venv path behaves as it would in the user's
+    // shell instead of against the child's cwd. Empty => no resolution.
+    std::filesystem::path        launch_dir;
 };
 
 namespace payload {

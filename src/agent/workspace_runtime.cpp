@@ -332,8 +332,8 @@ public:
         // environment and the SessionManager exist, then injected.
         sandbox_policy_ = std::make_unique<SessionSandboxPolicyService>(
             sessions_, PermissionPresetSettings{config.sandbox.mode, config.approval.policy},
-            config.sandbox.max_mode, sandbox_writable_roots(config),
-            config.permissions.presets);
+            config.sandbox.max_mode, config.sandbox.allow_escalation_to_danger_full_access,
+            sandbox_writable_roots(config), config.permissions.presets);
         environment_->setSandboxPolicyService(sandbox_policy_.get());
 
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
@@ -348,7 +348,9 @@ public:
                                            attach_permission_resolver)) {
             registrations_.push_back(tools_.add(make_skill_tool(skill_catalog_)));
         }
-        mcp_ = std::make_unique<McpManager>(to_mcp_config(config), tool_config_,
+        McpConfig mcp_config = to_mcp_config(config);
+        mcp_config.launch_dir = launch_dir; // 73-D3: shell-like relative-command base
+        mcp_ = std::make_unique<McpManager>(std::move(mcp_config), tool_config_,
                                             *environment_, governor_, tools_, bus_,
                                             category_logger(LogCategory::Mcp));
         if (mcp_client_factory) {

@@ -45,7 +45,11 @@ nlohmann::json terminal_schema() {
           {"append_newline", boolean_type()},
           {"wait_ms", integer_type()},
           {"max_bytes", integer_type()},
-          {"signal", string_type()}}},
+          {"signal", string_type()},
+          {"sandbox_permissions",
+           nlohmann::json{{"type", "string"},
+                          {"enum", {"workspace-write", "danger-full-access"}}}},
+          {"justification", string_type()}}},
         {"required", nlohmann::json::array({"action"})},
         {"additionalProperties", false}};
 }
@@ -201,8 +205,12 @@ private:
         // policy is fixed at open (D29).
         request.environment = {{"PWD", request.cwd.string()}};
         request.env_unset   = {"BASH_ENV", "ENV", "CDPATH"};
+        // 119-D31: prefer the policy resolved for this call (per-session mode,
+        // escalation); the deployment default is the fallback.
         const SandboxPolicy deployment =
-            context.execution().sandboxPolicy().resolveDeployment();
+            context.sandboxPolicy().has_value()
+                ? *context.sandboxPolicy()
+                : context.execution().sandboxPolicy().resolveDeployment();
         if (deployment.mode != SandboxMode::DangerFullAccess) {
             SandboxPolicy policy  = deployment;
             policy.workspace_root = context.root();

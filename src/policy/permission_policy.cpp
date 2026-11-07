@@ -438,6 +438,14 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     if (request.force_ask) {
         return PolicyVerdict::Ask;
     }
+    // 119-D22: an escalation request is always approval-gated, even under a
+    // fold that would otherwise allow it. `never` rejects in the broker/gate.
+    if (request.escalation) {
+        if (reason != nullptr) {
+            *reason = "permission:escalation";
+        }
+        return PolicyVerdict::Ask;
+    }
 
     // 90-D13/H1: paths inside `.git`/`.ymh` are a hard deny after the 89 guard,
     // ReadOnly, and force_ask, and before the rule fold and every grant.

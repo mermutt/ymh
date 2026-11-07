@@ -65,6 +65,7 @@ struct SandboxFacts {
 struct EscalationState {
     std::optional<ToolCallId> last_denied_call;
     std::string               last_denied_command;
+    TurnId                    turn{};
     bool                      used = false;
 };
 

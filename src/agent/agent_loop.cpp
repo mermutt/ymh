@@ -854,6 +854,10 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
                                                        TurnId turn, StepId step) {
     PreparedToolCall   plan;
     payload::ToolCall& call = plan.call;
+    if (escalation_.turn != turn) {
+        escalation_ = EscalationState{};
+        escalation_.turn = turn;
+    }
     CancellationToken  turnToken;
     {
         std::lock_guard<std::mutex> lock(control_mutex_);
@@ -906,12 +910,12 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
     // 90-D2: populate the path dimension from the tool arguments. This is a
     // pure lexical mapping; it never resolves, stats, or canonicalizes.
     request.path = request_path_target(call.name, call.arguments, request.root);
-    // 119-D3/D31: resolve the per-session policy once for this call. Wave 3
-    // uses the same carried value for the decision and the spawn.
+    // 119-D3/D31: resolve the per-session policy once for this call; the same
+    // value is carried to the decision and to the spawn.
+    std::optional<SandboxPolicy> carried;
     if (services_.execution != nullptr) {
-        const SandboxPolicy resolved =
-            services_.execution->sandboxPolicy().resolve(request);
-        request.sandbox  = resolved.mode;
+        carried          = services_.execution->sandboxPolicy().resolve(request);
+        request.sandbox  = carried->mode;
         request.approval = services_.execution->sandboxPolicy().approvalPolicy(request.session);
     } else {
         request.sandbox = config_.sandbox;
@@ -928,10 +932,24 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         request.force_ask = true;
     }
 
+    // 119-D22: validate an escalation retry before any prompt. A malformed
+    // attempt is rejected outright; a valid one forces the approval flow.
+    const bool shell_tool = call.name == "shell" || call.name == "terminal";
+    std::optional<EscalationRequest> escalation_request;
+    bool escalation_attempted = false;
+    if (shell_tool && services_.execution != nullptr) {
+        escalation_attempted = request.arguments.is_object() &&
+                               request.arguments.contains("sandbox_permissions");
+        escalation_request =
+            services_.execution->sandboxPolicy().validateEscalation(request, escalation_);
+        if (escalation_request.has_value()) {
+            request.escalation = true;
+        }
+    }
+
     // 119-D33: the composed decision. A confined, non-critical shell call is
     // auto-approved (the kernel is the approval); `danger` + `never` is the
     // only no-request unconfined combination. Rule/hard denies still win.
-    const bool shell_tool = call.name == "shell" || call.name == "terminal";
     const CriticalPathResult critical =
         shell_tool ? critical_path(request) : CriticalPathResult{};
     request.critical = critical.critical;
@@ -954,7 +972,18 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
     std::string                     reason;
     bool                            composed = false;
 
-    if (auto_allow) {
+    if (escalation_attempted && !escalation_request.has_value()) {
+        decision = payload::PermissionDecisionKind::Deny;
+        reason   = "escalation:invalid";
+        composed = true;
+        payload::PermissionDecision recorded;
+        recorded.call     = call.id;
+        recorded.decision = decision;
+        recorded.reason   = reason;
+        session_.append(recorded);
+    }
+
+    if (!composed && auto_allow) {
         decision = payload::PermissionDecisionKind::Allow;
         reason   = request.sandbox == SandboxMode::DangerFullAccess
                        ? "sandbox:unconfined-no-ask"
@@ -1035,7 +1064,25 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         }
     }
 
+    if (escalation_request.has_value() &&
+        decision != payload::PermissionDecisionKind::Deny) {
+        services_.execution->sandboxPolicy().grantEscalation(*escalation_request, call.id, 0);
+        escalation_.used = true;
+        carried          = services_.execution->sandboxPolicy().resolve(request);
+        request.sandbox  = carried->mode;
+    }
+    if (decision == payload::PermissionDecisionKind::Deny && shell_tool) {
+        const auto command_it = request.arguments.find("command");
+        if (command_it != request.arguments.end() && command_it->is_string()) {
+            escalation_.last_denied_call    = call.id;
+            escalation_.last_denied_command = command_it->get<std::string>();
+            escalation_.turn                = turn;
+            escalation_.used                = false;
+        }
+    }
+
     plan.decision = decision;
+    plan.sandbox  = std::move(carried);
     if (decision == payload::PermissionDecisionKind::Deny) {
         payload::ToolResult denied;
         denied.id      = call.id;
@@ -1075,7 +1122,8 @@ payload::ToolResult AgentLoop::runToolCall(const PreparedToolCall& plan) {
         services_.governor->caps().session_output_ring_bytes, std::move(live));
     ToolContext context(*services_.execution, session_, *services_.logger, plan.token,
                         *services_.governor, call_output, handle, plan.call.id,
-                        plan.call.turn, plan.call.step, deadline);
+                        plan.call.turn, plan.call.step, deadline, ToolContext::Clock::now,
+                        plan.sandbox);
     try {
         result = services_.tools->execute(plan.call, context).get();
     } catch (const std::exception& error) {

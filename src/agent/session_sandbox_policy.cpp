@@ -16,6 +16,15 @@ SandboxMode parse_mode(std::string_view mode) noexcept {
     return SandboxMode::WorkspaceWrite;
 }
 
+std::string mode_name(SandboxMode mode) noexcept {
+    switch (mode) {
+        case SandboxMode::ReadOnly:         return "read-only";
+        case SandboxMode::WorkspaceWrite:   return "workspace-write";
+        case SandboxMode::DangerFullAccess: return "danger-full-access";
+    }
+    return "workspace-write";
+}
+
 ApprovalPolicy parse_policy(std::string_view policy) noexcept {
     return policy == "never" ? ApprovalPolicy::Never : ApprovalPolicy::Ask;
 }
@@ -24,11 +33,12 @@ ApprovalPolicy parse_policy(std::string_view policy) noexcept {
 
 SessionSandboxPolicyService::SessionSandboxPolicyService(
     SessionManager& sessions, PermissionPresetSettings deployment, std::string max_mode,
-    std::vector<std::filesystem::path> roots,
+    bool allow_escalation_to_danger_full_access, std::vector<std::filesystem::path> roots,
     std::map<std::string, PermissionPresetSettings, std::less<>> presets)
     : sessions_(sessions),
       deployment_(std::move(deployment)),
       max_mode_(std::move(max_mode)),
+      allow_danger_(allow_escalation_to_danger_full_access),
       roots_(std::move(roots)),
       presets_(std::move(presets)) {}
 
@@ -82,6 +92,14 @@ SandboxPolicy SessionSandboxPolicyService::resolve(const PermissionRequest& requ
     SandboxPolicy policy = resolveDeployment();
     policy.mode          = effectiveMode(stateFor(request.session));
     policy.workspace_root = request.root;
+    // 119-D22: consume the single-use grant bound to this retry call.
+    {
+        std::lock_guard<std::mutex> lock(grant_mutex_);
+        if (grant_mode_.has_value() && grant_call_ == request.call) {
+            policy.mode = *grant_mode_;
+            grant_mode_.reset();
+        }
+    }
     return policy;
 }
 
@@ -98,14 +116,56 @@ ApprovalPolicy SessionSandboxPolicyService::approvalPolicy(const SessionId& id) 
 }
 
 std::optional<EscalationRequest> SessionSandboxPolicyService::validateEscalation(
-    const PermissionRequest&, const EscalationState&) const {
-    // Wave 3 enables the one-shot escalation.
-    return std::nullopt;
+    const PermissionRequest& request, const EscalationState& state) const {
+    if (request.tool != "shell" && request.tool != "terminal") {
+        return std::nullopt;
+    }
+    const auto mode_it = request.arguments.find("sandbox_permissions");
+    const auto why_it  = request.arguments.find("justification");
+    if (mode_it == request.arguments.end() || !mode_it->is_string() ||
+        why_it == request.arguments.end() || !why_it->is_string() ||
+        why_it->get<std::string>().empty()) {
+        return std::nullopt;
+    }
+    if (!state.last_denied_call.has_value() || state.used ||
+        request.call == *state.last_denied_call ||
+        request.turn != state.turn) {
+        return std::nullopt;
+    }
+    const auto command_it = request.arguments.find("command");
+    const std::string command =
+        command_it != request.arguments.end() && command_it->is_string()
+            ? command_it->get<std::string>()
+            : std::string{};
+    if (command.empty() || command != state.last_denied_command) {
+        return std::nullopt;
+    }
+    const SandboxMode requested = parse_mode(mode_it->get<std::string>());
+    if (mode_it->get<std::string>() != "workspace-write" &&
+        mode_it->get<std::string>() != "danger-full-access") {
+        return std::nullopt;
+    }
+    const SandboxMode base = effectiveMode(stateFor(request.session));
+    if (sandbox_rank(mode_name(requested)) <= sandbox_rank(mode_name(base))) {
+        return std::nullopt;
+    }
+    if (!max_mode_.empty() &&
+        sandbox_rank(mode_name(requested)) > sandbox_rank(max_mode_)) {
+        return std::nullopt;
+    }
+    if (requested == SandboxMode::DangerFullAccess && !allow_danger_) {
+        return std::nullopt;
+    }
+    return EscalationRequest{*state.last_denied_call, command, requested};
 }
 
-void SessionSandboxPolicyService::grantEscalation(const EscalationRequest&, ToolCallId,
-                                                  std::uint64_t) {
-    // Wave 3.
+void SessionSandboxPolicyService::grantEscalation(const EscalationRequest& request,
+                                                  ToolCallId retry_call,
+                                                  std::uint64_t approved_generation) {
+    std::lock_guard<std::mutex> lock(grant_mutex_);
+    grant_mode_       = request.mode;
+    grant_call_       = std::move(retry_call);
+    grant_generation_ = approved_generation;
 }
 
 } // namespace ymh

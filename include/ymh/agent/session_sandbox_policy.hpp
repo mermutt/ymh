@@ -6,7 +6,9 @@
 // answers the agent loop + broker. The deployment-only fallback lives in
 // `execution/sandbox.hpp` and is used when a session is not resident.
 
+#include <cstdint>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,7 +25,7 @@ public:
     SessionSandboxPolicyService(
         SessionManager& sessions,
         PermissionPresetSettings deployment,
-        std::string max_mode,
+        std::string max_mode, bool allow_escalation_to_danger_full_access,
         std::vector<std::filesystem::path> roots,
         std::map<std::string, PermissionPresetSettings, std::less<>> presets);
 
@@ -47,6 +49,11 @@ private:
     SessionManager&                                              sessions_;
     PermissionPresetSettings                                     deployment_;
     std::string                                                  max_mode_;
+    bool                                                         allow_danger_ = false;
+    mutable std::mutex                                           grant_mutex_;
+    mutable std::optional<SandboxMode>                           grant_mode_;
+    mutable ToolCallId                                           grant_call_;
+    std::uint64_t                                                grant_generation_ = 0;
     std::vector<std::filesystem::path>                           roots_;
     std::map<std::string, PermissionPresetSettings, std::less<>> presets_;
 };

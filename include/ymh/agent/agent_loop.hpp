@@ -223,6 +223,8 @@ private:
         CancellationToken               token;
         bool                            run = true;
         payload::ToolResult             decided;
+        // 119-D31: the per-session policy carried to the spawn.
+        std::optional<SandboxPolicy>    sandbox;
     };
     PreparedToolCall    prepareToolCall(const ToolCallAssembled& call, TurnId turn, StepId step);
     payload::ToolResult runToolCall(const PreparedToolCall& plan);
@@ -236,6 +238,8 @@ private:
                                                         std::vector<ToolCallAssembled>,
                                                         CancellationToken, ContextAcceptor);
 
+    // 119-D22: the one-shot escalation state for the current turn.
+    EscalationState          escalation_;
     AgentId                  id_;
     std::shared_ptr<Session> session_owner_;  // declared before session_ (AL1)
     Session&                 session_;

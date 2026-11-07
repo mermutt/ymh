@@ -88,6 +88,8 @@ struct PermissionRequest {
     // 119-D12: the loop's critical-path check. When set, a folded `Allow`
     // becomes `Ask` (the approval flow) after rules; a rule `Deny` wins.
     bool                   critical = false;
+    // 119-D22: the call carries `sandbox_permissions`; always approval-gated.
+    bool                   escalation = false;
 };
 
 struct PolicyRule {

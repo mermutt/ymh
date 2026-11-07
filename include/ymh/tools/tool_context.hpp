@@ -15,6 +15,7 @@
 #include "ymh/core/event.hpp"
 #include "ymh/core/logger.hpp"
 #include "ymh/execution/environment.hpp"
+#include "ymh/execution/sandbox.hpp"
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -38,7 +39,10 @@ public:
                 TurnId                turn,
                 StepId                step,
                 std::optional<Clock::time_point> deadline,
-                ClockReader                      clock = Clock::now);
+                ClockReader                      clock = Clock::now,
+                // 119-D31: the policy resolved for this call (mode/policy/
+                // escalation), so the tool spawns with the same decision.
+                std::optional<SandboxPolicy>     sandbox = std::nullopt);
 
     ExecutionEnvironment& execution() const noexcept { return *execution_; }
     Session&              session() const noexcept { return *session_; }
@@ -67,6 +71,9 @@ public:
     ResourceGovernor& governor() const noexcept { return *governor_; }
     OutputSink&       output() const noexcept { return *output_; }
     PermissionHandle& permission() const noexcept { return *permission_; }
+    [[nodiscard]] const std::optional<SandboxPolicy>& sandboxPolicy() const noexcept {
+        return sandbox_;
+    }
 
 private:
     ExecutionEnvironment* execution_;
@@ -81,6 +88,7 @@ private:
     StepId                step_;
     std::optional<Clock::time_point> deadline_;
     ClockReader                      clock_;
+    std::optional<SandboxPolicy>     sandbox_;
 };
 
 } // namespace ymh

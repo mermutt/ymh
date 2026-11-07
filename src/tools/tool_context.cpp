@@ -16,7 +16,8 @@ ToolContext::ToolContext(ExecutionEnvironment& execution,
                          TurnId turn,
                          StepId step,
                          std::optional<Clock::time_point> deadline,
-                         ClockReader clock)
+                         ClockReader clock,
+                         std::optional<SandboxPolicy> sandbox)
     : execution_(&execution),
       session_(&session),
       logger_(&logger),
@@ -28,7 +29,8 @@ ToolContext::ToolContext(ExecutionEnvironment& execution,
       turn_(turn),
       step_(step),
       deadline_(deadline),
-      clock_(std::move(clock)) {}
+      clock_(std::move(clock)),
+      sandbox_(std::move(sandbox)) {}
 
 void ToolContext::emit(Event event) const { session_->emit(std::move(event)); }
 
