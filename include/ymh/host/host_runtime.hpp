@@ -181,6 +181,7 @@ public:
     protocol::RestoreReport restoreCode(const SessionId& id, TurnId turn) override;
     protocol::SessionRenamedResult renameSession(const nlohmann::json& params) override;
     protocol::SetModeResult       setSessionMode(const nlohmann::json& params) override;
+    protocol::SandboxSetResult    setSandbox(const nlohmann::json& params) override;
     protocol::SetModelResult      setSessionModel(const nlohmann::json& params) override;
     void                     closeSession(const SessionId& id) override;
     void                     deleteSession(const SessionId& id, bool only_if_empty = false,

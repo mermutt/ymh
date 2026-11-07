@@ -72,6 +72,14 @@ struct SetModeResult {
     bool      pending = false;
 };
 
+// 119-D17: the `sandbox.set` result. `mode`/`policy` are the effective values
+// after the append (the session projection), not merely the requested ones.
+struct SandboxSetResult {
+    SessionId   session;
+    std::string mode;
+    std::string policy;
+};
+
 // 53-D5: the `session.set_model` result. `model` is the effective wire id;
 // `model_name` is the `llm.models` entry name ("" for a literal id); `pending`
 // is true iff the change was queued behind an open turn.
@@ -152,6 +160,7 @@ public:
     virtual nlohmann::json selectAgent(const nlohmann::json& params) = 0;
 
     virtual SetModeResult  setSessionMode(const nlohmann::json& params) = 0;
+    virtual SandboxSetResult setSandbox(const nlohmann::json& params) = 0;
     virtual SetModelResult setSessionModel(const nlohmann::json& params) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,

@@ -411,6 +411,12 @@ void ProtocolServer::handle_method(Connection& conn, const Request& request,
                     nlohmann::json{{"session", mode.session.value},
                                    {"active", mode.active},
                                    {"pending", mode.pending}});
+        } else if (method_name == method::kSandboxSet) {
+            const SandboxSetResult sandbox = host_.setSandbox(request.params);
+            respond(conn, request.id,
+                    nlohmann::json{{"session", sandbox.session.value},
+                                   {"mode", sandbox.mode},
+                                   {"policy", sandbox.policy}});
         } else if (method_name == method::kSessionSetModel) {
             const SetModelResult model = host_.setSessionModel(request.params);
             respond(conn, request.id,

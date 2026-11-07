@@ -780,6 +780,77 @@ protocol::SetModeResult HostRuntime::setSessionMode(const nlohmann::json& params
     });
 }
 
+protocol::SandboxSetResult HostRuntime::setSandbox(const nlohmann::json& params) {
+    return translate([&]() -> protocol::SandboxSetResult {
+        if (!params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const auto session_it = params.find("session");
+        if (session_it == params.end() || !session_it->is_string()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const SessionId id{session_it->get<std::string>()};
+        // Throws UnknownSession for an id the daemon does not know.
+        std::shared_ptr<Session> session = runtime_.sessions().sessionPtr(id);
+
+        auto invalid = []() {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        };
+        bool changed = false;
+        if (const auto mode_it = params.find("mode"); mode_it != params.end()) {
+            if (!mode_it->is_string()) {
+                invalid();
+            }
+            const std::string raw = mode_it->get<std::string>();
+            const std::string mode = raw == "read-only"       ? "read-only"
+                                     : raw == "workspace-write" || raw == "workspace"
+                                         ? "workspace-write"
+                                     : raw == "danger-full-access" || raw == "unrestricted"
+                                         ? "danger-full-access"
+                                         : std::string{};
+            if (mode.empty()) {
+                invalid();
+            }
+            session->append(payload::SandboxModeChanged{mode, "sandbox.set"});
+            changed = true;
+        }
+        if (const auto policy_it = params.find("policy"); policy_it != params.end()) {
+            if (!policy_it->is_string()) {
+                invalid();
+            }
+            const std::string policy = policy_it->get<std::string>();
+            if (policy != "ask" && policy != "never") {
+                invalid();
+            }
+            session->append(payload::ApprovalPolicyChanged{policy});
+            changed = true;
+        }
+        if (const auto preset_it = params.find("preset"); preset_it != params.end()) {
+            if (!preset_it->is_string() || preset_it->get<std::string>().empty()) {
+                invalid();
+            }
+            session->append(payload::PermissionPresetSelected{preset_it->get<std::string>()});
+            changed = true;
+        }
+        if (!changed) {
+            invalid();
+        }
+
+        const SandboxPolicyService& service = runtime_.environment().sandboxPolicy();
+        const SandboxPolicy deployment      = service.resolveDeployment();
+        const SandboxMode   mode            = service.overrideOf(id).value_or(deployment.mode);
+        const std::string   mode_name = mode == SandboxMode::ReadOnly     ? "read-only"
+                                        : mode == SandboxMode::WorkspaceWrite ? "workspace-write"
+                                                                              : "danger-full-access";
+        const std::string policy =
+            service.approvalPolicy(id) == ApprovalPolicy::Never ? "never" : "ask";
+        return protocol::SandboxSetResult{id, mode_name, policy};
+    });
+}
+
 protocol::SetModelResult HostRuntime::setSessionModel(const nlohmann::json& params) {
     return translate([&]() -> protocol::SetModelResult {
         if (!params.is_object()) {

@@ -715,7 +715,7 @@ void from_json(const nlohmann::json& json, RestoreReport& report) {
 
 namespace {
 
-constexpr std::array<std::string_view, 41> kMethodCatalog{{
+constexpr std::array<std::string_view, 42> kMethodCatalog{{
     method::kHostHello,        method::kHostAttach,       method::kHostDetach,
     method::kHostStatus,       method::kHostPing,         method::kHostShutdown,
     method::kHostOwnership,
@@ -730,6 +730,7 @@ constexpr std::array<std::string_view, 41> kMethodCatalog{{
     method::kAgentInject,      method::kAgentCancel,      method::kAgentStatus,
     method::kPermissionDecide, method::kEventSubscribe,   method::kEventUnsubscribe,
     method::kSessionRename,    method::kSessionSetMode,   method::kSessionSetModel,
+    method::kSandboxSet,
     method::kSkillsList,
     method::kSkillsShow,       method::kContextShow,      method::kMcpStatus,
     method::kAgentList,        method::kAgentSelect,      method::kCommandInvoke,
