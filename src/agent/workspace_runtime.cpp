@@ -285,7 +285,7 @@ public:
           default_permission_preset_(default_permission_preset_name(config)),
           permission_defaults_(config.permissions),
           permission_baseline_(deployment_permission_baseline(config)),
-          policy_(permission_config_, grant_store),
+          policy_(permission_config_, grant_store, config.sandbox.read_only_shell),
           gate_(policy_, permission_config_),
           agent_config_(make_agent_config(config, *skill_catalog_, policy_,
                                           attach_permission_gate ||

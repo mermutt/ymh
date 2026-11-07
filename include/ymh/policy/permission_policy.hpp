@@ -213,7 +213,8 @@ class RulePermissionPolicy final : public PermissionPolicy {
 public:
     // 46-D2: nullable; null disables persistence (tests). When non-null, the
     // constructor loads `store->load()` into `local_grants_` before `reorder()`.
-    explicit RulePermissionPolicy(PermissionConfig config, GrantStore* store = nullptr);
+    explicit RulePermissionPolicy(PermissionConfig config, GrantStore* store = nullptr,
+                                  bool read_only_shell = false);
 
     PolicyVerdict evaluate(const PermissionRequest& request) const override;
     PolicyVerdict evaluate(const PermissionRequest& request,
@@ -230,6 +231,7 @@ private:
     PermissionConfig   config_;
     PolicyGeneration   generation_;
     GrantStore*        store_ = nullptr;
+    bool                  read_only_shell_ = false;
     std::filesystem::path tmp_root_;
     std::vector<PolicyRule> ordered_rules_;
     std::vector<PolicyRule> base_rules_;
@@ -332,6 +334,7 @@ private:
 };
 
 // Hard deny helper (Q7): ReadOnly + a mutating tool is denied before any rule.
-[[nodiscard]] bool tool_is_mutating(const PermissionRequest& request) noexcept;
+[[nodiscard]] bool tool_is_mutating(const PermissionRequest& request,
+                                    bool read_only_shell = false) noexcept;
 
 } // namespace ymh

@@ -455,8 +455,9 @@ public:
             context.sandboxPolicy().has_value()
                 ? *context.sandboxPolicy()
                 : context.execution().sandboxPolicy().resolveDeployment();
-        std::optional<SandboxFacts> sandbox_facts;
-        std::vector<std::string>    denial_signatures;
+        std::optional<SandboxFacts>  sandbox_facts;
+        std::vector<std::string>     denial_signatures;
+        std::vector<RunnerFailureRule> runner_failure_rules;
         if (deployment.mode != SandboxMode::DangerFullAccess) {
             SandboxPolicy policy  = deployment;
             policy.workspace_root = context.root();
@@ -467,6 +468,7 @@ public:
             sandbox_facts->mode        = policy.mode;
             sandbox_facts->enforcement = plan.enforcement;
             denial_signatures          = plan.denial_signatures;
+            runner_failure_rules       = plan.runner_failure_rules;
         }
         request.sink = &context.output();
         if (arguments.value.contains("timeout_ms")) {

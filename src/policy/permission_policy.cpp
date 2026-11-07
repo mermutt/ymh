@@ -249,9 +249,15 @@ std::string session_grant_id(const PolicyRule& grant) {
 
 } // namespace
 
-bool tool_is_mutating(const PermissionRequest& request) noexcept {
+bool tool_is_mutating(const PermissionRequest& request, bool read_only_shell) noexcept {
     if (request.destructive) {
         return true;
+    }
+    // 119-D25: `sandbox.read_only_shell` opts into the dsh read-only shell;
+    // the shipped contract stays inspection-only by default.
+    if (read_only_shell && (request.tool == "shell" || request.tool == "terminal" ||
+                            request.tool == "pty")) {
+        return false;
     }
     static constexpr std::string_view kMutating[] = {
         "write_file", "edit_file", "shell", "pty", "terminal", "checkout", "git_checkout",
@@ -339,10 +345,11 @@ void validate_rule(std::string_view tool, std::string_view path,
     validate_glob(std::string{command});
 }
 
-RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* store)
+RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* store,
+                                             bool read_only_shell)
     : config_(std::move(config)),
-      generation_{1},
       store_(store),
+      read_only_shell_(read_only_shell),
       tmp_root_(canonical_tmp_root()) {
     for (const PolicyRule& rule : config_.rules) {
         validate_policy_rule(rule);
@@ -428,7 +435,8 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     // protected flag. `classify_shell_request` owns the terminal-open cwd.
     const ShellClassification classification =
         classify_shell_request(request, tmp_root_);
-    if (request.sandbox == SandboxMode::ReadOnly && tool_is_mutating(request)) {
+    if (request.sandbox == SandboxMode::ReadOnly &&
+        tool_is_mutating(request, read_only_shell_)) {
         return PolicyVerdict::Deny;
     }
     // 119-D13: the L1 risk no longer decides here. `Forbid` becomes the
