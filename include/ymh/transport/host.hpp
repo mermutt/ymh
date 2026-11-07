@@ -160,7 +160,11 @@ public:
     virtual nlohmann::json selectAgent(const nlohmann::json& params) = 0;
 
     virtual SetModeResult  setSessionMode(const nlohmann::json& params) = 0;
-    virtual SandboxSetResult setSandbox(const nlohmann::json& params) = 0;
+    // 119-D17: additive. Defaults to unsupported so existing test hosts stay
+    // concrete; the daemon overrides it.
+    virtual SandboxSetResult setSandbox(const nlohmann::json&) {
+        throw std::logic_error("sandbox.set is not supported by this host");
+    }
     virtual SetModelResult setSessionModel(const nlohmann::json& params) = 0;
 
     virtual bool decidePermission(const std::string& request_id, PermissionAnswer decision,
