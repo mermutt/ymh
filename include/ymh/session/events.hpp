@@ -18,6 +18,7 @@
 #include "ymh/agent/message.hpp"
 #include "ymh/commands/command_types.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/execution/sandbox.hpp"
 #include "ymh/core/omission.hpp"
 #include "ymh/goal/goal.hpp"
 #include "ymh/jobs/job_types.hpp"
@@ -155,6 +156,9 @@ struct ToolResult {
     MessageSource              source = tool_message_source(
         id.empty() ? std::optional<ToolCallId>{} : std::optional<ToolCallId>{id});
     ContextFormed              context{};
+    // 119-D35: what the sandbox actually did for this call (absent under
+    // `danger-full-access` and for pre-119 logs).
+    std::optional<SandboxFacts> sandbox;
 };
 
 // ---- permissions (01 §4.5, §19) --------------------------------------------

@@ -504,6 +504,21 @@ void to_json(nlohmann::json& json, const ToolResult& value) {
     if (value.context != ContextFormed{}) {
         json["context"] = value.context;
     }
+    if (value.sandbox.has_value()) {
+        nlohmann::json sandbox{
+            {"mode", value.sandbox->mode == SandboxMode::ReadOnly
+                         ? "read-only"
+                         : value.sandbox->mode == SandboxMode::WorkspaceWrite
+                               ? "workspace-write"
+                               : "danger-full-access"},
+            {"denied", value.sandbox->denied},
+        };
+        if (value.sandbox->enforcement.has_value()) {
+            sandbox["enforcement"] =
+                *value.sandbox->enforcement == SandboxEnforcement::Full ? "full" : "partial";
+        }
+        json["sandbox"] = std::move(sandbox);
+    }
 }
 
 void from_json(const nlohmann::json& json, ToolResult& value) {
@@ -530,6 +545,21 @@ void from_json(const nlohmann::json& json, ToolResult& value) {
     }
     if (json.contains("context") && !json.at("context").is_null()) {
         value.context = json.at("context").get<ContextFormed>();
+    }
+    if (json.contains("sandbox") && json.at("sandbox").is_object()) {
+        const nlohmann::json& sandbox = json.at("sandbox");
+        SandboxFacts          facts;
+        const std::string     mode = sandbox.value("mode", std::string{"workspace-write"});
+        facts.mode = mode == "read-only"         ? SandboxMode::ReadOnly
+                     : mode == "danger-full-access" ? SandboxMode::DangerFullAccess
+                                                    : SandboxMode::WorkspaceWrite;
+        if (sandbox.contains("enforcement") && sandbox.at("enforcement").is_string()) {
+            facts.enforcement = sandbox.at("enforcement").get<std::string>() == "full"
+                                    ? SandboxEnforcement::Full
+                                    : SandboxEnforcement::Partial;
+        }
+        facts.denied = sandbox.value("denied", false);
+        value.sandbox = facts;
     }
 }
 

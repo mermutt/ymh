@@ -262,6 +262,26 @@ bool schema_validate(const nlohmann::json& schema, const nlohmann::json& argumen
     return object_matches(schema, arguments);
 }
 
+void append_sandbox_markers(ToolResult& result, const SandboxFacts& facts) {
+    const std::string mode = facts.mode == SandboxMode::ReadOnly
+                                 ? "read-only"
+                                 : facts.mode == SandboxMode::WorkspaceWrite
+                                       ? "workspace-write"
+                                       : "danger-full-access";
+    if (facts.denied) {
+        result.output += "\n[sandbox: file access denied under " + mode + " mode]";
+        result.output +=
+            "\n[sandbox: escalation available \u2014 retry this exact command once with "
+            "sandbox_permissions (the narrowest wider mode that suffices) + justification; "
+            "the approval prompt asks the user]";
+    } else if (facts.runner_failure) {
+        result.output +=
+            "\n[sandbox: the sandbox runner itself failed under " + mode +
+            " mode \u2014 the command did not run; this is a sandbox problem, not a "
+            "command failure]";
+    }
+}
+
 void retain_tool_result(ToolResult& result, std::size_t max_bytes) {
     result.output = sanitize_utf8(result.output);
     if (result.error.has_value()) {

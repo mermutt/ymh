@@ -102,4 +102,8 @@ void validate_input_schema(const nlohmann::json& schema);
 // `omitted_kind`/`omitted_count` and derives `truncated` (40-I7).
 void retain_tool_result(ToolResult& result, std::size_t max_bytes);
 
+// 119-D35: append the dsh denial/escalation or runner-failure marker after
+// retention, so a max-size result cannot truncate it away.
+void append_sandbox_markers(ToolResult& result, const SandboxFacts& facts);
+
 } // namespace ymh

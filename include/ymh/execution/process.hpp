@@ -65,6 +65,9 @@ struct ProcessResult {
     // record), distinct from an ordinary exit 127.
     bool confinement_abort{false};
     int  confinement_errno{0};
+    // 119-D35: the bounded stderr tail used for denial/runner attribution.
+    // Captured separately even when the tool sink merges the streams.
+    std::string stderr_tail;
 };
 
 class ChildProcessHandle;

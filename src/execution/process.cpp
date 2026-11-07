@@ -104,7 +104,9 @@ std::vector<char*> to_argv(const std::vector<std::string>& argv) {
     return raw;
 }
 
-bool drain_fd(int fd, bool is_stderr, OutputSink* sink) {
+constexpr std::size_t kStderrTailMax = 2048;
+
+bool drain_fd(int fd, bool is_stderr, OutputSink* sink, std::string* stderr_tail) {
     std::array<char, 65536> buffer{};
     for (;;) {
         const ssize_t n = ::read(fd, buffer.data(), buffer.size());
@@ -113,6 +115,12 @@ bool drain_fd(int fd, bool is_stderr, OutputSink* sink) {
                 const std::string_view chunk(buffer.data(), static_cast<std::size_t>(n));
                 if (is_stderr) {
                     sink->writeErr(chunk);
+                    if (stderr_tail != nullptr) {
+                        stderr_tail->append(chunk);
+                        if (stderr_tail->size() > kStderrTailMax) {
+                            stderr_tail->erase(0, stderr_tail->size() - kStderrTailMax);
+                        }
+                    }
                 } else {
                     sink->write(chunk);
                 }
@@ -483,11 +491,11 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
             break;
         }
 
-        if (out_open && drain_fd(out.read_fd, false, request.sink)) {
+        if (out_open && drain_fd(out.read_fd, false, request.sink, nullptr)) {
             close_fd(out.read_fd);
             out_open = false;
         }
-        if (err_open && drain_fd(err.read_fd, true, request.sink)) {
+        if (err_open && drain_fd(err.read_fd, true, request.sink, &result.stderr_tail)) {
             close_fd(err.read_fd);
             err_open = false;
         }
@@ -534,17 +542,21 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
     }
 
     if (out.read_fd >= 0) {
-        drain_fd(out.read_fd, false, request.sink);
+        drain_fd(out.read_fd, false, request.sink, nullptr);
     }
     if (err.read_fd >= 0) {
-        drain_fd(err.read_fd, true, request.sink);
+        drain_fd(err.read_fd, true, request.sink, &result.stderr_tail);
     }
     close_fd(out.read_fd);
     close_fd(err.read_fd);
     close_fd(errsig.read_fd);
 
     if (!terminated) {
-        result = reap(pid);
+        // 119-D35: `reap` rebuilds the result from the wait status; keep the
+        // stderr tail captured above (and any confinement facts).
+        std::string tail = std::move(result.stderr_tail);
+        result           = reap(pid);
+        result.stderr_tail = std::move(tail);
     }
     if (request.sink != nullptr) {
         request.sink->close();

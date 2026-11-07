@@ -455,12 +455,18 @@ public:
             context.sandboxPolicy().has_value()
                 ? *context.sandboxPolicy()
                 : context.execution().sandboxPolicy().resolveDeployment();
+        std::optional<SandboxFacts> sandbox_facts;
+        std::vector<std::string>    denial_signatures;
         if (deployment.mode != SandboxMode::DangerFullAccess) {
             SandboxPolicy policy  = deployment;
             policy.workspace_root = context.root();
             const ConfinedSpawn plan =
                 context.execution().sandbox().confine(request, policy);
             plan.apply(request);
+            sandbox_facts.emplace();
+            sandbox_facts->mode        = policy.mode;
+            sandbox_facts->enforcement = plan.enforcement;
+            denial_signatures          = plan.denial_signatures;
         }
         request.sink = &context.output();
         if (arguments.value.contains("timeout_ms")) {
@@ -495,6 +501,22 @@ public:
         }
         output += "exit_code: " + std::to_string(process.exit_code);
         result.output = std::move(output);
+        if (sandbox_facts.has_value()) {
+            // 119-D35: the status record wins; then the denial dialect on the
+            // bounded stderr tail.
+            if (process.confinement_abort) {
+                sandbox_facts->runner_failure = true;
+            } else {
+            for (const std::string& signature : denial_signatures) {
+                    if (!signature.empty() &&
+                        process.stderr_tail.find(signature) != std::string::npos) {
+                        sandbox_facts->denied = true;
+                        break;
+                    }
+                }
+            }
+            result.sandbox = sandbox_facts;
+        }
         if (process.exit_code != 0) {
             result.outcome = payload::ToolOutcome::Error;
             result.error = "exit_code: " + std::to_string(process.exit_code);

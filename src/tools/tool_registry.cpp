@@ -327,6 +327,9 @@ Task<ToolResult> ToolRegistry::execute(const payload::ToolCall& call,
         result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             SteadyClock::now() - start);
         retain_tool_result(result, config_.tool_result_max_bytes);
+        if (result.sandbox.has_value()) {
+            append_sandbox_markers(result, *result.sandbox);
+        }
         return Task<ToolResult>(std::move(result));
     };
 
