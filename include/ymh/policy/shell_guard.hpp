@@ -78,6 +78,11 @@ struct ShellText {
     const std::filesystem::path& cwd,
     bool kernel_confinement);
 
+// 119-D12: true iff the command contains a recognized destructive verb (the
+// set the critical-path check keys on: rm/rmdir/shred/truncate/dd/mkfs*/wipefs/
+// chmod/chown/mv/cp/find/git-clean). Pure, total, I/O-free.
+[[nodiscard]] bool shell_command_is_destructive(std::string_view text);
+
 // 90-D5: `.risk` is exactly `classify_shell_command`; scope/protected are
 // additive matching input. Pure/total, no I/O, no symlink resolution.
 [[nodiscard]] ShellClassification classify_shell_command_with_scope(

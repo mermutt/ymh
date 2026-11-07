@@ -881,6 +881,10 @@ bool looks_destructive(std::string_view text) {
         }
         i = j;
     }
+    // 119-D12: `git clean` is destructive too, but the verb is `git`.
+    if (contains_word(text, "git") && contains_word(text, "clean")) {
+        return true;
+    }
     static constexpr std::string_view kVerbs[] = {
         "rm", "rmdir", "shred", "truncate", "dd", "mkfs", "mke2fs", "newfs",
         "wipefs", "chmod", "chown", "mv", "cp", "find"};
@@ -3245,6 +3249,10 @@ ShellText shell_text_of(const PermissionRequest& request) {
 }
 
 } // namespace
+
+bool shell_command_is_destructive(std::string_view text) {
+    return looks_destructive(text);
+}
 
 std::string shell_guard_text(const PermissionRequest& request) {
     return shell_text_of(request).text;
