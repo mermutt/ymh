@@ -406,20 +406,23 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
         for (const auto& [key, value] : request.environment) {
             ::setenv(key.c_str(), value.c_str(), 1);
         }
+        for (const std::string& name : request.env_unset) {
+            ::unsetenv(name.c_str());
+        }
 
         close_inherited_fds();
 
-        if (request.confinement != nullptr) {
+        if (request.child.has_value()) {
             set_confinement_status_fd(errsig.write_fd);
-            kernel_confinement().apply_or_abort(*request.confinement);
+            kernel_confinement().apply_or_abort(*request.child);
         }
 
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
 
-        const int saved = errno;
+        const ExecStatusRecord record{kExecStatusExec, errno};
         [[maybe_unused]] const auto write_result =
-            ::write(errsig.write_fd, &saved, sizeof(saved));
+            ::write(errsig.write_fd, &record, sizeof(record));
         _exit(127);
     }
 
@@ -489,28 +492,45 @@ Task<ProcessResult> LocalProcessService::run(const ProcessRequest& request,
             err_open = false;
         }
 
-        int exec_errno = 0;
-        const ssize_t sig_read = ::read(errsig.read_fd, &exec_errno, sizeof(exec_errno));
-        if (sig_read == static_cast<ssize_t>(sizeof(exec_errno))) {
+        ExecStatusRecord status{};
+        const ssize_t    sig_read = ::read(errsig.read_fd, &status, sizeof(status));
+        if (sig_read == static_cast<ssize_t>(sizeof(status)) &&
+            status.kind == kExecStatusExec) {
             ::kill(-pid, SIGKILL);
             close_fd(out.read_fd);
             close_fd(err.read_fd);
             close_fd(errsig.read_fd);
             result = reap(pid);
             throw ToolError{ToolErrorCode::Io,
-                            std::string{"exec: "} + std::strerror(exec_errno)};
+                            std::string{"exec: "} + std::strerror(status.errno_value)};
+        }
+        if (sig_read == static_cast<ssize_t>(sizeof(status)) &&
+            status.kind == kExecStatusRefused) {
+            ::kill(-pid, SIGKILL);
+            close_fd(out.read_fd);
+            close_fd(err.read_fd);
+            close_fd(errsig.read_fd);
+            result            = reap(pid);
+            result.confinement_abort = true;
+            result.confinement_errno = status.errno_value;
+            return Task<ProcessResult>(result);
         }
     }
 
-    int exec_errno = 0;
-    if (::read(errsig.read_fd, &exec_errno, sizeof(exec_errno)) ==
-        static_cast<ssize_t>(sizeof(exec_errno))) {
+    ExecStatusRecord status{};
+    if (::read(errsig.read_fd, &status, sizeof(status)) ==
+        static_cast<ssize_t>(sizeof(status))) {
         close_fd(out.read_fd);
         close_fd(err.read_fd);
         close_fd(errsig.read_fd);
         result = reap(pid);
+        if (status.kind == kExecStatusRefused) {
+            result.confinement_abort = true;
+            result.confinement_errno = status.errno_value;
+            return Task<ProcessResult>(result);
+        }
         throw ToolError{ToolErrorCode::Io,
-                        std::string{"exec: "} + std::strerror(exec_errno)};
+                        std::string{"exec: "} + std::strerror(status.errno_value)};
     }
 
     if (out.read_fd >= 0) {
@@ -592,16 +612,19 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         for (const auto& [key, value] : request.environment) {
             ::setenv(key.c_str(), value.c_str(), 1);
         }
+        for (const std::string& name : request.env_unset) {
+            ::unsetenv(name.c_str());
+        }
         close_inherited_fds();
-        if (request.confinement != nullptr) {
+        if (request.child.has_value()) {
             set_confinement_status_fd(errsig.write_fd);
-            kernel_confinement().apply_or_abort(*request.confinement);
+            kernel_confinement().apply_or_abort(*request.child);
         }
         std::vector<char*> argv = to_argv(request.argv);
         ::execvp(request.executable.c_str(), argv.data());
-        const int saved = errno;
+        const ExecStatusRecord record{kExecStatusExec, errno};
         [[maybe_unused]] const auto write_result =
-            ::write(errsig.write_fd, &saved, sizeof(saved));
+            ::write(errsig.write_fd, &record, sizeof(record));
         _exit(127);
     }
 

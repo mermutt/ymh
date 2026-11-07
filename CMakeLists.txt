@@ -366,6 +366,7 @@ add_library(ymh_execution STATIC
     src/execution/deadline.cpp
     src/execution/process.cpp
     src/execution/environment.cpp
+    src/execution/sandbox.cpp
     src/execution/landlock.cpp
     src/execution/git_service.cpp
     src/execution/resource_governor.cpp

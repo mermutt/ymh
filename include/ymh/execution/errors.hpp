@@ -21,6 +21,7 @@ enum class ToolErrorCode : std::uint8_t {
     Timeout,            // process/output deadline exceeded
     Io,                 // filesystem/process I/O failure
     Internal,           // tool invariant violated / unexpected exception
+    SandboxUnavailable, // 119-D9: no backend can enforce the requested mode
 };
 
 [[nodiscard]] std::string_view to_string(ToolErrorCode code) noexcept;

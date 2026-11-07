@@ -70,7 +70,7 @@ struct PermissionRequest {
     std::filesystem::path  root;          // canonical (07 X3)
     std::optional<std::filesystem::path> path;   // absolute, lexically normal
 
-    SandboxMode            sandbox = SandboxMode::Workspace;
+    SandboxMode            sandbox = SandboxMode::WorkspaceWrite;
     bool                   destructive = false;
     // 25-D4: non-mutating forced review. `evaluate` returns Ask before rules,
     // tool_defaults, default_verdict, and grants; `tool_is_mutating` never

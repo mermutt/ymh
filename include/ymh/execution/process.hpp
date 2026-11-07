@@ -34,6 +34,8 @@ struct ProcessRequest {
     std::vector<std::string>  argv;            // never a concatenated shell string
     std::filesystem::path     cwd;             // MUST be resolve()d under root()
     std::vector<std::pair<std::string, std::string>> environment;
+    // 119-D47: names removed from the inherited environment before `exec`.
+    std::vector<std::string>  env_unset;
     ProcessEnvMode            env_mode = ProcessEnvMode::Inherit;
     std::optional<std::filesystem::path> stderr_path;  // spawn()-only
     // 70-A13: spawn()-only. When set, the child dup2s it onto fd 2 in the stderr
@@ -49,9 +51,9 @@ struct ProcessRequest {
     bool                      capture_stderr{true};
     OutputSink*               sink{nullptr};   // streaming; null => buffered
 
-    // 89-D17/89-A10 (L2): when set, the forked child applies kernel confinement
-    // after `close_inherited_fds()` and before `execvp`. Null => no confinement.
-    const ConfinementPolicy*  confinement{nullptr};
+    // 119-D43: when set, the forked child applies this confinement plan after
+    // `close_inherited_fds()` and before `execvp`. Absent => no confinement.
+    std::optional<ChildConfinement> child;
 };
 
 struct ProcessResult {
@@ -59,6 +61,10 @@ struct ProcessResult {
     bool signalled{false};
     int  signal{0};
     bool timed_out{false};
+    // 119-D43: a pre-exec confinement failure (reported by the child's status
+    // record), distinct from an ordinary exit 127.
+    bool confinement_abort{false};
+    int  confinement_errno{0};
 };
 
 class ChildProcessHandle;

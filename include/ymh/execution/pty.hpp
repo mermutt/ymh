@@ -378,11 +378,12 @@ struct PtyRequest {
 
     SessionId                session;      // owning session (caps + routing)
     std::vector<std::pair<std::string, std::string>> environment;  // overlay
+    std::vector<std::string>  env_unset;                            // 119-D47
     std::string              term{"xterm-256color"};
 
-    // 89-D17/89-A10 (L2): when set, the forked child applies kernel confinement
-    // before `execve` (after the slave/master/status closes). Null => none.
-    const ConfinementPolicy* confinement{nullptr};
+    // 119-D43: when set, the forked child applies this confinement plan before
+    // `execve` (after the slave/master/status closes). Absent => none.
+    std::optional<ChildConfinement> child;
 };
 
 // ---- 14 §4.1 — the `PtyService` seam (pinned) ------------------------------

@@ -133,9 +133,6 @@ private:
                             "open requires exactly one of command or argv"};
         }
 
-        auto confinement = std::make_shared<SpawnConfinement>(
-            context.root(), context.execution().mode());
-
         PtyRequest request;
         if (has_command) {
             request.executable = "/bin/bash";
@@ -200,11 +197,18 @@ private:
                                 "terminal temp cwd is not a directory"};
             }
         }
-        request.environment = {{"HOME", confinement->home().string()},
-                               {"TMPDIR", confinement->tmpdir().string()},
-                               {"PWD", request.cwd.string()}};
-        if (context.execution().confinementStatus() == ConfinementStatus::Enforced) {
-            request.confinement = &confinement->policy();
+        // 119-D5/D21/D47: the user's environment and real `$HOME`; the PTY
+        // policy is fixed at open (D29).
+        request.environment = {{"PWD", request.cwd.string()}};
+        request.env_unset   = {"BASH_ENV", "ENV", "CDPATH"};
+        const SandboxPolicy deployment =
+            context.execution().sandboxPolicy().resolveDeployment();
+        if (deployment.mode != SandboxMode::DangerFullAccess) {
+            SandboxPolicy policy  = deployment;
+            policy.workspace_root = context.root();
+            const ConfinedSpawn plan =
+                context.execution().sandbox().confine(request, policy);
+            plan.apply(request);
         }
         if (arguments.value.contains("rows")) {
             request.rows = arguments.value["rows"].get<int>();
@@ -221,8 +225,6 @@ private:
             context.execution().pty().open(request, context.cancellation()).get();
         const PtySessionId id = opened->id();
         const int pid = opened->pid();
-        confinements_[id.value] = std::move(confinement);
-
         ToolResult result = makeResult(context);
         result.output = nlohmann::json{{"terminal_id", std::to_string(id.value)},
                                        {"pid", pid},
@@ -339,15 +341,6 @@ private:
             throw ToolError{ToolErrorCode::Timeout, "pty wait timed out"};
         }
 
-        if (arguments.value.contains("terminal_id") &&
-            arguments.value["terminal_id"].is_string()) {
-            try {
-                confinements_.erase(
-                    std::stoull(arguments.value["terminal_id"].get<std::string>()));
-            } catch (const std::exception&) {
-            }
-        }
-
         ToolResult result = makeResult(context);
         result.output = nlohmann::json{{"exit_code", status.exit_code},
                                        {"signalled", status.signalled},
@@ -371,7 +364,7 @@ private:
     }
 
     ToolConfig config_;
-    std::map<std::uint64_t, std::shared_ptr<SpawnConfinement>> confinements_;
+
 };
 
 } // namespace

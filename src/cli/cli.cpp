@@ -291,7 +291,7 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
         // cannot touch; surface both next to the policy summary.
         const SandboxMode sandbox = effective_sandbox_mode(config);
         const ConfinementStatus confinement =
-            sandbox == SandboxMode::Unrestricted ? ConfinementStatus::NotApplicable
+            sandbox == SandboxMode::DangerFullAccess ? ConfinementStatus::NotApplicable
                                                  : kernel_confinement().probe();
         // 119-D1/D38: report the parsed baseline (canonical mode names), the
         // effective ceiling, and the approval policy; deprecation notes go to

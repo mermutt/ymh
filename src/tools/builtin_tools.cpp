@@ -41,7 +41,7 @@ std::filesystem::path resolve_required_path(const ToolContext& context,
 }
 
 // 90-A17/90-D13: canonical protection independent of `resolve()`, so it also
-// holds under `SandboxMode::Unrestricted`.
+// holds under `SandboxMode::DangerFullAccess`.
 std::filesystem::path safety_path(const std::filesystem::path& path) {
     std::error_code error;
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, error);
@@ -433,18 +433,24 @@ public:
                             "subprocess cap exhausted"};
         }
 
-        SpawnConfinement confinement(context.root(), context.execution().mode());
-
         ProcessRequest request;
         request.executable = "/bin/bash";
         request.argv = {"/bin/bash", "--noprofile", "--norc", "-lc", command};
         request.cwd = context.root();
-        request.env_mode = ProcessEnvMode::Minimal;
-        request.environment = {{"HOME", confinement.home().string()},
-                               {"TMPDIR", confinement.tmpdir().string()},
-                               {"PWD", context.root().string()}};
-        if (context.execution().confinementStatus() == ConfinementStatus::Enforced) {
-            request.confinement = &confinement.policy();
+        // 119-D5/D47: the user's environment and real `$HOME`; only the
+        // shell-startup variables are unset. Wave 1 resolves the deployment
+        // mode; Wave 2 makes it per session.
+        request.env_mode    = ProcessEnvMode::Inherit;
+        request.environment = {{"PWD", context.root().string()}};
+        request.env_unset   = {"BASH_ENV", "ENV", "CDPATH"};
+        const SandboxPolicy deployment =
+            context.execution().sandboxPolicy().resolveDeployment();
+        if (deployment.mode != SandboxMode::DangerFullAccess) {
+            SandboxPolicy policy  = deployment;
+            policy.workspace_root = context.root();
+            const ConfinedSpawn plan =
+                context.execution().sandbox().confine(request, policy);
+            plan.apply(request);
         }
         request.sink = &context.output();
         if (arguments.value.contains("timeout_ms")) {

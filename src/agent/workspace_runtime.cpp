@@ -58,13 +58,24 @@
 namespace ymh {
 namespace {
 
+// 119-D39: the validated, canonical `[sandbox]` writable roots. Wave 0 already
+// rejected the dangerous spellings at load; this only converts them.
+std::vector<std::filesystem::path> sandbox_writable_roots(const Config& config) {
+    std::vector<std::filesystem::path> roots;
+    roots.reserve(config.sandbox.additional_writable_roots.size());
+    for (const std::string& root : config.sandbox.additional_writable_roots) {
+        roots.emplace_back(root);
+    }
+    return roots;
+}
+
 std::string sandbox_mode_name(SandboxMode mode) {
     switch (mode) {
-        case SandboxMode::Workspace:
+        case SandboxMode::WorkspaceWrite:
             return "workspace";
         case SandboxMode::ReadOnly:
             return "read-only";
-        case SandboxMode::Unrestricted:
+        case SandboxMode::DangerFullAccess:
             return "unrestricted";
     }
     return "workspace";
@@ -265,7 +276,8 @@ public:
                                                        pty_events_, tool_config_)
                    : nullptr),
           environment_(std::make_unique<LocalEnvironment>(
-              root_, effective_sandbox_mode(config), tool_config_, pty_.get())),
+              root_, effective_sandbox_mode(config), tool_config_, pty_.get(),
+              sandbox_writable_roots(config))),
           skill_catalog_(make_skill_catalog(config, *environment_, launch_dir,
                                             category_logger(LogCategory::Tool))),
           permission_config_(to_permission_config(config)),

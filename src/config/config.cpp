@@ -2005,13 +2005,13 @@ SandboxMode effective_sandbox_mode(const Config& config) {
         deployment_permission_baseline(config));
     // 119-D1: the new names map onto the shipped enum until Wave 1 moves it.
     if (effective.sandbox == "workspace" || effective.sandbox == "workspace-write") {
-        return SandboxMode::Workspace;
+        return SandboxMode::WorkspaceWrite;
     }
     if (effective.sandbox == "read-only") {
         return SandboxMode::ReadOnly;
     }
     if (effective.sandbox == "unrestricted" || effective.sandbox == "danger-full-access") {
-        return SandboxMode::Unrestricted;
+        return SandboxMode::DangerFullAccess;
     }
     throw ConfigError("invalid sandbox '" + effective.sandbox + "'");
 }

@@ -9,6 +9,8 @@
 // constructor parameter, baked in before any tool is written (07 decision (n)).
 
 #include <filesystem>
+#include <memory>
+#include <vector>
 #include <string_view>
 
 #include "ymh/execution/config.hpp"
@@ -16,6 +18,7 @@
 #include "ymh/execution/filesystem.hpp"
 #include "ymh/execution/git_service.hpp"
 #include "ymh/execution/process.hpp"
+#include "ymh/execution/sandbox.hpp"
 #include "ymh/execution/services.hpp"
 
 namespace ymh {
@@ -37,6 +40,12 @@ public:
     // destructive in-root call to `Confirm`. Probed and cached at construction.
     [[nodiscard]] virtual ConfinementStatus confinementStatus() const noexcept = 0;
 
+    // 119 Wave 1: the sandbox seam. `sandbox()` wraps a spawn or refuses it;
+    // `sandboxPolicy()` resolves the deployment baseline (Wave 2 adds the
+    // per-session projection).
+    virtual SandboxProvider&      sandbox() = 0;
+    virtual SandboxPolicyService& sandboxPolicy() = 0;
+
     virtual Filesystem&      fs() = 0;
     virtual ProcessService&  process() = 0;
     virtual PtyService&      pty() = 0;
@@ -54,18 +63,22 @@ public:
     // The stored root is realpath-canonical. `pty` is borrowed (14 §4.5, E-P7);
     // nullptr keeps the internal `UnavailablePtyService` (the v1 default).
     explicit LocalEnvironment(std::filesystem::path root,
-                              SandboxMode mode = SandboxMode::Workspace,
+                              SandboxMode mode = SandboxMode::WorkspaceWrite,
                               ToolConfig config = {},
-                              PtyService* pty = nullptr);
+                              PtyService* pty = nullptr,
+                              std::vector<std::filesystem::path> writable_roots = {});
 
     const std::filesystem::path& root() const override { return root_; }
     std::filesystem::path        resolve(std::string_view path) const override;
     SandboxMode                  mode() const noexcept override { return mode_; }
 
     [[nodiscard]] ConfinementStatus confinementStatus() const noexcept override {
-        return mode_ == SandboxMode::Unrestricted ? ConfinementStatus::NotApplicable
-                                                  : confinement_status_;
+        return mode_ == SandboxMode::DangerFullAccess ? ConfinementStatus::NotApplicable
+                                                      : confinement_status_;
     }
+
+    SandboxProvider&      sandbox() override;
+    SandboxPolicyService& sandboxPolicy() override;
 
     Filesystem&     fs() override { return fs_; }
     ProcessService& process() override { return process_; }
@@ -87,6 +100,8 @@ private:
     PtyService*           pty_ = nullptr;
     LibGit2GitService     git_;
     ToolConfig            config_;
+    std::vector<std::filesystem::path>     writable_roots_;
+    std::unique_ptr<SandboxPolicyService>  policy_service_;
 };
 
 // Component-wise containment over weakly-canonical operands (07 §6.2). Never a

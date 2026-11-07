@@ -1,6 +1,7 @@
 #include "ymh/execution/confinement.hpp"
 
 #include <cerrno>
+#include <limits>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -62,8 +63,8 @@ int g_status_fd = -1;
 
 [[noreturn]] void confine_fail(int err) {
     if (g_status_fd >= 0) {
-        const char byte = static_cast<char>(err == 0 ? EACCES : err);
-        (void)!::write(g_status_fd, &byte, 1);
+        const ExecStatusRecord record{kExecStatusRefused, err == 0 ? EACCES : err};
+        (void)!::write(g_status_fd, &record, sizeof(record));
     }
     ::_exit(127);
 }
@@ -90,18 +91,24 @@ void add_path_rule(int ruleset_fd, const std::filesystem::path& path, std::uint6
 
 class LandlockConfinement final : public KernelConfinement {
 public:
-    [[nodiscard]] ConfinementStatus probe() const noexcept override {
-        const long abi = static_cast<long>(
-            ::syscall(__NR_landlock_create_ruleset, nullptr, 0, LANDLOCK_CREATE_RULESET_VERSION));
-        if (abi < 0) {
-            return ConfinementStatus::Unavailable;
-        }
-        return classify_landlock_abi(static_cast<long long>(abi));
+    [[nodiscard]] ConfinementStatus probe() const override {
+        (void)abi();
+        return classify_landlock_abi(abi_cached_);
     }
 
-    void apply_or_abort(const ConfinementPolicy& policy) override {
+    [[nodiscard]] long long abi() const override {
+        if (abi_cached_ == kAbiUnprobed) {
+            const long value = static_cast<long>(
+                ::syscall(__NR_landlock_create_ruleset, nullptr, 0,
+                          LANDLOCK_CREATE_RULESET_VERSION));
+            abi_cached_ = value < 0 ? static_cast<long long>(-errno) : static_cast<long long>(value);
+        }
+        return abi_cached_;
+    }
+
+    void apply_or_abort(const ChildConfinement& policy) override {
         landlock_ruleset_attr attr{};
-        attr.handled_access_fs = kHandledRights;
+        attr.handled_access_fs = confinement_handled_rights(abi());
         const int ruleset_fd   = static_cast<int>(
             ::syscall(__NR_landlock_create_ruleset, &attr, sizeof(attr), 0));
         if (ruleset_fd < 0) {
@@ -110,24 +117,18 @@ public:
 
         add_path_rule(ruleset_fd, policy.root,
                       policy.workspace_writable ? kRootRights : kReadRights);
-        if (policy.home.has_value()) {
-            add_path_rule(ruleset_fd, *policy.home, kHomeRights);
+        if (policy.temp.has_value()) {
+            add_path_rule(ruleset_fd, *policy.temp, kTmpRights);
         }
-        if (policy.tmpdir.has_value()) {
-            add_path_rule(ruleset_fd, *policy.tmpdir, kTmpRights);
-        }
-        if (policy.tmp_root.has_value()) {
-            add_path_rule(ruleset_fd, *policy.tmp_root, kTmpRights);
+        for (const std::filesystem::path& extra : policy.additional_writable_roots) {
+            add_path_rule(ruleset_fd, extra, kTmpRights);
         }
         for (const std::filesystem::path& ro : policy.ro_paths) {
             add_path_rule(ruleset_fd, ro, kReadRights);
         }
         // 118-D2: `/dev/null` is the one writable device a well-behaved command
-        // needs: git opens it O_RDWR at startup (`git --version` dies without
-        // it) and `2>/dev/null` is ubiquitous. It discards every byte, so a
-        // write cannot leak or persist anything. Granted here rather than
-        // through `SpawnConfinement` so every spawn gets it, including a
-        // read-only workspace. A missing node is skipped, never fatal.
+        // needs (git opens it O_RDWR at startup; `2>/dev/null` is ubiquitous).
+        // It discards every byte, so it cannot leak or persist anything.
         {
             std::error_code dev_ec;
             if (std::filesystem::exists("/dev/null", dev_ec)) {
@@ -147,17 +148,21 @@ public:
         }
         ::close(ruleset_fd);
     }
+
+private:
+    static constexpr long long kAbiUnprobed = std::numeric_limits<long long>::min();
+    mutable long long          abi_cached_  = kAbiUnprobed;
 };
 
 #else  // no Landlock headers / syscall numbers at build time
 
 class LandlockConfinement final : public KernelConfinement {
 public:
-    [[nodiscard]] ConfinementStatus probe() const noexcept override {
+    [[nodiscard]] ConfinementStatus probe() const override {
         return ConfinementStatus::Unavailable;
     }
-
-    void apply_or_abort(const ConfinementPolicy& policy) override {
+    [[nodiscard]] long long abi() const override { return -ENOSYS; }
+    void apply_or_abort(const ChildConfinement& policy) override {
         (void)policy;
         confine_fail(ENOSYS);
     }
@@ -167,13 +172,15 @@ public:
 
 } // namespace
 
-std::uint64_t confinement_handled_rights() noexcept { return kHandledRights; }
+std::uint64_t confinement_handled_rights(long long abi) noexcept {
+    if (abi > 0 && abi < 5) {
+        return kHandledRights & ~kFsIoctlDev;
+    }
+    return kHandledRights;
+}
 
 ConfinementStatus classify_landlock_abi(long long abi_or_errno) noexcept {
-    if (abi_or_errno < 0) {
-        return ConfinementStatus::Unavailable;
-    }
-    if (abi_or_errno < 5) {
+    if (abi_or_errno < 3) {
         return ConfinementStatus::Unavailable;
     }
     return ConfinementStatus::Enforced;

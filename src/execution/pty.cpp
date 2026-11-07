@@ -456,6 +456,9 @@ private:
             strip_env(environment, key);
             environment.push_back(key + "=" + value);
         }
+        for (const std::string& name : request.env_unset) {
+            strip_env(environment, name);
+        }
 
         std::vector<std::string> argv = request.argv;
         std::vector<char*>       argv_raw = to_raw(argv);
@@ -487,9 +490,9 @@ private:
                 (void)!::write(status_pipe[1], &status_byte, 1);
                 ::_exit(127);
             }
-            if (request.confinement != nullptr) {
+            if (request.child.has_value()) {
                 set_confinement_status_fd(status_pipe[1]);
-                kernel_confinement().apply_or_abort(*request.confinement);
+                kernel_confinement().apply_or_abort(*request.child);
             }
             ::execve(executable.c_str(), argv_raw.data(), env_raw.data());
             const char status_byte = 'E';

@@ -132,7 +132,7 @@ struct AgentConfig {
     std::size_t              max_chunk_batch = 32;
     std::chrono::milliseconds chunk_flush_interval{100};
     std::size_t              compaction_threshold_tokens = 0;
-    SandboxMode              sandbox = SandboxMode::Workspace;
+    SandboxMode              sandbox = SandboxMode::WorkspaceWrite;
     std::string              system_prompt;
     std::string              plan_section;
     bool                     persist_prompt_text = false;

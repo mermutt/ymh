@@ -14,6 +14,7 @@ std::string_view to_string(ToolErrorCode code) noexcept {
         case ToolErrorCode::Timeout:           return "Timeout";
         case ToolErrorCode::Io:                return "Io";
         case ToolErrorCode::Internal:          return "Internal";
+        case ToolErrorCode::SandboxUnavailable: return "SandboxUnavailable";
     }
     return "Internal";
 }
