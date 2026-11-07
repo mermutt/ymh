@@ -1,3 +1,4 @@
+#include "ymh/policy/critical_path.hpp"
 #include "ymh/policy/permission_policy.hpp"
 
 #include <algorithm>
@@ -531,7 +532,9 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         return PolicyVerdict::Deny;
     }
     if (folded == PolicyVerdict::Allow) {
-        if (request.critical) {
+        // 119-D12: the critical check runs here too, so every caller (the loop,
+        // the gate, the broker) is safe even if it did not set the flag.
+        if (request.critical || critical_path(request).critical) {
             if (reason != nullptr) {
                 *reason = "permission:critical-path";
             }
