@@ -209,15 +209,6 @@ std::string_view verdict_name(PolicyVerdict verdict) {
     return "?";
 }
 
-std::string_view confinement_name(ConfinementStatus status) {
-    switch (status) {
-        case ConfinementStatus::Enforced:      return "enforced";
-        case ConfinementStatus::Unavailable:   return "unavailable";
-        case ConfinementStatus::NotApplicable: return "not-applicable";
-    }
-    return "?";
-}
-
 std::string iso8601_utc(std::chrono::system_clock::time_point point) {
     const std::time_t seconds = std::chrono::system_clock::to_time_t(point);
     std::tm           utc{};
@@ -290,18 +281,25 @@ int run_config_command(const CliInvocation& invocation, std::ostream& out, std::
         // actually active decide what a `default: allow` deployment still
         // cannot touch; surface both next to the policy summary.
         const SandboxMode sandbox = effective_sandbox_mode(config);
-        const ConfinementStatus confinement =
-            sandbox == SandboxMode::DangerFullAccess ? ConfinementStatus::NotApplicable
-                                                 : kernel_confinement().probe();
         // 119-D1/D38: report the parsed baseline (canonical mode names), the
         // effective ceiling, and the approval policy; deprecation notes go to
         // stderr so the machine-readable summary stays on stdout.
         const std::string& max_mode =
             config.sandbox.max_mode.empty() ? config.sandbox.mode : config.sandbox.max_mode;
+        std::string backend = std::string{default_sandbox_provider().backend()};
+        if (sandbox == SandboxMode::DangerFullAccess) {
+            backend += " (bypassed)";
+        } else if (const auto enforcement = default_sandbox_provider().enforcement(sandbox);
+                   enforcement.has_value()) {
+            backend += *enforcement == SandboxEnforcement::Full ? " (full)" : " (partial)";
+        } else {
+            backend += " (unavailable)";
+        }
         out << "  sandbox: " << config.sandbox.mode
             << "  approval: " << config.approval.policy
             << "  max_mode: " << max_mode
-            << "  confinement: " << confinement_name(confinement) << '\n';
+            << "  backend: " << backend
+            << "  network: unconfined" << '\n';
         for (const std::string& warning : config.warnings) {
             err << "note: " << warning << '\n';
         }

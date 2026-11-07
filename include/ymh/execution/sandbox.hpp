@@ -160,6 +160,10 @@ private:
 // Wave 1 wiring: the process-wide Landlock-backed provider, and a
 // deployment-only policy service (mode + roots from `[sandbox]`).
 [[nodiscard]] SandboxProvider& default_sandbox_provider();
+
+// Test-only: clears the cached backend probe so a test can exercise the
+// negative probe with a fake `bwrap` on PATH (119-D42).
+void reset_sandbox_probe_cache_for_test();
 [[nodiscard]] std::unique_ptr<SandboxPolicyService> make_deployment_policy_service(
     SandboxMode mode, std::vector<std::filesystem::path> roots);
 
