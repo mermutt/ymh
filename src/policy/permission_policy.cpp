@@ -427,29 +427,13 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     // protected flag. `classify_shell_request` owns the terminal-open cwd.
     const ShellClassification classification =
         classify_shell_request(request, tmp_root_);
-    if (request_is_tmp_exempt(request, classification, tmp_root_)) {
-        if (reason != nullptr) {
-            *reason = "permission:temp-root-exempt";
-        }
-        return PolicyVerdict::Allow;
-    }
-    const ShellCommandRisk    guard_risk     = classification.risk;
-    if (guard_risk == ShellCommandRisk::Forbid) {
-        if (reason != nullptr) {
-            *reason = "shell-guard:outside-root";
-        }
-        return PolicyVerdict::Deny;
-    }
-
     if (request.sandbox == SandboxMode::ReadOnly && tool_is_mutating(request)) {
         return PolicyVerdict::Deny;
     }
-    // 110-D2: `Confirm` (an in-root shell effect that cannot be bounded) and a
-    // git metadata write no longer short-circuit the rule fold: they are the
-    // default when the fold does not decide, so an explicit allow rule, the
-    // operator's `permissions.shell`, or a session/durable grant can approve
-    // them. `Forbid`, ReadOnly, force_ask, and a protected path stay hard.
-    const bool guard_confirm = guard_risk == ShellCommandRisk::Confirm;
+    // 119-D13: the L1 risk no longer decides here. `Forbid` becomes the
+    // loop's critical-path check (119-D12); `Confirm`/`git_metadata_write`
+    // no longer gate the fold. ReadOnly, force_ask, and protected paths stay
+    // hard.
     if (request.force_ask) {
         return PolicyVerdict::Ask;
     }
@@ -547,24 +531,13 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         return PolicyVerdict::Deny;
     }
     if (folded == PolicyVerdict::Allow) {
-        // 110-D2: a guard-flagged call needs an *explicit* decision to proceed
-        // (a matching rule — including the `permissions.shell` rule — or a
-        // session/durable grant). The bare no-match fallback does not silence
-        // the guard, so an unconfigured deployment keeps its prompts.
-        const bool guard_active = guard_confirm || classification.git_metadata_write;
-        if (!guard_active || winner != nullptr) {
-            return PolicyVerdict::Allow;
+        if (request.critical) {
+            if (reason != nullptr) {
+                *reason = "permission:critical-path";
+            }
+            return PolicyVerdict::Ask;
         }
-    }
-    // The fold did not clear the guard; the prompt says why.
-    if (guard_confirm) {
-        if (reason != nullptr) {
-            *reason = "shell-guard:unbounded-in-root";
-        }
-    } else if (classification.git_metadata_write) {
-        if (reason != nullptr) {
-            *reason = "permission:protected-path";
-        }
+        return PolicyVerdict::Allow;
     }
     return PolicyVerdict::Ask;
 }

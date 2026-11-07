@@ -133,6 +133,10 @@ struct AgentConfig {
     std::chrono::milliseconds chunk_flush_interval{100};
     std::size_t              compaction_threshold_tokens = 0;
     SandboxMode              sandbox = SandboxMode::WorkspaceWrite;
+    // 119-D34: partial enforcement auto-approves only with the opt-in, and
+    // `require_full_enforcement` turns partial into an error.
+    bool                     allow_partial_auto_approve = false;
+    bool                     require_full_enforcement = false;
     std::string              system_prompt;
     std::string              plan_section;
     bool                     persist_prompt_text = false;

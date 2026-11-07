@@ -279,6 +279,8 @@ AgentConfig to_agent_config(const Config& config) {
     agent.max_segments = config.agent.max_segments;
     agent.max_turn_steps = config.agent.max_turn_steps;
     agent.sandbox     = effective_sandbox_mode(config);
+    agent.allow_partial_auto_approve = config.sandbox.allow_partial_auto_approve;
+    agent.require_full_enforcement   = config.sandbox.require_full_enforcement;
     agent.persist_prompt_text = config.session.persist_prompt_text;
     agent.system_prompt =
         config.agent.system_prompt.empty() ? default_system_prompt() : config.agent.system_prompt;

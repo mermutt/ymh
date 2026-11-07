@@ -405,6 +405,7 @@ endif()
 
 add_library(ymh_policy STATIC
     src/policy/permission_policy.cpp
+    src/policy/critical_path.cpp
     src/policy/path_target.cpp
     src/policy/shell_guard.cpp
 )

@@ -1,5 +1,6 @@
 #include "ymh/agent/agent_loop.hpp"
 
+#include "ymh/policy/critical_path.hpp"
 #include "ymh/policy/path_target.hpp"
 
 #include <algorithm>
@@ -927,10 +928,53 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         request.force_ask = true;
     }
 
+    // 119-D33: the composed decision. A confined, non-critical shell call is
+    // auto-approved (the kernel is the approval); `danger` + `never` is the
+    // only no-request unconfined combination. Rule/hard denies still win.
+    const bool shell_tool = call.name == "shell" || call.name == "terminal";
+    const CriticalPathResult critical =
+        shell_tool ? critical_path(request) : CriticalPathResult{};
+    request.critical = critical.critical;
+    std::optional<SandboxEnforcement> enforcement;
+    if (shell_tool && request.sandbox != SandboxMode::DangerFullAccess &&
+        services_.execution != nullptr) {
+        enforcement = services_.execution->sandbox().enforcement(request.sandbox);
+    }
+    const bool partial_ok =
+        enforcement.has_value() && *enforcement == SandboxEnforcement::Partial &&
+        config_.allow_partial_auto_approve && !config_.require_full_enforcement;
+    const bool auto_allow =
+        shell_tool && !request.force_ask && !critical.critical &&
+        ((request.sandbox == SandboxMode::DangerFullAccess &&
+          request.approval == ApprovalPolicy::Never) ||
+         (request.sandbox != SandboxMode::DangerFullAccess && enforcement.has_value() &&
+          (*enforcement == SandboxEnforcement::Full || partial_ok)));
+
     payload::PermissionDecisionKind decision = payload::PermissionDecisionKind::Deny;
     std::string                     reason;
+    bool                            composed = false;
 
-    if (services_.gate != nullptr) {
+    if (auto_allow) {
+        decision = payload::PermissionDecisionKind::Allow;
+        reason   = request.sandbox == SandboxMode::DangerFullAccess
+                       ? "sandbox:unconfined-no-ask"
+                       : (partial_ok ? "sandbox:confined-partial" : "sandbox:confined");
+        composed = true;
+        if (services_.policy != nullptr) {
+            std::string policy_reason;
+            if (services_.policy->evaluate(request, &policy_reason) == PolicyVerdict::Deny) {
+                decision = payload::PermissionDecisionKind::Deny;
+                reason   = policy_reason.empty() ? std::string{"denied by policy"} : policy_reason;
+            }
+        }
+        payload::PermissionDecision recorded;
+        recorded.call     = call.id;
+        recorded.decision = decision;
+        recorded.reason   = reason;
+        session_.append(recorded);
+    }
+
+    if (!composed && services_.gate != nullptr) {
         std::weak_ptr<Session> weak = session_owner_;
         services_.gate->set_decision_hook(
             [weak](const payload::PermissionDecision& recorded) {
@@ -947,7 +991,7 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         decision = outcome.decision;
         reason   = outcome.reason;
         state_   = AgentState::CallingTool;
-    } else {
+    } else if (!composed) {
         std::string         policy_reason;
         const PolicyVerdict verdict =
             services_.policy != nullptr
@@ -968,8 +1012,11 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
                 reason   = outcome.reason;
             } else {
                 decision = payload::PermissionDecisionKind::Deny;
-                reason   = request.force_ask ? "exit_plan_mode requires an interactive review"
-                                             : "no permission resolver attached";
+                reason   = !policy_reason.empty()
+                               ? policy_reason
+                               : (request.force_ask
+                                      ? "exit_plan_mode requires an interactive review"
+                                      : "no permission resolver attached");
             }
             state_ = AgentState::CallingTool;
         }

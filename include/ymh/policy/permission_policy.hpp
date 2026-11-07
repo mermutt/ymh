@@ -85,6 +85,9 @@ struct PermissionRequest {
     // (`ConfinementStatus::Enforced`). `false` makes the L1 guard promote a
     // recognized in-root destructive command to Confirm (`L1.None => L2.on`).
     bool                   kernel_confinement = false;
+    // 119-D12: the loop's critical-path check. When set, a folded `Allow`
+    // becomes `Ask` (the approval flow) after rules; a rule `Deny` wins.
+    bool                   critical = false;
 };
 
 struct PolicyRule {
