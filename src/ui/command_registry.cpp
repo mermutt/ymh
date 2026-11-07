@@ -236,6 +236,13 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "sandbox", "show or change the sandbox and approval policy",
+        [](CommandContext& context, const std::string& args) {
+            if (context.sandbox) {
+                context.sandbox(args);
+            }
+        }});
+    registry.add(Command{
         "subagents", "enter a subagent of the current session",
         [](CommandContext& context, const std::string&) {
             if (context.subagents) {

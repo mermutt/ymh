@@ -74,6 +74,14 @@ struct SetModeResult {
 
 // 119-D17: the `sandbox.set` result. `mode`/`policy` are the effective values
 // after the append (the session projection), not merely the requested ones.
+struct SandboxStateResult {
+    SessionId   session;
+    std::string mode;
+    std::string policy;
+    std::string backend;
+    std::string enforcement;  // full | partial | unavailable | bypassed
+};
+
 struct SandboxSetResult {
     SessionId   session;
     std::string mode;
@@ -164,6 +172,9 @@ public:
     // concrete; the daemon overrides it.
     virtual SandboxSetResult setSandbox(const nlohmann::json&) {
         throw std::logic_error("sandbox.set is not supported by this host");
+    }
+    virtual SandboxStateResult sandboxState(const nlohmann::json&) {
+        throw std::logic_error("sandbox.get is not supported by this host");
     }
     virtual SetModelResult setSessionModel(const nlohmann::json& params) = 0;
 

@@ -84,6 +84,11 @@ SessionId SessionManager::createSession(const SessionOptions& options) {
         .title         = header.title,
         .model_name    = header.model_name.value_or(""),
     });
+    // 119-D17/D36: the creation seed, so a resumed projection does not depend
+    // on the header fallback alone.
+    if (header.permission_preset.has_value()) {
+        session.append(payload::PermissionPresetSelected{*header.permission_preset});
+    }
     return header.id;
 }
 

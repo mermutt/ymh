@@ -847,7 +847,50 @@ protocol::SandboxSetResult HostRuntime::setSandbox(const nlohmann::json& params)
                                                                               : "danger-full-access";
         const std::string policy =
             service.approvalPolicy(id) == ApprovalPolicy::Never ? "never" : "ask";
+        // 119-D17: make the change model-visible on the next call.
+        payload::ContextInjected note;
+        note.id      = make_event_id().value;
+        note.role    = Role::User;
+        note.text    = "sandbox: mode=" + mode_name + " approval=" + policy +
+                       "; applies to subsequent calls";
+        note.source  = plugin_message_source("ymh.sandbox", ContextFormed(ContextForm::Notice));
+        note.context = ContextFormed(ContextForm::Notice);
+        session->append(note);
         return protocol::SandboxSetResult{id, mode_name, policy};
+    });
+}
+
+protocol::SandboxStateResult HostRuntime::sandboxState(const nlohmann::json& params) {
+    return translate([&]() -> protocol::SandboxStateResult {
+        if (!params.is_object()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const auto session_it = params.find("session");
+        if (session_it == params.end() || !session_it->is_string()) {
+            throw_mapped(WireError{protocol::code_value(protocol::RpcCode::InvalidParams),
+                                   "InvalidParams"});
+        }
+        const SessionId id{session_it->get<std::string>()};
+        (void)runtime_.sessions().sessionPtr(id);  // throws UnknownSession
+        const SandboxPolicyService& service = runtime_.environment().sandboxPolicy();
+        const SandboxPolicy deployment      = service.resolveDeployment();
+        const SandboxMode   mode            = service.overrideOf(id).value_or(deployment.mode);
+        const std::string   mode_name = mode == SandboxMode::ReadOnly     ? "read-only"
+                                        : mode == SandboxMode::WorkspaceWrite ? "workspace-write"
+                                                                              : "danger-full-access";
+        const std::string policy =
+            service.approvalPolicy(id) == ApprovalPolicy::Never ? "never" : "ask";
+        const SandboxProvider& provider = runtime_.environment().sandbox();
+        std::string            enforcement = "bypassed";
+        if (mode != SandboxMode::DangerFullAccess) {
+            const auto level = provider.enforcement(mode);
+            enforcement = !level.has_value() ? "unavailable"
+                          : *level == SandboxEnforcement::Full ? "full"
+                                                               : "partial";
+        }
+        return protocol::SandboxStateResult{id, mode_name, policy,
+                                            std::string{provider.backend()}, enforcement};
     });
 }
 

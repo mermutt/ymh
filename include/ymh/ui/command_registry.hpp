@@ -44,6 +44,9 @@ struct CommandContext {
     // the same workspace daemon. `args` is the trimmed command-line tail: empty,
     // or a non-negative integer resolved-view boundary.
     std::function<void(const std::string&)> fork;
+    // 119-D17/D38: `/sandbox [mode|policy|preset=NAME]` shows or changes the
+    // session's effective knobs (empty args = show).
+    std::function<void(const std::string&)> sandbox;
     // 79-D1: opens the rewind picker for the focused session. `args` is the
     // trimmed command-line tail; it is unused today (reserved).
     std::function<void(const std::string&)> rewind;

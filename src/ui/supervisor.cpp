@@ -3340,6 +3340,88 @@ private:
                   });
     }
 
+    void request_sandbox(const std::string& args) {
+        WorkspaceModel* workspace = model_.activeWorkspace();
+        if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
+            model_.pushNotice("sandbox: no active session");
+            model_.dirty.markAggregate();
+            return;
+        }
+        const SessionId session = workspace->activeSessionId();
+        const auto append = [this, session](std::string text) {
+            enqueue([this, session, text = std::move(text)]() mutable {
+                if (SessionUiState* state = model_.session(session); state != nullptr) {
+                    append_system_entry(model_, *state, std::move(text));
+                }
+            });
+        };
+        if (!args.empty()) {
+            nlohmann::json params{{"session", session.value}};
+            for (const std::string& token : split_ws(args)) {
+                if (token == "read-only" || token == "workspace-write" ||
+                    token == "danger-full-access" ||
+                    (token == "workspace" || token == "unrestricted")) {
+                    params["mode"] = token == "workspace"       ? "workspace-write"
+                                     : token == "unrestricted" ? "danger-full-access"
+                                                              : token;
+                } else if (token == "ask" || token == "never") {
+                    params["policy"] = token;
+                } else if (token.starts_with("preset=")) {
+                    params["preset"] = token.substr(7);
+                } else {
+                    append("sandbox: unknown argument '" + token +
+                           "' (mode, policy, or preset=NAME)");
+                    return;
+                }
+            }
+            submit_to(workspace->id, std::string(protocol::method::kSandboxSet),
+                      std::move(params), [append](SupervisorReply reply) {
+                          if (!reply.ok) {
+                              append("sandbox: " +
+                                     (reply.error.empty() ? std::string{"request failed"}
+                                                          : reply.error));
+                              return;
+                          }
+                          append("sandbox: mode=" + reply.result.value("mode", std::string{}) +
+                                 " policy=" + reply.result.value("policy", std::string{}));
+                      });
+            return;
+        }
+        submit_to(workspace->id, std::string(protocol::method::kSandboxGet),
+                  nlohmann::json{{"session", session.value}},
+                  [append](SupervisorReply reply) {
+                      if (!reply.ok) {
+                          append("sandbox: " +
+                                 (reply.error.empty() ? std::string{"request failed"}
+                                                      : reply.error));
+                          return;
+                      }
+                      append("sandbox: mode=" + reply.result.value("mode", std::string{}) +
+                             " policy=" + reply.result.value("policy", std::string{}) +
+                             " backend=" + reply.result.value("backend", std::string{}) +
+                             " (" + reply.result.value("enforcement", std::string{}) + ")");
+                  });
+    }
+
+    static std::vector<std::string> split_ws(const std::string& text) {
+        std::vector<std::string> out;
+        std::size_t              start = 0;
+        while (start < text.size()) {
+            while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) {
+                ++start;
+            }
+            std::size_t end = start;
+            while (end < text.size() && !std::isspace(static_cast<unsigned char>(text[end]))) {
+                ++end;
+            }
+            if (end > start) {
+                out.push_back(text.substr(start, end - start));
+            }
+            start = end;
+        }
+        return out;
+    }
+
     void request_handoff(const std::string& args) {
         WorkspaceModel* workspace = model_.activeWorkspace();
         if (workspace == nullptr || workspace->activeSessionId().value.empty()) {
@@ -3440,6 +3522,7 @@ private:
         context.mcp = [this] { request_mcp(); };
         context.status = [this] { request_status(); };
         context.handoff = [this](const std::string& args) { request_handoff(args); };
+        context.sandbox = [this](const std::string& args) { request_sandbox(args); };
         return registry_.dispatch(line, context);
     }
 
