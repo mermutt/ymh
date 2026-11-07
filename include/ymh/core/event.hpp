@@ -79,6 +79,9 @@ enum class EventType : std::uint16_t {
     CommandDone,         // wire: command/done (44 §6.1, 26 §4.3.9)
     JobChanged,          // wire: job/changed  (44 §6.1, 26 §4.3.9)
     SessionModelChanged, // wire: session/model (53-D6)
+    SandboxModeChanged,    // wire: sandbox/mode      (119-D17)
+    ApprovalPolicyChanged, // wire: approval/policy   (119-D17)
+    PermissionPresetSelected, // wire: permission/preset (119-D17)
     // Live-only (15 §4.7, AM-1): never in the durable SessionEventMap, never
     // appended to the session log. Delivered to global EventBus subscribers.
     McpServerStatusChanged,  // wire: mcp/server_status_changed

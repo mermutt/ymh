@@ -12,6 +12,8 @@
 #include <system_error>
 #include <utility>
 
+#include "ymh/session/permissions_state.hpp"
+
 namespace ymh {
 namespace {
 
@@ -110,6 +112,18 @@ SessionId SessionManager::forkSession(const SessionId& parent, std::size_t seedL
     }
 
     Session child = Session::fork(*parentSession, seedLength, *store_, *bus_);
+    // 119-D36: a fork inherits the parent's effective knobs, not just the
+    // header preset, so a narrowed parent does not widen in the child.
+    const PermissionsState inherited = permissions_state(parentSession->events());
+    if (inherited.mode.has_value()) {
+        child.append(payload::SandboxModeChanged{*inherited.mode, "fork"});
+    }
+    if (inherited.policy.has_value()) {
+        child.append(payload::ApprovalPolicyChanged{*inherited.policy});
+    }
+    if (inherited.preset.has_value()) {
+        child.append(payload::PermissionPresetSelected{*inherited.preset});
+    }
     const SessionId childId = child.id();
     sessions_[childId.value] = std::make_shared<Session>(std::move(child));
     return childId;

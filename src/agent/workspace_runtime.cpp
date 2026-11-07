@@ -21,6 +21,7 @@
 #include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/preset.hpp"
+#include "ymh/agent/session_sandbox_policy.hpp"
 #include "ymh/agent/session_activator.hpp"
 #include "ymh/agent/subagent_service.hpp"
 #include "ymh/cli/wiring.hpp"
@@ -327,6 +328,14 @@ public:
           providers_(std::move(providers)),
           provider_factory_(std::move(provider_factory)),
           endpoints_(make_endpoint_map(config)) {
+        // 119 Wave 2: the session-aware policy service is built after the
+        // environment and the SessionManager exist, then injected.
+        sandbox_policy_ = std::make_unique<SessionSandboxPolicyService>(
+            sessions_, PermissionPresetSettings{config.sandbox.mode, config.approval.policy},
+            config.sandbox.max_mode, sandbox_writable_roots(config),
+            config.permissions.presets);
+        environment_->setSandboxPolicyService(sandbox_policy_.get());
+
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
             registrations_.push_back(tools_.add(std::move(tool)));
         }
@@ -544,6 +553,7 @@ public:
     ResourceGovernor                   governor_;
     NoopPtyEventSink                   pty_events_;
     std::unique_ptr<LocalPtyService>   pty_;
+    std::unique_ptr<SessionSandboxPolicyService> sandbox_policy_;
     std::unique_ptr<LocalEnvironment>  environment_;
     std::shared_ptr<SkillCatalog>      skill_catalog_;
     ToolRegistry                       tools_;

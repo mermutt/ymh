@@ -71,7 +71,9 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
 
 SandboxProvider& LocalEnvironment::sandbox() { return default_sandbox_provider(); }
 
-SandboxPolicyService& LocalEnvironment::sandboxPolicy() { return *policy_service_; }
+SandboxPolicyService& LocalEnvironment::sandboxPolicy() {
+    return external_policy_ != nullptr ? *external_policy_ : *policy_service_;
+}
 
 std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
     if (path.empty()) {

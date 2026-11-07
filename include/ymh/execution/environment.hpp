@@ -79,6 +79,11 @@ public:
 
     SandboxProvider&      sandbox() override;
     SandboxPolicyService& sandboxPolicy() override;
+    // 119 Wave 2: the runtime injects the session-aware service after
+    // construction (the environment is built before the SessionManager).
+    void setSandboxPolicyService(SandboxPolicyService* service) noexcept {
+        external_policy_ = service;
+    }
 
     Filesystem&     fs() override { return fs_; }
     ProcessService& process() override { return process_; }
@@ -102,6 +107,7 @@ private:
     ToolConfig            config_;
     std::vector<std::filesystem::path>     writable_roots_;
     std::unique_ptr<SandboxPolicyService>  policy_service_;
+    SandboxPolicyService*                  external_policy_ = nullptr;
 };
 
 // Component-wise containment over weakly-canonical operands (07 §6.2). Never a

@@ -296,6 +296,7 @@ add_library(ymh_session STATIC
     src/session/session_persistence.cpp
     src/session/session_manager.cpp
     src/session/plan_mode.cpp
+    src/session/permissions_state.cpp
     src/session/checkpoints.cpp
     src/session/tool_result_text.cpp
 )
@@ -577,6 +578,7 @@ target_link_libraries(ymh_prompt
 
 add_library(ymh_agent STATIC
     src/agent/agent.cpp
+    src/agent/session_sandbox_policy.cpp
     src/agent/agent_loop.cpp
     src/agent/agent_registry.cpp
     src/agent/chunk_coalescer.cpp

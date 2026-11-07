@@ -413,6 +413,9 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::SessionEnded:
             case EventType::SessionRenamed:
             case EventType::PlanMode:
+            case EventType::SandboxModeChanged:
+            case EventType::ApprovalPolicyChanged:
+            case EventType::PermissionPresetSelected:
             case EventType::SessionModelChanged:
             case EventType::LlmRequestHeader:
             case EventType::AgentPresetSelected:

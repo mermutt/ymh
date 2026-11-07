@@ -283,6 +283,11 @@ std::future<PermissionOutcome> PermissionBroker::State::resolve(const Permission
     if (verdict == PolicyVerdict::Deny) {
         return ready_outcome({payload::PermissionDecisionKind::Deny, fallback_reason});
     }
+    // 119-D2: `never` rejects the request deterministically, before any
+    // answerer or subscriber check.
+    if (request.approval == ApprovalPolicy::Never) {
+        return ready_outcome({payload::PermissionDecisionKind::Deny, "approval:rejected"});
+    }
     if (cancel.cancelled()) {
         return ready_outcome({payload::PermissionDecisionKind::Deny, "cancelled"});
     }

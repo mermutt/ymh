@@ -676,6 +676,31 @@ void from_json(const nlohmann::json& json, SessionRenamed& value) {
     value.origin = parse_rename_origin(json.at("origin").get<std::string>());
 }
 
+void to_json(nlohmann::json& json, const SandboxModeChanged& value) {
+    json = nlohmann::json{{"mode", value.mode}, {"reason", value.reason}};
+}
+
+void from_json(const nlohmann::json& json, SandboxModeChanged& value) {
+    value.mode   = json.value("mode", std::string{});
+    value.reason = json.value("reason", std::string{});
+}
+
+void to_json(nlohmann::json& json, const ApprovalPolicyChanged& value) {
+    json = nlohmann::json{{"policy", value.policy}};
+}
+
+void from_json(const nlohmann::json& json, ApprovalPolicyChanged& value) {
+    value.policy = json.value("policy", std::string{"ask"});
+}
+
+void to_json(nlohmann::json& json, const PermissionPresetSelected& value) {
+    json = nlohmann::json{{"preset", value.preset}};
+}
+
+void from_json(const nlohmann::json& json, PermissionPresetSelected& value) {
+    value.preset = json.value("preset", std::string{});
+}
+
 void to_json(nlohmann::json& json, const PlanMode& value) {
     json = nlohmann::json{{"active", value.active}};
 }

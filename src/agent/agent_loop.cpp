@@ -905,7 +905,16 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
     // 90-D2: populate the path dimension from the tool arguments. This is a
     // pure lexical mapping; it never resolves, stats, or canonicalizes.
     request.path = request_path_target(call.name, call.arguments, request.root);
-    request.sandbox = config_.sandbox;
+    // 119-D3/D31: resolve the per-session policy once for this call. Wave 3
+    // uses the same carried value for the decision and the spawn.
+    if (services_.execution != nullptr) {
+        const SandboxPolicy resolved =
+            services_.execution->sandboxPolicy().resolve(request);
+        request.sandbox  = resolved.mode;
+        request.approval = services_.execution->sandboxPolicy().approvalPolicy(request.session);
+    } else {
+        request.sandbox = config_.sandbox;
+    }
     request.kernel_confinement =
         services_.execution != nullptr &&
         services_.execution->confinementStatus() == ConfinementStatus::Enforced;

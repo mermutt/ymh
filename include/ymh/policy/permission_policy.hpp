@@ -27,6 +27,7 @@
 #include "ymh/core/event.hpp"
 #include "ymh/core/task.hpp"
 #include "ymh/execution/environment.hpp"
+#include "ymh/execution/sandbox.hpp"
 #include "ymh/session/events.hpp"
 #include "ymh/session/ids.hpp"
 #include "ymh/policy/path_target.hpp"
@@ -71,6 +72,9 @@ struct PermissionRequest {
     std::optional<std::filesystem::path> path;   // absolute, lexically normal
 
     SandboxMode            sandbox = SandboxMode::WorkspaceWrite;
+    // 119-D2: `Never` rejects an approval request inside the broker before any
+    // answerer runs; the loop fills it from the session projection.
+    ApprovalPolicy         approval = ApprovalPolicy::Ask;
     bool                   destructive = false;
     // 25-D4: non-mutating forced review. `evaluate` returns Ask before rules,
     // tool_defaults, default_verdict, and grants; `tool_is_mutating` never

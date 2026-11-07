@@ -258,6 +258,24 @@ struct PlanMode {
     bool active = false;
 };
 
+// ---- sandbox / approval (119-D17) ------------------------------------------
+
+// Whole-value-replace deployment knobs. The last `sandbox/mode` /
+// `approval/policy` in a session log wins; a log with none falls back to the
+// header `permission_preset` and then the deployment baseline (119-D36).
+struct SandboxModeChanged {
+    std::string mode;    // read-only | workspace-write | danger-full-access
+    std::string reason;  // audit text
+};
+
+struct ApprovalPolicyChanged {
+    std::string policy;  // ask | never
+};
+
+struct PermissionPresetSelected {
+    std::string preset;
+};
+
 // ---- session model (53-D6) -------------------------------------------------
 
 // Whole-value-replace session model selection. The last `session/model` in a
@@ -447,6 +465,18 @@ struct SessionEventMap<EventType::PlanMode> {
     using type = payload::PlanMode;
 };
 template <>
+struct SessionEventMap<EventType::SandboxModeChanged> {
+    using type = payload::SandboxModeChanged;
+};
+template <>
+struct SessionEventMap<EventType::ApprovalPolicyChanged> {
+    using type = payload::ApprovalPolicyChanged;
+};
+template <>
+struct SessionEventMap<EventType::PermissionPresetSelected> {
+    using type = payload::PermissionPresetSelected;
+};
+template <>
 struct SessionEventMap<EventType::LlmRequestHeader> {
     using type = payload::LlmRequestHeader;
 };
@@ -569,6 +599,18 @@ struct EventTraits<payload::PlanMode> {
     static constexpr EventType type = EventType::PlanMode;
 };
 template <>
+struct EventTraits<payload::SandboxModeChanged> {
+    static constexpr EventType type = EventType::SandboxModeChanged;
+};
+template <>
+struct EventTraits<payload::ApprovalPolicyChanged> {
+    static constexpr EventType type = EventType::ApprovalPolicyChanged;
+};
+template <>
+struct EventTraits<payload::PermissionPresetSelected> {
+    static constexpr EventType type = EventType::PermissionPresetSelected;
+};
+template <>
 struct EventTraits<payload::LlmRequestHeader> {
     static constexpr EventType type = EventType::LlmRequestHeader;
 };
@@ -661,6 +703,12 @@ void to_json(nlohmann::json& json, const SubagentFanIn& value);
 void from_json(const nlohmann::json& json, SubagentFanIn& value);
 void to_json(nlohmann::json& json, const SessionRenamed& value);
 void from_json(const nlohmann::json& json, SessionRenamed& value);
+void to_json(nlohmann::json& json, const SandboxModeChanged& value);
+void from_json(const nlohmann::json& json, SandboxModeChanged& value);
+void to_json(nlohmann::json& json, const ApprovalPolicyChanged& value);
+void from_json(const nlohmann::json& json, ApprovalPolicyChanged& value);
+void to_json(nlohmann::json& json, const PermissionPresetSelected& value);
+void from_json(const nlohmann::json& json, PermissionPresetSelected& value);
 void to_json(nlohmann::json& json, const PlanMode& value);
 void from_json(const nlohmann::json& json, PlanMode& value);
 void to_json(nlohmann::json& json, const LlmRequestHeader& value);

@@ -747,6 +747,12 @@ PermissionOutcome PermissionGate::resolve(const PermissionRequest& request,
         emit_decision(request, outcome);
         return outcome;
     }
+    // 119-D2: `never` rejects the request before any attention hook.
+    if (request.approval == ApprovalPolicy::Never) {
+        PermissionOutcome outcome{payload::PermissionDecisionKind::Deny, "approval:rejected"};
+        emit_decision(request, outcome);
+        return outcome;
+    }
 
     PermissionRequestId id;
     {
