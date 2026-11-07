@@ -8,6 +8,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
@@ -66,6 +67,16 @@ constexpr std::array<std::string_view, 6> kHandoffHeadings{{
     "## Relevant Files",
 }};
 
+// Per-field caps that keep the evidence digest a digest. Without them a single
+// pasted prompt or assistant message can exceed `max_input_bytes` on its own,
+// making `/handoff` fail no matter how far compaction has shrunk the transcript.
+constexpr std::size_t kMaxHandoffFieldBytes = 8u * 1024u;
+constexpr std::size_t kMaxHandoffErrorBytes = 2u * 1024u;
+constexpr std::size_t kMaxHandoffFileBytes  = 1u * 1024u;
+// `HandoffService::run` gives the digest at most this share of
+// `max_input_bytes`; the rest is available to the bounded transcript.
+constexpr std::size_t kHandoffEvidenceShareDivisor = 2;
+
 std::string format_stamp(std::time_t utc_now) {
     std::tm tm{};
     gmtime_r(&utc_now, &tm);
@@ -107,6 +118,14 @@ std::string cap_title(const std::string& title, std::size_t max_bytes) {
         return title;
     }
     return title.substr(0, utf8_prefix(title, max_bytes));
+}
+
+// Deterministic UTF-8-safe cap for one digest field.
+std::string cap_text(const std::string& text, std::size_t max_bytes) {
+    if (text.size() <= max_bytes) {
+        return text;
+    }
+    return text.substr(0, utf8_prefix(text, max_bytes));
 }
 
 std::string join_text_blocks(const std::vector<ContentBlock>& blocks) {
@@ -396,11 +415,29 @@ struct SessionSummaryFacts {
     std::vector<std::string> files;
 };
 
+// The latest committed compaction boundary. Everything at or before it is
+// shadowed in `deriveMessages`; the durable summary carries that history, so the
+// digest must not re-read it (otherwise a compacted long session can never be
+// handed off: the shadowed assistant text alone exceeds `max_input_bytes`).
+Sequence latest_compaction_boundary(const EventRange& events) {
+    Sequence boundary = 0;
+    for (const EventRecord& record : events) {
+        if (record.event.type != EventType::ContextCompaction) {
+            continue;
+        }
+        boundary = std::max(
+            boundary, record.event.payload.get<payload::ContextCompaction>().boundary);
+    }
+    return boundary;
+}
+
 SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange& events) {
     SessionSummaryFacts facts;
     std::set<std::string> seen_files;
+    const Sequence        boundary = latest_compaction_boundary(events);
     for (const EventRecord& record : events) {
         const Event& event = record.event;
+        const bool   shadowed = record.seq <= boundary;
         switch (event.type) {
             case EventType::TurnStarted:
                 ++facts.turn_count;
@@ -416,8 +453,9 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
                 facts.last_turn = "failed";
                 break;
             case EventType::UserMessage: {
-                const std::string text =
-                    join_text_blocks(event.payload.get<payload::UserMessage>().content);
+                const std::string text = cap_text(
+                    join_text_blocks(event.payload.get<payload::UserMessage>().content),
+                    kMaxHandoffFieldBytes);
                 if (!text.empty()) {
                     if (facts.goal_first.empty()) {
                         facts.goal_first = text;
@@ -429,21 +467,27 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
             case EventType::GoalChange: {
                 const payload::GoalChange& change = event.payload.get<payload::GoalChange>();
                 if (change.goal.has_value()) {
-                    facts.goal_change = change.goal->objective;
+                    facts.goal_change =
+                        cap_text(change.goal->objective, kMaxHandoffFieldBytes);
                 }
                 break;
             }
             case EventType::AssistantMessage: {
-                const std::string text =
-                    join_assistant_text(event.payload.get<payload::AssistantMessage>().content);
+                if (shadowed) {
+                    break;
+                }
+                const std::string text = cap_text(
+                    join_assistant_text(event.payload.get<payload::AssistantMessage>().content),
+                    kMaxHandoffFieldBytes);
                 if (!text.empty()) {
                     facts.decisions.push_back(text);
                 }
                 break;
             }
             case EventType::ContextCompaction:
-                facts.prior_summary =
-                    event.payload.get<payload::ContextCompaction>().summary;
+                facts.prior_summary = cap_text(
+                    event.payload.get<payload::ContextCompaction>().summary,
+                    kMaxHandoffFieldBytes);
                 break;
             case EventType::ToolCall: {
                 const payload::ToolCall& call = event.payload.get<payload::ToolCall>();
@@ -454,8 +498,9 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
                     if (!it.value().is_string() || !is_path_key(it.key())) {
                         continue;
                     }
-                    const std::string relative =
-                        workspace_relative(it.value().get<std::string>(), header.cwd);
+                    const std::string relative = cap_text(
+                        workspace_relative(it.value().get<std::string>(), header.cwd),
+                        kMaxHandoffFileBytes);
                     if (relative.empty()) {
                         continue;
                     }
@@ -467,6 +512,9 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
                 break;
             }
             case EventType::ToolResult: {
+                if (shadowed) {
+                    break;
+                }
                 const payload::ToolResult& result = event.payload.get<payload::ToolResult>();
                 if (result.outcome == payload::ToolOutcome::Ok) {
                     break;
@@ -475,7 +523,8 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
                     result.error.has_value() && !result.error->empty()
                         ? *result.error
                         : std::string{tool_outcome_name(result.outcome)});
-                facts.errors.push_back(result.name + ": " + detail);
+                facts.errors.push_back(
+                    cap_text(result.name + ": " + detail, kMaxHandoffErrorBytes));
                 break;
             }
             default:
@@ -486,40 +535,89 @@ SessionSummaryFacts collect_facts(const SessionHeader& header, const EventRange&
     return facts;
 }
 
+struct KeptLines {
+    std::vector<std::string> lines;
+    std::size_t              bytes = 0;
+};
+
+// Keep the newest entries that fit the budget, in log order. Stopping at the
+// first entry that does not fit keeps the selection deterministic and anchored
+// on the most recent history, which is what a continuation summarizer needs.
+KeptLines keep_recent_within(const std::vector<std::string>& items, std::size_t budget) {
+    KeptLines kept;
+    for (auto it = items.rbegin(); it != items.rend(); ++it) {
+        const std::size_t line = it->size() + 3;  // "- " + "\n"
+        if (kept.bytes + line > budget) {
+            break;
+        }
+        kept.bytes += line;
+        kept.lines.push_back(*it);
+    }
+    std::reverse(kept.lines.begin(), kept.lines.end());
+    return kept;
+}
+
+void append_lines(std::string& out, const KeptLines& kept) {
+    for (const std::string& line : kept.lines) {
+        out += "- ";
+        out += line;
+        out.push_back('\n');
+    }
+}
+
+// The single serializer. `max_bytes` is `kUnlimitedEvidence` for the public
+// unlimited projection; `HandoffService::run` passes a bounded share of the
+// input budget so shadowed or oversized history can never starve the
+// transcript of the recent turns.
+constexpr std::size_t kUnlimitedEvidence = std::numeric_limits<std::size_t>::max();
+
+std::string serialize_evidence(const SessionHeader& header, const SessionSummaryFacts& facts,
+                               std::size_t max_bytes) {
+    std::ostringstream prefix;
+    prefix << "[handoff evidence]\n";
+    prefix << "session: " << header.id.value << "\n";
+    prefix << "title: " << header.title << "\n";
+    prefix << "model: " << header.model << "\n";
+    prefix << "kind: " << session_kind_name(header.kind) << "\n";
+    prefix << "parent: " << (header.parentSession.has_value() ? header.parentSession->value
+                                                              : std::string{"-"})
+           << "\n";
+    prefix << "turn_count: " << facts.turn_count << "\n";
+    prefix << "last_turn: " << facts.last_turn << "\n";
+    prefix << "goal_first: " << facts.goal_first << "\n";
+    prefix << "goal_latest: " << facts.goal_latest << "\n";
+    prefix << "goal_change: " << facts.goal_change << "\n";
+    prefix << "prior_summary: " << facts.prior_summary << "\n";
+    prefix << "decisions:\n";
+
+    std::string out = prefix.str();
+    if (max_bytes == kUnlimitedEvidence) {
+        append_lines(out, KeptLines{facts.decisions, 0});
+        out += "errors:\n";
+        append_lines(out, KeptLines{facts.errors, 0});
+        out += "files:\n";
+        append_lines(out, KeptLines{facts.files, 0});
+        return out;
+    }
+
+    const std::size_t remaining = max_bytes > out.size() ? max_bytes - out.size() : 0;
+    const std::size_t decision_budget = remaining * 3 / 5;
+    const std::size_t error_budget    = remaining / 5;
+    const std::size_t file_budget     = remaining - decision_budget - error_budget;
+    append_lines(out, keep_recent_within(facts.decisions, decision_budget));
+    out += "errors:\n";
+    append_lines(out, keep_recent_within(facts.errors, error_budget));
+    out += "files:\n";
+    append_lines(out, keep_recent_within(facts.files, file_budget));
+    return out;
+}
+
 } // namespace
 
 std::string_view handoff_instruction() noexcept { return kHandoffInstruction; }
 
 std::string build_handoff_evidence(const SessionHeader& header, const EventRange& events) {
-    const SessionSummaryFacts facts = collect_facts(header, events);
-    std::ostringstream        out;
-    out << "[handoff evidence]\n";
-    out << "session: " << header.id.value << "\n";
-    out << "title: " << header.title << "\n";
-    out << "model: " << header.model << "\n";
-    out << "kind: " << session_kind_name(header.kind) << "\n";
-    out << "parent: " << (header.parentSession.has_value() ? header.parentSession->value
-                                                          : std::string{"-"})
-        << "\n";
-    out << "turn_count: " << facts.turn_count << "\n";
-    out << "last_turn: " << facts.last_turn << "\n";
-    out << "goal_first: " << facts.goal_first << "\n";
-    out << "goal_latest: " << facts.goal_latest << "\n";
-    out << "goal_change: " << facts.goal_change << "\n";
-    out << "prior_summary: " << facts.prior_summary << "\n";
-    out << "decisions:\n";
-    for (const std::string& decision : facts.decisions) {
-        out << "- " << decision << "\n";
-    }
-    out << "errors:\n";
-    for (const std::string& error : facts.errors) {
-        out << "- " << error << "\n";
-    }
-    out << "files:\n";
-    for (const std::string& file : facts.files) {
-        out << "- " << file << "\n";
-    }
-    return out.str();
+    return serialize_evidence(header, collect_facts(header, events), kUnlimitedEvidence);
 }
 
 std::filesystem::path resolve_handoff_path(const ExecutionEnvironment& env,
@@ -588,7 +686,12 @@ HandoffResult HandoffService::run(const Session&              source,
         return result;
     }
 
-    const std::string evidence = build_handoff_evidence(source.header(), events);
+    // The digest is bounded independently from the transcript so a long or
+    // shadowed history cannot consume the whole input budget and turn every
+    // handoff into `ContextTooLarge`.
+    const std::string evidence = serialize_evidence(
+        source.header(), collect_facts(source.header(), events),
+        policy_.max_input_bytes / kHandoffEvidenceShareDivisor);
     constexpr std::string_view kTranscriptMarker = "\n[transcript]\n";
     const std::size_t overhead = evidence.size() + kTranscriptMarker.size();
     const std::size_t digest_budget =
