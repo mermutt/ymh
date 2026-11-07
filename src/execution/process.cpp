@@ -633,14 +633,14 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
     close_fd(out.write_fd);
     close_fd(errsig.write_fd);
 
-    bool exec_failed = false;
-    int  exec_errno = 0;
+    bool              exec_failed = false;
+    ExecStatusRecord status{};
     {
         pollfd fd{errsig.read_fd, POLLIN, 0};
         const int ready = ::poll(&fd, 1, 200);
         if (ready > 0 && (fd.revents & POLLIN) != 0) {
-            const ssize_t count = ::read(errsig.read_fd, &exec_errno, sizeof(exec_errno));
-            exec_failed = count == static_cast<ssize_t>(sizeof(exec_errno));
+            const ssize_t count = ::read(errsig.read_fd, &status, sizeof(status));
+            exec_failed = count == static_cast<ssize_t>(sizeof(status));
         }
     }
     close_fd(errsig.read_fd);
@@ -650,8 +650,12 @@ Task<std::unique_ptr<ChildProcessHandle>> LocalProcessService::spawn(
         close_fd(out.read_fd);
         ::kill(-pid, SIGKILL);
         (void)reap(pid);
+        if (status.kind == kExecStatusRefused) {
+            throw ToolError{ToolErrorCode::SandboxUnavailable,
+                            std::string{"sandbox: "} + std::strerror(status.errno_value)};
+        }
         throw ToolError{ToolErrorCode::Io,
-                        std::string{"exec: "} + std::strerror(exec_errno)};
+                        std::string{"exec: "} + std::strerror(status.errno_value)};
     }
 
     set_nonblocking(in.write_fd);
