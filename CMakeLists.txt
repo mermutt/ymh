@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.22)
 
 # 96-D17: stamp the build before `project()`. `CMAKE_CURRENT_SOURCE_DIR` and
 # `CMAKE_BINARY_DIR` are already defined here; `project(VERSION 0.003)` stays as
-# CMake's compatibility version and is no longer displayed (96-D8).
+# CMake's compatibility version and is no longer displayed (96-D8). The stamp is
+# derived from git (`v<YYMMDD>-<hash>[x]`); no source-tree state is written.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_stamp.cmake")
-ymh_stamp_version("${CMAKE_CURRENT_SOURCE_DIR}/.version_info" YMH_DISPLAY_VERSION)
+ymh_stamp_version("${CMAKE_CURRENT_SOURCE_DIR}" YMH_DISPLAY_VERSION)
 
 project(
     ymh
@@ -13,11 +14,15 @@ project(
     LANGUAGES CXX
 )
 
-# 96-D8: the display string contains `#`, which CMake strips from compile
-# definitions, so a generated header carries it to every consumer.
+# 96-D8: a generated header carries the display string to every consumer, so
+# the CLI, TUI, and MCP handshake cannot drift apart.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/ymh")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_version.hpp.in"
                "${CMAKE_BINARY_DIR}/generated/ymh/build_version.hpp" @ONLY)
+
+# The stamp is a function of HEAD and the work-tree state, so make Ninja re-run
+# configure when either changes; `build.sh` also configures on every run.
+ymh_watch_version_inputs("${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---------------------------------------------------------------------------
 # Language / build configuration

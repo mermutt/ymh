@@ -1723,7 +1723,7 @@ std::string truncate_to_width(std::string_view text, int max_width) {
 Element render_header(const UiModel& model, const Theme& theme, int width) {
     const auto workspace = model.workspaces.find(model.activeWorkspaceId);
     // 72-D3: the top-left product mark carries the build version.
-    std::string title = std::string{"ymh (v"} + YMH_VERSION + ")";
+    std::string title = std::string{"ymh ("} + YMH_VERSION + ")";
     if (workspace != model.workspaces.end() && !workspace->second.cwd.empty()) {
         title += " · " + workspace->second.cwd;
     }

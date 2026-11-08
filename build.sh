@@ -61,6 +61,9 @@ docker run --rm -v "$ROOT:/w" -w /w \
         libsqlite3-dev nlohmann-json3-dev libcurl4-openssl-dev >/dev/null
 
     git config --global http.sslVerify false
+    # The checkout is owned by the launching user, but this container runs as
+    # root; allow git to read it for the version stamp.
+    git config --global --add safe.directory /w
 
     # gcc-13 comes from the ubuntu-toolchain-r PPA on 22.04.
     echo "deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
@@ -70,13 +73,13 @@ docker run --rm -v "$ROOT:/w" -w /w \
         -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false \
         g++-13 gcc-13 >/dev/null
 
-    # Configure once; subsequent runs rebuild incrementally.
-    if [ ! -f "/w/$BUILD_DIR/build.ninja" ]; then
-        cmake -S /w -B "/w/$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=gcc-13 -DCMAKE_CXX_COMPILER=g++-13 \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
-            -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG -Wno-error=maybe-uninitialized"
-    fi
+    # Configure on every run: the build version is derived from git at
+    # configure time, so an incremental build must re-stamp HEAD and the dirty
+    # marker. CMake configuration itself remains incremental.
+    cmake -S /w -B "/w/$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=gcc-13 -DCMAKE_CXX_COMPILER=g++-13 \
+        -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+        -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG -Wno-error=maybe-uninitialized"
 
     cmake --build "/w/$BUILD_DIR" -j "$(nproc)"
 
