@@ -1641,14 +1641,21 @@ bool scan_token_protected(const std::string& token_text, const std::filesystem::
 
 // 110-D1: `metadata_write` is a subcommand that writes refs/tracking config
 // *by name* — recoverable, and approvable. `hard_protected` is anything that
-// must stay denied: a `-C`/`--git-dir`/`--work-tree` operand into `.git`/`.ymh`,
-// and the destructive or config-surface subcommands (clean, config write,
-// submodule, worktree, remote mutation, stash -u).
+// must stay denied: a mutating `-C`/`--git-dir`/`--work-tree` operand into
+// `.git`/`.ymh`, and the destructive or config-surface subcommands (clean,
+// config write, submodule, remote mutation, stash -u). Linked-worktree
+// mutations are metadata writes: the sandbox bounds their file effects, and
+// `git worktree list` remains read-only.
 struct GitScope {
     std::optional<ShellTargetScope> scope;
     bool                            metadata_write = false;
     bool                            hard_protected = false;
+    bool                            read_only = false;
 };
+
+GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
+                                 std::size_t e, const std::filesystem::path& root,
+                                 const std::filesystem::path& cwd);
 
 // ---------------------------------------------------------------------------
 // 113-D2: read-only `.git` access. An explicit `.git` target is protected
@@ -1758,7 +1765,20 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem
         }
         const bool read_only =
             !executable.empty() && read_only_executable(executable, toks, i, j);
+        // 110-D1/113-D2: a read-only git invocation may name `.git` explicitly
+        // through `--git-dir`/`-C`/`--work-tree`; those operands are metadata
+        // reads, not protected writes. Every other token is still scanned.
+        GitScope git_scope;
+        const bool git_invocation = executable == "git";
+        if (git_invocation) {
+            git_scope = classify_git_subcommand(toks, i, j, root, cwd);
+        }
+        bool skip_git_path_operand = false;
         for (std::size_t k = i; k < j; ++k) {
+            if (skip_git_path_operand) {
+                skip_git_path_operand = false;
+                continue;
+            }
             if (toks[k].kind == TokKind::Redirect) {
                 std::size_t t = k + 1;
                 while (t < j && toks[t].kind == TokKind::Redirect) {
@@ -1774,6 +1794,17 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem
             if (toks[k].kind != TokKind::Word) {
                 continue;
             }
+            if (git_invocation && git_scope.read_only) {
+                const std::string& text = toks[k].text;
+                if (text == "--git-dir" || text == "--work-tree" || text == "-C") {
+                    skip_git_path_operand = true;
+                    continue;
+                }
+                if (text.starts_with("--git-dir=") || text.starts_with("--work-tree=") ||
+                    (text.starts_with("-C") && !text.starts_with("--"))) {
+                    continue;
+                }
+            }
             if (read_only && k != i &&
                 git_metadata_readable(toks[k].text, executable, root, cwd)) {
                 continue;
@@ -1783,6 +1814,87 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem
             }
         }
         i = j;
+    }
+    return false;
+}
+
+// 110-D1/113-D2: an explicit `-C`/`--git-dir`/`--work-tree` naming `.git` is a
+// protected write surface, but reading repository metadata through it is routine
+// inspection. This returns true only for invocations that cannot mutate the
+// repository, so the explicit `.git` operand stays hard-protected for writes.
+bool git_read_only_invocation(std::string_view sub,
+                              const std::vector<std::string>& args) {
+    static constexpr std::string_view kReadOnly[] = {
+        "status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree",
+        "cat-file", "blame", "grep", "describe", "shortlog", "whatchanged",
+        "show-ref", "merge-base", "rev-list", "for-each-ref", "name-rev",
+        "merge-tree", "verify-commit", "verify-tag", "check-ignore",
+        "check-attr", "count-objects", "diff-tree", "diff-index", "diff-files",
+        "show-branch", "cherry", "ls-remote", "var", "version", "help"};
+    if (std::any_of(std::begin(kReadOnly), std::end(kReadOnly),
+                    [&](std::string_view name) { return sub == name; })) {
+        return true;
+    }
+
+    auto any_arg = [&](std::string_view needle) {
+        return std::find(args.begin(), args.end(), needle) != args.end();
+    };
+    auto first_is = [&](std::string_view needle) {
+        return !args.empty() && args.front() == needle;
+    };
+
+    if (sub == "config") {
+        return any_arg("--get") || any_arg("--get-all") ||
+               any_arg("--get-regexp") || any_arg("--list");
+    }
+    if (sub == "branch") {
+        bool listing = false;
+        for (const std::string& value : args) {
+            if (value == "-l" || value == "--list" || value == "-a" || value == "--all" ||
+                value == "-r" || value == "--remotes" || value == "--contains" ||
+                value == "--merged" || value == "--no-merged" || value == "--points-at" ||
+                value == "--format" || value == "--sort" || value == "--column" ||
+                value == "--no-column" || value == "--omit-empty" || value == "--show-current" ||
+                value.starts_with("--contains=") || value.starts_with("--merged=") ||
+                value.starts_with("--no-merged=") || value.starts_with("--points-at=") ||
+                value.starts_with("--format=") || value.starts_with("--sort=")) {
+                listing = true;
+            }
+            if (value == "-m" || value == "-M" || value == "-c" || value == "-C" ||
+                value == "--move" || value == "--copy" || value == "-d" ||
+                value == "-D" || value == "--delete" || value == "--track" ||
+                value == "-t" || value.starts_with("--set-upstream-to") ||
+                value == "--unset-upstream" || value == "--edit-description" ||
+                value == "-u") {
+                return false;
+            }
+            if (value.size() > 2 && value[0] == '-' && value[1] != '-') {
+                const char option = value[1];
+                if (option == 'm' || option == 'M' || option == 'c' || option == 'C' ||
+                    option == 'u' || option == 't') {
+                    return false;
+                }
+            }
+        }
+        return listing;
+    }
+    if (sub == "remote") {
+        if (args.empty()) {
+            return true;
+        }
+        static constexpr std::string_view kReadOnlyRemote[] = {
+            "-v", "--verbose", "show", "get-url", "list"};
+        return std::any_of(std::begin(kReadOnlyRemote), std::end(kReadOnlyRemote),
+                           [&](std::string_view name) { return args.front() == name; });
+    }
+    if (sub == "stash") {
+        return first_is("list") || first_is("show");
+    }
+    if (sub == "submodule") {
+        return args.empty() || first_is("status") || first_is("summary");
+    }
+    if (sub == "worktree") {
+        return first_is("list");
     }
     return false;
 }
@@ -1863,9 +1975,6 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
     if (out.scope == ShellTargetScope::Outside || out.scope == ShellTargetScope::Unknown) {
         return out;
     }
-    if (out.hard_protected) {
-        return out;
-    }
 
     const std::string sub = toks[i].text;
     // 109-D1: a redirect's operand is not a subcommand argument. The scanner
@@ -1908,6 +2017,18 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
         return false;
     };
 
+    // 110-D1/113-D2: the explicit `.git`/`.ymh` operand makes this a hard
+    // deny only when the invocation can write. `git --git-dir=.git rev-parse`
+    // and friends are routine metadata reads.
+    const bool read_only = git_read_only_invocation(sub, args);
+    out.read_only = read_only;
+    if (out.hard_protected) {
+        if (!read_only) {
+            return out;
+        }
+        out.hard_protected = false;
+    }
+
     if (sub == "config") {
         if (any_arg("--get") || any_arg("--get-all") || any_arg("--get-regexp") ||
             any_arg("--list")) {
@@ -1932,10 +2053,12 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
         return out;
     }
     if (sub == "worktree") {
-        if (!args.empty() && args.front() == "list") {
-            return out;
+        if (!args.empty() && args.front() != "list") {
+            // 110-D1 (rev): linked-worktree administration writes only refs
+            // and worktree metadata; the sandbox bounds the file effects, so
+            // it is an approvable metadata write, not a hard deny.
+            out.metadata_write = true;
         }
-        out.hard_protected = true;
         return out;
     }
     if (sub == "remote") {
