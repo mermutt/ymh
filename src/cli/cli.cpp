@@ -1356,7 +1356,8 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
         "remove", "Delete a stopped workspace's registry row (keeps <workspace>/.ymh)");
     std::string workspace_remove_target;
     bool        workspace_remove_yes = false;
-    workspace_remove->add_option("target", workspace_remove_target, "Workspace ID or path")
+    workspace_remove->add_option("target", workspace_remove_target,
+                                 "Workspace ID, path, title, or unambiguous prefix of one")
         ->required();
     workspace_remove->add_flag("--yes", workspace_remove_yes, "Skip the confirmation prompt");
 

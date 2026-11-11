@@ -7,6 +7,7 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -73,6 +74,60 @@ int workspace_list(std::ostream& out, std::ostream& err) {
     }
 }
 
+// `workspace remove` accepts an unambiguous prefix of any workspace handle —
+// its ID, its canonical path, or its display title — instead of only the full
+// ID/path. Resolution order is exact ID, exact canonical path, exact display
+// title, then a prefix; a prefix matching more than one workspace is reported
+// as ambiguous (with the candidates) rather than guessed.
+struct TargetResolution {
+    std::optional<WorkspaceRecord> resolved;
+    std::vector<WorkspaceRecord>   ambiguous;
+};
+
+TargetResolution resolve_remove_target(const WorkspaceRegistry& registry,
+                                       const std::string&        target) {
+    if (auto exact = registry.findById(WorkspaceId{target})) {
+        return {std::move(exact), {}};
+    }
+    std::error_code             canonical_error;
+    const std::filesystem::path canonical = std::filesystem::canonical(target, canonical_error);
+    if (!canonical_error) {
+        if (auto exact = registry.findByCanonicalPath(canonical)) {
+            return {std::move(exact), {}};
+        }
+    }
+
+    const std::vector<WorkspaceRecord> workspaces = registry.listWorkspaces();
+
+    // An exact title wins before any prefix: with workspaces titled `proj` and
+    // `proj2`, `remove proj` means the former, not an ambiguous match.
+    std::vector<WorkspaceRecord> exact_title;
+    for (const WorkspaceRecord& record : workspaces) {
+        if (record.displayTitle == target) {
+            exact_title.push_back(record);
+        }
+    }
+    if (exact_title.size() == 1) {
+        return {std::move(exact_title.front()), {}};
+    }
+    if (exact_title.size() > 1) {
+        return {std::nullopt, std::move(exact_title)};
+    }
+
+    std::vector<WorkspaceRecord> prefixed;
+    for (const WorkspaceRecord& record : workspaces) {
+        if (record.id.value.starts_with(target) ||
+            record.canonicalPath.string().starts_with(target) ||
+            record.displayTitle.starts_with(target)) {
+            prefixed.push_back(record);
+        }
+    }
+    if (prefixed.size() == 1) {
+        return {std::move(prefixed.front()), {}};
+    }
+    return {std::nullopt, std::move(prefixed)};
+}
+
 } // namespace
 
 int run_workspace_command(const std::vector<std::string>& args, std::ostream& out,
@@ -93,8 +148,8 @@ int run_workspace_command(const std::vector<std::string>& args, std::ostream& ou
 
 int run_workspace_remove(const std::vector<std::string>& args, bool assume_yes, std::ostream& out,
                          std::ostream& err) {
-    if (args.size() != 2) {
-        err << "ymh: usage: ymh workspace remove <workspace-id|path> [--yes]\n";
+    if (args.size() != 2 || args[1].empty()) {
+        err << "ymh: usage: ymh workspace remove <workspace-id|path|title-prefix> [--yes]\n";
         return 2;
     }
 
@@ -106,18 +161,22 @@ int run_workspace_remove(const std::vector<std::string>& args, bool assume_yes, 
         return 3;
     }
 
-    std::optional<WorkspaceRecord> record = registry->findById(WorkspaceId{args[1]});
-    if (!record.has_value()) {
-        std::error_code             error;
-        const std::filesystem::path canonical = std::filesystem::canonical(args[1], error);
-        if (!error) {
-            record = registry->findByCanonicalPath(canonical);
+    TargetResolution resolution = resolve_remove_target(*registry, args[1]);
+    if (!resolution.ambiguous.empty()) {
+        err << "ymh: " << resolution.ambiguous.size() << " workspaces start with '" << args[1]
+            << "':\n";
+        for (const WorkspaceRecord& candidate : resolution.ambiguous) {
+            err << "  " << candidate.id.value << '\t' << candidate.canonicalPath.string() << '\t'
+                << candidate.displayTitle << '\n';
         }
+        err << "ymh: provide more characters to identify one workspace\n";
+        return 2;
     }
-    if (!record.has_value()) {
+    if (!resolution.resolved.has_value()) {
         err << "ymh: unknown workspace: " << args[1] << '\n';
         return 2;
     }
+    const std::optional<WorkspaceRecord> record = std::move(resolution.resolved);
 
     // 112-D2: a live daemon owns the row; removal is only for a stopped (or
     // stale-claimed) workspace. `removeWorkspace` re-checks this under the lock.
