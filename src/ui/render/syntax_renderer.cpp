@@ -11,6 +11,7 @@
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
+#include <ftxui/screen/string.hpp>
 
 namespace ymh::ui {
 namespace {
@@ -372,6 +373,55 @@ ftxui::Element style_token(const std::string& text, TokenKind kind,
     return element;
 }
 
+std::size_t utf8_glyph_length(unsigned char lead) {
+    if (lead < 0x80U) {
+        return 1;
+    }
+    if ((lead >> 5U) == 0x6U) {
+        return 2;
+    }
+    if ((lead >> 4U) == 0xEU) {
+        return 3;
+    }
+    if ((lead >> 3U) == 0x1EU) {
+        return 4;
+    }
+    return 1;
+}
+
+// Split a token that is wider than the pane into glyph-aligned chunks. A single
+// `hflow` child wider than the line is still compressed by flexbox, so long
+// strings and URLs need explicit chunks before the flow can wrap them.
+void append_wrapped_token(ftxui::Elements& out, const std::string& text, TokenKind kind,
+                          const RenderContext& context, int max_width) {
+    if (text.empty()) {
+        return;
+    }
+    std::string chunk;
+    int         width = 0;
+    std::size_t index = 0;
+    while (index < text.size()) {
+        std::size_t length =
+            utf8_glyph_length(static_cast<unsigned char>(text[index]));
+        if (index + length > text.size()) {
+            length = 1;
+        }
+        const std::string glyph = text.substr(index, length);
+        const int glyph_width = ftxui::string_width(glyph);
+        if (!chunk.empty() && width + glyph_width > max_width) {
+            out.push_back(style_token(chunk, kind, context));
+            chunk.clear();
+            width = 0;
+        }
+        chunk += glyph;
+        width += glyph_width;
+        index += length;
+    }
+    if (!chunk.empty()) {
+        out.push_back(style_token(chunk, kind, context));
+    }
+}
+
 } // namespace
 
 std::string normalize_language(std::string_view language) {
@@ -420,6 +470,20 @@ ftxui::Element SyntaxRenderer::render(std::string_view code, std::string_view la
         return ftxui::text("");
     }
 
+    // A source line is a flow, not a rigid hbox: `hbox` distributes a negative
+    // width budget across every child, which silently chops the last cell off
+    // every token when the pane is narrower than the line. `hflow` wraps
+    // instead, so shrinking the terminal never loses characters.
+    const auto line_element = [](ftxui::Elements elements) -> ftxui::Element {
+        if (elements.empty()) {
+            return ftxui::text("");
+        }
+        return ftxui::hflow(std::move(elements));
+    };
+    const int width_base =
+        context.content_width > 0 ? context.content_width : context.width;
+    const int max_width = std::max(1, width_base - context.indent);
+
     ftxui::Elements lines;
     ftxui::Elements current;
     for (const SyntaxToken& token : tokens) {
@@ -430,18 +494,16 @@ ftxui::Element SyntaxRenderer::render(std::string_view code, std::string_view la
                                            ? std::string::npos
                                            : newline - start;
             const std::string segment = token.text.substr(start, length);
-            if (!segment.empty()) {
-                current.push_back(style_token(segment, token.kind, context));
-            }
+            append_wrapped_token(current, segment, token.kind, context, max_width);
             if (newline == std::string::npos) {
                 break;
             }
-            lines.push_back(ftxui::hbox(std::move(current)));
+            lines.push_back(line_element(std::move(current)));
             current = ftxui::Elements{};
             start = newline + 1;
         }
     }
-    lines.push_back(ftxui::hbox(std::move(current)));
+    lines.push_back(line_element(std::move(current)));
     return ftxui::vbox(std::move(lines));
 }
 
