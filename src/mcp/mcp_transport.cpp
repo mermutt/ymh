@@ -36,6 +36,30 @@ std::string sanitize_server_id(std::string_view id) {
     return out.empty() ? std::string{"server"} : out;
 }
 
+// 73-D3: resolve a stdio server command the way a shell would. An absolute path
+// is used as-is; a bare name is left for execvp/PATH; a relative path (one with
+// a parent component, e.g. ".venv/bin/python3") is resolved against the daemon's
+// launch directory, not the child's cwd, so a configured relative interpreter or
+// venv keeps working after the child chdirs to the workspace root. When the
+// relative path does not exist under the launch directory the original value is
+// preserved (the child-cwd-relative fallback).
+std::string resolve_stdio_command(const std::string& command,
+                                  const std::filesystem::path& launch_dir) {
+    if (command.empty() || launch_dir.empty()) {
+        return command;
+    }
+    const std::filesystem::path raw{command};
+    if (raw.is_absolute() || !raw.has_parent_path()) {
+        return command;
+    }
+    std::error_code error;
+    const std::filesystem::path candidate = launch_dir / raw;
+    if (std::filesystem::exists(candidate, error) && !error) {
+        return candidate.lexically_normal().string();
+    }
+    return command;
+}
+
 } // namespace
 
 std::vector<std::pair<std::string, std::string>> resolve_mcp_env(
@@ -86,6 +110,7 @@ StdioMcpTransport::StdioMcpTransport(const McpServerConfig& config,
     : config_(config),
       max_frame_bytes_(mcp_config.max_frame_bytes),
       log_child_stderr_(mcp_config.log_child_stderr),
+      launch_dir_(mcp_config.launch_dir),
       environment_(environment),
       logger_(logger) {}
 
@@ -174,8 +199,9 @@ Task<void> StdioMcpTransport::start(CancellationToken cancel) {
     }
 
     ProcessRequest request;
-    request.executable = config_.command;
-    request.argv.push_back(config_.command);
+    const std::string command = resolve_stdio_command(config_.command, launch_dir_);
+    request.executable = command;
+    request.argv.push_back(command);
     for (const std::string& argument : config_.args) {
         request.argv.push_back(argument);
     }
@@ -205,11 +231,11 @@ Task<void> StdioMcpTransport::start(CancellationToken cancel) {
         child_ = environment_.process().spawn(request).get();
     } catch (const ToolError& error) {
         throw McpError{McpErrorCode::SpawnFailed,
-                       "spawn failed: " + config_.command + ": " + error.what()};
+                       "spawn failed: " + command + ": " + error.what()};
     }
     if (child_ == nullptr) {
         throw McpError{McpErrorCode::SpawnFailed,
-                       "spawn failed: " + config_.command + ": spawn returned no child"};
+                       "spawn failed: " + command + ": spawn returned no child"};
     }
     return Task<void>{};
 }
