@@ -2728,11 +2728,10 @@ void temp_add_target(TempInfo& info, const Token& token,
             info.has_unknown = true;
             return;
         }
-        if (path_is_protected(root, absolute)) {
-            info.protected_target = true;
-            info.has_unknown = true;
-            return;
-        }
+        // 113-D2: a neutral read (stat/checksum/cmp) is still a read. Leave the
+        // protected decision to `scan_protected_tokens`, which knows the verb
+        // and allows readable `.git` metadata (FETCH_HEAD, refs, …) while still
+        // rejecting `config`, `hooks`, and credentials.
         info.neutral_reads.push_back(absolute);
         return;
     }
