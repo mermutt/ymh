@@ -1644,8 +1644,9 @@ bool scan_token_protected(const std::string& token_text, const std::filesystem::
 // must stay denied: a mutating `-C`/`--git-dir`/`--work-tree` operand into
 // `.git`/`.ymh`, and the destructive or config-surface subcommands (clean,
 // config write, submodule, remote mutation, stash -u). Linked-worktree
-// mutations are metadata writes: the sandbox bounds their file effects, and
-// `git worktree list` remains read-only.
+// mutations and the ref plumbing (`branch`, `update-ref`, `symbolic-ref`) are
+// metadata writes: the sandbox bounds their file effects, and `git worktree
+// list` remains read-only.
 struct GitScope {
     std::optional<ShellTargetScope> scope;
     bool                            metadata_write = false;
@@ -2059,6 +2060,16 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             // it is an approvable metadata write, not a hard deny.
             out.metadata_write = true;
         }
+        return out;
+    }
+    if (sub == "update-ref" || sub == "symbolic-ref") {
+        // 110-D1 (rev): ref plumbing that creates, moves, deletes, or repoints
+        // a ref by name is the same recoverable metadata class as
+        // `git branch <name>`, `git tag`, and `git worktree add`; it cannot
+        // reach hooks or config. Classifying it as a metadata write keeps it in
+        // the in-root fold (and therefore approvable) instead of falling
+        // through to Unknown, where a scoped allow rule could not match it.
+        out.metadata_write = true;
         return out;
     }
     if (sub == "remote") {
