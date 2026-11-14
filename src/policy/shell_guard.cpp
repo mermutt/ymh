@@ -861,6 +861,25 @@ bool token_destructive(std::string_view w) {
            is_mkfs_like(w);
 }
 
+// A `cp`/`mv` whose every operand is a dev sink (`/dev/null`, `/dev/stdout`,
+// …) can neither overwrite nor delete anything: `cp /dev/null /dev/null` is a
+// no-op and `cp /dev/null file` is the truncate idiom. It is not destructive
+// evidence, so it must not promote an unrelated outside redirect to critical.
+bool dev_only_copy_or_move(const std::vector<Token>& toks, std::size_t cw,
+                           std::size_t e) {
+    const std::string& verb = toks[cw].text;
+    if (verb != "cp" && verb != "mv") {
+        return false;
+    }
+    const std::vector<std::size_t> operands = collect_operands(toks, cw, e);
+    if (operands.empty()) {
+        return false;
+    }
+    return std::all_of(operands.begin(), operands.end(), [&](std::size_t index) {
+        return is_dev_whitelist(toks[index].text);
+    });
+}
+
 bool looks_destructive(std::string_view text) {
     const Scan s = scan(text);
     const std::size_t n = s.tokens.size();
@@ -876,7 +895,8 @@ bool looks_destructive(std::string_view text) {
             ++j;
         }
         const std::size_t cw = strip_prefixes(s.tokens, i, j);
-        if (cw < j && token_destructive(s.tokens[cw].text)) {
+        if (cw < j && token_destructive(s.tokens[cw].text) &&
+            !dev_only_copy_or_move(s.tokens, cw, j)) {
             return true;
         }
         i = j;
@@ -885,9 +905,11 @@ bool looks_destructive(std::string_view text) {
     if (contains_word(text, "git") && contains_word(text, "clean")) {
         return true;
     }
+    // `cp`/`mv` are judged above with their operands; keeping them out of this
+    // crude word scan also stops `echo cp` from reading as destructive.
     static constexpr std::string_view kVerbs[] = {
         "rm", "rmdir", "shred", "truncate", "dd", "mkfs", "mke2fs", "newfs",
-        "wipefs", "chmod", "chown", "mv", "cp", "find"};
+        "wipefs", "chmod", "chown", "find"};
     for (const std::string_view verb : kVerbs) {
         if (contains_word(text, verb)) {
             return true;
@@ -1591,6 +1613,12 @@ std::optional<ShellTargetScope> classify_scope_path(
     }
     std::filesystem::path target;
     resolve_lexical(root, cwd, s, target);
+    // 98-D1/118-D2: a dev sink discards or mirrors data, so it is not a
+    // workspace target. Without this, `cp /dev/null /dev/null` would read as an
+    // outside write and drag an otherwise in-root command outside.
+    if (is_dev_whitelist(target.lexically_normal().string())) {
+        return std::nullopt;
+    }
     if (target == root.lexically_normal()) {
         return ShellTargetScope::InRoot;
     }
