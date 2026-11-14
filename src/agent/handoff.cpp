@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -199,26 +200,61 @@ std::string tool_outcome_name(payload::ToolOutcome outcome) {
     return "unknown";
 }
 
+// Models occasionally drift from the exact `## Goal` spelling even when the
+// prompt asks for it (`### Goal`, `**Goal**`, `Goal:`). Recognizing those
+// variants keeps a good summary from being flattened into six "(none)"
+// sections; a line must look like a heading, so an ordinary bullet that merely
+// starts with a section name is not stolen.
+std::optional<std::size_t> handoff_heading_index(std::string_view line) {
+    static constexpr std::array<std::string_view, 6> kNames{{
+        "goal", "key decisions", "current state", "next steps", "open questions",
+        "relevant files"}};
+    const std::size_t begin = line.find_first_not_of(" \t\r");
+    if (begin == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::size_t end = line.find_last_not_of(" \t\r");
+    std::string_view  trimmed = line.substr(begin, end - begin + 1);
+    const bool        heading_like =
+        trimmed.front() == '#' ||
+        (trimmed.size() > 4 && trimmed.starts_with("**") && trimmed.ends_with("**")) ||
+        trimmed.back() == ':';
+    if (!heading_like) {
+        return std::nullopt;
+    }
+    while (!trimmed.empty() &&
+           (trimmed.front() == '#' || trimmed.front() == '*' || trimmed.front() == '`' ||
+            trimmed.front() == ' ')) {
+        trimmed.remove_prefix(1);
+    }
+    while (!trimmed.empty() &&
+           (trimmed.back() == '*' || trimmed.back() == ':' || trimmed.back() == '`' ||
+            trimmed.back() == ' ')) {
+        trimmed.remove_suffix(1);
+    }
+    std::string lowered{trimmed};
+    for (char& character : lowered) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    for (std::size_t index = 0; index < kNames.size(); ++index) {
+        if (lowered == kNames[index]) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
 std::string normalize_summary_sections(const std::string& text) {
     std::array<std::string, kHandoffHeadings.size()> bodies{};
-    std::size_t     current = kHandoffHeadings.size();
+    std::size_t     current  = kHandoffHeadings.size();
+    bool            saw_head = false;
     std::istringstream input{text};
     std::string        line;
     while (std::getline(input, line)) {
-        std::string trimmed = line;
-        while (!trimmed.empty() &&
-               (trimmed.back() == '\r' || std::isspace(static_cast<unsigned char>(trimmed.back())) != 0)) {
-            trimmed.pop_back();
-        }
-        std::size_t index = kHandoffHeadings.size();
-        for (std::size_t candidate = 0; candidate < kHandoffHeadings.size(); ++candidate) {
-            if (trimmed == kHandoffHeadings[candidate]) {
-                index = candidate;
-                break;
-            }
-        }
+        const std::size_t index = handoff_heading_index(line).value_or(kHandoffHeadings.size());
         if (index != kHandoffHeadings.size()) {
-            current = index;
+            current  = index;
+            saw_head = true;
             continue;
         }
         if (current == kHandoffHeadings.size()) {
@@ -228,6 +264,12 @@ std::string normalize_summary_sections(const std::string& text) {
             bodies[current].push_back('\n');
         }
         bodies[current] += line;
+    }
+
+    // The model ignored the section contract. Keep its prose rather than
+    // emitting a document that says "(none)" everywhere and hides the failure.
+    if (!saw_head) {
+        return text;
     }
 
     std::string out;
@@ -775,10 +817,21 @@ HandoffResult HandoffService::run(const Session&              source,
         return result;
     }
 
-    std::string summary = bound_summary(summary_text, policy_);
-    if (summary.size() > policy_.max_summary_bytes) {
+    // A successful stream with no text (a reasoning-only response, a provider
+    // that returns an error body as 200, or an over-eager truncation) must not
+    // be written as a document whose every section is "(none)": that hides the
+    // failure and seeds an empty continuation session.
+    if (summary_text.find_first_not_of(" \t\r\n") == std::string::npos) {
         result.outcome = HandoffResult::Outcome::Internal;
-        result.detail  = "handoff: internal error";
+        result.detail  = "handoff: model returned an empty summary";
+        return result;
+    }
+
+    std::string summary = bound_summary(summary_text, policy_);
+    if (summary.empty() || summary.size() > policy_.max_summary_bytes) {
+        result.outcome = HandoffResult::Outcome::Internal;
+        result.detail  = summary.empty() ? std::string{"handoff: model returned an empty summary"}
+                                         : std::string{"handoff: internal error"};
         return result;
     }
     summary = to_ascii(normalize_summary_sections(summary));
@@ -897,6 +950,16 @@ HandoffResult HandoffService::run(const Session&              source,
         result.outcome = HandoffResult::Outcome::StoreUnavailable;
         result.detail  = "handoff: wrote " + doc_relative + " (seed unavailable)";
         return result;
+    }
+
+    // `ymh list` hides unprompted root sessions, so the seeded session is not
+    // otherwise discoverable once the transient command result scrolls away.
+    // Record its id in the durable doc so `ymh --resume <id>` stays possible.
+    {
+        std::ofstream out{doc_path, std::ios::binary | std::ios::app};
+        if (out) {
+            out << "- seed: " << seed_id.value << '\n';
+        }
     }
 
     result.seed_session = seed_id;
