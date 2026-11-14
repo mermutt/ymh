@@ -11,20 +11,19 @@ CriticalPathResult critical_path(const PermissionRequest& request) {
         return out;
     }
     try {
-        // 119-D12: critical means a destructive verb with an outside-root
-        // target, or a scan the classifier could not resolve. `Forbid` alone is
-        // too broad: it also covers benign outside redirects such as
-        // `>/tmp/build.log`, which the workspace-write sandbox grants. Compare
-        // the strict verdict with the tmp-root-aware one and keep the strict
-        // verdict for destructive verbs and unresolved scans.
+        // 119-D12: critical means an outside-root target that even the
+        // tmp-root-aware classifier rejects, or a scan it could not resolve.
+        // `/tmp` is scratch: a command bounded to the canonical tmp root is not
+        // critical even when it uses a destructive verb (`cp`, `rm`, …), which
+        // matches the workspace-write sandbox's writable tmp. The tmp root
+        // itself and `..` escapes are not "under" it, so `rm -rf /tmp` and
+        // `rm -rf /tmp/../home/...` stay critical.
         const ShellClassification strict = classify_shell_request(request);
         const ShellClassification relaxed =
             classify_shell_request(request, canonical_tmp_root());
-        const bool destructive =
-            shell_command_is_destructive(shell_guard_text(request));
         const bool outside_or_unresolved =
             strict.risk == ShellCommandRisk::Forbid &&
-            (relaxed.risk == ShellCommandRisk::Forbid || destructive);
+            relaxed.risk == ShellCommandRisk::Forbid;
         if (outside_or_unresolved) {
             out.critical = true;
             out.why      = "shell-guard:outside-root";

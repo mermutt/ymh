@@ -2535,14 +2535,28 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
         if (operand == e) {
             return result;
         }
+        // `/tmp` is scratch: a cwd there does not put the command outside the
+        // workspace, and later relative operands must resolve against it.
+        // Without this, `cd /tmp && rm foo` read as an outside-root command and
+        // `foo` was resolved against the workspace root instead of `/tmp`.
+        const std::string cd_text =
+            expand_home_ref(toks[operand].text, toks[operand].single_quoted)
+                .value_or(toks[operand].text);
+        {
+            std::filesystem::path cd_target;
+            if (!tmp_root.empty() && resolve_lexical(root, cur, cd_text, cd_target) &&
+                (cd_target.lexically_normal() == tmp_root.lexically_normal() ||
+                 path_is_under_tmp_root(tmp_root, cd_target))) {
+                note_scope(result, ShellTargetScope::InRoot);
+                cur = cd_target.lexically_normal();
+                return result;
+            }
+        }
         const auto scope = classify_scope_path(toks[operand].text, toks[operand], root, cur,
                                                true, false);
         if (scope.has_value()) {
             note_scope(result, *scope);
             if (*scope == ShellTargetScope::InRoot) {
-                const std::string cd_text =
-                    expand_home_ref(toks[operand].text, toks[operand].single_quoted)
-                        .value_or(toks[operand].text);
                 std::filesystem::path target;
                 if (resolve_lexical(root, cur, cd_text, target)) {
                     cur = target;
