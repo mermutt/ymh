@@ -70,7 +70,11 @@ protocol::HostBootId to_protocol_boot_id(const HostBootId& boot_id) {
 std::string default_system_prompt() {
     return "You are ymh, a terminal coding agent. Inspect and modify the workspace with the "
            "provided tools. Prefer reading files before editing them. Be concise and never "
-           "invent tool output.";
+           "invent tool output. You may issue multiple independent tool calls in one response; "
+           "they run in parallel when safe. For edits, use `edit_file` for one targeted "
+           "replacement, `multi_edit` for several replacements in one file, and `apply_patch` "
+           "for a multi-hunk structural change. Use shell, `sed`, or Python for computed or bulk "
+           "transformations, not for ordinary edits.";
 }
 
 std::string default_plan_section() {
@@ -164,6 +168,8 @@ PermissionConfig to_permission_config(const Config& config) {
     add_rule(permissions, "glob", read, "default.glob");
     add_rule(permissions, "write_file", write, "default.write_file");
     add_rule(permissions, "edit_file", write, "default.edit_file");
+    add_rule(permissions, "multi_edit", write, "default.multi_edit");
+    add_rule(permissions, "apply_patch", write, "default.apply_patch");
     add_rule(permissions, "shell", shell, "default.shell");
 
     for (const McpServerSettings& server : config.mcp.servers) {

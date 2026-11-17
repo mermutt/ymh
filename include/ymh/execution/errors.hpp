@@ -17,7 +17,8 @@ enum class ToolErrorCode : std::uint8_t {
     InvalidArguments,   // arguments violate input_schema
     PathEscape,         // resolve() rejected an out-of-root path (F1, §18)
     NotFound,           // fs/git target does not exist
-    ResourceExhausted,  // subprocess/PTY cap exhausted (F8, §9.11)
+    ResourceExhausted,  // configured resource bound hit (F8, §9.11; 120-D5: an
+                        // edit tool's read_file_max_bytes rejection)
     Timeout,            // process/output deadline exceeded
     Io,                 // filesystem/process I/O failure
     Internal,           // tool invariant violated / unexpected exception

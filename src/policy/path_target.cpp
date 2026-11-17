@@ -7,7 +7,8 @@ namespace ymh {
 namespace {
 
 bool is_required_path_tool(std::string_view tool) noexcept {
-    return tool == "read_file" || tool == "write_file" || tool == "edit_file";
+    return tool == "read_file" || tool == "write_file" || tool == "edit_file" ||
+           tool == "multi_edit" || tool == "apply_patch";
 }
 
 bool is_optional_path_tool(std::string_view tool) noexcept {
@@ -41,8 +42,9 @@ std::optional<std::filesystem::path> normalize_target(
 } // namespace
 
 bool tool_has_path_dimension(std::string_view tool) noexcept {
-    static constexpr std::array<std::string_view, 7> kTools = {
-        "read_file", "write_file", "edit_file", "grep", "glob", "git_status", "git_diff"};
+    static constexpr std::array<std::string_view, 9> kTools = {
+        "read_file", "write_file", "edit_file", "multi_edit", "apply_patch", "grep", "glob",
+        "git_status", "git_diff"};
     for (std::string_view candidate : kTools) {
         if (candidate == tool) {
             return true;

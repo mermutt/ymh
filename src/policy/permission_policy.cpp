@@ -260,7 +260,8 @@ bool tool_is_mutating(const PermissionRequest& request, bool read_only_shell) no
         return false;
     }
     static constexpr std::string_view kMutating[] = {
-        "write_file", "edit_file", "shell", "pty", "terminal", "checkout", "git_checkout",
+        "write_file", "edit_file", "multi_edit", "apply_patch", "shell", "pty", "terminal",
+        "checkout", "git_checkout",
     };
     for (std::string_view name : kMutating) {
         if (request.tool == name) {

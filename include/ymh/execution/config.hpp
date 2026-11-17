@@ -39,6 +39,14 @@ struct ToolConfig {
     // 46-D8: the generic per-tool-run deadline. `0` disables the tool-deadline
     // layer entirely; it is never an immediate timeout.
     std::chrono::milliseconds tool_timeout{300'000};
+
+    // 120-D5: edit-tool locals. These bounds do not change the filesystem read
+    // bound (`read_file_max_bytes`) or the durable result bound
+    // (`tool_result_max_bytes`).
+    std::size_t edit_max_edits{100};                       // multi_edit entries
+    std::size_t edit_patch_max_bytes{256u * 1024u};        // apply_patch `patch`
+    std::size_t edit_patch_max_hunks{200};                 // apply_patch hunks
+    std::size_t edit_diff_max_bytes{64u * 1024u};          // result diff section
 };
 
 } // namespace ymh
