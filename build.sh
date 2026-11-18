@@ -62,8 +62,16 @@ docker run --rm -v "$ROOT:/w" -w /w \
 
     git config --global http.sslVerify false
     # The checkout is owned by the launching user, but this container runs as
-    # root; allow git to read it for the version stamp.
+    # root; allow git to read it for the version stamp. FetchContent clones its
+    # dependencies into the (equally user-owned) build tree, so those need an
+    # exception too, otherwise incremental re-configures fail in the
+    # FetchContent update step with "dubious ownership". Wildcards are not
+    # honoured here (git matches paths literally), so list the existing clones
+    # explicitly; clones created by this run are only revisited on later runs.
     git config --global --add safe.directory /w
+    for dep_dir in "/w/$BUILD_DIR"/_deps/*-src; do
+        [ -d "$dep_dir" ] && git config --global --add safe.directory "$dep_dir"
+    done
 
     # gcc-13 comes from the ubuntu-toolchain-r PPA on 22.04.
     echo "deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
