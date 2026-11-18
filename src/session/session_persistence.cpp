@@ -53,6 +53,13 @@ std::int64_t now_ms() {
         .count();
 }
 
+// GCC's -Wunused-result is not silenced by a `(void)` cast on functions
+// declared with warn_unused_result (write/ftruncate/fdatasync on the office
+// toolchain). Passing the result to an unnamed parameter marks it used without
+// inventing a dead variable, while keeping the best-effort calls explicit.
+template <typename T>
+void ignore_result(T&&) noexcept {}
+
 std::int64_t to_epoch_ms(std::chrono::system_clock::time_point point) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(point.time_since_epoch()).count();
 }
@@ -113,7 +120,7 @@ void fsync_directory(const std::filesystem::path& directory) noexcept {
     if (fd < 0) {
         return;
     }
-    (void)::fsync(fd);
+    ignore_result(::fsync(fd));
     ::close(fd);
 }
 
@@ -741,8 +748,8 @@ void migrate_legacy_store(const PersistenceConfig& config) {
     } closer{db};
 
     char* checkpoint_message = nullptr;
-    (void)sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nullptr, nullptr,
-                       &checkpoint_message);
+    ignore_result(sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nullptr, nullptr,
+                               &checkpoint_message));
     sqlite3_free(checkpoint_message);
 
     try {
@@ -822,7 +829,7 @@ void migrate_legacy_store(const PersistenceConfig& config) {
                     const std::string line = event_line(record);
                     write_all_fd(fd, line);
                 }
-                (void)::fdatasync(fd);
+                ignore_result(::fdatasync(fd));
                 ::close(fd);
             } catch (...) {
                 ::close(fd);
@@ -892,7 +899,7 @@ public:
         cache.clear();
         leases.clear();
         if (lock_fd >= 0) {
-            ::flock(lock_fd, LOCK_UN);
+            ignore_result(::flock(lock_fd, LOCK_UN));
             ::close(lock_fd);
             lock_fd = -1;
         }
@@ -1077,10 +1084,10 @@ public:
             cached.next_sequence = next;
             cached.next_known    = true;
             if (durable) {
-                (void)::fdatasync(fd);
+                ignore_result(::fdatasync(fd));
             }
         } catch (...) {
-            (void)::ftruncate(fd, start);
+            ignore_result(::ftruncate(fd, start));
             throw;
         }
         if (projection_changed) {
@@ -1158,8 +1165,8 @@ std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
             nlohmann::json{{"pid", ::getpid()}, {"boot_id", config.boot_id.value},
                            {"acquired_at", now_ms()}}
                 .dump();
-        (void)::ftruncate(impl.lock_fd, 0);
-        (void)::write(impl.lock_fd, diagnostic.data(), diagnostic.size());
+        ignore_result(::ftruncate(impl.lock_fd, 0));
+        ignore_result(::write(impl.lock_fd, diagnostic.data(), diagnostic.size()));
     }
 
     const bool needs_migration = !marker_exists(impl.store_dir) && legacy_db_exists(config);
@@ -1172,11 +1179,11 @@ std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
             try {
                 migrate_legacy_store(config);
             } catch (...) {
-                ::flock(migration_lock, LOCK_UN);
+                ignore_result(::flock(migration_lock, LOCK_UN));
                 ::close(migration_lock);
                 throw;
             }
-            ::flock(migration_lock, LOCK_UN);
+            ignore_result(::flock(migration_lock, LOCK_UN));
             ::close(migration_lock);
         }
     }
@@ -1267,7 +1274,7 @@ SessionHeader SessionPersistence::create(SessionHeader header) {
         std::filesystem::remove_all(directory, error);
         throw StoreError("cannot create " + events.string() + ": " + std::strerror(errno));
     }
-    (void)::fdatasync(fd);
+    ignore_result(::fdatasync(fd));
     ::close(fd);
 
     try {
