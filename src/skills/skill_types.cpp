@@ -15,29 +15,12 @@ bool is_valid_skill_name(std::string_view name) noexcept {
     if (name.empty() || name.size() > kMaxSkillNameLength) {
         return false;
     }
-    if (name[0] < 'a' || name[0] > 'z') {
+    const char first = name.front();
+    if (!((first >= 'a' && first <= 'z') || (first >= '0' && first <= '9'))) {
         return false;
     }
-    std::size_t index = 1;
-    while (index < name.size() && name[index] != '-') {
-        if (!is_lower_alnum(name[index])) {
-            return false;
-        }
-        ++index;
-    }
-    while (index < name.size()) {
-        if (name[index] != '-') {
-            return false;
-        }
-        ++index;
-        const std::size_t segment = index;
-        while (index < name.size() && name[index] != '-') {
-            if (!is_lower_alnum(name[index])) {
-                return false;
-            }
-            ++index;
-        }
-        if (index == segment) {
+    for (const char c : name) {
+        if (!is_lower_alnum(c) && c != '-' && c != '_') {
             return false;
         }
     }
@@ -50,8 +33,12 @@ std::string_view skill_source_name(SkillSource source) noexcept {
             return "home";
         case SkillSource::User:
             return "user";
+        case SkillSource::Opencode:
+            return "opencode";
         case SkillSource::Claude:
             return "claude";
+        case SkillSource::Agents:
+            return "agents";
         case SkillSource::Workspace:
             return "workspace";
         case SkillSource::Builtin:

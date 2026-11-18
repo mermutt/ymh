@@ -71,7 +71,26 @@ std::vector<std::string_view> split_lines(std::string_view text) {
 }
 
 bool is_key_char(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+}
+
+bool is_indented(std::string_view line) {
+    return !line.empty() && (line.front() == ' ' || line.front() == '\t');
+}
+
+bool is_key(std::string_view key) {
+    return !key.empty() && std::all_of(key.begin(), key.end(), is_key_char);
+}
+
+// Frontmatter keys OpenCode understands but ymh does not interpret. They are
+// accepted and ignored so an OpenCode skill loads unchanged.
+bool is_ignored_compat_key(std::string_view key) {
+    static constexpr std::string_view kIgnored[] = {
+        "metadata", "compatibility", "disable-model-invocation", "agent",
+        "mode",     "temperature",   "top_p",           "top-p",
+        "top_k",    "reasoning-effort"};
+    return std::find(std::begin(kIgnored), std::end(kIgnored), key) !=
+           std::end(kIgnored);
 }
 
 bool is_block_scalar(std::string_view value) {
@@ -150,6 +169,38 @@ bool parse_flow_sequence(std::string_view raw, std::vector<std::string>& items) 
     return split_flow_items(std::string_view{trimmed}.substr(1, trimmed.size() - 2), items);
 }
 
+bool split_comma_list(std::string_view raw, std::vector<std::string>& items) {
+    std::size_t begin = 0;
+    while (begin <= raw.size()) {
+        const std::size_t end = raw.find(',', begin);
+        const std::string_view piece =
+            raw.substr(begin, end == std::string_view::npos ? std::string_view::npos
+                                                            : end - begin);
+        std::string value;
+        if (!parse_scalar(piece, value)) {
+            return false;
+        }
+        if (!value.empty()) {
+            items.push_back(std::move(value));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return true;
+}
+
+// `allowed-tools: [read, write]` (ymh) and `tools: bash, read, write, edit`
+// (OpenCode / Claude agent files) both describe an advisory tool list.
+bool parse_string_list(std::string_view raw, std::vector<std::string>& items) {
+    const std::string trimmed = trim(raw);
+    if (!trimmed.empty() && trimmed.front() == '[') {
+        return parse_flow_sequence(raw, items);
+    }
+    return split_comma_list(raw, items);
+}
+
 std::string truncate_description(std::string description, std::size_t max_bytes) {
     if (description.size() <= max_bytes) {
         return description;
@@ -175,31 +226,95 @@ FrontmatterResult parse_skill_file(std::string_view content,
     const std::string normalized = normalize_line_endings(strip_bom(std::string{content}));
     const std::vector<std::string_view> lines = split_lines(normalized);
 
-    if (lines.empty() || trim(lines.front()) != kFence) {
-        result.error = "missing opening '---' fence";
+    // Leading blank lines are tolerated. A `---` fence is the canonical form;
+    // an unfenced `key: value` header is accepted for OpenCode/Claude skills
+    // that were written without one.
+    std::size_t start = 0;
+    while (start < lines.size() && trim(lines[start]).empty()) {
+        ++start;
+    }
+    if (start == lines.size()) {
+        result.error = "empty SKILL.md";
         return result;
     }
 
-    std::size_t close_index = lines.size();
+    const bool fenced = trim(lines[start]) == kFence;
+    std::size_t header_begin = start;
+    std::size_t header_end   = lines.size();
+    std::size_t body_begin   = lines.size();
     std::size_t region_bytes = 0;
-    for (std::size_t index = 1; index < lines.size(); ++index) {
-        region_bytes += lines[index].size() + 1;
+
+    if (fenced) {
+        header_begin = start + 1;
+        for (std::size_t index = header_begin; index < lines.size(); ++index) {
+            region_bytes += lines[index].size() + 1;
+            if (region_bytes > max_frontmatter_bytes) {
+                result.error = "frontmatter exceeds max_frontmatter_bytes";
+                return result;
+            }
+            if (trim(lines[index]) == kFence) {
+                header_end = index;
+                body_begin = index + 1;
+                break;
+            }
+        }
+        if (body_begin == lines.size()) {
+            result.error = "missing closing '---' fence";
+            return result;
+        }
+    } else {
+        // Accept a bare header block. A line only belongs to the header while it
+        // is `key: value` or an indented continuation; the first other line
+        // starts the body. At least `name` or `description` must be present so
+        // ordinary prose is never mistaken for frontmatter.
+        std::size_t index = header_begin;
+        bool        saw_header_key = false;
+        while (index < lines.size()) {
+            const std::string_view raw = lines[index];
+            if (trim(raw).empty()) {
+                break;
+            }
+            if (is_indented(raw)) {
+                ++index;
+                continue;
+            }
+            const std::string line = trim(raw);
+            if (line.front() == '#') {
+                break;
+            }
+            const std::size_t colon = line.find(':');
+            if (colon == std::string::npos) {
+                break;
+            }
+            const std::string key = trim(std::string_view{line}.substr(0, colon));
+            if (!is_key(key)) {
+                break;
+            }
+            if (key == "name" || key == "description") {
+                saw_header_key = true;
+            }
+            ++index;
+        }
+        if (!saw_header_key) {
+            result.error =
+                "missing required field 'description' (add frontmatter or a leading "
+                "'description:' line)";
+            return result;
+        }
+        header_end = index;
+        body_begin = index;
+        for (std::size_t i = header_begin; i < header_end; ++i) {
+            region_bytes += lines[i].size() + 1;
+        }
         if (region_bytes > max_frontmatter_bytes) {
             result.error = "frontmatter exceeds max_frontmatter_bytes";
             return result;
         }
-        if (trim(lines[index]) == kFence) {
-            close_index = index;
-            break;
-        }
-    }
-    if (close_index == lines.size()) {
-        result.error = "missing closing '---' fence";
-        return result;
     }
 
-    bool has_name = false;
     bool has_description = false;
+    std::string frontmatter_name;
+    bool has_name_line = false;
     std::vector<std::string> seen_keys;
     std::uint32_t version = 1;
     std::vector<std::string> allowed_tools;
@@ -208,19 +323,24 @@ FrontmatterResult parse_skill_file(std::string_view content,
     std::string model;
 
     const auto assign = [&](const std::string& key, std::string_view raw) -> bool {
-        if (key == "allowed-tools") {
-            return parse_flow_sequence(raw, allowed_tools);
+        if (key == "allowed-tools" || key == "tools") {
+            return parse_string_list(raw, allowed_tools);
         }
         if (key == "tags") {
-            return parse_flow_sequence(raw, tags);
+            return parse_string_list(raw, tags);
+        }
+        if (is_ignored_compat_key(key)) {
+            return true;
         }
         std::string scalar;
         if (!parse_scalar(raw, scalar)) {
             return false;
         }
         if (key == "name") {
-            result.meta.name.value = std::move(scalar);
-            has_name = true;
+            if (!scalar.empty()) {
+                frontmatter_name = std::move(scalar);
+                has_name_line   = true;
+            }
         } else if (key == "description") {
             result.meta.description = std::move(scalar);
             has_description = true;
@@ -242,14 +362,19 @@ FrontmatterResult parse_skill_file(std::string_view content,
         return true;
     };
 
-    for (std::size_t index = 1; index < close_index; ++index) {
-        const std::string line = trim(lines[index]);
-        if (line.empty()) {
+    for (std::size_t index = header_begin; index < header_end; ++index) {
+        const std::string_view raw = lines[index];
+        if (trim(raw).empty()) {
             continue;
         }
+        // Nested YAML (`metadata:` children) is preserved only as ignored text;
+        // the subset parser does not interpret it.
+        if (is_indented(raw)) {
+            continue;
+        }
+        const std::string line = trim(raw);
         if (line.front() == '#') {
-            result.error = "comments are not supported";
-            return result;
+            continue;
         }
         const std::size_t colon = line.find(':');
         if (colon == std::string::npos) {
@@ -257,27 +382,33 @@ FrontmatterResult parse_skill_file(std::string_view content,
             return result;
         }
         const std::string key = trim(std::string_view{line}.substr(0, colon));
-        if (key.empty() || !std::all_of(key.begin(), key.end(), is_key_char)) {
+        if (!is_key(key)) {
             result.error = "invalid key";
             return result;
         }
         static constexpr std::string_view kKnownKeys[] = {
-            "name", "description", "version", "allowed-tools", "tags", "license", "model"};
-        if (std::find(std::begin(kKnownKeys), std::end(kKnownKeys), key) ==
-            std::end(kKnownKeys)) {
-            result.error = "unknown key '" + key + "'";
-            return result;
+            "name", "description", "version", "allowed-tools", "tools", "tags", "license",
+            "model"};
+        const bool known =
+            std::find(std::begin(kKnownKeys), std::end(kKnownKeys), key) !=
+            std::end(kKnownKeys);
+        if (!known && !is_ignored_compat_key(key)) {
+            result.warnings.push_back("ignored unknown frontmatter key '" + key + "'");
+            continue;
         }
         if (std::find(seen_keys.begin(), seen_keys.end(), key) != seen_keys.end()) {
-            result.error = "duplicate key '" + key + "'";
-            return result;
+            result.warnings.push_back("ignored duplicate frontmatter key '" + key + "'");
+            continue;
         }
         seen_keys.push_back(key);
-        std::string_view raw = std::string_view{line}.substr(colon + 1);
-        const std::string trimmed_raw = trim(raw);
+        std::string_view raw_value = std::string_view{line}.substr(colon + 1);
+        const std::string trimmed_raw = trim(raw_value);
         if (is_block_scalar(trimmed_raw)) {
-            result.error = "unsupported construct (block scalar)";
-            return result;
+            if (key == "description") {
+                result.error = "unsupported construct (block scalar)";
+                return result;
+            }
+            continue;
         }
         if (!trimmed_raw.empty() &&
             (trimmed_raw.front() == '&' || trimmed_raw.front() == '*' ||
@@ -285,27 +416,29 @@ FrontmatterResult parse_skill_file(std::string_view content,
             result.error = "unsupported construct";
             return result;
         }
-        if (!assign(key, raw)) {
+        if (!assign(key, raw_value)) {
             result.error = "invalid value for '" + key + "'";
             return result;
         }
     }
 
-    if (!has_name || result.meta.name.value.empty()) {
-        result.error = "missing required field 'name'";
+    // OpenCode derives the skill id from the path; the frontmatter `name` is a
+    // display label. ymh keeps the directory basename as the addressable id so
+    // an existing skill tree (including `improve_ut`) loads unchanged.
+    const std::string id = std::string{expected_name};
+    if (!is_valid_skill_name(id)) {
+        result.error = "invalid skill directory name '" + id + "'";
         return result;
+    }
+    result.meta.name.value = id;
+    if (has_name_line && frontmatter_name != id) {
+        result.meta.display_name = frontmatter_name;
+        result.warnings.push_back("frontmatter name '" + frontmatter_name +
+                                  "' differs from directory '" + id +
+                                  "'; using the directory name as the skill id");
     }
     if (!has_description || result.meta.description.empty()) {
         result.error = "missing required field 'description'";
-        return result;
-    }
-    if (!is_valid_skill_name(result.meta.name.value)) {
-        result.error = "invalid skill name '" + result.meta.name.value + "'";
-        return result;
-    }
-    if (result.meta.name.value != expected_name) {
-        result.error = "name '" + result.meta.name.value + "' does not match directory '" +
-                       std::string{expected_name} + "'";
         return result;
     }
 
@@ -321,8 +454,8 @@ FrontmatterResult parse_skill_file(std::string_view content,
     result.meta.model = std::move(model);
 
     std::string body;
-    for (std::size_t index = close_index + 1; index < lines.size(); ++index) {
-        if (index != close_index + 1) {
+    for (std::size_t index = body_begin; index < lines.size(); ++index) {
+        if (index != body_begin) {
             body.push_back('\n');
         }
         body.append(lines[index]);

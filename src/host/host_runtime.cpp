@@ -201,6 +201,7 @@ nlohmann::json skill_list_json(const SkillCatalog& catalog) {
     nlohmann::json skills = nlohmann::json::array();
     for (const Skill& skill : catalog.all()) {
         skills.push_back(nlohmann::json{{"name", skill.meta.name.value},
+                                        {"display_name", skill.meta.display_name},
                                         {"description", skill.meta.description},
                                         {"trust", std::string{skill_trust_name(skill.trust)}},
                                         {"source", std::string{skill_source_name(skill.source)}},
@@ -226,6 +227,7 @@ nlohmann::json skill_list_json(const SkillCatalog& catalog) {
 
 nlohmann::json skill_show_json(const Skill& skill) {
     return nlohmann::json{{"name", skill.meta.name.value},
+                          {"display_name", skill.meta.display_name},
                           {"description", skill.meta.description},
                           {"trust", std::string{skill_trust_name(skill.trust)}},
                           {"source", std::string{skill_source_name(skill.source)}},

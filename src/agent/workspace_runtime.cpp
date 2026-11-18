@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <map>
@@ -59,6 +60,22 @@
 namespace ymh {
 namespace {
 
+std::filesystem::path weak_key(const std::filesystem::path& path) {
+    std::error_code error;
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, error);
+    return error ? path.lexically_normal() : canonical;
+}
+
+void append_unique_root(std::vector<SkillRoot>& roots, SkillRoot root) {
+    const std::filesystem::path key = weak_key(root.path);
+    for (const SkillRoot& existing : roots) {
+        if (weak_key(existing.path) == key) {
+            return;
+        }
+    }
+    roots.push_back(std::move(root));
+}
+
 // 119-D39: the validated, canonical `[sandbox]` writable roots. Wave 0 already
 // rejected the dangerous spellings at load; this only converts them.
 std::vector<std::filesystem::path> sandbox_writable_roots(const Config& config) {
@@ -87,8 +104,30 @@ std::shared_ptr<SkillCatalog> make_skill_catalog(const Config& config,
                                                  const std::filesystem::path& launch_dir,
                                                  Logger& logger) {
     std::vector<SkillRoot> roots = default_skill_roots();
-    roots.push_back(SkillRoot{environment.root() / ".ymh" / "skills", SkillSource::Workspace,
-                              SkillTrust::Untrusted});
+
+    // Explicit `[skills].roots` entries are operator-authored configuration, so
+    // they are trusted. Relative paths resolve from the launch directory (like
+    // OpenCode); `~/` expands from HOME.
+    for (const std::string& listed : config.skills.roots) {
+        std::filesystem::path path{listed};
+        if (path.empty()) {
+            continue;
+        }
+        if (listed.rfind("~/", 0) == 0) {
+            if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+                path = std::filesystem::path{home} / listed.substr(2);
+            }
+        }
+        if (path.is_relative()) {
+            path = (launch_dir.empty() ? environment.root() : launch_dir) / path;
+        }
+        append_unique_root(roots, SkillRoot{std::move(path), SkillSource::User,
+                                            SkillTrust::Trusted, /*required=*/true});
+    }
+
+    for (SkillRoot root : workspace_skill_roots(environment.root())) {
+        append_unique_root(roots, std::move(root));
+    }
     SkillCatalogConfig catalog_config = to_skill_catalog_config(config);
     catalog_config.workspace_trusted =
         workspace_tier_trusted(environment.root(), launch_dir,

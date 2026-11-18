@@ -24,9 +24,10 @@ struct SkillLoadWarning {
 
 struct SkillCatalogConfig {
     bool        enabled = true;
-    bool        expose_workspace = false;  // untrusted tier visible to the model
-    // 50-D5: the workspace tier is loaded only when the operator has trusted
-    // this workspace (a record outside the workspace). Untrusted => skipped.
+    // DANGER: load the project tier even when the workspace is not trusted.
+    bool        expose_workspace = false;
+    // 50-D5: a trusted workspace's tier is loaded and model-visible. An
+    // untrusted workspace's tier stays hidden unless `expose_workspace` is set.
     bool        workspace_trusted = false;
     std::size_t max_skills = 256;
     std::size_t max_skill_bytes = 64u * 1024u;

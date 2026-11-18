@@ -428,7 +428,14 @@ struct ToolsSettings {
 // [skills] — the skill subsystem (20 §5.6). Additive.
 struct SkillsSettings {
     bool        enabled = true;
-    bool        expose_workspace = false;  // DANGER: exposes repo-authored skills
+    // DANGER: load project skills (`<workspace>/.ymh/skills`, `.opencode/skills`,
+    // `.claude/skills`, `.agents/skills`) even when the workspace is not trusted.
+    // Global-layer only: a repository config must not expose itself.
+    bool        expose_workspace = false;
+    // Extra trusted skill roots (`~` and relative-to-launch-dir are resolved).
+    // An OpenCode/Claude skill tree can be pointed at in place. Global-layer
+    // only: a repository config must not whitelist an arbitrary directory.
+    std::vector<std::string> roots;
     std::size_t max_skills = 256;
     std::size_t max_skill_bytes = 64u * 1024u;
     std::size_t max_description_bytes = 512;

@@ -1200,15 +1200,30 @@ void apply_mcp_servers_entry(McpServerSettings& server, const Json& entry, const
     }
 }
 
-void apply_skills(Config& config, const Json& table, const std::filesystem::path& source) {
+void apply_skills(Config& config, const Json& table, const std::filesystem::path& source,
+                  bool global_layer) {
+    // A workspace config ships with the repository. It must not be able to
+    // whitelist its own instruction files (prompt injection) or point at an
+    // arbitrary trusted root.
+    if (!global_layer) {
+        if (member(table, "expose_workspace") != nullptr) {
+            fail(source, "'skills.expose_workspace' is global-layer only");
+        }
+        if (member(table, "roots") != nullptr) {
+            fail(source, "'skills.roots' is global-layer only");
+        }
+    }
     reject_unknown(table, "skills",
-                   {"enabled", "expose_workspace", "max_skills", "max_skill_bytes",
+                   {"enabled", "expose_workspace", "roots", "max_skills", "max_skill_bytes",
                     "max_description_bytes", "max_index_bytes", "max_frontmatter_bytes"},
                    source);
     SkillsSettings& skills = config.skills;
     skills.enabled = read_bool(table, "enabled", "skills", skills.enabled, source);
     skills.expose_workspace =
         read_bool(table, "expose_workspace", "skills", skills.expose_workspace, source);
+    if (member(table, "roots") != nullptr) {
+        skills.roots = read_string_array(table, "roots", "skills", source);
+    }
     skills.max_skills = static_cast<std::size_t>(read_int64(
         table, "max_skills", "skills", static_cast<std::int64_t>(skills.max_skills), source));
     skills.max_skill_bytes = static_cast<std::size_t>(read_int64(
@@ -1540,7 +1555,7 @@ void apply_document(Config& config, const Json& table, const std::filesystem::pa
         apply_mcp(config, *mcp, source);
     }
     if (const Json* skills = section("skills"); skills != nullptr) {
-        apply_skills(config, *skills, source);
+        apply_skills(config, *skills, source, global_layer);
     }
     if (const Json* session = section("session"); session != nullptr) {
         if (!global_layer) {

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -34,6 +36,85 @@ std::string join_reason(const std::filesystem::path& file, std::string_view reas
     return file.string() + ": " + std::string{reason};
 }
 
+// OpenCode also accepts flat `*.md` skills at the source root. ymh's own roots
+// stay directory-only so a stray README cannot become a skill.
+bool is_flat_skill_source(SkillSource source) {
+    return source == SkillSource::Opencode || source == SkillSource::Claude ||
+           source == SkillSource::Agents;
+}
+
+struct SkillCandidate {
+    std::filesystem::path file;
+    std::string           id;
+};
+
+std::vector<SkillCandidate> collect_candidates(const std::filesystem::path& base,
+                                               SkillSource                  source,
+                                               std::vector<ScanItem>&       items) {
+    std::vector<SkillCandidate> candidates;
+    constexpr int               kMaxDepth = 6;
+    std::function<void(const std::filesystem::path&, int)> walk =
+        [&](const std::filesystem::path& directory, int depth) {
+            std::error_code ec;
+            std::vector<std::filesystem::directory_entry> entries;
+            std::filesystem::directory_iterator iterator(directory, ec);
+            if (ec) {
+                items.push_back(ScanItem{
+                    std::nullopt,
+                    {SkillLoadWarning{directory, "skills directory is unreadable"}}});
+                return;
+            }
+            for (; iterator != std::filesystem::directory_iterator(); iterator.increment(ec)) {
+                if (ec) {
+                    break;
+                }
+                entries.push_back(*iterator);
+            }
+            if (ec) {
+                items.push_back(ScanItem{
+                    std::nullopt,
+                    {SkillLoadWarning{directory, "skills directory is unreadable"}}});
+                return;
+            }
+            std::sort(entries.begin(), entries.end(),
+                      [](const std::filesystem::directory_entry& left,
+                         const std::filesystem::directory_entry& right) {
+                          return left.path().filename().string() <
+                                 right.path().filename().string();
+                      });
+            for (const std::filesystem::directory_entry& entry : entries) {
+                std::error_code entry_ec;
+                if (entry.is_symlink(entry_ec) || entry_ec) {
+                    continue;
+                }
+                if (entry.is_directory(entry_ec) && !entry_ec) {
+                    const std::string name = entry.path().filename().string();
+                    if (name.empty() || name.front() == '.' || name == "node_modules") {
+                        continue;
+                    }
+                    const std::filesystem::path marker = entry.path() / "SKILL.md";
+                    std::error_code             marker_ec;
+                    if (std::filesystem::is_regular_file(marker, marker_ec) && !marker_ec) {
+                        candidates.push_back(SkillCandidate{marker, name});
+                    } else if (depth < kMaxDepth) {
+                        walk(entry.path(), depth + 1);
+                    }
+                    continue;
+                }
+                if (!is_flat_skill_source(source) || depth != 0 ||
+                    !entry.is_regular_file(entry_ec) || entry_ec) {
+                    continue;
+                }
+                const std::filesystem::path path = entry.path();
+                if (path.extension() == ".md" && path.filename() != "SKILL.md") {
+                    candidates.push_back(SkillCandidate{path, path.stem().string()});
+                }
+            }
+        };
+    walk(base, 0);
+    return candidates;
+}
+
 std::vector<ScanItem> scan(const std::filesystem::path& root,
                            SkillSource                  source,
                            SkillTrust                   trust,
@@ -53,80 +134,79 @@ std::vector<ScanItem> scan(const std::filesystem::path& root,
         return items;
     }
 
-    std::filesystem::directory_iterator iterator(base, ec);
-    if (ec) {
-        items.push_back(ScanItem{std::nullopt, {SkillLoadWarning{root, "skills root is unreadable"}}});
-        return items;
-    }
+    const std::vector<SkillCandidate> candidates = collect_candidates(base, source, items);
 
-    for (const std::filesystem::directory_entry& entry : iterator) {
+    for (const SkillCandidate& candidate : candidates) {
         std::error_code entry_ec;
-        if (!entry.is_directory(entry_ec) || entry_ec) {
-            continue;
-        }
-        const std::filesystem::path directory = weakly(entry.path());
+        const std::filesystem::path directory = weakly(candidate.file.parent_path());
         if (!path_is_within(directory, base)) {
             items.push_back(ScanItem{std::nullopt,
-                                     {SkillLoadWarning{entry.path(), "skill directory escapes its root"}}});
+                                     {SkillLoadWarning{candidate.file,
+                                                       "skill directory escapes its root"}}});
             continue;
         }
 
-        const std::filesystem::path candidate = directory / "SKILL.md";
-        std::filesystem::path       resolved  = candidate;
+        std::filesystem::path resolved = candidate.file;
         if (workspace_tier) {
             std::error_code relative_ec;
             const std::filesystem::path relative =
-                std::filesystem::relative(candidate, environment->root(), relative_ec);
+                std::filesystem::relative(candidate.file, environment->root(), relative_ec);
             if (relative_ec) {
                 items.push_back(ScanItem{std::nullopt,
-                                         {SkillLoadWarning{candidate, "cannot resolve SKILL.md"}}});
+                                         {SkillLoadWarning{candidate.file,
+                                                           "cannot resolve the skill file"}}});
                 continue;
             }
             try {
                 resolved = environment->resolve(relative.string());
             } catch (const ToolError&) {
                 items.push_back(ScanItem{std::nullopt,
-                                         {SkillLoadWarning{candidate, "SKILL.md escapes the workspace root"}}});
+                                         {SkillLoadWarning{candidate.file,
+                                                           "skill file escapes the workspace root"}}});
                 continue;
             }
         }
 
         if (!std::filesystem::is_regular_file(resolved, entry_ec) || entry_ec) {
             items.push_back(ScanItem{std::nullopt,
-                                     {SkillLoadWarning{candidate, "SKILL.md is not a regular file"}}});
+                                     {SkillLoadWarning{candidate.file,
+                                                       "skill file is not a regular file"}}});
             continue;
         }
         const std::filesystem::path canonical_file = weakly(resolved);
         if (!path_is_within(canonical_file, base)) {
             items.push_back(ScanItem{std::nullopt,
-                                     {SkillLoadWarning{candidate, "SKILL.md escapes its root"}}});
+                                     {SkillLoadWarning{candidate.file,
+                                                       "skill file escapes its root"}}});
             continue;
         }
 
         const std::uintmax_t size = std::filesystem::file_size(canonical_file, entry_ec);
         if (entry_ec) {
             items.push_back(ScanItem{std::nullopt,
-                                     {SkillLoadWarning{candidate, "cannot stat SKILL.md"}}});
+                                     {SkillLoadWarning{candidate.file,
+                                                       "cannot stat the skill file"}}});
             continue;
         }
         if (size > config.max_skill_bytes) {
             items.push_back(ScanItem{std::nullopt,
-                                     {SkillLoadWarning{candidate, "exceeds max_skill_bytes"}}});
+                                     {SkillLoadWarning{candidate.file, "exceeds max_skill_bytes"}}});
             continue;
         }
 
         std::ifstream input(canonical_file, std::ios::binary);
         if (!input) {
             items.push_back(ScanItem{std::nullopt,
-                                     {SkillLoadWarning{candidate, "cannot read SKILL.md"}}});
+                                     {SkillLoadWarning{candidate.file,
+                                                       "cannot read the skill file"}}});
             continue;
         }
         const std::string content{std::istreambuf_iterator<char>(input),
                                   std::istreambuf_iterator<char>()};
 
-        FrontmatterResult parsed = parse_skill_file(
-            content, directory.filename().string(), config.max_frontmatter_bytes,
-            config.max_description_bytes);
+        FrontmatterResult parsed =
+            parse_skill_file(content, candidate.id, config.max_frontmatter_bytes,
+                             config.max_description_bytes);
         if (!parsed.error.empty()) {
             items.push_back(
                 ScanItem{std::nullopt, {SkillLoadWarning{canonical_file, std::move(parsed.error)}}});
@@ -211,6 +291,7 @@ void SkillCatalog::discover() {
 
     std::vector<std::pair<std::size_t, Skill>> entries;
     std::map<std::string, std::size_t>         by_name;
+    bool                                       workspace_tier_warned = false;
     const auto consider = [&](std::size_t root_index, ScanItem&& item) {
         for (SkillLoadWarning& warning : item.warnings) {
             warnings_.push_back(std::move(warning));
@@ -232,9 +313,15 @@ void SkillCatalog::discover() {
     for (std::size_t index = 0; index < roots_.size(); ++index) {
         const SkillRoot& root = roots_[index];
         const bool       workspace_tier = root.trust == SkillTrust::Untrusted;
-        if (workspace_tier && !config_.workspace_trusted) {
-            warnings_.push_back(
-                SkillLoadWarning{root.path, "workspace is not trusted: workspace tier disabled"});
+        if (workspace_tier && !config_.workspace_trusted && !config_.expose_workspace) {
+            // One notice for the whole tier, not one per project skill directory.
+            if (!workspace_tier_warned) {
+                warnings_.push_back(
+                    SkillLoadWarning{root.path,
+                                     "workspace is not trusted: set skills.expose_workspace to "
+                                     "load project skills anyway"});
+                workspace_tier_warned = true;
+            }
             continue;
         }
         if (!root.path.is_absolute()) {
@@ -243,8 +330,10 @@ void SkillCatalog::discover() {
                 "relative " + std::string{skill_source_name(root.source)} + " root: tier disabled"});
             continue;
         }
-        const bool optional_root =
-            root.source == SkillSource::Home || root.source == SkillSource::Claude;
+        // Missing candidate roots are normal: a workspace usually has only one
+        // of `.ymh`, `.opencode`, `.claude`, `.agents`. Explicit `[skills].roots`
+        // entries are required so a typo is visible.
+        const bool optional_root = !root.required;
         if (optional_root) {
             std::error_code exists_ec;
             if (!std::filesystem::exists(root.path, exists_ec) || exists_ec) {
@@ -283,7 +372,10 @@ void SkillCatalog::discover() {
     all_ = std::move(ordered);
     model_visible_.reserve(all_.size());
     for (const Skill& skill : all_) {
-        if (skill.trust == SkillTrust::Trusted || config_.expose_workspace) {
+        // A trusted workspace's project skills are usable by the model; the
+        // danger flag additionally exposes them for an untrusted workspace.
+        if (skill.trust == SkillTrust::Trusted || config_.workspace_trusted ||
+            config_.expose_workspace) {
             model_visible_.push_back(&skill);
         }
     }

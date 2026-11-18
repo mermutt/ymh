@@ -13,7 +13,8 @@
 
 namespace ymh {
 
-// Grammar: [a-z][a-z0-9]*(-[a-z0-9]+)*, length 1..64 (20 §2.3).
+// Grammar: [a-z0-9][a-z0-9_-]* , length 1..64 (20 §2.3). Underscores are
+// accepted so OpenCode skill directories such as `improve_ut` work unchanged.
 struct SkillName {
     std::string value;
     auto operator<=>(const SkillName&) const = default;
@@ -22,11 +23,13 @@ struct SkillName {
 [[nodiscard]] bool is_valid_skill_name(std::string_view name) noexcept;
 
 enum class SkillSource : std::uint8_t {
-    Home,       // $HOME/.ymh/skills/<name>/SKILL.md          (50-D1.2, Trusted)
-    User,       // <config-root>/ymh/skills/<name>/SKILL.md
-    Claude,     // $HOME/.claude/skills/<name>/SKILL.md       (50-D1.2, Trusted)
-    Workspace,  // <workspace>/.ymh/skills/<name>/SKILL.md
-    Builtin,    // reserved; never produced in v1 (20-D2, OQ-3)
+    Home,      // $HOME/.ymh/skills/<name>/SKILL.md          (50-D1.2, Trusted)
+    User,      // <config-root>/ymh/skills/<name>/SKILL.md, plus [skills].roots
+    Opencode,  // $HOME/.config/opencode/skills/<name>/SKILL.md
+    Claude,    // $HOME/.claude/skills/<name>/SKILL.md       (50-D1.2, Trusted)
+    Agents,    // $HOME/.agents/skills/<name>/SKILL.md
+    Workspace, // <workspace>/.ymh/skills/<name>/SKILL.md + project skill dirs
+    Builtin,   // reserved; never produced in v1 (20-D2, OQ-3)
 };
 
 enum class SkillTrust : std::uint8_t {
@@ -35,7 +38,8 @@ enum class SkillTrust : std::uint8_t {
 };
 
 struct SkillMetadata {
-    SkillName                name;
+    SkillName                name;          // path-derived id; the addressable key
+    std::string              display_name;  // frontmatter `name` when it differs
     std::string              description;
     std::uint32_t            version{1};
     std::vector<std::string> allowed_tools;  // ADVISORY ONLY — never enforced

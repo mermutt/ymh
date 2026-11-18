@@ -1,6 +1,8 @@
 #pragma once
 
-// Strict YAML-subset frontmatter parser for SKILL.md (20-skills.md §4.2, §5.3).
+// Frontmatter parser for SKILL.md (20-skills.md §4.2, §5.3), with OpenCode
+// compatibility: the `---` fence is optional, `name` is optional and advisory,
+// `tools` aliases `allowed-tools`, and unknown keys are ignored with a warning.
 // Pure: no I/O. `error` is fatal (skip the skill); `warnings` is non-fatal (keep
 // the skill, SK-F4/M1).
 
@@ -20,8 +22,9 @@ struct FrontmatterResult {
     std::vector<std::string> warnings;  // non-fatal, e.g. description truncation
 };
 
-// `content` is the full SKILL.md text. `expected_name` is the directory
-// basename; a mismatch yields an error (SK-F3).
+// `content` is the full SKILL.md text. `expected_name` is the path-derived
+// skill id (directory basename for `<name>/SKILL.md`, file stem for a flat
+// `<name>.md`); the frontmatter `name` is a display label and may differ.
 [[nodiscard]] FrontmatterResult parse_skill_file(std::string_view content,
                                                  std::string_view expected_name,
                                                  std::size_t max_frontmatter_bytes,
