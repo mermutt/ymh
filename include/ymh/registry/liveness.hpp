@@ -2,10 +2,12 @@
 
 // Host liveness primitives for the workspace registry (03 §6.3, R5, R6).
 //
-// Liveness is sidecar-flock-primary: the daemon holds
-// `<workspace>/.ymh/sessions.lock` for its whole lifetime and the kernel
-// releases it on process death, including SIGKILL (§9.7). `kill(pid, 0)` and
-// heartbeat staleness are hints only and are never sufficient to clear a claim.
+// Local liveness is process/socket-primary: a daemon is live HERE only when a
+// process in this PID namespace owns the advertised AF_UNIX socket. The daemon
+// also holds `<workspace>/.ymh/sessions.lock` for its whole lifetime; because a
+// shared/NFS flock is visible from every host, a held lock without a local
+// socket owner means the daemon is on another machine (`Remote`), not here.
+// The kernel releases the lock on process death, including SIGKILL (§9.7).
 
 #include <cstdint>
 #include <filesystem>

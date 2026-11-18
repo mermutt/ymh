@@ -35,6 +35,7 @@
 #include "ymh/cli/stream_receiver.hpp"
 #include "ymh/cli/wiring.hpp"
 #include "ymh/host/host_launcher.hpp"
+#include "ymh/host/runtime_paths.hpp"
 #include "ymh/host/workspace_host.hpp"
 #include "ymh/registry/doctor_cli.hpp"
 #include "ymh/registry/workspace_cli.hpp"
@@ -421,9 +422,14 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     HostConfig host_config;
     host_config.workspace      = WorkspaceId{workspace_id};
     host_config.workspace_root = canonical;
-    host_config.socket_path    = socket_path.empty()
-                                     ? canonical / ".ymh" / "host.sock"
-                                     : std::filesystem::path{socket_path};
+    try {
+        host_config.socket_path = socket_path.empty()
+                                      ? local_host_socket_path(workspace_id)
+                                      : std::filesystem::path{socket_path};
+    } catch (const std::exception& socket_error) {
+        err << "ymh --host: cannot resolve socket path: " << socket_error.what() << '\n';
+        return 2;
+    }
     host_config.log_sink       = canonical / ".ymh" / "host.log";
     host_config.registry       = default_registry_config();
     host_config.persistence.db_path   = canonical / ".ymh" / "sessions.db";
@@ -484,6 +490,11 @@ int run_workspace_stop(const std::vector<std::string>& args, bool force, std::os
         // workspace is an idempotent no-op, not an error.
         out << "not running " << record->id.value << '\n';
         return 0;
+    }
+    if (registry->probeLiveness(record->id) == HostLiveness::Remote) {
+        err << "ymh: workspace " << record->id.value
+            << " is running on another host; stop it there\n";
+        return 1;
     }
     // 111-D2: a claim whose sidecar lock is free outlived its daemon (SIGKILL,
     // reboot). `stop` must not clear claims (88-D1: remediation is explicit),
@@ -662,10 +673,13 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     const AttachIdentity identity{ui::process_client_instance(),
                                   protocol::ClientRole::Supervisor};
     std::optional<std::string> startup_notice;
+    bool                       attached_existing = false;
+    bool                       ensured           = false;
     try {
         const AttachResult attach =
             lifecycle.ensureRunning(row->id, ui::probe_attach_identity(), AttachBudget{});
-        (void)attach;
+        attached_existing = !attach.spawned;
+        ensured           = true;
     } catch (const std::exception& error) {
         // 53-D1 step 4: an explicit activation (`--resume`/`--new`) stays fatal;
         // a bare `ymh` records the failure and continues unmodeled (53-F1).
@@ -678,7 +692,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
 
     ui::DaemonSetScanner scanner(*registry, std::chrono::milliseconds{2'000}, {});
     std::vector<ui::SupervisorWorkspace> attached = scanner.scanOnce();
-    if (attached.empty()) {
+    if (ensured && attached.empty()) {
         const std::optional<WorkspaceRecord> refreshed = registry->findById(row->id);
         if (refreshed.has_value() && refreshed->host.has_value()) {
             ui::SupervisorWorkspace workspace;
@@ -695,7 +709,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     // config reload). If one is already running, the file we just read may be
     // newer than the policy in effect; say so instead of letting stale prompts
     // look like a bug in the rules.
-    if (!attached.empty()) {
+    if (attached_existing) {
         const std::string note =
             "config: a workspace daemon is already running; policy edits need a restart "
             "(`ymh workspace stop <path>`)";
@@ -1579,6 +1593,12 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                             WorkspaceRegistry::open(default_registry_config());
                         return run_via_daemon(*writer, *row, effective_global_config(invocation),
                                               invocation.task, invocation.session, out, err);
+                    }
+                    if (row.has_value() && row->host.has_value() &&
+                        reader->probeLiveness(row->id) == HostLiveness::Remote) {
+                        err << "ymh: workspace daemon is running on another host; "
+                               "stop it there and retry\n";
+                        return 2;
                     }
                 }
             } catch (const std::exception&) {

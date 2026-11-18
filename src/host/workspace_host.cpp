@@ -45,6 +45,7 @@
 #include "ymh/execution/environment.hpp"
 #include "ymh/host/host_launcher.hpp"
 #include "ymh/host/host_runtime.hpp"
+#include "ymh/host/runtime_paths.hpp"
 #include "ymh/permission/permission_broker.hpp"
 #include "ymh/permission/permission_transport.hpp"
 #include "ymh/policy/permission_policy.hpp"
@@ -797,7 +798,13 @@ HostExitCode WorkspaceHost::Impl::startup() {
     }
 
     if (config_.socket_path.empty()) {
-        config_.socket_path = canonical_root_ / ".ymh" / "host.sock";
+        try {
+            config_.socket_path = local_host_socket_path(config_.workspace.value);
+        } catch (const std::exception& socket_error) {
+            std::fprintf(stderr, "ymh --host: cannot resolve socket path: %s\n",
+                         socket_error.what());
+            return HostExitCode::StartupRejected;
+        }
     }
     if (config_.log_sink.empty()) {
         config_.log_sink = canonical_root_ / ".ymh" / "host.log";
@@ -845,8 +852,12 @@ HostExitCode WorkspaceHost::Impl::startup() {
 
     executor_ = std::make_unique<AsioExecutor>(io_);
 
+    std::error_code store_error;
     db_preexisted_ =
-        std::filesystem::exists(canonical_root_ / ".ymh" / "sessions.db", error) && !error;
+        (std::filesystem::is_directory(canonical_root_ / ".ymh" / "sessions", store_error) &&
+         !store_error) ||
+        (std::filesystem::exists(canonical_root_ / ".ymh" / "sessions.db", store_error) &&
+         !store_error);
     error.clear();
 
     try {
@@ -994,8 +1005,8 @@ HostExitCode WorkspaceHost::Impl::startup() {
 
     // 23 §7 (SL-I19/SL-I20): repair a junction whose session erase committed but
     // whose junction removal was lost to a crash. Runs only in this flock-held
-    // startup window (between claimHost and Serving) and only when sessions.db
-    // pre-existed the writable open -- a freshly created empty DB would
+    // startup window (between claimHost and Serving) and only when the session
+    // store pre-existed the writable open -- a freshly created empty store would
     // otherwise classify every junction as an orphan.
     if (db_preexisted_ && runtime_->persistence() != nullptr) {
         for (const WorkspaceSessionRecord& junction : registry_->listSessions(config_.workspace)) {
@@ -1565,7 +1576,7 @@ HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     HostConfig config;
     config.workspace      = record.id;
     config.workspace_root = record.canonicalPath;
-    config.socket_path    = record.canonicalPath / ".ymh" / "host.sock";
+    config.socket_path    = local_host_socket_path(record.id.value);
     config.log_sink       = record.canonicalPath / ".ymh" / "host.log";
     config.config_path    = config_path_;
     config.registry       = default_registry_config();
@@ -1736,6 +1747,13 @@ AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace, AttachIdentity 
     if (!record.has_value()) {
         throw HostError(protocol::HostErrorCode::WorkspaceMissing,
                         "no workspace row for id " + workspace.value);
+    }
+    if (record->host.has_value() &&
+        registry_.probeLiveness(workspace) == HostLiveness::Remote) {
+        throw HostError(
+            protocol::HostErrorCode::WorkspaceLockForeign,
+            "workspace daemon is running on another host; stop it there "
+            "(`ymh workspace stop <path>` on that machine)");
     }
     if (!record->host.has_value()) {
         return spawnAndAttach(*record, identity, budget, deadline);

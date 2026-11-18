@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "ymh/host/runtime_paths.hpp"
+
 namespace ymh {
 namespace {
 
@@ -83,9 +85,7 @@ bool is_ymh_host_process(const std::vector<std::string>& argv) {
         return false;
     }
     std::string workspace;
-    std::string socket;
-    return flag_value(argv, "--workspace", workspace) && flag_value(argv, "--socket", socket) &&
-           !workspace.empty() && !socket.empty();
+    return flag_value(argv, "--workspace", workspace) && !workspace.empty();
 }
 
 std::vector<ScannedHost> scanHosts(
@@ -114,7 +114,11 @@ std::vector<ScannedHost> scanHosts(
             if (record->host.has_value() && !record->host->socketPath.empty()) {
                 socket = record->host->socketPath;
             } else {
-                socket = root / ".ymh" / "host.sock";
+                try {
+                    socket = host_socket_path(workspace_value);
+                } catch (const std::exception&) {
+                    socket = root / ".ymh" / "host.sock";
+                }
             }
         } else {
             std::error_code error;
@@ -123,7 +127,11 @@ std::vector<ScannedHost> scanHosts(
             if (error) {
                 root = entry.cwd;
             }
-            socket = root / ".ymh" / "host.sock";
+            try {
+                socket = host_socket_path(workspace_value);
+            } catch (const std::exception&) {
+                socket = root / ".ymh" / "host.sock";
+            }
         }
 
         host.workspaceRoot = root;

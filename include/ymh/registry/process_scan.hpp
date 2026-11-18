@@ -4,7 +4,8 @@
 // R10/R11, §7.4). It is attempted ONLY when the durable index is unavailable
 // (missing / corrupt / pre-`initialized`). `argv` is used solely to seed
 // candidate PIDs; every path is derived independently from the registry row or
-// from the process's cwd, never from the scanned `argv`. A scan never kills.
+// from the process's cwd, never from the scanned `argv`. The socket follows the
+// local host runtime path. A scan never kills.
 
 #include <cstdint>
 #include <filesystem>
@@ -40,11 +41,11 @@ using HostConfirmer =
 
 // Pure, testable core. Seeds candidates from `table` where the executable
 // basename of `argv[0]` is exactly "ymh" and the argv contains the host flag
-// triple `--host --workspace <uuid> --socket <path>`. For each candidate the
-// workspace root comes from `lookup` (the registry) when available, otherwise
-// from the independently-resolved `ProcessEntry::cwd`; the socket path comes
-// from the registry row or the `<root>/.ymh/host.sock` convention. Only
-// candidates confirmed by `confirm` are returned.
+// pair `--host --workspace <uuid>`. For each candidate the workspace root comes
+// from `lookup` (the registry) when available, otherwise from the independently-
+// resolved `ProcessEntry::cwd`; the socket path comes from the registry row or
+// the local host runtime convention. Only candidates confirmed by `confirm` are
+// returned.
 [[nodiscard]] std::vector<ScannedHost> scanHosts(
     std::span<const ProcessEntry> table,
     const std::function<std::optional<WorkspaceRecord>(const WorkspaceId&)>& lookup,

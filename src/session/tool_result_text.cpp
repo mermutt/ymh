@@ -41,7 +41,10 @@ std::string denial_detail(std::string_view reason) {
         return "no permission resolver attached";
     }
     if (reason == "rule") return "denied by a permission rule";
-    if (reason == "permission:protected-path") return "protected path";
+    if (reason == "permission:protected-path") {
+        return "protected path (`.ymh` is internal: use `ymh list`, `ymh show`, "
+               "`ymh replay`, or `ymh doctor` for session state)";
+    }
     return bounded_ascii(reason, kMaxDenialReasonBytes);
 }
 

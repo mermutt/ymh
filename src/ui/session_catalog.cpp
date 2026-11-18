@@ -1,11 +1,9 @@
 #include "ymh/ui/session_catalog.hpp"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -18,45 +16,32 @@
 namespace ymh::ui {
 namespace {
 
-constexpr std::array<unsigned char, 16> kSqliteMagic{
-    'S', 'Q', 'L', 'i', 't', 'e', ' ', 'f', 'o', 'r', 'm', 'a', 't', ' ', '3', '\0'};
-
 std::filesystem::path db_path_of(const std::filesystem::path& workspace) {
     return workspace / ".ymh" / "sessions.db";
+}
+
+std::filesystem::path store_dir_of(const std::filesystem::path& workspace) {
+    return workspace / ".ymh" / "sessions";
 }
 
 std::filesystem::path ymh_dir_of(const std::filesystem::path& workspace) {
     return workspace / ".ymh";
 }
 
-// §4.4 pre-flight step 4: read the 16-byte SQLite header. A zero-byte or
-// truncated file fails this check (the read short-fails).
-bool has_sqlite_magic(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return false;
-    }
-    std::array<unsigned char, 16> magic{};
-    file.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
-    return file.good() && magic == kSqliteMagic;
+bool has_legacy_store(const std::filesystem::path& workspace) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(db_path_of(workspace), error) && !error;
 }
 
-// §4.4 "read-only location" nuance (LOW-D): the arm fires only when the
-// `-shm`/`-wal` sidecars are absent. With a sidecar present SQLite can attach
-// it without creating a file and the read succeeds, so a non-writable `.ymh`
-// alone is not enough.
-bool is_read_only_location(const std::filesystem::path& ymh_dir) {
-    if (::access(ymh_dir.c_str(), W_OK) == 0) {
-        return false;
-    }
+bool has_file_store(const std::filesystem::path& workspace) {
     std::error_code error;
-    if (std::filesystem::exists(ymh_dir / "sessions.db-shm", error)) {
-        return false;
-    }
-    if (std::filesystem::exists(ymh_dir / "sessions.db-wal", error)) {
-        return false;
-    }
-    return true;
+    return std::filesystem::is_directory(store_dir_of(workspace), error) && !error;
+}
+
+// §4.4 "read-only location" nuance: the file store only needs read access to
+// the directory tree, and one-time migration needs write access.
+bool is_read_only_location(const std::filesystem::path& ymh_dir) {
+    return ::access(ymh_dir.c_str(), W_OK) != 0;
 }
 
 SessionHistoryEntry to_entry(const SessionHeader& header) {
@@ -105,19 +90,23 @@ WorkspaceHistory read_workspace_history(const WorkspaceRecord& record, bool live
     }
     const std::filesystem::path ymh_dir = ymh_dir_of(record.canonicalPath);
     const std::filesystem::path db_path = db_path_of(record.canonicalPath);
-    if (!std::filesystem::exists(db_path, error)) {
-        return note_history(record, live, "no sessions.db");
+    if (!has_file_store(record.canonicalPath) && !has_legacy_store(record.canonicalPath)) {
+        return note_history(record, live, "no sessions");
     }
-    if (!std::filesystem::is_regular_file(db_path, error)) {
+    if (has_file_store(record.canonicalPath) &&
+        !std::filesystem::is_directory(store_dir_of(record.canonicalPath), error)) {
+        return note_history(record, live, "not a directory");
+    }
+    if (!has_file_store(record.canonicalPath) &&
+        !std::filesystem::is_regular_file(db_path, error)) {
         return note_history(record, live, "not a file");
     }
     // Permission-dependent (LOW-5): `access` is bypassed by root, so this and
     // the "read-only location" arm are pinned under the non-root assumption.
-    if (::access(db_path.c_str(), R_OK) != 0) {
+    const std::filesystem::path readable =
+        has_file_store(record.canonicalPath) ? store_dir_of(record.canonicalPath) : db_path;
+    if (::access(readable.c_str(), R_OK) != 0) {
         return note_history(record, live, "unreadable");
-    }
-    if (!has_sqlite_magic(db_path)) {
-        return note_history(record, live, "corrupt");
     }
 
     WorkspaceHistory history;

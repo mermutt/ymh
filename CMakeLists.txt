@@ -53,8 +53,8 @@ option(YMH_BUNDLED_SPDLOG "Build and statically link spdlog/fmt" ON)
 option(YMH_BUNDLED_CMARK_GFM "Build and statically link cmark-gfm + extensions" ON)
 option(YMH_BUNDLED_LIBGIT2 "Build and statically link libgit2" ON)
 
-# The test suite lives on the `dev` branch. A standalone code checkout (the
-# `main` branch, or an office export) has no tests/ directory: tests are then
+# The full historical test suite lives on the `dev` branch. A standalone code
+# checkout may ship a focused `tests/CMakeLists.txt`; without one, tests are
 # implicitly disabled so the documented configure commands keep working.
 if(YMH_BUILD_TESTS AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     set(YMH_BUILD_TESTS OFF)
@@ -768,6 +768,7 @@ target_link_libraries(ymh_registry
     PRIVATE
         nlohmann_json::nlohmann_json
         SQLite3::SQLite3
+        ymh::session
         ymh::warnings
 )
 

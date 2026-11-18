@@ -1,19 +1,25 @@
 #include "ymh/session/session_persistence.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <filesystem>
+#include <fstream>
+#include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -22,9 +28,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <csignal>
-
 #include <sqlite3.h>
+
+#include <nlohmann/json.hpp>
 
 #include "ymh/session/errors.hpp"
 #include "ymh/session/session.hpp"
@@ -32,56 +38,14 @@
 namespace ymh {
 namespace {
 
-constexpr char kDdl[] = R"sql(
-CREATE TABLE sessions (
-    id              TEXT PRIMARY KEY,
-    cwd             TEXT NOT NULL,
-    created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL,
-    title           TEXT NOT NULL DEFAULT '',
-    model           TEXT NOT NULL DEFAULT '',
-    server_profile  TEXT NOT NULL DEFAULT 'interactive',
-    kind            TEXT NOT NULL DEFAULT 'root',
-    parent_session  TEXT,
-    seed_length     INTEGER,
-    metadata        JSON,
-    FOREIGN KEY(parent_session) REFERENCES sessions(id),
-    CHECK (kind IN ('root','fork','subagent')),
-    CHECK ((kind='root' AND parent_session IS NULL AND seed_length IS NULL) OR (kind='fork' AND parent_session IS NOT NULL AND seed_length IS NOT NULL) OR (kind='subagent' AND parent_session IS NOT NULL AND (seed_length IS NULL OR seed_length = 0)))
-);
-
-CREATE TABLE events (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    event_id TEXT NOT NULL UNIQUE,
-    timestamp INTEGER NOT NULL,
-    type TEXT NOT NULL,
-    payload JSON NOT NULL,
-    FOREIGN KEY(session_id) REFERENCES sessions(id)
-);
-
-CREATE INDEX idx_events_session
-ON events(session_id, sequence);
-
-CREATE TABLE session_leases (
-    session_id     TEXT PRIMARY KEY,
-    holder_pid     INTEGER NOT NULL,
-    holder_boot_id TEXT NOT NULL,
-    acquired_at    INTEGER NOT NULL,
-    expires_at     INTEGER NOT NULL,
-    FOREIGN KEY(session_id) REFERENCES sessions(id)
-);
-
-CREATE TABLE session_snapshots (
-    session_id     TEXT PRIMARY KEY,
-    at_sequence    INTEGER NOT NULL,
-    header_json    TEXT NOT NULL,
-    messages_json  TEXT NOT NULL,
-    event_count    INTEGER NOT NULL,
-    created_at     INTEGER NOT NULL,
-    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-)sql";
+// The durable session store is append-only: one immutable event log per session
+// plus a small header file that is atomically replaced only when the mutable
+// projection (title/model) changes. There is no database, no WAL, and no
+// cross-process transaction engine.
+constexpr int         kLayoutFormat      = 1;
+constexpr int         kLegacyApplication = 0x594D4801;
+constexpr std::string_view kLayoutMarker = "layout-v1";
+constexpr std::string_view kStoreDirName = "sessions";
 
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -97,15 +61,418 @@ std::chrono::system_clock::time_point from_epoch_ms(std::int64_t ms) {
     return std::chrono::system_clock::time_point{std::chrono::milliseconds{ms}};
 }
 
-bool process_alive(std::int32_t pid) {
-    if (pid <= 0) {
+void write_all_fd(int fd, std::string_view bytes) {
+    std::size_t written = 0;
+    while (written < bytes.size()) {
+        const ssize_t count =
+            ::write(fd, bytes.data() + written, bytes.size() - written);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw StoreError(std::string{"write failed: "} + std::strerror(errno));
+        }
+        if (count == 0) {
+            throw StoreError("write returned 0 bytes");
+        }
+        written += static_cast<std::size_t>(count);
+    }
+}
+
+std::optional<std::string> read_file(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            return std::nullopt;
+        }
+        throw StoreError("cannot open " + path.string() + ": " + std::strerror(errno));
+    }
+    std::string bytes;
+    char        buffer[16 * 1024];
+    while (true) {
+        const ssize_t count = ::read(fd, buffer, sizeof buffer);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            const std::string error = std::strerror(errno);
+            ::close(fd);
+            throw StoreError("cannot read " + path.string() + ": " + error);
+        }
+        if (count == 0) {
+            break;
+        }
+        bytes.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(fd);
+    return bytes;
+}
+
+void fsync_directory(const std::filesystem::path& directory) noexcept {
+    const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return;
+    }
+    (void)::fsync(fd);
+    ::close(fd);
+}
+
+// Header files are tiny; the temp+rename keeps a reader from observing a
+// half-written projection. fsync-before-rename is required on NFS, where a
+// rename can otherwise publish a zero-length file.
+void atomic_write(const std::filesystem::path& path, std::string_view bytes) {
+    static std::atomic<std::uint64_t> counter{0};
+    const std::filesystem::path directory = path.parent_path();
+    std::error_code             error;
+    std::filesystem::create_directories(directory, error);
+    if (error) {
+        throw StoreError("cannot create directory " + directory.string() + ": " +
+                         error.message());
+    }
+
+    const std::string temp_name =
+        "." + path.filename().string() + ".tmp." + std::to_string(::getpid()) + "." +
+        std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+    const std::filesystem::path temp = directory / temp_name;
+
+    const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        throw StoreError("cannot create " + temp.string() + ": " + std::strerror(errno));
+    }
+    try {
+        write_all_fd(fd, bytes);
+        if (::fsync(fd) != 0) {
+            throw StoreError("cannot fsync " + temp.string() + ": " + std::strerror(errno));
+        }
+        ::close(fd);
+    } catch (...) {
+        const int saved = errno;
+        ::close(fd);
+        std::error_code ignored;
+        std::filesystem::remove(temp, ignored);
+        errno = saved;
+        throw;
+    }
+
+    std::error_code rename_error;
+    std::filesystem::rename(temp, path, rename_error);
+    if (rename_error) {
+        std::error_code ignored;
+        std::filesystem::remove(temp, ignored);
+        throw StoreError("cannot replace " + path.string() + ": " + rename_error.message());
+    }
+    fsync_directory(directory);
+}
+
+bool is_uuid_like_component(const std::string& value) {
+    if (value.empty() || value == "." || value == "..") {
         return false;
     }
-    if (::kill(pid, 0) == 0) {
-        return true;
+    for (const char character : value) {
+        if (character == '/' || character == '\\' || character == '\0') {
+            return false;
+        }
     }
-    return errno != ESRCH;
+    return true;
 }
+
+std::filesystem::path session_dir_of(const std::filesystem::path& store_dir,
+                                     const SessionId&            id) {
+    if (!is_uuid_like_component(id.value)) {
+        throw CorruptionError("invalid session id: " + id.value);
+    }
+    return store_dir / id.value;
+}
+
+std::filesystem::path header_path_of(const std::filesystem::path& store_dir,
+                                     const SessionId&            id) {
+    return session_dir_of(store_dir, id) / "header.json";
+}
+
+std::filesystem::path events_path_of(const std::filesystem::path& store_dir,
+                                     const SessionId&            id) {
+    return session_dir_of(store_dir, id) / "events.jsonl";
+}
+
+struct HeaderEnvelope {
+    SessionHeader header;
+    Sequence      base_sequence = 0;
+};
+
+bool has_newline_terminator(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat status {};
+    bool        terminated = false;
+    if (::fstat(fd, &status) == 0 && status.st_size > 0) {
+        char last = '\0';
+        if (::pread(fd, &last, 1, status.st_size - 1) == 1) {
+            terminated = last == '\n';
+        }
+    }
+    ::close(fd);
+    return terminated;
+}
+
+// Returns the last complete JSON line. A trailing partial line (a crash in the
+// middle of write) is ignored. A malformed complete line is corruption.
+std::optional<nlohmann::json> read_last_json_line(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            return std::nullopt;
+        }
+        throw StoreError("cannot open " + path.string() + ": " + std::strerror(errno));
+    }
+    struct stat status {};
+    if (::fstat(fd, &status) != 0 || status.st_size == 0) {
+        ::close(fd);
+        return std::nullopt;
+    }
+    const bool terminated = has_newline_terminator(path);
+
+    std::string tail;
+    off_t       position = status.st_size;
+    std::size_t newlines = 0;
+    char        buffer[4096];
+    while (position > 0 && newlines < 2) {
+        const std::size_t wanted =
+            std::min<std::size_t>(sizeof buffer, static_cast<std::size_t>(position));
+        position -= static_cast<off_t>(wanted);
+        const ssize_t count = ::pread(fd, buffer, wanted, position);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            const std::string error = std::strerror(errno);
+            ::close(fd);
+            throw StoreError("cannot read " + path.string() + ": " + error);
+        }
+        tail.insert(0, buffer, static_cast<std::size_t>(count));
+        newlines = static_cast<std::size_t>(
+            std::count(tail.begin(), tail.end(), '\n'));
+    }
+    ::close(fd);
+    if (tail.empty()) {
+        return std::nullopt;
+    }
+
+    std::size_t end = tail.size();
+    if (terminated && end > 0 && tail[end - 1] == '\n') {
+        --end;
+    } else if (!terminated) {
+        const std::size_t partial = tail.rfind('\n');
+        if (partial == std::string::npos) {
+            return std::nullopt;
+        }
+        end = partial;
+    }
+    if (end == 0) {
+        return std::nullopt;
+    }
+    const std::size_t previous = tail.rfind('\n', end - 1);
+    const std::size_t begin    = previous == std::string::npos ? 0 : previous + 1;
+    const std::string line     = tail.substr(begin, end - begin);
+    if (line.empty()) {
+        return std::nullopt;
+    }
+    try {
+        return nlohmann::json::parse(line);
+    } catch (const nlohmann::json::exception&) {
+        if (!terminated) {
+            return std::nullopt;
+        }
+        throw CorruptionError("malformed event record in " + path.string());
+    }
+}
+
+std::optional<Sequence> last_own_sequence(const std::filesystem::path& events) {
+    const std::optional<nlohmann::json> line = read_last_json_line(events);
+    if (!line.has_value() || !line->contains("seq") || !line->at("seq").is_number_integer()) {
+        return std::nullopt;
+    }
+    return line->at("seq").get<Sequence>();
+}
+
+std::optional<std::int64_t> last_event_timestamp(const std::filesystem::path& events) {
+    const std::optional<nlohmann::json> line = read_last_json_line(events);
+    if (!line.has_value() || !line->contains("timestamp") ||
+        !line->at("timestamp").is_number_integer()) {
+        return std::nullopt;
+    }
+    return line->at("timestamp").get<std::int64_t>();
+}
+
+// Calls `consume` for each complete event line. Stops when `consume` returns
+// false. A trailing partial line is ignored; corruption in the middle throws.
+void for_each_event(const std::filesystem::path& events,
+                    const std::function<bool(const EventRecord&)>& consume) {
+    std::ifstream stream{events, std::ios::binary};
+    if (!stream) {
+        return;
+    }
+    const bool          terminated = has_newline_terminator(events);
+    std::string         line;
+    Sequence            previous = 0;
+    while (std::getline(stream, line)) {
+        const bool at_eof = stream.eof();
+        if (line.empty()) {
+            if (at_eof && !terminated) {
+                break;
+            }
+            continue;
+        }
+        nlohmann::json parsed;
+        try {
+            parsed = nlohmann::json::parse(line);
+        } catch (const nlohmann::json::exception&) {
+            if (at_eof && !terminated) {
+                break;
+            }
+            throw CorruptionError("malformed event record in " + events.string());
+        }
+        try {
+            EventRecord record;
+            if (!parsed.contains("seq") || !parsed.at("seq").is_number_integer()) {
+                throw CorruptionError("event record has no sequence in " + events.string());
+            }
+            record.seq   = parsed.at("seq").get<Sequence>();
+            record.event = parsed.get<Event>();
+            const std::string expected = events.parent_path().filename().string();
+            if (!expected.empty() && record.event.session_id.value != expected) {
+                throw CorruptionError("event session id does not match directory in " +
+                                      events.string());
+            }
+            if (record.seq <= previous) {
+                throw CorruptionError("event log is not ascending by Sequence");
+            }
+            previous = record.seq;
+            if (!consume(record)) {
+                return;
+            }
+        } catch (const nlohmann::json::exception& error) {
+            throw CorruptionError("malformed event record in " + events.string() + ": " +
+                                  error.what());
+        }
+    }
+}
+
+EventRange read_events_after(const std::filesystem::path& events, Sequence after,
+                             std::size_t limit) {
+    EventRange result;
+    if (limit == 0) {
+        return result;
+    }
+    const bool unbounded = limit >= kUnbounded;
+    for_each_event(events, [&](const EventRecord& record) {
+        if (record.seq <= after) {
+            return true;
+        }
+        result.push_back(record);
+        return unbounded || result.size() < limit;
+    });
+    return result;
+}
+
+HeaderEnvelope read_envelope(const std::filesystem::path& header) {
+    const std::optional<std::string> bytes = read_file(header);
+    if (!bytes.has_value()) {
+        throw UnknownSession("unknown session: " + header.parent_path().filename().string());
+    }
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(*bytes);
+    } catch (const nlohmann::json::exception& error) {
+        throw CorruptionError("malformed session header " + header.string() + ": " +
+                              error.what());
+    }
+    HeaderEnvelope envelope;
+    if (parsed.contains("header")) {
+        const int format = parsed.value("format", kLayoutFormat);
+        if (format > kLayoutFormat) {
+            throw SchemaVersionError("session store layout is newer than this binary");
+        }
+        envelope.base_sequence = parsed.value("base_sequence", Sequence{0});
+        envelope.header        = parsed.at("header").get<SessionHeader>();
+    } else {
+        // Forward-compatible read of a bare header written by an early build.
+        envelope.header = parsed.get<SessionHeader>();
+    }
+    return envelope;
+}
+
+void write_envelope(const std::filesystem::path& directory, const SessionHeader& header,
+                    Sequence base_sequence) {
+    nlohmann::json payload{
+        {"format", kLayoutFormat},
+        {"base_sequence", base_sequence},
+        {"header", header},
+    };
+    atomic_write(directory / "header.json", payload.dump() + "\n");
+}
+
+std::string event_line(const EventRecord& record) {
+    nlohmann::json payload = record.event;
+    payload["seq"]         = record.seq;
+    return payload.dump() + "\n";
+}
+
+bool is_durable_boundary(EventType type) {
+    return type == EventType::TurnEnded || type == EventType::TurnFailed ||
+           type == EventType::TurnCancelled || type == EventType::SessionEnded;
+}
+
+// A crash can leave the final append half-written. The partial suffix is not an
+// event (the caller never received a sequence for it), so the next writer
+// truncates it before appending. This runs only on the single-writer path.
+void repair_trailing_partial_line(int fd, const std::filesystem::path& path) {
+    struct stat status {};
+    if (::fstat(fd, &status) != 0) {
+        throw StoreError("cannot stat " + path.string() + ": " + std::strerror(errno));
+    }
+    if (status.st_size == 0) {
+        return;
+    }
+    char last = '\0';
+    if (::pread(fd, &last, 1, status.st_size - 1) != 1) {
+        throw StoreError("cannot read " + path.string() + ": " + std::strerror(errno));
+    }
+    if (last == '\n') {
+        return;
+    }
+    off_t       position = status.st_size;
+    std::string chunk;
+    char        buffer[4096];
+    while (position > 0) {
+        const std::size_t wanted =
+            std::min<std::size_t>(sizeof buffer, static_cast<std::size_t>(position));
+        position -= static_cast<off_t>(wanted);
+        const ssize_t count = ::pread(fd, buffer, wanted, position);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw StoreError("cannot read " + path.string() + ": " + std::strerror(errno));
+        }
+        chunk.insert(0, buffer, static_cast<std::size_t>(count));
+        const std::size_t newline = chunk.rfind('\n');
+        if (newline != std::string::npos) {
+            const off_t cut = position + static_cast<off_t>(newline) + 1;
+            if (::ftruncate(fd, cut) != 0) {
+                throw StoreError("cannot repair " + path.string() + ": " +
+                                 std::strerror(errno));
+            }
+            return;
+        }
+    }
+    if (::ftruncate(fd, 0) != 0) {
+        throw StoreError("cannot repair " + path.string() + ": " + std::strerror(errno));
+    }
+}
+
+// ---- legacy SQLite import -------------------------------------------------
 
 [[noreturn]] void throw_sqlite(sqlite3* db, const std::string& context) {
     throw StoreError(context + ": " + sqlite3_errmsg(db));
@@ -141,35 +508,9 @@ public:
         }
     }
 
-    void bindNull(int index) {
-        if (sqlite3_bind_null(stmt_, index) != SQLITE_OK) {
-            throw_sqlite(db_, "bind null failed");
-        }
-    }
-
-    void bindOptionalText(int index, const std::optional<std::string>& value) {
-        if (value.has_value()) {
-            bindText(index, *value);
-        } else {
-            bindNull(index);
-        }
-    }
-
-    void bindOptionalInt64(int index, const std::optional<std::int64_t>& value) {
-        if (value.has_value()) {
-            bindInt64(index, *value);
-        } else {
-            bindNull(index);
-        }
-    }
-
     int step() {
         const int rc = sqlite3_step(stmt_);
         if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
-            const int primary = sqlite3_extended_errcode(db_) & 0xFF;
-            if (primary == SQLITE_CONSTRAINT) {
-                throw CorruptionError(std::string{"constraint violation: "} + sqlite3_errmsg(db_));
-            }
             throw_sqlite(db_, "step failed");
         }
         return rc;
@@ -211,80 +552,11 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 
-void exec_sql(sqlite3* db, const char* sql) {
-    char* message = nullptr;
-    const int rc  = sqlite3_exec(db, sql, nullptr, nullptr, &message);
-    if (rc != SQLITE_OK) {
-        std::string detail = message != nullptr ? message : sqlite3_errmsg(db);
-        sqlite3_free(message);
-        throw StoreError(std::string{"exec failed: "} + detail);
-    }
-}
-
-std::string wire_type(const Event& event) {
-    return std::string{wire_name(event.type)};
-}
-
-Event decode_event(std::string_view session, std::int64_t timestamp, std::string_view type,
-                   std::string_view payload_text) {
-    const auto parsed = parse_event_type(type);
-    if (!parsed) {
-        throw CorruptionError("undecodable event type: " + std::string{type});
-    }
-    Event event;
-    event.session_id.value = std::string{session};
-    event.timestamp        = from_epoch_ms(timestamp);
-    event.type             = *parsed;
-    event.payload          = nlohmann::json::parse(payload_text);
-    return event;
-}
-
-// 42 §4.3 / 43 §1.2: the `sessions.metadata` column is a JSON object whose
-// reserved keys carry the typed header fields; the opaque user string rides
-// under the `metadata` key. A reserved key inside the user bag is corruption
-// (43-F1). A pre-Wave-5 row (no envelope) is read back verbatim.
-constexpr std::string_view kMetadataKey    = "metadata";
-constexpr std::string_view kAgentPresetKey = "agent_preset";
-constexpr std::string_view kDepthKey       = "depth";
-constexpr std::string_view kPermissionPresetKey = "permission_preset";
-constexpr std::string_view kModelNameKey        = "model_name";
-
-std::optional<std::string> encode_metadata_column(const SessionHeader& header) {
-    if (!header.metadata.has_value() && !header.agent_preset.has_value() && header.depth == 0 &&
-        !header.permission_preset.has_value() && !header.model_name.has_value()) {
-        return std::nullopt;
-    }
-    nlohmann::json object = nlohmann::json::object();
-    object[std::string{kMetadataKey}] =
-        header.metadata.has_value() ? nlohmann::json(*header.metadata) : nlohmann::json(nullptr);
-    if (header.agent_preset.has_value()) {
-        object[std::string{kAgentPresetKey}] = *header.agent_preset;
-    }
-    if (header.permission_preset.has_value()) {
-        object[std::string{kPermissionPresetKey}] = *header.permission_preset;
-    }
-    if (header.model_name.has_value()) {
-        object[std::string{kModelNameKey}] = *header.model_name;
-    }
-    object[std::string{kDepthKey}] = header.depth;
-    return object.dump();
-}
-
-bool bag_carries_reserved_key(const std::string& bag) {
-    nlohmann::json parsed;
-    try {
-        parsed = nlohmann::json::parse(bag);
-    } catch (const nlohmann::json::exception&) {
-        return false;
-    }
-    if (!parsed.is_object()) {
-        return false;
-    }
-    return parsed.contains(std::string{kAgentPresetKey}) ||
-           parsed.contains(std::string{kDepthKey}) ||
-           parsed.contains(std::string{kPermissionPresetKey}) ||
-           parsed.contains(std::string{kModelNameKey});
-}
+constexpr std::string_view kMetadataKey          = "metadata";
+constexpr std::string_view kAgentPresetKey       = "agent_preset";
+constexpr std::string_view kDepthKey             = "depth";
+constexpr std::string_view kPermissionPresetKey  = "permission_preset";
+constexpr std::string_view kModelNameKey         = "model_name";
 
 void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader& header) {
     header.metadata          = std::nullopt;
@@ -323,41 +595,22 @@ void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader
     if (bag.is_null()) {
         header.metadata = std::nullopt;
     } else if (bag.is_string()) {
-        const std::string value = bag.get<std::string>();
-        if (bag_carries_reserved_key(value)) {
-            throw CorruptionError("sessions.metadata opaque bag carries a reserved key");
-        }
-        header.metadata = value;
+        header.metadata = bag.get<std::string>();
     } else {
         throw CorruptionError("sessions.metadata opaque bag must be a string or null");
     }
     if (object.contains(std::string{kAgentPresetKey})) {
-        const nlohmann::json& preset = object.at(std::string{kAgentPresetKey});
-        if (!preset.is_string()) {
-            throw CorruptionError("sessions.metadata agent_preset must be a string");
-        }
-        header.agent_preset = preset.get<std::string>();
+        header.agent_preset = object.at(std::string{kAgentPresetKey}).get<std::string>();
     }
     if (object.contains(std::string{kPermissionPresetKey})) {
-        const nlohmann::json& preset = object.at(std::string{kPermissionPresetKey});
-        if (!preset.is_string()) {
-            throw CorruptionError("sessions.metadata permission_preset must be a string");
-        }
-        header.permission_preset = preset.get<std::string>();
+        header.permission_preset =
+            object.at(std::string{kPermissionPresetKey}).get<std::string>();
     }
     if (object.contains(std::string{kModelNameKey})) {
-        const nlohmann::json& name = object.at(std::string{kModelNameKey});
-        if (!name.is_string()) {
-            throw CorruptionError("sessions.metadata model_name must be a string");
-        }
-        header.model_name = name.get<std::string>();
+        header.model_name = object.at(std::string{kModelNameKey}).get<std::string>();
     }
     if (object.contains(std::string{kDepthKey})) {
-        const nlohmann::json& depth = object.at(std::string{kDepthKey});
-        if (!depth.is_number_unsigned()) {
-            throw CorruptionError("sessions.metadata depth must be a non-negative integer");
-        }
-        const std::uint64_t value = depth.get<std::uint64_t>();
+        const std::uint64_t value = object.at(std::string{kDepthKey}).get<std::uint64_t>();
         if (value > std::numeric_limits<std::uint32_t>::max()) {
             throw CorruptionError("sessions.metadata depth is out of range");
         }
@@ -365,16 +618,261 @@ void decode_metadata_column(const std::optional<std::string>& raw, SessionHeader
     }
 }
 
+SessionHeader read_legacy_header_row(const Statement& statement) {
+    SessionHeader header;
+    header.id.value      = statement.columnText(0);
+    header.cwd           = std::filesystem::path{statement.columnText(1)};
+    header.createdAt     = statement.columnInt64(2);
+    header.updatedAt     = statement.columnInt64(3);
+    header.title         = statement.columnText(4);
+    header.model         = statement.columnText(5);
+    header.serverProfile = statement.columnText(6);
+    header.kind = parse_session_kind(statement.columnText(7)).value_or(SessionKind::Root);
+    if (const auto parent = statement.columnOptionalText(8)) {
+        header.parentSession = SessionId{*parent};
+    }
+    if (const auto seed = statement.columnOptionalInt64(9)) {
+        header.seedLength = static_cast<std::size_t>(*seed);
+    }
+    decode_metadata_column(statement.columnOptionalText(10), header);
+    return header;
+}
+
+std::filesystem::path store_dir_of(const PersistenceConfig& config) {
+    return config.db_path.parent_path() / std::string{kStoreDirName};
+}
+
+std::filesystem::path workspace_of(const PersistenceConfig& config) {
+    return config.db_path.parent_path().parent_path();
+}
+
+bool marker_exists(const std::filesystem::path& store_dir) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(store_dir / std::string{kLayoutMarker}, error) &&
+           !error;
+}
+
+int read_layout_version(const std::filesystem::path& store_dir) {
+    const std::optional<std::string> bytes =
+        read_file(store_dir / std::string{kLayoutMarker});
+    if (!bytes.has_value()) {
+        return 0;
+    }
+    try {
+        const nlohmann::json parsed = nlohmann::json::parse(*bytes);
+        if (parsed.is_object() && parsed.contains("format")) {
+            return parsed.at("format").get<int>();
+        }
+    } catch (const nlohmann::json::exception&) {
+        throw CorruptionError("malformed session layout marker");
+    }
+    return kLayoutFormat;
+}
+
+void write_layout_marker(const std::filesystem::path& store_dir) {
+    atomic_write(store_dir / std::string{kLayoutMarker},
+                 nlohmann::json{{"format", kLayoutFormat}}.dump() + "\n");
+}
+
+bool legacy_db_exists(const PersistenceConfig& config) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(config.db_path, error) && !error;
+}
+
+int acquire_lock_retrying(const std::filesystem::path& lock_path,
+                          std::chrono::milliseconds budget) {
+    const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        throw StoreOpenError(StoreOpenErrorCode::Unavailable,
+                             "cannot open session store lock: " + lock_path.string());
+    }
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (true) {
+        if (::flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            return fd;
+        }
+        if (errno != EWOULDBLOCK && errno != EAGAIN) {
+            const std::string error = std::strerror(errno);
+            ::close(fd);
+            throw StoreOpenError(StoreOpenErrorCode::Unavailable,
+                                 "cannot lock session store: " + error);
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            ::close(fd);
+            throw StoreOpenError(StoreOpenErrorCode::Locked,
+                                 "session store is locked: " + lock_path.string());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+}
+
+void migrate_legacy_store(const PersistenceConfig& config) {
+    const std::filesystem::path store_dir = store_dir_of(config);
+    if (marker_exists(store_dir) || !legacy_db_exists(config)) {
+        return;
+    }
+    std::error_code             error;
+    std::filesystem::create_directories(store_dir, error);
+    if (error) {
+        throw StoreOpenError(StoreOpenErrorCode::Unavailable,
+                             "cannot create session store directory: " + store_dir.string());
+    }
+    std::filesystem::permissions(store_dir, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, error);
+
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(config.db_path.c_str(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
+        const std::string message = db != nullptr ? sqlite3_errmsg(db) : "open failed";
+        if (db != nullptr) {
+            sqlite3_close_v2(db);
+        }
+        throw StoreOpenError(StoreOpenErrorCode::Unavailable,
+                             "cannot open legacy session store: " + message);
+    }
+
+    struct Closer {
+        sqlite3* db;
+        ~Closer() {
+            if (db != nullptr) {
+                sqlite3_close_v2(db);
+            }
+        }
+    } closer{db};
+
+    char* checkpoint_message = nullptr;
+    (void)sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nullptr, nullptr,
+                       &checkpoint_message);
+    sqlite3_free(checkpoint_message);
+
+    try {
+        {
+            Statement application{db, "PRAGMA application_id"};
+            if (application.step() != SQLITE_ROW ||
+                application.columnInt64(0) != kLegacyApplication) {
+                throw SchemaVersionError("legacy session store is not a ymh database");
+            }
+        }
+        {
+            Statement version{db, "PRAGMA user_version"};
+            if (version.step() != SQLITE_ROW || version.columnInt64(0) != 1) {
+                throw SchemaVersionError("legacy session store schema does not match");
+            }
+        }
+
+        Statement sessions{
+            db,
+            "SELECT id, cwd, created_at, updated_at, title, model, server_profile, kind, "
+            "parent_session, seed_length, metadata FROM sessions ORDER BY created_at, id"};
+        while (sessions.step() == SQLITE_ROW) {
+            const SessionHeader header = read_legacy_header_row(sessions);
+            const std::filesystem::path directory = session_dir_of(store_dir, header.id);
+            std::error_code             directory_error;
+            const bool                  header_exists =
+                std::filesystem::is_regular_file(directory / "header.json", directory_error);
+            if (header_exists) {
+                continue;
+            }
+            std::filesystem::remove_all(directory, directory_error);
+            if (!std::filesystem::create_directories(directory, directory_error)) {
+                if (directory_error) {
+                    throw StoreError("cannot create " + directory.string() + ": " +
+                                     directory_error.message());
+                }
+            }
+            std::filesystem::permissions(directory, std::filesystem::perms::owner_all,
+                                         std::filesystem::perm_options::replace,
+                                         directory_error);
+
+            const std::filesystem::path events = directory / "events.jsonl";
+            const int                   fd =
+                ::open(events.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            if (fd < 0) {
+                throw StoreError("cannot create " + events.string() + ": " +
+                                 std::strerror(errno));
+            }
+
+            Sequence maximum = 0;
+            try {
+                Statement rows{
+                    db,
+                    "SELECT sequence, event_id, timestamp, type, payload FROM events "
+                    "WHERE session_id = ? ORDER BY sequence"};
+                rows.bindText(1, header.id.value);
+                while (rows.step() == SQLITE_ROW) {
+                    const auto parsed_type = parse_event_type(rows.columnText(3));
+                    if (!parsed_type.has_value()) {
+                        throw CorruptionError("undecodable event type: " + rows.columnText(3));
+                    }
+                    Event event;
+                    event.id.value         = rows.columnText(1);
+                    event.session_id.value = header.id.value;
+                    event.timestamp        = from_epoch_ms(rows.columnInt64(2));
+                    event.type             = *parsed_type;
+                    try {
+                        event.payload = nlohmann::json::parse(rows.columnText(4));
+                    } catch (const nlohmann::json::exception& error) {
+                        throw CorruptionError("malformed event payload: " +
+                                              std::string{error.what()});
+                    }
+                    EventRecord record;
+                    record.seq   = rows.columnInt64(0);
+                    record.event = std::move(event);
+                    maximum      = std::max(maximum, record.seq);
+                    const std::string line = event_line(record);
+                    write_all_fd(fd, line);
+                }
+                (void)::fdatasync(fd);
+                ::close(fd);
+            } catch (...) {
+                ::close(fd);
+                throw;
+            }
+            write_envelope(directory, header, maximum);
+        }
+
+        write_layout_marker(store_dir);
+    } catch (...) {
+        throw;
+    }
+
+    sqlite3_close_v2(db);
+    closer.db = nullptr;
+
+    // Keep the legacy database as a backup. The marker is authoritative; a
+    // stale sessions.db left beside it is ignored.
+    const std::filesystem::path retired = config.db_path.string() + ".migrated";
+    std::error_code             rename_error;
+    std::filesystem::rename(config.db_path, retired, rename_error);
+    if (!rename_error) {
+        for (const char* suffix : {"-wal", "-shm"}) {
+            std::error_code ignored;
+            std::filesystem::rename(config.db_path.string() + suffix,
+                                    retired.string() + suffix, ignored);
+        }
+    }
+}
+
 } // namespace
 
 class SessionPersistence::Impl {
 public:
-    sqlite3*          db       = nullptr;
-    int               lock_fd  = -1;
-    bool              writable = false;
-    bool              closed   = false;
-    PersistenceConfig config;
-    mutable std::mutex mutex;
+    PersistenceConfig           config;
+    std::filesystem::path       store_dir;
+    bool                        writable = false;
+    bool                        closed   = false;
+    int                         lock_fd  = -1;
+    mutable std::mutex          mutex;
+    std::set<std::string>       leases;
+
+    struct CachedSession {
+        SessionHeader header;
+        Sequence      base_sequence = 0;
+        Sequence      next_sequence = 0;
+        bool          next_known    = false;
+        int           events_fd     = -1;
+    };
+    mutable std::map<std::string, CachedSession> cache;
 
     static std::unique_ptr<Impl> create(const PersistenceConfig& config, bool writable);
 
@@ -385,13 +883,14 @@ public:
             return;
         }
         closed = true;
-        if (db != nullptr) {
-            if (writable) {
-                sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nullptr, nullptr, nullptr);
+        for (auto& [id, cached] : cache) {
+            if (cached.events_fd >= 0) {
+                ::close(cached.events_fd);
+                cached.events_fd = -1;
             }
-            sqlite3_close_v2(db);
-            db = nullptr;
         }
+        cache.clear();
+        leases.clear();
         if (lock_fd >= 0) {
             ::flock(lock_fd, LOCK_UN);
             ::close(lock_fd);
@@ -399,109 +898,88 @@ public:
         }
     }
 
-    [[nodiscard]] HolderIdentity me() const { return HolderIdentity{::getpid(), config.boot_id}; }
-
-    [[nodiscard]] bool flock_held_by_me() const noexcept { return writable && lock_fd >= 0; }
-
-    [[nodiscard]] std::optional<SessionHeader> load_header_locked(const SessionId& id) const {
-        Statement statement{
-            db,
-            "SELECT id, cwd, created_at, updated_at, title, model, server_profile, kind, "
-            "parent_session, seed_length, metadata FROM sessions WHERE id = ?"};
-        statement.bindText(1, id.value);
-        if (statement.step() != SQLITE_ROW) {
+    [[nodiscard]] std::optional<HeaderEnvelope> load_envelope(const SessionId& id) const {
+        const std::filesystem::path header = header_path_of(store_dir, id);
+        std::error_code             error;
+        if (!std::filesystem::is_regular_file(header, error)) {
             return std::nullopt;
         }
-        return read_header_row(statement);
+        HeaderEnvelope envelope = read_envelope(header);
+        if (const auto timestamp = last_event_timestamp(events_path_of(store_dir, id));
+            timestamp.has_value()) {
+            envelope.header.updatedAt = *timestamp;
+        }
+        return envelope;
     }
 
-    [[nodiscard]] static SessionHeader read_header_row(const Statement& statement) {
-        SessionHeader header;
-        header.id.value      = statement.columnText(0);
-        header.cwd           = std::filesystem::path{statement.columnText(1)};
-        header.createdAt     = statement.columnInt64(2);
-        header.updatedAt     = statement.columnInt64(3);
-        header.title         = statement.columnText(4);
-        header.model         = statement.columnText(5);
-        header.serverProfile = statement.columnText(6);
-        header.kind = parse_session_kind(statement.columnText(7)).value_or(SessionKind::Root);
-        if (const auto parent = statement.columnOptionalText(8)) {
-            header.parentSession = SessionId{*parent};
+    [[nodiscard]] CachedSession& cached_session(const HeaderEnvelope& envelope) {
+        auto [iterator, inserted] = cache.try_emplace(envelope.header.id.value);
+        if (inserted || iterator->second.header.id.value.empty()) {
+            iterator->second.header        = envelope.header;
+            iterator->second.base_sequence = envelope.base_sequence;
         }
-        if (const auto seed = statement.columnOptionalInt64(9)) {
-            header.seedLength = static_cast<std::size_t>(*seed);
-        }
-        decode_metadata_column(statement.columnOptionalText(10), header);
-        return header;
+        return iterator->second;
     }
 
-    // 23 §5.3: the extracted dependent-children probe shared by `erase`,
-    // `eraseWithEvent`, and `hasDependents`. Caller holds `mutex`; no
-    // transaction of its own so it composes into the erase transaction.
-    [[nodiscard]] bool has_dependents_locked(const SessionId& id) const {
-        Statement statement{db, "SELECT 1 FROM sessions WHERE parent_session = ? LIMIT 1"};
-        statement.bindText(1, id.value);
-        return statement.step() == SQLITE_ROW;
+    [[nodiscard]] Sequence next_sequence(const SessionId& id) {
+        const std::optional<HeaderEnvelope> envelope = load_envelope(id);
+        if (!envelope.has_value()) {
+            throw UnknownSession("unknown session: " + id.value);
+        }
+        CachedSession& cached = cached_session(*envelope);
+        if (cached.next_known) {
+            return cached.next_sequence;
+        }
+        Sequence next = cached.base_sequence + 1;
+        if (const auto last = last_own_sequence(events_path_of(store_dir, id));
+            last.has_value()) {
+            next = std::max(next, *last + 1);
+        } else if (cached.header.kind == SessionKind::Fork &&
+                   cached.header.seedLength.value_or(0) > 0) {
+            std::vector<std::string> stack;
+            const EventRange prefix =
+                resolve_after(*cached.header.parentSession, 0,
+                              cached.header.seedLength.value_or(0), stack);
+            if (!prefix.empty()) {
+                next = std::max(next, prefix.back().seq + 1);
+            }
+        }
+        cached.next_sequence = next;
+        cached.next_known    = true;
+        return next;
     }
 
-    [[nodiscard]] EventRange read_events_after_locked(const SessionId& id, Sequence after,
-                                                      std::size_t limit) const {
-        if (limit == 0) {
-            return {};
-        }
-        const bool unbounded =
-            limit >= static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
-        Statement statement{
-            db, unbounded
-                    ? "SELECT sequence, session_id, event_id, timestamp, type, payload FROM events "
-                      "WHERE session_id = ? AND sequence > ? ORDER BY sequence"
-                    : "SELECT sequence, session_id, event_id, timestamp, type, payload FROM events "
-                      "WHERE session_id = ? AND sequence > ? ORDER BY sequence LIMIT ?"};
-        statement.bindText(1, id.value);
-        statement.bindInt64(2, after);
-        if (!unbounded) {
-            statement.bindInt64(3, static_cast<std::int64_t>(limit));
-        }
-        EventRange records;
-        while (statement.step() == SQLITE_ROW) {
-            EventRecord record;
-            record.seq   = statement.columnInt64(0);
-            record.event = decode_event(statement.columnText(1), statement.columnInt64(3),
-                                        statement.columnText(4), statement.columnText(5));
-            record.event.id.value = statement.columnText(2);
-            records.push_back(std::move(record));
-        }
-        return records;
-    }
-
-    [[nodiscard]] EventRange resolve_after_locked(const SessionId& id, Sequence after,
-                                                  std::size_t limit,
-                                                  std::vector<std::string>& stack) const {
-        const auto header = load_header_locked(id);
-        if (!header.has_value()) {
+    [[nodiscard]] EventRange resolve_after(const SessionId& id, Sequence after,
+                                           std::size_t limit,
+                                           std::vector<std::string>& stack) const {
+        const std::optional<HeaderEnvelope> envelope = load_envelope(id);
+        if (!envelope.has_value()) {
             throw UnknownSession("unknown session: " + id.value);
         }
         if (std::find(stack.begin(), stack.end(), id.value) != stack.end()) {
             throw CorruptionError("fork cycle detected at session " + id.value);
         }
+        if (limit == 0) {
+            return {};
+        }
         stack.push_back(id.value);
 
         EventRange result;
-        if (header->kind == SessionKind::Fork) {
-            if (!header->parentSession.has_value()) {
+        const SessionHeader& header = envelope->header;
+        if (header.kind == SessionKind::Fork) {
+            if (!header.parentSession.has_value()) {
                 throw CorruptionError("fork without parent: " + id.value);
             }
-            const std::size_t seed = header->seedLength.value_or(0);
+            const std::size_t seed = header.seedLength.value_or(0);
             if (seed > 0) {
-                const EventRange prefix =
-                    resolve_after_locked(*header->parentSession, 0, seed, stack);
+                const EventRange prefix = resolve_after(*header.parentSession, 0, seed, stack);
                 if (prefix.size() < seed) {
                     throw CorruptionError("fork seed exceeds parent view: " + id.value);
                 }
                 for (const EventRecord& record : prefix) {
                     if (record.seq > after) {
                         result.push_back(record);
-                        if (result.size() == limit) {
+                        if (result.size() >= limit) {
                             break;
                         }
                     }
@@ -509,239 +987,140 @@ public:
             }
         }
         if (result.size() < limit) {
-            EventRange own = read_events_after_locked(id, after, limit - result.size());
+            const EventRange own =
+                read_events_after(events_path_of(store_dir, id), after, limit - result.size());
             result.insert(result.end(), own.begin(), own.end());
         }
         stack.pop_back();
         return result;
     }
 
-    [[nodiscard]] EventRange resolve_locked(const SessionId& id,
-                                            std::vector<std::string>& stack) const {
-        return resolve_after_locked(id, 0, kUnbounded, stack);
+    [[nodiscard]] int events_fd(const SessionId& id) {
+        auto iterator = cache.find(id.value);
+        if (iterator == cache.end()) {
+            throw UnknownSession("unknown session: " + id.value);
+        }
+        if (iterator->second.events_fd < 0) {
+            const std::filesystem::path events = events_path_of(store_dir, id);
+            const int fd = ::open(events.c_str(), O_RDWR | O_APPEND | O_CLOEXEC, 0600);
+            if (fd < 0) {
+                throw StoreError("cannot open " + events.string() + ": " +
+                                 std::strerror(errno));
+            }
+            iterator->second.events_fd = fd;
+        }
+        return iterator->second.events_fd;
     }
 
-    [[nodiscard]] bool lease_matches_me_locked(const SessionId& id) const {
-        Statement statement{
-            db,
-            "SELECT holder_pid, holder_boot_id FROM session_leases WHERE session_id = ?"};
-        statement.bindText(1, id.value);
-        if (statement.step() != SQLITE_ROW) {
-            return false;
+    [[nodiscard]] std::vector<Sequence> append_batch_locked(
+        const SessionId& id, std::span<const Event> events, bool require_lease) {
+        if (!writable) {
+            throw StoreOpenError("store is read-only");
         }
-        const HolderIdentity self = me();
-        return statement.columnInt64(0) == self.pid && statement.columnText(1) == self.boot_id.value;
-    }
+        if (events.empty()) {
+            return {};
+        }
+        const std::optional<HeaderEnvelope> envelope = load_envelope(id);
+        if (!envelope.has_value()) {
+            throw UnknownSession("unknown session: " + id.value);
+        }
+        if (require_lease && !leases.contains(id.value)) {
+            throw LeaseLost("not the lease holder for session " + id.value);
+        }
+        for (const Event& event : events) {
+            if (event.payload.dump().size() > config.max_payload_bytes) {
+                throw PayloadTooLarge("event payload exceeds the configured cap");
+            }
+            if (event.session_id.value != id.value) {
+                throw std::invalid_argument("append: event does not belong to session " +
+                                            id.value);
+            }
+        }
 
-    [[nodiscard]] bool steal_locked(const SessionId& id) {
-        Statement statement{
-            db,
-            "SELECT holder_pid, holder_boot_id, expires_at FROM session_leases WHERE session_id = ?"};
-        statement.bindText(1, id.value);
-        if (statement.step() != SQLITE_ROW) {
-            return false;
+        CachedSession& cached = cached_session(*envelope);
+        Sequence       next   = next_sequence(id);
+        const int      fd     = events_fd(id);
+        repair_trailing_partial_line(fd, events_path_of(store_dir, id));
+        off_t          start  = ::lseek(fd, 0, SEEK_END);
+        if (start < 0) {
+            throw StoreError("cannot seek " + events_path_of(store_dir, id).string());
         }
-        const std::int64_t holder_pid  = statement.columnInt64(0);
-        const std::string  holder_boot = statement.columnText(1);
-        const std::int64_t expires_at  = statement.columnInt64(2);
-        const HolderIdentity self      = me();
 
-        if (holder_pid == self.pid && holder_boot == self.boot_id.value) {
-            return true;
-        }
-        if (!flock_held_by_me()) {
-            return false;
-        }
-        const bool expired = expires_at < now_ms();
-        if (!expired && process_alive(static_cast<std::int32_t>(holder_pid))) {
-            return false;
-        }
-        Statement replace{
-            db,
-            "REPLACE INTO session_leases(session_id, holder_pid, holder_boot_id, acquired_at, "
-            "expires_at) VALUES (?, ?, ?, ?, ?)"};
-        const std::int64_t now = now_ms();
-        replace.bindText(1, id.value);
-        replace.bindInt64(2, self.pid);
-        replace.bindText(3, self.boot_id.value);
-        replace.bindInt64(4, now);
-        replace.bindInt64(5, now + config.lease_ttl.count());
-        replace.step();
-        return true;
-    }
-
-    [[nodiscard]] bool acquire_locked(const SessionId& id) {
-        const HolderIdentity self = me();
-        const std::int64_t   now  = now_ms();
-        Statement insert{
-            db,
-            "INSERT INTO session_leases(session_id, holder_pid, holder_boot_id, acquired_at, "
-            "expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id) DO NOTHING"};
-        insert.bindText(1, id.value);
-        insert.bindInt64(2, self.pid);
-        insert.bindText(3, self.boot_id.value);
-        insert.bindInt64(4, now);
-        insert.bindInt64(5, now + config.lease_ttl.count());
-        insert.step();
-        if (sqlite3_changes(db) > 0) {
-            return true;
-        }
-        return steal_locked(id);
-    }
-
-    [[nodiscard]] std::vector<Sequence> append_batch_locked(const SessionId& id,
-                                                            std::span<const Event> events) {
-        const HolderIdentity self = me();
         std::vector<Sequence> sequences;
-        exec_sql(db, "BEGIN IMMEDIATE");
-
-        bool committed = false;
+        sequences.reserve(events.size());
+        bool durable = false;
+        bool projection_changed = false;
         try {
             for (const Event& event : events) {
-                if (event.payload.dump().size() > config.max_payload_bytes) {
-                    throw PayloadTooLarge("event payload exceeds the configured cap");
-                }
-            }
-
-            if (!lease_matches_me_locked(id)) {
-                throw LeaseLost("not the lease holder for session " + id.value);
-            }
-
-            std::int64_t last_timestamp = 0;
-            for (const Event& event : events) {
-                Statement insert{
-                    db,
-                    "INSERT INTO events(session_id, event_id, timestamp, type, payload) VALUES (?, "
-                    "?, ?, ?, ?)"};
-                last_timestamp = to_epoch_ms(event.timestamp);
-                insert.bindText(1, id.value);
-                insert.bindText(2, event.id.value);
-                insert.bindInt64(3, last_timestamp);
-                insert.bindText(4, wire_type(event));
-                insert.bindText(5, event.payload.dump());
-                insert.step();
-                sequences.push_back(static_cast<Sequence>(sqlite3_last_insert_rowid(db)));
-
-                // 19 §5.2 / 53-D6: materialize sessions.title/model in the same
-                // transaction.
+                const Sequence sequence = next++;
+                EventRecord    record;
+                record.seq   = sequence;
+                record.event = event;
+                const std::string line = event_line(record);
+                write_all_fd(fd, line);
+                sequences.push_back(sequence);
+                durable = durable || is_durable_boundary(event.type);
+                cached.header.updatedAt = to_epoch_ms(event.timestamp);
                 if (event.type == EventType::SessionRenamed) {
-                    Statement set_title{db, "UPDATE sessions SET title = ? WHERE id = ?"};
-                    set_title.bindText(1, event.payload.get<payload::SessionRenamed>().title);
-                    set_title.bindText(2, id.value);
-                    set_title.step();
+                    cached.header.title =
+                        event.payload.get<payload::SessionRenamed>().title;
+                    projection_changed = true;
                 } else if (event.type == EventType::SessionModelChanged) {
-                    Statement set_model{db, "UPDATE sessions SET model = ? WHERE id = ?"};
-                    set_model.bindText(1,
-                                       event.payload.get<payload::SessionModelChanged>().model);
-                    set_model.bindText(2, id.value);
-                    set_model.step();
+                    const auto& change = event.payload.get<payload::SessionModelChanged>();
+                    cached.header.model      = change.model;
+                    cached.header.model_name = change.model_name.empty()
+                                                   ? std::nullopt
+                                                   : std::optional<std::string>{change.model_name};
+                    projection_changed = true;
                 }
             }
-
-            Statement update_header{db, "UPDATE sessions SET updated_at = ? WHERE id = ?"};
-            update_header.bindInt64(1, last_timestamp);
-            update_header.bindText(2, id.value);
-            update_header.step();
-
-            Statement renew{
-                db,
-                "UPDATE session_leases SET expires_at = ? WHERE session_id = ? AND holder_pid = ? "
-                "AND holder_boot_id = ?"};
-            renew.bindInt64(1, now_ms() + config.lease_ttl.count());
-            renew.bindText(2, id.value);
-            renew.bindInt64(3, self.pid);
-            renew.bindText(4, self.boot_id.value);
-            renew.step();
-
-            if (!lease_matches_me_locked(id)) {
-                throw LeaseLost("lease lost before commit for session " + id.value);
+            cached.next_sequence = next;
+            cached.next_known    = true;
+            if (durable) {
+                (void)::fdatasync(fd);
             }
-
-            exec_sql(db, "COMMIT");
-            committed = true;
         } catch (...) {
-            if (!committed) {
-                sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
-            }
+            (void)::ftruncate(fd, start);
             throw;
+        }
+        if (projection_changed) {
+            write_envelope(session_dir_of(store_dir, id), cached.header,
+                           cached.base_sequence);
         }
         return sequences;
     }
 
-    [[nodiscard]] int user_version_locked() const {
-        Statement statement{db, "PRAGMA user_version"};
-        if (statement.step() != SQLITE_ROW) {
-            return 0;
+    [[nodiscard]] bool has_dependents_locked(const SessionId& id) const {
+        std::error_code error;
+        if (!std::filesystem::is_directory(store_dir, error)) {
+            return false;
         }
-        return static_cast<int>(statement.columnInt64(0));
-    }
-
-    [[nodiscard]] int application_id_locked() const {
-        Statement statement{db, "PRAGMA application_id"};
-        if (statement.step() != SQLITE_ROW) {
-            return 0;
+        const std::filesystem::directory_iterator end;
+        for (std::filesystem::directory_iterator iterator{store_dir, error}; !error &&
+             iterator != end; iterator.increment(error)) {
+            const std::filesystem::path header = iterator->path() / "header.json";
+            if (!std::filesystem::is_regular_file(header, error)) {
+                error.clear();
+                continue;
+            }
+            const HeaderEnvelope envelope = read_envelope(header);
+            if (envelope.header.parentSession.has_value() &&
+                envelope.header.parentSession->value == id.value) {
+                return true;
+            }
         }
-        return static_cast<int>(statement.columnInt64(0));
+        return false;
     }
 };
-
-namespace {
-
-void apply_pragmas(sqlite3* db, const PersistenceConfig& config, bool writable) {
-    exec_sql(db, "PRAGMA foreign_keys = ON");
-    exec_sql(db, ("PRAGMA busy_timeout = " + std::to_string(config.busy_timeout.count())).c_str());
-    exec_sql(db, "PRAGMA synchronous = NORMAL");
-    if (writable) {
-        exec_sql(db, ("PRAGMA wal_autocheckpoint = " +
-                      std::to_string(config.wal_autocheckpoint_pages))
-                         .c_str());
-    }
-    exec_sql(db, "PRAGMA journal_mode = WAL");
-}
-
-void migrate_fresh(sqlite3* db) {
-    exec_sql(db, "BEGIN IMMEDIATE");
-    try {
-        exec_sql(db, kDdl);
-        exec_sql(db, "PRAGMA user_version = 1");
-        exec_sql(db, "PRAGMA application_id = 0x594D4801");
-        exec_sql(db, "COMMIT");
-    } catch (...) {
-        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
-        throw;
-    }
-}
-
-void verify_consistency(sqlite3* db) {
-    {
-        Statement check{db, "PRAGMA foreign_key_check"};
-        if (check.step() == SQLITE_ROW) {
-            throw CorruptionError("foreign_key_check reported violations");
-        }
-    }
-    {
-        Statement check{
-            db,
-            "SELECT COUNT(*) FROM (SELECT session_id, sequence, LAG(sequence) OVER (PARTITION BY "
-            "session_id ORDER BY sequence) AS prev FROM events) WHERE prev IS NOT NULL AND sequence "
-            "<= prev"};
-        if (check.step() == SQLITE_ROW && check.columnInt64(0) != 0) {
-            throw CorruptionError("non-monotonic sequence in event log");
-        }
-    }
-}
-
-std::filesystem::path workspace_of(const PersistenceConfig& config) {
-    return config.db_path.parent_path().parent_path();
-}
-
-} // namespace
 
 std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
     const PersistenceConfig& config, bool writable) {
     std::unique_ptr<Impl> owner{new Impl()};
     Impl&                 impl = *owner;
     impl.config                = config;
+    impl.store_dir             = store_dir_of(config);
+    impl.writable              = writable;
+
     const std::filesystem::path workspace = workspace_of(config);
     std::error_code             error;
     if (!std::filesystem::is_directory(workspace, error)) {
@@ -758,10 +1137,8 @@ std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
         std::filesystem::permissions(config.db_path.parent_path(),
                                      std::filesystem::perms::owner_all,
                                      std::filesystem::perm_options::replace, error);
-    }
-
-    if (writable) {
-        impl.lock_fd = ::open(config.lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        impl.lock_fd =
+            ::open(config.lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
         if (impl.lock_fd < 0) {
             throw StoreOpenError("cannot open sidecar lock: " + config.lock_path.string());
         }
@@ -777,59 +1154,57 @@ std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
             throw StoreOpenError(StoreOpenErrorCode::Unavailable,
                                  "cannot acquire sidecar lock: " + config.lock_path.string());
         }
-    }
-
-    const int flags = writable ? (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX)
-                               : (SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX);
-    if (sqlite3_open_v2(config.db_path.c_str(), &impl.db, flags, nullptr) != SQLITE_OK) {
-        const std::string message = impl.db != nullptr ? sqlite3_errmsg(impl.db) : "open failed";
-        if (impl.db != nullptr) {
-            sqlite3_close_v2(impl.db);
-            impl.db = nullptr;
-        }
-        if (impl.lock_fd >= 0) {
-            ::flock(impl.lock_fd, LOCK_UN);
-            ::close(impl.lock_fd);
-            impl.lock_fd = -1;
-        }
-        throw StoreOpenError("cannot open database: " + message);
-    }
-
-    impl.writable = writable;
-    apply_pragmas(impl.db, config, writable);
-
-    const int app_id = impl.application_id_locked();
-    if (app_id != 0 && app_id != kApplicationId) {
-        throw SchemaVersionError("database is not a ymh sessions.db");
-    }
-
-    const int version = impl.user_version_locked();
-    if (writable) {
-        if (version == 0) {
-            migrate_fresh(impl.db);
-        } else if (version > kSchemaVersion) {
-            throw SchemaVersionError("database schema is newer than this binary");
-        } else if (version < kSchemaVersion) {
-            throw SchemaVersionError("database schema predates this binary");
-        }
-    } else if (version != kSchemaVersion) {
-        throw SchemaVersionError("database schema does not match this binary");
-    }
-
-    verify_consistency(impl.db);
-
-    if (writable) {
         const std::string diagnostic =
-            nlohmann::json{
-                {"pid", ::getpid()},
-                {"boot_id", config.boot_id.value},
-                {"acquired_at", now_ms()},
-            }
+            nlohmann::json{{"pid", ::getpid()}, {"boot_id", config.boot_id.value},
+                           {"acquired_at", now_ms()}}
                 .dump();
-        if (::ftruncate(impl.lock_fd, 0) == 0) {
-            const ssize_t ignored =
-                ::write(impl.lock_fd, diagnostic.data(), diagnostic.size());
-            (void)ignored;
+        (void)::ftruncate(impl.lock_fd, 0);
+        (void)::write(impl.lock_fd, diagnostic.data(), diagnostic.size());
+    }
+
+    const bool needs_migration = !marker_exists(impl.store_dir) && legacy_db_exists(config);
+    if (needs_migration) {
+        if (writable) {
+            migrate_legacy_store(config);
+        } else {
+            const int migration_lock =
+                acquire_lock_retrying(config.lock_path, std::chrono::milliseconds{2'000});
+            try {
+                migrate_legacy_store(config);
+            } catch (...) {
+                ::flock(migration_lock, LOCK_UN);
+                ::close(migration_lock);
+                throw;
+            }
+            ::flock(migration_lock, LOCK_UN);
+            ::close(migration_lock);
+        }
+    }
+
+    if (!marker_exists(impl.store_dir)) {
+        if (writable) {
+            std::filesystem::create_directories(impl.store_dir, error);
+            if (error) {
+                throw StoreOpenError("cannot create session store: " + impl.store_dir.string());
+            }
+            std::filesystem::permissions(impl.store_dir, std::filesystem::perms::owner_all,
+                                         std::filesystem::perm_options::replace, error);
+            write_layout_marker(impl.store_dir);
+        } else {
+            std::error_code exists_error;
+            if (std::filesystem::exists(impl.store_dir, exists_error)) {
+                const bool non_empty = std::filesystem::directory_iterator{impl.store_dir,
+                                                                           exists_error} !=
+                                       std::filesystem::directory_iterator{};
+                if (!exists_error && non_empty) {
+                    throw SchemaVersionError("session store has no layout marker");
+                }
+            }
+        }
+    } else {
+        const int version = read_layout_version(impl.store_dir);
+        if (version <= 0 || version > kLayoutFormat) {
+            throw SchemaVersionError("session store layout is newer than this binary");
         }
     }
 
@@ -856,56 +1231,103 @@ SessionHeader SessionPersistence::create(SessionHeader header) {
     if (!impl_->writable) {
         throw StoreOpenError("store is read-only");
     }
-    exec_sql(impl_->db, "BEGIN IMMEDIATE");
-    try {
-        Statement insert{
-            impl_->db,
-            "INSERT INTO sessions(id, cwd, created_at, updated_at, title, model, server_profile, "
-            "kind, parent_session, seed_length, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"};
-        insert.bindText(1, header.id.value);
-        insert.bindText(2, header.cwd.string());
-        insert.bindInt64(3, header.createdAt);
-        insert.bindInt64(4, header.updatedAt);
-        insert.bindText(5, header.title);
-        insert.bindText(6, header.model);
-        insert.bindText(7, header.serverProfile);
-        insert.bindText(8, std::string{session_kind_name(header.kind)});
-        insert.bindOptionalText(9, header.parentSession.has_value()
-                                       ? std::optional<std::string>{header.parentSession->value}
-                                       : std::nullopt);
-        insert.bindOptionalInt64(
-            10, header.seedLength.has_value()
-                    ? std::optional<std::int64_t>{static_cast<std::int64_t>(*header.seedLength)}
-                    : std::nullopt);
-        insert.bindOptionalText(11, encode_metadata_column(header));
-        insert.step();
 
-        if (!impl_->acquire_locked(header.id)) {
-            throw StoreError("cannot acquire lease for new session " + header.id.value);
+    const std::filesystem::path directory = session_dir_of(impl_->store_dir, header.id);
+    std::error_code             error;
+    if (!std::filesystem::create_directories(directory, error)) {
+        if (error) {
+            throw StoreError("cannot create " + directory.string() + ": " + error.message());
         }
-        exec_sql(impl_->db, "COMMIT");
+        throw CorruptionError("session already exists: " + header.id.value);
+    }
+    std::filesystem::permissions(directory, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, error);
+
+    Sequence base = 0;
+    if (header.kind == SessionKind::Fork && header.seedLength.value_or(0) > 0) {
+        if (!header.parentSession.has_value()) {
+            throw CorruptionError("fork without parent: " + header.id.value);
+        }
+        std::vector<std::string> stack;
+        const std::size_t        seed = header.seedLength.value_or(0);
+        const EventRange         prefix =
+            impl_->resolve_after(*header.parentSession, 0, seed, stack);
+        if (prefix.size() < seed) {
+            throw CorruptionError("fork seed exceeds parent view: " + header.id.value);
+        }
+        if (!prefix.empty()) {
+            base = prefix.back().seq;
+        }
+    }
+
+    const std::filesystem::path events = directory / "events.jsonl";
+    const int                   fd =
+        ::open(events.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        std::filesystem::remove_all(directory, error);
+        throw StoreError("cannot create " + events.string() + ": " + std::strerror(errno));
+    }
+    (void)::fdatasync(fd);
+    ::close(fd);
+
+    try {
+        write_envelope(directory, header, base);
     } catch (...) {
-        sqlite3_exec(impl_->db, "ROLLBACK", nullptr, nullptr, nullptr);
+        std::error_code ignored;
+        std::filesystem::remove_all(directory, ignored);
         throw;
     }
+
+    Impl::CachedSession cached;
+    cached.header        = header;
+    cached.base_sequence = base;
+    cached.next_sequence = base + 1;
+    cached.next_known    = true;
+    impl_->cache[header.id.value] = cached;
+    impl_->leases.insert(header.id.value);
     return header;
 }
 
 std::optional<SessionHeader> SessionPersistence::load(SessionId id) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->load_header_locked(id);
+    const std::optional<HeaderEnvelope> envelope = impl_->load_envelope(id);
+    if (!envelope.has_value()) {
+        return std::nullopt;
+    }
+    return envelope->header;
 }
 
 std::vector<SessionHeader> SessionPersistence::list() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    Statement statement{
-        impl_->db,
-        "SELECT id, cwd, created_at, updated_at, title, model, server_profile, kind, "
-        "parent_session, seed_length, metadata FROM sessions ORDER BY created_at, id"};
     std::vector<SessionHeader> headers;
-    while (statement.step() == SQLITE_ROW) {
-        headers.push_back(Impl::read_header_row(statement));
+    std::error_code            error;
+    if (!std::filesystem::is_directory(impl_->store_dir, error)) {
+        return headers;
     }
+    const std::filesystem::directory_iterator end;
+    for (std::filesystem::directory_iterator iterator{impl_->store_dir, error};
+         !error && iterator != end; iterator.increment(error)) {
+        const std::filesystem::path header = iterator->path() / "header.json";
+        if (!std::filesystem::is_regular_file(header, error)) {
+            error.clear();
+            continue;
+        }
+        const HeaderEnvelope envelope = read_envelope(header);
+        SessionHeader        item     = envelope.header;
+        if (const auto timestamp =
+                last_event_timestamp(iterator->path() / "events.jsonl");
+            timestamp.has_value()) {
+            item.updatedAt = *timestamp;
+        }
+        headers.push_back(std::move(item));
+    }
+    std::sort(headers.begin(), headers.end(), [](const SessionHeader& left,
+                                                 const SessionHeader& right) {
+        if (left.createdAt != right.createdAt) {
+            return left.createdAt < right.createdAt;
+        }
+        return left.id.value < right.id.value;
+    });
     return headers;
 }
 
@@ -914,45 +1336,76 @@ void SessionPersistence::erase(SessionId id) {
     if (!impl_->writable) {
         throw StoreOpenError("store is read-only");
     }
-    exec_sql(impl_->db, "BEGIN IMMEDIATE");
-    try {
-        if (impl_->has_dependents_locked(id)) {
-            throw DependentSessionError("session has dependent children: " + id.value);
-        }
-        {
-            Statement snapshots{impl_->db, "DELETE FROM session_snapshots WHERE session_id = ?"};
-            snapshots.bindText(1, id.value);
-            snapshots.step();
-        }
-        {
-            Statement leases{impl_->db, "DELETE FROM session_leases WHERE session_id = ?"};
-            leases.bindText(1, id.value);
-            leases.step();
-        }
-        {
-            Statement events{impl_->db, "DELETE FROM events WHERE session_id = ?"};
-            events.bindText(1, id.value);
-            events.step();
-        }
-        {
-            Statement sessions{impl_->db, "DELETE FROM sessions WHERE id = ?"};
-            sessions.bindText(1, id.value);
-            sessions.step();
-        }
-        exec_sql(impl_->db, "COMMIT");
-    } catch (...) {
-        sqlite3_exec(impl_->db, "ROLLBACK", nullptr, nullptr, nullptr);
-        throw;
+    if (impl_->has_dependents_locked(id)) {
+        throw DependentSessionError("session has dependent children: " + id.value);
     }
+    auto iterator = impl_->cache.find(id.value);
+    if (iterator != impl_->cache.end()) {
+        if (iterator->second.events_fd >= 0) {
+            ::close(iterator->second.events_fd);
+        }
+        impl_->cache.erase(iterator);
+    }
+    impl_->leases.erase(id.value);
+    std::error_code error;
+    std::filesystem::remove_all(session_dir_of(impl_->store_dir, id), error);
+    if (error) {
+        throw StoreError("cannot erase session " + id.value + ": " + error.message());
+    }
+}
+
+EventRange SessionPersistence::read(SessionId id, Sequence after) const {
+    return readAfter(id, after, kUnbounded);
+}
+
+EventRange SessionPersistence::readAfter(SessionId id, Sequence after,
+                                         std::size_t limit) const {
+    std::lock_guard<std::mutex>       lock(impl_->mutex);
+    std::vector<std::string>          stack;
+    return impl_->resolve_after(id, after, limit, stack);
+}
+
+EventRange SessionPersistence::readRange(SessionId id, Sequence from, Sequence to) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::vector<std::string>    stack;
+    const EventRange            resolved = impl_->resolve_after(id, 0, kUnbounded, stack);
+    EventRange                  result;
+    for (const EventRecord& record : resolved) {
+        if (record.seq >= from && record.seq <= to) {
+            result.push_back(record);
+        }
+    }
+    return result;
+}
+
+Sequence SessionPersistence::append(SessionId id, Event event) {
+    const Event                 single[] = {std::move(event)};
+    const std::vector<Sequence> sequences = appendBatch(id, single);
+    return sequences.front();
+}
+
+std::vector<Sequence> SessionPersistence::appendBatch(SessionId id,
+                                                      std::span<const Event> events) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->append_batch_locked(id, events, true);
+}
+
+bool SessionPersistence::isLeaseHolder(SessionId id) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->writable && impl_->leases.contains(id.value);
 }
 
 bool SessionPersistence::isUnprompted(SessionId id) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    Statement statement{
-        impl_->db,
-        "SELECT 1 FROM events WHERE session_id = ? AND type = 'user/message' LIMIT 1"};
-    statement.bindText(1, id.value);
-    return statement.step() != SQLITE_ROW;
+    bool                        prompted = false;
+    for_each_event(events_path_of(impl_->store_dir, id), [&](const EventRecord& record) {
+        if (record.event.type == EventType::UserMessage) {
+            prompted = true;
+            return false;
+        }
+        return true;
+    });
+    return !prompted;
 }
 
 bool SessionPersistence::hasDependents(SessionId id) const {
@@ -965,147 +1418,55 @@ Sequence SessionPersistence::eraseWithEvent(SessionId id, Event event) {
     if (!impl_->writable) {
         throw StoreOpenError("store is read-only");
     }
-    Sequence assigned = 0;
-    exec_sql(impl_->db, "BEGIN IMMEDIATE");
-    try {
-        if (impl_->has_dependents_locked(id)) {
-            throw DependentSessionError("session has dependent children: " + id.value);
-        }
-        if (event.payload.dump().size() > impl_->config.max_payload_bytes) {
-            throw PayloadTooLarge("event payload exceeds the configured cap");
-        }
-        {
-            Statement insert{
-                impl_->db,
-                "INSERT INTO events(session_id, event_id, timestamp, type, payload) VALUES (?, ?, "
-                "?, ?, ?)"};
-            insert.bindText(1, id.value);
-            insert.bindText(2, event.id.value);
-            insert.bindInt64(3, to_epoch_ms(event.timestamp));
-            insert.bindText(4, wire_type(event));
-            insert.bindText(5, event.payload.dump());
-            insert.step();
-            assigned = static_cast<Sequence>(sqlite3_last_insert_rowid(impl_->db));
-        }
-        {
-            Statement snapshots{impl_->db, "DELETE FROM session_snapshots WHERE session_id = ?"};
-            snapshots.bindText(1, id.value);
-            snapshots.step();
-        }
-        {
-            Statement leases{impl_->db, "DELETE FROM session_leases WHERE session_id = ?"};
-            leases.bindText(1, id.value);
-            leases.step();
-        }
-        {
-            Statement events{impl_->db, "DELETE FROM events WHERE session_id = ?"};
-            events.bindText(1, id.value);
-            events.step();
-        }
-        {
-            Statement sessions{impl_->db, "DELETE FROM sessions WHERE id = ?"};
-            sessions.bindText(1, id.value);
-            sessions.step();
-        }
-        exec_sql(impl_->db, "COMMIT");
-    } catch (...) {
-        sqlite3_exec(impl_->db, "ROLLBACK", nullptr, nullptr, nullptr);
-        throw;
+    if (impl_->has_dependents_locked(id)) {
+        throw DependentSessionError("session has dependent children: " + id.value);
     }
-    return assigned;
-}
-
-EventRange SessionPersistence::read(SessionId id, Sequence after) const {
-    return readAfter(id, after, kUnbounded);
+    const std::vector<Sequence> sequences =
+        impl_->append_batch_locked(id, std::span<const Event>{&event, 1}, false);
+    const Sequence sequence = sequences.front();
+    auto           iterator = impl_->cache.find(id.value);
+    if (iterator != impl_->cache.end()) {
+        if (iterator->second.events_fd >= 0) {
+            ::close(iterator->second.events_fd);
+        }
+        impl_->cache.erase(iterator);
+    }
+    impl_->leases.erase(id.value);
+    std::error_code error;
+    std::filesystem::remove_all(session_dir_of(impl_->store_dir, id), error);
+    if (error) {
+        throw StoreError("cannot erase session " + id.value + ": " + error.message());
+    }
+    return sequence;
 }
 
 Sequence SessionPersistence::headSequence(SessionId id) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto header = impl_->load_header_locked(id);
-    if (!header.has_value()) {
+    const std::optional<HeaderEnvelope> envelope = impl_->load_envelope(id);
+    if (!envelope.has_value()) {
         throw UnknownSession("unknown session: " + id.value);
     }
-    Statement statement{
-        impl_->db, "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE session_id = ?"};
-    statement.bindText(1, id.value);
-    Sequence head = 0;
-    if (statement.step() == SQLITE_ROW) {
-        head = statement.columnInt64(0);
+    if (const auto last = last_own_sequence(events_path_of(impl_->store_dir, id));
+        last.has_value()) {
+        return *last;
     }
-    if (head == 0 && header->kind == SessionKind::Fork) {
+    if (envelope->header.kind == SessionKind::Fork &&
+        envelope->header.seedLength.value_or(0) > 0) {
         std::vector<std::string> stack;
-        for (const EventRecord& record : impl_->resolve_locked(id, stack)) {
-            head = std::max(head, record.seq);
+        const EventRange         prefix = impl_->resolve_after(
+            *envelope->header.parentSession, 0,
+            envelope->header.seedLength.value_or(0), stack);
+        if (!prefix.empty()) {
+            return prefix.back().seq;
         }
     }
-    return head;
-}
-
-EventRange SessionPersistence::readAfter(SessionId id, Sequence after, std::size_t limit) const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (limit == 0) {
-        return {};
-    }
-    std::vector<std::string> stack;
-    return impl_->resolve_after_locked(id, after, limit, stack);
-}
-
-EventRange SessionPersistence::readRange(SessionId id, Sequence from, Sequence to) const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    std::vector<std::string>    stack;
-    EventRange                  resolved = impl_->resolve_locked(id, stack);
-    EventRange                  result;
-    for (const EventRecord& record : resolved) {
-        if (record.seq >= from && record.seq <= to) {
-            result.push_back(record);
-        }
-    }
-    return result;
-}
-
-Sequence SessionPersistence::append(SessionId id, Event event) {
-    const Event single[] = {std::move(event)};
-    const std::vector<Sequence> sequences = appendBatch(id, single);
-    return sequences.front();
-}
-
-std::vector<Sequence> SessionPersistence::appendBatch(SessionId id,
-                                                      std::span<const Event> events) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (!impl_->writable) {
-        throw StoreOpenError("store is read-only");
-    }
-    if (events.empty()) {
-        return {};
-    }
-    return impl_->append_batch_locked(id, events);
-}
-
-bool SessionPersistence::isLeaseHolder(SessionId id) const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (!impl_->writable) {
-        return false;
-    }
-    return impl_->lease_matches_me_locked(id);
+    return 0;
 }
 
 LeaseState SessionPersistence::leaseState(SessionId id) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    Statement statement{
-        impl_->db,
-        "SELECT holder_pid, holder_boot_id, expires_at FROM session_leases WHERE session_id = ?"};
-    statement.bindText(1, id.value);
-    if (statement.step() != SQLITE_ROW) {
-        return LeaseState::Absent;
-    }
-    const HolderIdentity self = impl_->me();
-    if (statement.columnInt64(0) == self.pid && statement.columnText(1) == self.boot_id.value) {
-        return LeaseState::HeldByMe;
-    }
-    if (statement.columnInt64(2) < now_ms()) {
-        return LeaseState::Expired;
-    }
-    return LeaseState::HeldByOther;
+    return impl_->writable && impl_->leases.contains(id.value) ? LeaseState::HeldByMe
+                                                               : LeaseState::Absent;
 }
 
 bool SessionPersistence::acquireLease(SessionId id) {
@@ -1113,22 +1474,12 @@ bool SessionPersistence::acquireLease(SessionId id) {
     if (!impl_->writable) {
         throw StoreOpenError("store is read-only");
     }
-    return impl_->acquire_locked(id);
+    impl_->leases.insert(id.value);
+    return true;
 }
 
 void SessionPersistence::renewLeases() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (!impl_->writable) {
-        throw StoreOpenError("store is read-only");
-    }
-    const HolderIdentity self = impl_->me();
-    Statement renew{
-        impl_->db,
-        "UPDATE session_leases SET expires_at = ? WHERE holder_pid = ? AND holder_boot_id = ?"};
-    renew.bindInt64(1, now_ms() + impl_->config.lease_ttl.count());
-    renew.bindInt64(2, self.pid);
-    renew.bindText(3, self.boot_id.value);
-    renew.step();
+    // A process-held store is the lease. There is no TTL to renew.
 }
 
 bool SessionPersistence::releaseLease(SessionId id) {
@@ -1136,103 +1487,31 @@ bool SessionPersistence::releaseLease(SessionId id) {
     if (!impl_->writable) {
         throw StoreOpenError("store is read-only");
     }
-    const HolderIdentity self = impl_->me();
-    Statement statement{
-        impl_->db,
-        "DELETE FROM session_leases WHERE session_id = ? AND holder_pid = ? AND holder_boot_id = "
-        "?"};
-    statement.bindText(1, id.value);
-    statement.bindInt64(2, self.pid);
-    statement.bindText(3, self.boot_id.value);
-    statement.step();
-    return true;
+    const bool released = impl_->leases.erase(id.value) > 0;
+    auto       iterator = impl_->cache.find(id.value);
+    if (iterator != impl_->cache.end() && iterator->second.events_fd >= 0) {
+        ::close(iterator->second.events_fd);
+        iterator->second.events_fd = -1;
+    }
+    return released;
 }
 
-void SessionPersistence::checkpoint(SessionId id) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (!impl_->writable) {
-        throw StoreOpenError("store is read-only");
-    }
-    const auto header = impl_->load_header_locked(id);
-    if (!header.has_value()) {
-        throw UnknownSession("unknown session: " + id.value);
-    }
-    std::vector<std::string> stack;
-    const EventRange         resolved = impl_->resolve_locked(id, stack);
-    const std::vector<Message> messages = deriveMessages(*header, resolved);
-    const Sequence             head     = resolved.empty() ? 0 : resolved.back().seq;
-
-    exec_sql(impl_->db, "BEGIN IMMEDIATE");
-    try {
-        Statement statement{
-            impl_->db,
-            "REPLACE INTO session_snapshots(session_id, at_sequence, header_json, messages_json, "
-            "event_count, created_at) VALUES (?, ?, ?, ?, ?, ?)"};
-        statement.bindText(1, id.value);
-        statement.bindInt64(2, head);
-        statement.bindText(3, nlohmann::json(*header).dump());
-        statement.bindText(4, nlohmann::json(messages).dump());
-        statement.bindInt64(5, static_cast<std::int64_t>(resolved.size()));
-        statement.bindInt64(6, now_ms());
-        statement.step();
-        exec_sql(impl_->db, "COMMIT");
-    } catch (...) {
-        sqlite3_exec(impl_->db, "ROLLBACK", nullptr, nullptr, nullptr);
-        throw;
-    }
+void SessionPersistence::checkpoint(SessionId) {
+    // Snapshots are no longer part of the store; the append-only log is the
+    // sole resume path.
 }
 
-std::optional<SessionSnapshot> SessionPersistence::loadSnapshot(SessionId id) const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    Statement statement{
-        impl_->db,
-        "SELECT at_sequence, header_json, messages_json, event_count FROM session_snapshots WHERE "
-        "session_id = ?"};
-    statement.bindText(1, id.value);
-    if (statement.step() != SQLITE_ROW) {
-        return std::nullopt;
-    }
-    try {
-        SessionSnapshot snapshot;
-        snapshot.session    = id;
-        snapshot.at         = statement.columnInt64(0);
-        snapshot.header     = nlohmann::json::parse(statement.columnText(1)).get<SessionHeader>();
-        snapshot.messages =
-            nlohmann::json::parse(statement.columnText(2)).get<std::vector<Message>>();
-        snapshot.eventCount = static_cast<std::size_t>(statement.columnInt64(3));
-        return snapshot;
-    } catch (const nlohmann::json::exception&) {
-        return std::nullopt;
-    }
+std::optional<SessionSnapshot> SessionPersistence::loadSnapshot(SessionId) const {
+    return std::nullopt;
 }
 
-bool SessionPersistence::snapshotIsCurrent(SessionId id) const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    Statement statement{impl_->db, "SELECT at_sequence FROM session_snapshots WHERE session_id = ?"};
-    statement.bindText(1, id.value);
-    if (statement.step() != SQLITE_ROW) {
-        return false;
-    }
-    const std::int64_t at = statement.columnInt64(0);
-    std::vector<std::string> stack;
-    const EventRange resolved = impl_->resolve_locked(id, stack);
-    const Sequence   head     = resolved.empty() ? 0 : resolved.back().seq;
-    return at == head;
-}
+bool SessionPersistence::snapshotIsCurrent(SessionId) const { return false; }
 
-void SessionPersistence::discardSnapshot(SessionId id) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (!impl_->writable) {
-        throw StoreOpenError("store is read-only");
-    }
-    Statement statement{impl_->db, "DELETE FROM session_snapshots WHERE session_id = ?"};
-    statement.bindText(1, id.value);
-    statement.step();
-}
+void SessionPersistence::discardSnapshot(SessionId) {}
 
 int SessionPersistence::schemaVersion() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->user_version_locked();
+    return kLayoutFormat;
 }
 
 void SessionPersistence::close() {

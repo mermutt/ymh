@@ -131,7 +131,8 @@ struct SessionSnapshot {
 // 11-m2-errata §5.2 (D15): sentinel for an unbounded `readAfter`.
 inline constexpr std::size_t kUnbounded = std::numeric_limits<std::size_t>::max();
 
-// 01 §7: the persistence seam. Spec 02 owns the SQLite implementation.
+// 01 §7: the persistence seam. Spec 02's implementation keeps each session as
+// an append-only event log plus a small atomically-replaced header.
 class SessionStore {
 public:
     virtual ~SessionStore() = default;

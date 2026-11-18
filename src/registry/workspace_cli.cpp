@@ -56,6 +56,8 @@ int workspace_list(std::ostream& out, std::ostream& err) {
             const char*        state    = "stopped";
             if (liveness == HostLiveness::Live) {
                 state = "running";
+            } else if (liveness == HostLiveness::Remote) {
+                state = "remote";
             } else if (liveness == HostLiveness::Stale) {
                 state = "stale";
             }
@@ -180,7 +182,8 @@ int run_workspace_remove(const std::vector<std::string>& args, bool assume_yes, 
 
     // 112-D2: a live daemon owns the row; removal is only for a stopped (or
     // stale-claimed) workspace. `removeWorkspace` re-checks this under the lock.
-    if (registry->probeLiveness(record->id) == HostLiveness::Live) {
+    if (registry->probeLiveness(record->id) == HostLiveness::Live ||
+        registry->probeLiveness(record->id) == HostLiveness::Remote) {
         err << "ymh: workspace " << record->id.value
             << " is running; stop it first: ymh workspace stop " << record->id.value << '\n';
         return 1;
@@ -190,7 +193,7 @@ int run_workspace_remove(const std::vector<std::string>& args, bool assume_yes, 
     out << record->id.value << '\t' << record->canonicalPath.string() << '\t' << sessions.size()
         << " session(s)\n";
     // 51-I24: the registry row and its junctions go; the workspace's `.ymh`
-    // tree (including sessions.db) is left untouched.
+    // tree (including the session store) is left untouched.
     out << "keeping " << (record->canonicalPath / ".ymh").string() << '\n';
 
     if (!assume_yes) {

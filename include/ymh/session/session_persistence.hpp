@@ -1,9 +1,10 @@
 #pragma once
 
-// SQLite-backed persistence and write lease (component 02). Pinned by
-// docs/design/02-persistence.md §3-§7: `PersistenceConfig`, `BootId`,
-// `HolderIdentity`, `LeaseState`, and `SessionPersistence`. The store is the
-// sole assigner of `Sequence` (01 I2 / P6) and the only mutating layer.
+// Append-only session persistence and in-process write lease (component 02).
+// `SessionPersistence` keeps each session as an immutable `events.jsonl` log
+// plus a small atomically-replaced `header.json`; the legacy `sessions.db`
+// path in `PersistenceConfig` is read once for migration only. The store is
+// the sole assigner of `Sequence` (01 I2 / P6) and the only mutating layer.
 
 #include <chrono>
 #include <cstddef>
@@ -47,6 +48,8 @@ enum class LeaseState : std::uint8_t {
 
 // 02 §4.1.
 struct PersistenceConfig {
+    // Legacy SQLite path. The file store lives in `<db_path-parent>/sessions/`;
+    // this path is used only to discover and migrate an existing sessions.db.
     std::filesystem::path db_path;
     std::filesystem::path lock_path;
     BootId                boot_id;

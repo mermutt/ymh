@@ -30,6 +30,8 @@
 #include <sqlite3.h>
 
 #include "ymh/registry/liveness.hpp"
+#include "ymh/registry/process_scan.hpp"
+#include "ymh/session/session_persistence.hpp"
 
 namespace ymh {
 namespace {
@@ -226,11 +228,14 @@ private:
 void apply_pragmas(sqlite3* db, const RegistryConfig& config, bool writable) {
     exec_sql(db, "PRAGMA foreign_keys = ON");
     exec_sql(db, ("PRAGMA busy_timeout = " + std::to_string(config.busy_timeout.count())).c_str());
-    exec_sql(db, "PRAGMA synchronous = NORMAL");
+    // The registry may live on an NFS-shared home. WAL's -shm protocol is
+    // host-local and unsafe with writers on multiple machines; rollback
+    // journaling with FULL sync is the network-filesystem-compatible mode.
+    // Read-only opens never change the journal mode.
+    exec_sql(db, "PRAGMA synchronous = FULL");
     if (writable) {
-        exec_sql(db, "PRAGMA wal_autocheckpoint = 1000");
+        exec_sql(db, "PRAGMA journal_mode = DELETE");
     }
-    exec_sql(db, "PRAGMA journal_mode = WAL");
 }
 
 void migrate_fresh(sqlite3* db) {
@@ -921,11 +926,17 @@ HostLiveness WorkspaceRegistry::probeLiveness(WorkspaceId workspace) const {
     if (!record.has_value() || !record->host.has_value()) {
         return HostLiveness::Absent;
     }
-    // 111-D4: a probe must not create `<ws>/.ymh/sessions.lock` (this method is
-    // documented read-only and is called on merely-browsed workspaces). A
-    // missing lock file means "no live daemon", exactly like a free lock.
-    const WorkspaceLockProbe probe = probeWorkspaceLock(record->canonicalPath, false);
-    return probe.held ? HostLiveness::Live : HostLiveness::Stale;
+    // A shared NFS lock is visible from every host, so it cannot answer "is
+    // there a daemon HERE?". The socket owner is a local /proc fact: a socket
+    // bound by a process on another server has no owner in this namespace.
+    if (socketOwnerPid(record->host->socketPath).has_value()) {
+        return HostLiveness::Live;
+    }
+    // 111-D4: this probe must not create `<ws>/.ymh/sessions.lock`.
+    if (probeWorkspaceLock(record->canonicalPath, false).held) {
+        return HostLiveness::Remote;
+    }
+    return HostLiveness::Stale;
 }
 
 std::vector<SupervisorRow> WorkspaceRegistry::listSupervisors() const {
@@ -1433,8 +1444,12 @@ void WorkspaceRegistry::bootstrap() {
                 return;
             }
             std::error_code error;
-            const std::filesystem::path sessions_db = directory / ".ymh" / "sessions.db";
-            if (std::filesystem::is_regular_file(sessions_db, error)) {
+            const std::filesystem::path session_store = directory / ".ymh" / "sessions";
+            const std::filesystem::path legacy_store  = directory / ".ymh" / "sessions.db";
+            const bool has_store =
+                (std::filesystem::is_directory(session_store, error) && !error) ||
+                (std::filesystem::is_regular_file(legacy_store, error) && !error);
+            if (has_store) {
                 std::filesystem::path canonical = std::filesystem::canonical(directory, error);
                 if (!error) {
                     const auto existing = findByCanonicalPath(canonical);
@@ -1492,42 +1507,35 @@ std::size_t WorkspaceRegistry::importSessionsFromDisk(WorkspaceId workspace,
         canonical = workspaceRoot;
     }
     const std::filesystem::path sessions_db = canonical / ".ymh" / "sessions.db";
-    if (!std::filesystem::is_regular_file(sessions_db, error)) {
+    const std::filesystem::path sessions_dir = canonical / ".ymh" / "sessions";
+    if (!std::filesystem::is_directory(sessions_dir, error) &&
+        !std::filesystem::is_regular_file(sessions_db, error)) {
         return 0;
     }
 
-    sqlite3* source = nullptr;
-    if (sqlite3_open_v2(sessions_db.c_str(), &source, SQLITE_OPEN_READONLY, nullptr) !=
-        SQLITE_OK) {
-        if (source != nullptr) {
-            sqlite3_close_v2(source);
-        }
-        return 0;
-    }
+    PersistenceConfig persistence;
+    persistence.db_path   = sessions_db;
+    persistence.lock_path = canonical / ".ymh" / "sessions.lock";
+    persistence.boot_id   = BootId{"registry-import"};
 
-    struct SourceSession {
-        std::string  id;
-        std::int64_t createdAt = 0;
-    };
-    std::vector<SourceSession> source_sessions;
+    std::vector<SessionHeader> source_sessions;
     try {
-        if (read_pragma_int(source, "PRAGMA application_id") != 0x594D4801) {
-            sqlite3_close_v2(source);
-            return 0;
-        }
-        Statement statement{
-            source,
-            "SELECT id, created_at FROM sessions ORDER BY created_at DESC, updated_at DESC, "
-            "id ASC"};
-        while (statement.step() == SQLITE_ROW) {
-            source_sessions.push_back(
-                SourceSession{statement.columnText(0), statement.columnInt64(1)});
-        }
-    } catch (const RegistryError&) {
-        sqlite3_close_v2(source);
+        const std::unique_ptr<SessionPersistence> store =
+            SessionPersistence::openReadOnly(persistence);
+        source_sessions = store->list();
+    } catch (const std::exception&) {
         return 0;
     }
-    sqlite3_close_v2(source);
+    std::sort(source_sessions.begin(), source_sessions.end(),
+              [](const SessionHeader& left, const SessionHeader& right) {
+                  if (left.createdAt != right.createdAt) {
+                      return left.createdAt > right.createdAt;
+                  }
+                  if (left.updatedAt != right.updatedAt) {
+                      return left.updatedAt > right.updatedAt;
+                  }
+                  return left.id.value < right.id.value;
+              });
 
     std::int64_t next_ordinal = 0;
     {
@@ -1547,7 +1555,7 @@ std::size_t WorkspaceRegistry::importSessionsFromDisk(WorkspaceId workspace,
             impl_->db,
             "SELECT 1 FROM workspace_sessions WHERE workspace_id = ? AND session_id = ?"};
         exists.bindText(1, workspace.value);
-        exists.bindText(2, session.id);
+        exists.bindText(2, session.id.value);
         if (exists.step() == SQLITE_ROW) {
             continue;
         }
@@ -1556,7 +1564,7 @@ std::size_t WorkspaceRegistry::importSessionsFromDisk(WorkspaceId workspace,
             "INSERT INTO workspace_sessions(workspace_id, session_id, ordinal, archived, "
             "created_at) VALUES (?, ?, ?, 0, ?)"};
         insert.bindText(1, workspace.value);
-        insert.bindText(2, session.id);
+        insert.bindText(2, session.id.value);
         insert.bindInt64(3, next_ordinal);
         insert.bindInt64(4, session.createdAt);
         insert.step();

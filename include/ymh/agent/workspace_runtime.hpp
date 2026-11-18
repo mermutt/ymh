@@ -105,9 +105,10 @@ struct WorkspaceRuntimeOptions {
     std::function<std::unique_ptr<LLMProvider>(const LLMProviderConfig&)> provider_factory;
 
     // 11-m2-errata §3.5 (D9): when set, the runtime uses this store instead of
-    // opening the real SQLite file, so daemon integration tests can run without
-    // a DB. The caller owns the store and must keep it alive for the runtime's
-    // lifetime; never set in production (H6: one store / one flock).
+    // opening the real file-backed store, so daemon integration tests can run
+    // without touching disk. The caller owns the store and must keep it alive
+    // for the runtime's lifetime; never set in production (H6: one store / one
+    // flock).
     std::function<std::unique_ptr<SessionStore>()> store_factory;
 
     // 14 §4.5 (E-P7): the daemon's loop adapter. When set, the runtime owns a
@@ -150,10 +151,10 @@ public:
     [[nodiscard]] SessionStore&         store() noexcept;
     [[nodiscard]] SessionPersistence*   persistence() noexcept;
 
-    // True when the runtime opened the real SQLite `SessionPersistence`; false
-    // when a `store_factory` supplied an in-memory fake (D9 store seam). Only a
-    // durable store carries a cross-process write lease, so the lease methods
-    // below are no-ops when this is false.
+    // True when the runtime opened the real file-backed `SessionPersistence`;
+    // false when a `store_factory` supplied an in-memory fake (D9 store seam).
+    // Only a durable store carries a cross-process write lease, so the lease
+    // methods below are no-ops when this is false.
     [[nodiscard]] bool hasDurableStore() const noexcept;
     [[nodiscard]] SessionManager&       sessions() noexcept;
     [[nodiscard]] AgentRegistry&        agents() noexcept;

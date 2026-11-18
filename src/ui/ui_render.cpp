@@ -1257,7 +1257,7 @@ std::string relative_age_label(std::int64_t delta_ms) {
 }
 
 std::string history_note_leaf(const std::string& note) {
-    if (note == "no sessions.db") {
+    if (note == "no sessions" || note == "no sessions.db") {
         return "(no stored sessions)";
     }
     if (note.rfind("unavailable", 0) == 0) {

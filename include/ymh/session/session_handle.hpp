@@ -1,8 +1,9 @@
 #pragma once
 
 // SessionHandle: the IPC-addressable teardown capability that owns a session's
-// write lease (01 §7, 02 §4.8). The abstract shape is frozen by 01; the concrete
-// SQLite-backed handle is implemented in session_persistence.cpp.
+// write lease (01 §7, 02 §4.8). The abstract shape is frozen by 01; the
+// concrete `SqliteSessionHandle` name is kept for source compatibility with the
+// file-store engine.
 
 #include "ymh/core/event.hpp"
 #include "ymh/session/session.hpp"

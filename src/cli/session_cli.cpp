@@ -54,6 +54,16 @@ std::filesystem::path database_path(const std::filesystem::path& workspace) {
     return workspace / ".ymh" / "sessions.db";
 }
 
+std::filesystem::path store_dir(const std::filesystem::path& workspace) {
+    return workspace / ".ymh" / "sessions";
+}
+
+bool has_session_store(const std::filesystem::path& workspace) {
+    std::error_code error;
+    return (std::filesystem::is_directory(store_dir(workspace), error) && !error) ||
+           (std::filesystem::is_regular_file(database_path(workspace), error) && !error);
+}
+
 std::filesystem::path lock_path(const std::filesystem::path& workspace) {
     return workspace / ".ymh" / "sessions.lock";
 }
@@ -171,8 +181,7 @@ void print_message(std::ostream& out, const Message& message) {
 }
 
 int require_store(const std::filesystem::path& workspace, std::ostream& err) {
-    std::error_code error;
-    if (!std::filesystem::exists(database_path(workspace), error)) {
+    if (!has_session_store(workspace)) {
         err << "ymh: no session store in " << workspace << " (run `ymh run \"task\"` first)\n";
         return 2;
     }
@@ -188,8 +197,7 @@ int session_list(const std::filesystem::path& workspace, std::ostream& out, std:
         err << "ymh: workspace not found: " << workspace << '\n';
         return 2;
     }
-    std::error_code exists_error;
-    if (!std::filesystem::exists(database_path(root), exists_error)) {
+    if (!has_session_store(root)) {
         out << "no sessions\n";
         return 0;
     }
@@ -466,11 +474,9 @@ bool apply_live(const WorkspaceRecord& record, std::vector<PruneEntry*>& entries
 
 bool apply_stopped(const WorkspaceRecord& record, std::vector<PruneEntry*>& entries,
                    std::unique_ptr<WorkspaceRegistry>& writer, std::ostream& err) {
-    const std::filesystem::path db_path = record.canonicalPath / ".ymh" / "sessions.db";
-    std::error_code             exists_error;
-    const bool db_preexisted = std::filesystem::exists(db_path, exists_error) && !exists_error;
-    if (!db_preexisted) {
-        mark_all_failed(entries, "no sessions.db");
+    const bool store_preexisted = has_session_store(record.canonicalPath);
+    if (!store_preexisted) {
+        mark_all_failed(entries, "no sessions");
         return false;
     }
 
@@ -577,9 +583,7 @@ int session_prune(const PruneOptions& options, std::ostream& out, std::ostream& 
 
     std::vector<PruneEntry> entries;
     for (const WorkspaceRecord& record : targets) {
-        const std::filesystem::path db_path = record.canonicalPath / ".ymh" / "sessions.db";
-        std::error_code             error;
-        if (!std::filesystem::exists(db_path, error) || error) {
+        if (!has_session_store(record.canonicalPath)) {
             continue;
         }
         std::unique_ptr<SessionPersistence> store;
@@ -624,8 +628,14 @@ int session_prune(const PruneOptions& options, std::ostream& out, std::ostream& 
                 mine.push_back(&entry);
             }
         }
-        const bool live = record.host.has_value() &&
-                          registry->probeLiveness(record.id) == HostLiveness::Live;
+        const HostLiveness liveness =
+            record.host.has_value() ? registry->probeLiveness(record.id) : HostLiveness::Absent;
+        if (liveness == HostLiveness::Remote) {
+            mark_all_failed(mine, "running on another host");
+            any_failed = true;
+            continue;
+        }
+        const bool live = liveness == HostLiveness::Live;
         bool path_ok = true;
         if (live) {
             if (!mine.empty()) {

@@ -5,9 +5,9 @@
 // an exit code reflecting the turn's terminal event.
 //
 // The runner owns the single-process MVP wiring: it opens the workspace's
-// SQLite store (`<workspace>/.ymh/sessions.db`), builds the environment, tools,
-// permission policy, context assembler, provider, and `AgentRegistry`, then
-// creates or resumes a session and sends one user message.
+// append-only session store (`<workspace>/.ymh/sessions/`), builds the
+// environment, tools, permission policy, context assembler, provider, and
+// `AgentRegistry`, then creates or resumes a session and sends one user message.
 //
 // Test hooks (not used in production):
 //   * `provider_factory` injects a `FakeLLM` (or any provider) directly,

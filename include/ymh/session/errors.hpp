@@ -17,8 +17,7 @@ public:
 // 11-m2-errata §3.4 (D8): the store-open failure surface. `Locked` is the
 // sidecar `flock(LOCK_EX | LOCK_NB)` EWOULDBLOCK case (02 §5.1) that
 // `WorkspaceRuntime::create` maps to `WorkspaceBusy`; every other open failure
-// (missing root, mkdir/open failure, sqlite open, schema gate) is
-// `Unavailable`.
+// (missing root, mkdir/open failure, layout gate) is `Unavailable`.
 enum class StoreOpenErrorCode : std::uint8_t {
     Locked,
     Unavailable,

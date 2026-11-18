@@ -2,7 +2,7 @@
 
 // Unix-socket server layer (docs/design/05-transport.md §3.1–§3.3, §9).
 //
-// Wraps a `ProtocolServer` with an Asio acceptor on `<workspace>/.ymh/host.sock`.
+// Wraps a `ProtocolServer` with an Asio acceptor on the per-host daemon socket.
 // It owns the accept loop and the async reads/writes; it never interprets a
 // frame. Every accepted connection reports its SO_PEERCRED to the protocol
 // engine, which enforces the same-UID trust boundary (§4.2, T15).

@@ -105,7 +105,7 @@ private:
 struct HostConfig {
     WorkspaceId           workspace;       // UUIDv4, never the path
     std::filesystem::path workspace_root;  // canonical realpath; chdir target
-    std::filesystem::path socket_path;     // v1 default <root>/.ymh/host.sock
+    std::filesystem::path socket_path;     // default: local host runtime path
     std::filesystem::path log_sink;        // v1 default <root>/.ymh/host.log
 
     // The global config the daemon must load (21-D15). Additive and defaulted:

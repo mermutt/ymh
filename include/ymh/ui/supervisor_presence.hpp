@@ -103,9 +103,9 @@ public:
     void start();
     void stop();
 
-    // One read-only tick (§3.2). Bounded: O(workspaces) `probeLiveness`
-    // open+flock syscalls per tick (C-L3), one read transaction, no filesystem
-    // walk. Returns only workspaces whose host claim is live.
+    // One read-only tick (§3.2). Bounded: O(workspaces) local-liveness probes
+    // per tick (C-L3), one read transaction, no filesystem walk. Returns only
+    // workspaces whose daemon is local; a remote host's live claim is skipped.
     [[nodiscard]] std::vector<SupervisorWorkspace> scanOnce() const;
 
 private:

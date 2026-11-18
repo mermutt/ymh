@@ -3,10 +3,10 @@
 // Stored-session catalog reader (22-switcher-sessions-errata.md §4, S2).
 //
 // The `/sessions` surface lists every *stored* session for every *registered*
-// workspace, read from disk (`<workspace>/.ymh/sessions.db`) — no daemon is
+// workspace, read from disk (`<workspace>/.ymh/sessions/`) — no daemon is
 // required. The reader owns one worker thread and delivers immutable
 // `SessionCatalogSnapshot`s to the UI thread through a `Sink`; the UI thread
-// never opens SQLite (§4.2, SW7).
+// never parses the event store (§4.2, SW7).
 //
 // This header is deliberately UI-model-free: Wave C injects the reader into
 // `SupervisorApp` (registry-backed source + `SupervisorApp::enqueue` sink) and
@@ -89,8 +89,8 @@ struct WorkspaceCatalogSource {
 };
 
 // §4.1/§4.5: enumerate every row of `WorkspaceRegistry::listWorkspaces()` and
-// read each `<canonical_path>/.ymh/sessions.db` with `openReadOnly`. Reads take
-// no `flock` and open no second registry handle.
+// read each `<canonical_path>/.ymh/sessions/` store with `openReadOnly`. Reads
+// take no `flock` and open no second registry handle.
 [[nodiscard]] WorkspaceCatalogSource registry_catalog_source(WorkspaceRegistry& registry);
 
 // §4.2: one worker thread builds the snapshot; the sink runs on that thread and

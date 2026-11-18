@@ -32,6 +32,9 @@ std::string render_runtime_context(const RuntimeContextConfig& config, const std
     if (!config.delegation.empty()) {
         out += "- Delegation: " + config.delegation + "\n";
     }
+    out += "- Workspace internals: `.ymh/` is protected from shell/file tools; use "
+           "`ymh list`, `ymh show <id>`, `ymh replay <id>`, or `ymh doctor` for session "
+           "and daemon state.\n";
     out += "- Date: " + date;
     return out;
 }

@@ -9,13 +9,14 @@
 //
 // The registry is the durable membership/ordering authority for the open set.
 // It is deliberately outside the event log (D21) and outside any single daemon:
-// session events/leases live in each workspace's `sessions.db` (spec 02), and
-// the focused session is supervisor-local (spec 10, R12). It holds no events,
-// leases, permissions, or UI state (R1).
+// session events/leases live in each workspace's append-only store (spec 02),
+// and the focused session is supervisor-local (spec 10, R12). It holds no
+// events, leases, permissions, or UI state (R1).
 //
 // Cross-process writer serialization is an exclusive `flock(LOCK_EX)` on
 // `registry.lock` held per mutation (D22, §5); readers take no lock and see a
-// WAL snapshot (R2, R15).
+// consistent SQLite snapshot (R2, R15). The database uses rollback journaling
+// (not WAL) because the shared home may be NFS.
 
 #include <chrono>
 #include <cstdint>
@@ -110,13 +111,15 @@ struct PendingMutation {
     std::int64_t timestamp = 0;  // epoch ms
 };
 
-// Host liveness as observed by the sidecar-flock probe (§6.3, R5). The probe
-// never mutates; a read-only registry reports `Stale` and leaves clearing to a
-// writer via `reapHost` (§6.4).
+// Host liveness as observed locally. The probe never mutates. A claim whose
+// socket is not owned by a process on this machine is `Remote`: it is a fact
+// about another host, not a local daemon, and must not be attached to, stopped,
+// or reaped from here.
 enum class HostLiveness : std::uint8_t {
     Absent,  // no claim row
-    Live,    // claim row and the sidecar `sessions.lock` is held
-    Stale,   // claim row but the sidecar lock is absent
+    Live,    // claim row and a local process owns the advertised socket
+    Remote,  // claim row and the sidecar lock is held, but no local socket owner
+    Stale,   // claim row but neither a local socket owner nor a held lock
 };
 
 // ---------------------------------------------------------------------------
@@ -230,7 +233,9 @@ public:
     // Number of rows with a host claim (supports §9.11's live-daemon cap; F8).
     [[nodiscard]] std::size_t liveHostCount() const;
 
-    // Sidecar-flock liveness observation (§6.3, §6.4). Read-only; never clears.
+    // Local-liveness observation (§6.3, §6.4): socket ownership in this PID
+    // namespace, with the shared sidecar lock distinguishing `Remote` from
+    // `Stale`. Read-only; never clears. Remote claims are never acted on.
     [[nodiscard]] HostLiveness probeLiveness(WorkspaceId) const;
 
     // ---- supervisor ownership set (16 §7.1) --------------------------------
@@ -291,7 +296,7 @@ public:
     // writes `registry_meta['initialized']` last.
     void bootstrap();
 
-    // Imports a workspace's `sessions.db` rows newest-first (§7.1/§7.2).
+    // Imports the workspace's stored session headers newest-first (§7.1/§7.2).
     // Idempotent (junction PRIMARY KEY upserts); returns rows newly inserted.
     std::size_t importSessionsFromDisk(WorkspaceId, const std::filesystem::path& workspaceRoot);
 
