@@ -1,0 +1,5 @@
+# The image build only needs the toolchain definition; never send the checkout,
+# the git history, or build outputs to the daemon.
+*
+!build.Dockerfile
+!build-toolchain.sh
