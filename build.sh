@@ -51,13 +51,16 @@ docker run --rm -v "$ROOT:/w" -w /w \
     -e "LAUNCHER_UID=$LAUNCHER_UID" \
     -e "LAUNCHER_GID=$LAUNCHER_GID" \
     "$IMG" bash -lc '
+    set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     export GIT_SSL_NO_VERIFY=true
 
     # Fresh containers install the toolchain; incremental rebuilds no-op.
-    apt-get update >/dev/null
+    # ca-certificates is installed up front so the PPA HTTPS endpoints can be
+    # verified on networks that do not preinstall a CA store.
+    apt-get update -o Acquire::Retries=5 >/dev/null
     apt-get install -y --no-install-recommends \
-        git cmake ninja-build pkg-config \
+        ca-certificates git cmake ninja-build pkg-config \
         libsqlite3-dev nlohmann-json3-dev libcurl4-openssl-dev >/dev/null
 
     git config --global http.sslVerify false
@@ -73,13 +76,48 @@ docker run --rm -v "$ROOT:/w" -w /w \
         [ -d "$dep_dir" ] && git config --global --add safe.directory "$dep_dir"
     done
 
-    # gcc-13 comes from the ubuntu-toolchain-r PPA on 22.04.
-    echo "deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
-        > /etc/apt/sources.list.d/toolchain.list
-    apt-get update -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false >/dev/null
-    apt-get install -y --no-install-recommends \
-        -o Acquire::https::Verify-Peer=false -o Acquire::https::Verify-Host=false \
-        g++-13 gcc-13 >/dev/null
+    # gcc-13 comes from the ubuntu-toolchain-r PPA on 22.04: jammy ships gcc-11,
+    # and gcc-12 predates <format>. The PPA CDN intermittently serves a stale
+    # index whose package files have already been replaced, and workplace proxies
+    # cache it inconsistently. Each attempt starts from a clean package list; if
+    # the content host keeps failing, retry over the Launchpad legacy host.
+    install_gcc13() {
+        local host="$1"
+        echo "deb [trusted=yes] ${host}/ubuntu-toolchain-r/test/ubuntu jammy main" \
+            > /etc/apt/sources.list.d/toolchain.list
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            rm -rf /var/lib/apt/lists/*
+            if { apt-get update \
+                      -o Acquire::Retries=5 \
+                      -o Acquire::http::No-Cache=true \
+                      -o Acquire::https::No-Cache=true \
+                      -o Acquire::https::Verify-Peer=false \
+                      -o Acquire::https::Verify-Host=false &&
+                  apt-get install -y --no-install-recommends \
+                      -o Acquire::Retries=5 \
+                      -o Acquire::https::Verify-Peer=false \
+                      -o Acquire::https::Verify-Host=false \
+                      g++-13 gcc-13; } >/tmp/ymh-gcc13-apt.log 2>&1; then
+                return 0
+            fi
+            echo "==> gcc-13 install attempt ${attempt} failed; retrying" >&2
+            tail -n 5 /tmp/ymh-gcc13-apt.log >&2 || true
+            apt-get clean
+            sleep $((attempt * 2))
+        done
+        return 1
+    }
+
+    if ! install_gcc13 "https://ppa.launchpadcontent.net"; then
+        echo "==> content host failed; retrying the toolchain PPA over the legacy host" >&2
+        if ! install_gcc13 "http://ppa.launchpad.net"; then
+            echo "ymh: cannot install gcc-13/g++-13 from the ubuntu-toolchain-r PPA." >&2
+            echo "     The PPA index may be stale or unreachable; retry the build later." >&2
+            exit 1
+        fi
+    fi
+    gcc-13 --version | head -1
 
     # Configure on every run: the build version is derived from git at
     # configure time, so an incremental build must re-stamp HEAD and the dirty
