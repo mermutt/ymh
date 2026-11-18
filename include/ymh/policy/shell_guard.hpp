@@ -91,7 +91,8 @@ struct ShellText {
     const std::filesystem::path& cwd,
     bool kernel_confinement,
     const std::filesystem::path& canonical_tmp_root = {},
-    bool relaxed_sed = false);
+    bool relaxed_sed = false,
+    bool allow_ymh = false);
 
 // 90-D22: request-level wrapper. Computes the declared `terminal open` cwd
 // first, then classifies; empty text is NotApplicable for a non-shell tool and
@@ -99,7 +100,8 @@ struct ShellText {
 // `terminal write` scope is forced Unknown (the PTY cwd is not modeled).
 [[nodiscard]] ShellClassification classify_shell_request(
     const PermissionRequest& request,
-    const std::filesystem::path& canonical_tmp_root = {});
+    const std::filesystem::path& canonical_tmp_root = {},
+    bool allow_ymh = false);
 
 // 90-D23/PS29: resolve-time temp verdict. Bounded per-target I/O: probes every
 // path prefix for dangling/unresolvable symlinks and weakly-canonicalizes each

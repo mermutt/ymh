@@ -27,6 +27,7 @@ struct RuntimeContextConfig {
     std::string sandbox;     // workspace | read-only | unrestricted
     std::string approval;    // the pinned default permission preset name
     std::string delegation;  // e.g. "available (max depth 3)" | "disabled"
+    bool        allow_ymh_access = false;  // `--allow-ymh-access` debug hatch
 };
 
 using DateProvider = std::function<std::string()>;

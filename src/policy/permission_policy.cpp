@@ -435,7 +435,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     // the old `classify_shell_command` value plus the additive target scope and
     // protected flag. `classify_shell_request` owns the terminal-open cwd.
     const ShellClassification classification =
-        classify_shell_request(request, tmp_root_);
+        classify_shell_request(request, tmp_root_, config_.allow_ymh_access);
     if (request.sandbox == SandboxMode::ReadOnly &&
         tool_is_mutating(request, read_only_shell_)) {
         return PolicyVerdict::Deny;
@@ -459,7 +459,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     // 90-D13/H1: paths inside `.git`/`.ymh` are a hard deny after the 89 guard,
     // ReadOnly, and force_ask, and before the rule fold and every grant.
     if (request.path.has_value() &&
-        path_is_protected(request.root, *request.path)) {
+        path_is_protected(request.root, *request.path, config_.allow_ymh_access)) {
         if (reason != nullptr) {
             *reason = "permission:protected-path";
         }

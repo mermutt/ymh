@@ -142,8 +142,9 @@ struct LiveProbe {
 class HostLifecycle {
 public:
     HostLifecycle(HostLauncher& launcher, WorkspaceRegistry& registry,
-                  std::filesystem::path config_path = {})
-        : launcher_(launcher), registry_(registry), config_path_(std::move(config_path)) {}
+                  std::filesystem::path config_path = {}, bool allow_ymh_access = false)
+        : launcher_(launcher), registry_(registry), config_path_(std::move(config_path)),
+          allow_ymh_access_(allow_ymh_access) {}
 
     // Attach to a live daemon or spawn one. NEVER kills a process. May clear a
     // stale claim (lazy reap) under the D22 write lock (03 §6.4, H10, H11).
@@ -183,6 +184,7 @@ private:
     HostLauncher&      launcher_;
     WorkspaceRegistry& registry_;
     std::filesystem::path config_path_;
+    bool                  allow_ymh_access_ = false;
 };
 
 } // namespace ymh

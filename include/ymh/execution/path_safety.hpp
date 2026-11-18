@@ -24,6 +24,7 @@ namespace ymh {
 
 [[nodiscard]] bool path_is_protected(
     const std::filesystem::path& canonical_root,
-    const std::filesystem::path& candidate);
+    const std::filesystem::path& candidate,
+    bool                         allow_ymh = false);
 
 } // namespace ymh

@@ -87,6 +87,10 @@ struct AgentServices {
     // 55-D8/55-H5: the route-catalog seam used by `AgentRegistry::createChild`
     // to validate a child route's model/effort before any session is created.
     RouteCatalog*         route_catalog = nullptr;
+    // Debug escape hatch behind `--allow-ymh-access`; copied to every
+    // `PermissionRequest` so policy, critical-path and shell classification
+    // agree on whether `.ymh` is protected for this runtime.
+    bool                  allow_ymh_access = false;
 
     // 34-D4: monotonic source for `TimedStreamEvent.at`. Production default is
     // steady_clock::now; tests inject a deterministic reader.

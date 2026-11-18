@@ -174,7 +174,7 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
         std::error_code canonical_ec;
         const std::filesystem::path canonical =
             std::filesystem::weakly_canonical(query.base, canonical_ec);
-        if (!canonical_ec && path_is_protected(root_, canonical)) {
+        if (!canonical_ec && path_is_protected(root_, canonical, config_.allow_ymh_access)) {
             throw ToolError{ToolErrorCode::PathEscape, "protected path"};
         }
     }
@@ -208,7 +208,7 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
             if (ec) {
                 break;
             }
-            if (path_is_protected(root_, it->path())) {
+            if (path_is_protected(root_, it->path(), config_.allow_ymh_access)) {
                 std::error_code entry_ec;
                 if (it->is_directory(entry_ec)) {
                     it.disable_recursion_pending();
@@ -233,7 +233,7 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
         std::error_code canonical_ec;
         const std::filesystem::path canonical =
             std::filesystem::weakly_canonical(query.base, canonical_ec);
-        if (!canonical_ec && path_is_protected(root_, canonical)) {
+        if (!canonical_ec && path_is_protected(root_, canonical, config_.allow_ymh_access)) {
             throw ToolError{ToolErrorCode::PathEscape, "protected path"};
         }
     }
@@ -274,7 +274,7 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
             const std::filesystem::recursive_directory_iterator end;
             while (it != end) {
                 std::error_code entry_ec;
-                const bool protected_entry = path_is_protected(root_, it->path());
+                const bool protected_entry = path_is_protected(root_, it->path(), config_.allow_ymh_access);
                 const bool symlink_entry = it->is_symlink(entry_ec);
                 if (protected_entry || symlink_entry) {
                     // 90-A13/90-D14: never traverse `.ymh`/`.git`, and never

@@ -117,6 +117,8 @@ void add_common(CLI::App& app, CliInvocation& invocation) {
     app.add_option("--log-level", invocation.log_level, "Override the log level");
     app.add_option("--reasoning-effort", invocation.reasoning_effort,
                    "Override the reasoning effort");
+    app.add_flag("--allow-ymh-access", invocation.allow_ymh_access,
+                 "Allow shell/file tools to read and write <workspace>/.ymh (debug only)");
     app.add_flag("-v,--verbose", invocation.verbose, "Verbose diagnostics");
 }
 
@@ -330,7 +332,8 @@ std::string help_text(CLI::App& app, std::initializer_list<CLI::App*> subcommand
 
 std::string host_usage() {
     return "ymh --host --workspace <uuid> --root <canonical-root> --socket <path>\n"
-           "          [--config <path>] [--boot-id <uuid>] [--predecessor-boot-id <uuid>]\n";
+           "          [--config <path>] [--boot-id <uuid>] [--predecessor-boot-id <uuid>]\n"
+           "          [--allow-ymh-access]\n";
 }
 
 bool contains_host_flag(const std::vector<std::string>& args) {
@@ -344,6 +347,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     std::string config_path;
     std::string boot_id;
     std::string predecessor_boot_id;
+    bool        allow_ymh_access = false;
 
     for (std::size_t index = 0; index < args.size(); ++index) {
         const std::string& argument = args[index];
@@ -373,6 +377,8 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
             if (!take_value(boot_id)) { err << host_usage(); return 2; }
         } else if (argument == "--predecessor-boot-id") {
             if (!take_value(predecessor_boot_id)) { err << host_usage(); return 2; }
+        } else if (argument == "--allow-ymh-access") {
+            allow_ymh_access = true;
         } else {
             err << "ymh --host: unknown argument '" << argument << "'\n";
             return 2;
@@ -431,6 +437,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
         return 2;
     }
     host_config.log_sink       = canonical / ".ymh" / "host.log";
+    host_config.allow_ymh_access = allow_ymh_access;
     host_config.registry       = default_registry_config();
     host_config.persistence.db_path   = canonical / ".ymh" / "sessions.db";
     host_config.persistence.lock_path = canonical / ".ymh" / "sessions.lock";
@@ -615,7 +622,8 @@ std::optional<WorkspaceRecord> resolve_session_workspace(WorkspaceRegistry& regi
 
 int run_supervisor_entry(const std::filesystem::path& root, const Config& config,
                          const std::filesystem::path& config_path, bool verbose,
-                         const std::string& resume_session, bool new_session, std::ostream& err) {
+                         const std::string& resume_session, bool new_session,
+                         bool allow_ymh_access, std::ostream& err) {
     // 22 §6.1 (S4, decision 22-D5): a `--resume` id resolves the session's own
     // workspace, which overrides the cwd/`--workspace` root for the supervisor's
     // initial workspace and daemon target. The config already loaded for the
@@ -664,7 +672,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     }
 
     ForkExecLauncher launcher;
-    HostLifecycle    lifecycle(launcher, *registry, config_path);
+    HostLifecycle    lifecycle(launcher, *registry, config_path, allow_ymh_access);
 
     // 87-D2/87-A2: the bare-`ymh` `ensureRunning` is a transient liveness probe
     // (its returned connection is discarded via RAII), so it uses a fresh
@@ -719,6 +727,16 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
             startup_notice = note;
         }
     }
+    if (allow_ymh_access && attached_existing) {
+        const std::string note =
+            "--allow-ymh-access is applied when a workspace daemon starts; restart the "
+            "running daemon if .ymh access is still denied";
+        if (startup_notice.has_value()) {
+            *startup_notice += "  ·  " + note;
+        } else {
+            startup_notice = note;
+        }
+    }
 
     ui::SupervisorRunOptions options;
     options.workspaces = std::move(attached);
@@ -740,9 +758,10 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
 // `ymh run` against a live daemon: attach, create/resume a session, stream the turn.
 int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
                    const std::filesystem::path& config_path, const std::string& task,
-                   const std::string& resume, std::ostream& out, std::ostream& err) {
+                   const std::string& resume, bool allow_ymh_access, std::ostream& out,
+                   std::ostream& err) {
     ForkExecLauncher launcher;
-    HostLifecycle    lifecycle(launcher, registry, config_path);
+    HostLifecycle    lifecycle(launcher, registry, config_path, allow_ymh_access);
     AttachResult     attach;
     const AttachIdentity identity{protocol::ClientInstanceId{generate_uuid_v4()},
                                   protocol::ClientRole::Automation};
@@ -1187,6 +1206,9 @@ std::vector<std::string> daemon_override_flags(const CliInvocation& invocation) 
     if (!invocation.reasoning_effort.empty()) {
         flags.emplace_back("--reasoning-effort");
     }
+    if (invocation.allow_ymh_access) {
+        flags.emplace_back("--allow-ymh-access");
+    }
     return flags;
 }
 
@@ -1562,7 +1584,8 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                 resume.clear();
             }
             return run_supervisor_entry(root, config, effective_global_config(invocation),
-                                        invocation.verbose, resume, invocation.new_session, err);
+                                        invocation.verbose, resume, invocation.new_session,
+                                        invocation.allow_ymh_access, err);
         }
 
         case CliInvocation::Command::Run: {
@@ -1592,7 +1615,8 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                         std::unique_ptr<WorkspaceRegistry> writer =
                             WorkspaceRegistry::open(default_registry_config());
                         return run_via_daemon(*writer, *row, effective_global_config(invocation),
-                                              invocation.task, invocation.session, out, err);
+                                              invocation.task, invocation.session,
+                                              invocation.allow_ymh_access, out, err);
                     }
                     if (row.has_value() && row->host.has_value() &&
                         reader->probeLiveness(row->id) == HostLiveness::Remote) {
@@ -1609,6 +1633,7 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
             options.task      = invocation.task;
             options.config    = config;
             options.verbose   = invocation.verbose;
+            options.allow_ymh_access = invocation.allow_ymh_access;
             options.out       = &out;
             options.err       = &err;
             if (!invocation.session.empty()) {

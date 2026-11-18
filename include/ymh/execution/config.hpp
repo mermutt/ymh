@@ -12,6 +12,10 @@
 namespace ymh {
 
 struct ToolConfig {
+    // Debug escape hatch: allow shell/file tools to read and write
+    // `<workspace>/.ymh`. Off by default; CLI `--allow-ymh-access`.
+    bool allow_ymh_access = false;
+
     // Durable output clamp on the serialized payload (§5.2, X10). Must be
     // <= PersistenceConfig::max_payload_bytes minus envelope headroom.
     std::size_t tool_result_max_bytes{1u * 1024u * 1024u};

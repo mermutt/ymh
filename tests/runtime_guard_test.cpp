@@ -17,6 +17,17 @@ TEST(RuntimeGuardGuidance, RuntimeContextNamesProtectedStateAndCommands) {
     EXPECT_NE(text.find("ymh doctor"), std::string::npos);
 }
 
+TEST(RuntimeGuardGuidance, RuntimeContextAnnouncesEnabledAccess) {
+    ymh::RuntimeContextConfig config;
+    config.cwd              = "/tmp/workspace";
+    config.model            = "test-model";
+    config.allow_ymh_access = true;
+
+    const std::string text = ymh::render_runtime_context(config, "2026-01-01");
+    EXPECT_NE(text.find("direct access"), std::string::npos);
+    EXPECT_NE(text.find(".ymh"), std::string::npos);
+}
+
 TEST(RuntimeGuardGuidance, ProtectedPathDenialTellsModelWhatToUse) {
     const std::string detail = ymh::denial_detail("permission:protected-path");
     EXPECT_NE(detail.find("protected path"), std::string::npos);

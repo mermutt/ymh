@@ -192,7 +192,8 @@ private:
                 path_is_under_tmp_root(tmp_root, checked);
             if (!temp &&
                 (!path_is_within(checked, context.root()) ||
-                 path_is_protected(context.root(), checked))) {
+                 path_is_protected(context.root(), checked,
+                                   context.execution().allow_ymh_access()))) {
                 throw ToolError{ToolErrorCode::PathEscape,
                                 "terminal cwd escapes workspace root"};
             }

@@ -32,9 +32,14 @@ std::string render_runtime_context(const RuntimeContextConfig& config, const std
     if (!config.delegation.empty()) {
         out += "- Delegation: " + config.delegation + "\n";
     }
-    out += "- Workspace internals: `.ymh/` is protected from shell/file tools; use "
-           "`ymh list`, `ymh show <id>`, `ymh replay <id>`, or `ymh doctor` for session "
-           "and daemon state.\n";
+    if (config.allow_ymh_access) {
+        out += "- Workspace internals: direct access to `.ymh/` is enabled for this invocation "
+               "(debug mode); inspect it normally. `.git/` remains protected.\n";
+    } else {
+        out += "- Workspace internals: `.ymh/` is protected from shell/file tools; use "
+               "`ymh list`, `ymh show <id>`, `ymh replay <id>`, or `ymh doctor` for session "
+               "and daemon state.\n";
+    }
     out += "- Date: " + date;
     return out;
 }

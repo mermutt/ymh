@@ -52,7 +52,7 @@ bool path_is_under_tmp_root(const std::filesystem::path& canonical_tmp_root,
 }
 
 bool path_is_protected(const std::filesystem::path& canonical_root,
-                       const std::filesystem::path& candidate) {
+                       const std::filesystem::path& candidate, bool allow_ymh) {
     const std::filesystem::path root = canonical_root.lexically_normal();
     const std::filesystem::path target = candidate.lexically_normal();
     if (!root.is_absolute() || !target.is_absolute()) {
@@ -68,7 +68,7 @@ bool path_is_protected(const std::filesystem::path& canonical_root,
             return false;
         }
         first = false;
-        if (component == ".ymh" || component == ".git") {
+        if (component == ".git" || (!allow_ymh && component == ".ymh")) {
             return true;
         }
     }

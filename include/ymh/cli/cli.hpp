@@ -48,6 +48,7 @@ struct CliInvocation {
     std::string log_level;
     std::string reasoning_effort;
     bool        verbose = false;
+    bool        allow_ymh_access = false;  // debug: unprotect <workspace>/.ymh
     bool        version_requested = false;
     bool        workspace_force = false;   // `workspace stop --force` (§4.6)
     bool        workspace_yes = false;     // `workspace reap --yes` (88-A1/DOC8)

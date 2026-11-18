@@ -1218,8 +1218,8 @@ bool has_glob(std::string_view text) {
     return text.find_first_of("*?") != std::string_view::npos;
 }
 
-bool component_is_protected(std::string_view component) {
-    if (component == ".ymh" || component == ".git") {
+bool component_is_protected(std::string_view component, bool allow_ymh = false) {
+    if (component == ".git" || (!allow_ymh && component == ".ymh")) {
         return true;
     }
     if (!has_glob(component)) {
@@ -1236,9 +1236,10 @@ bool component_is_protected(std::string_view component) {
     return glob_match(component, ".ymh") || glob_match(component, ".git");
 }
 
-bool path_components_protected(const std::filesystem::path& relative) {
+bool path_components_protected(const std::filesystem::path& relative,
+                               bool                         allow_ymh = false) {
     for (const std::filesystem::path& component : relative) {
-        if (component_is_protected(component.string())) {
+        if (component_is_protected(component.string(), allow_ymh)) {
             return true;
         }
     }
@@ -1277,7 +1278,7 @@ bool temp_redirect_target(const Token& token, const std::filesystem::path& root,
 
 bool candidate_is_protected(const std::filesystem::path& root,
                             const std::filesystem::path& cwd,
-                            std::string_view             text) {
+                            std::string_view             text, bool allow_ymh) {
     if (text.empty()) {
         return false;
     }
@@ -1292,7 +1293,7 @@ bool candidate_is_protected(const std::filesystem::path& root,
     if (relative.empty() || relative.is_absolute()) {
         return false;
     }
-    return path_components_protected(relative);
+    return path_components_protected(relative, allow_ymh);
 }
 
 int hex_value(char c) {
@@ -1636,14 +1637,14 @@ void note_scope(ScopeResult& result, ShellTargetScope scope) {
 }
 
 bool scan_token_protected(const std::string& token_text, const std::filesystem::path& root,
-                          const std::filesystem::path& cwd) {
-    if (candidate_is_protected(root, cwd, token_text)) {
+                          const std::filesystem::path& cwd, bool allow_ymh) {
+    if (candidate_is_protected(root, cwd, token_text, allow_ymh)) {
         return true;
     }
     std::string fragment;
     const auto flush = [&]() {
         if (!fragment.empty()) {
-            if (candidate_is_protected(root, cwd, fragment)) {
+            if (candidate_is_protected(root, cwd, fragment, allow_ymh)) {
                 return true;
             }
             fragment.clear();
@@ -1684,7 +1685,7 @@ struct GitScope {
 
 GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
                                  std::size_t e, const std::filesystem::path& root,
-                                 const std::filesystem::path& cwd);
+                                 const std::filesystem::path& cwd, bool allow_ymh = false);
 
 // ---------------------------------------------------------------------------
 // 113-D2: read-only `.git` access. An explicit `.git` target is protected
@@ -1775,7 +1776,7 @@ bool git_metadata_readable(std::string_view text, std::string_view executable,
 }
 
 bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem::path& root,
-                           const std::filesystem::path& cwd) {
+                           const std::filesystem::path& cwd, bool allow_ymh) {
     std::size_t i = 0;
     const std::size_t n = toks.size();
     while (i < n) {
@@ -1800,7 +1801,7 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem
         GitScope git_scope;
         const bool git_invocation = executable == "git";
         if (git_invocation) {
-            git_scope = classify_git_subcommand(toks, i, j, root, cwd);
+            git_scope = classify_git_subcommand(toks, i, j, root, cwd, allow_ymh);
         }
         bool skip_git_path_operand = false;
         for (std::size_t k = i; k < j; ++k) {
@@ -1814,7 +1815,7 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem
                     ++t;
                 }
                 if (t < j && toks[t].kind == TokKind::Word &&
-                    scan_token_protected(toks[t].text, root, cwd)) {
+                    scan_token_protected(toks[t].text, root, cwd, allow_ymh)) {
                     return true;
                 }
                 k = t;
@@ -1838,7 +1839,7 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const std::filesystem
                 git_metadata_readable(toks[k].text, executable, root, cwd)) {
                 continue;
             }
-            if (scan_token_protected(toks[k].text, root, cwd)) {
+            if (scan_token_protected(toks[k].text, root, cwd, allow_ymh)) {
                 return true;
             }
         }
@@ -1930,7 +1931,7 @@ bool git_read_only_invocation(std::string_view sub,
 
 GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
                                  std::size_t e, const std::filesystem::path& root,
-                                 const std::filesystem::path& cwd) {
+                                 const std::filesystem::path& cwd, bool allow_ymh) {
     GitScope out;
     std::filesystem::path git_cwd = cwd;
 
@@ -1946,7 +1947,7 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
             out.scope = ShellTargetScope::Outside;
             return false;
         }
-        if (path_components_protected(target.lexically_relative(root))) {
+        if (path_components_protected(target.lexically_relative(root), allow_ymh)) {
             out.hard_protected = true;
         }
         git_cwd = target;
@@ -2231,7 +2232,8 @@ GitScope classify_git_subcommand(const std::vector<Token>& toks, std::size_t cw,
 ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
                        const std::filesystem::path& cwd, bool kernel_confinement,
                        bool relaxed_sed = false,
-                       const std::filesystem::path& tmp_root = {});
+                       const std::filesystem::path& tmp_root = {},
+                       bool allow_ymh = false);
 
 
 // 100-D2..D4: a stdin-only `sed` whose script can only read the input stream
@@ -2488,7 +2490,8 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
                                    std::size_t e, const std::filesystem::path& root,
                                    std::filesystem::path& cur, bool cwd_known,
                                    bool kernel_confinement, bool relaxed_sed,
-                                   const std::filesystem::path& tmp_root) {
+                                   const std::filesystem::path& tmp_root,
+                                   bool allow_ymh = false) {
     ScopeResult result;
     if (b >= e) {
         return result;
@@ -2610,7 +2613,7 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
                     } else {
                         const ScopeResult inner =
                             scope_impl(toks[k + 1].text, root, cur, kernel_confinement,
-                                       relaxed_sed, tmp_root);
+                                       relaxed_sed, tmp_root, allow_ymh);
                         note_scope(result, inner.scope);
                         result.protected_target = result.protected_target || inner.protected_target;
                         result.metadata_write   = result.metadata_write || inner.metadata_write;
@@ -2623,7 +2626,7 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
     }
 
     if (executable == "git") {
-        const GitScope git = classify_git_subcommand(toks, cw, e, root, cur);
+        const GitScope git = classify_git_subcommand(toks, cw, e, root, cur, allow_ymh);
         if (git.scope.has_value()) {
             note_scope(result, *git.scope);
         }
@@ -2669,7 +2672,8 @@ ScopeResult classify_segment_scope(const std::vector<Token>& toks, std::size_t b
 
 ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
                        const std::filesystem::path& cwd, bool kernel_confinement,
-                       bool relaxed_sed, const std::filesystem::path& tmp_root) {
+                       bool relaxed_sed, const std::filesystem::path& tmp_root,
+                       bool allow_ymh) {
     ScopeResult result;
     if (text.empty()) {
         return result;
@@ -2692,7 +2696,7 @@ ScopeResult scope_impl(std::string_view text, const std::filesystem::path& root,
         }
         const ScopeResult segment =
             classify_segment_scope(s.tokens, i, j, root, cur, cwd_known,
-                                   kernel_confinement, relaxed_sed, tmp_root);
+                                   kernel_confinement, relaxed_sed, tmp_root, allow_ymh);
         note_scope(result, segment.scope);
         result.protected_target = result.protected_target || segment.protected_target;
         result.metadata_write   = result.metadata_write || segment.metadata_write;
@@ -3753,7 +3757,8 @@ std::optional<std::string> normalize_literal_loops(
 ShellClassification classify_shell_command_with_scope(
     std::string_view text, const std::filesystem::path& root,
     const std::filesystem::path& cwd, bool kernel_confinement,
-    const std::filesystem::path& canonical_tmp_root, bool relaxed_sed) {
+    const std::filesystem::path& canonical_tmp_root, bool relaxed_sed,
+    bool allow_ymh) {
     ShellClassification out;
     if (text.empty()) {
         out.scope = ShellTargetScope::NotApplicable;
@@ -3766,10 +3771,10 @@ ShellClassification classify_shell_command_with_scope(
                              canonical_tmp_root);
 
     const ScopeResult scope = scope_impl(analysis, root, effective, kernel_confinement,
-                                         relaxed_sed, canonical_tmp_root);
+                                         relaxed_sed, canonical_tmp_root, allow_ymh);
     bool protected_target = scope.protected_target;
     const Scan scanned = scan(analysis);
-    if (scan_protected_tokens(scanned.tokens, root, effective)) {
+    if (scan_protected_tokens(scanned.tokens, root, effective, allow_ymh)) {
         protected_target = true;
     }
     const TempInfo temp = temp_pass(analysis, root, effective, canonical_tmp_root);
@@ -3851,7 +3856,7 @@ std::string command_prefix(std::string_view text) {
 
 ShellClassification classify_shell_request(
     const PermissionRequest& request,
-    const std::filesystem::path& canonical_tmp_root) {
+    const std::filesystem::path& canonical_tmp_root, bool allow_ymh) {
     ShellClassification out;
     if (request.tool != "shell" && request.tool != "terminal") {
         out.scope = ShellTargetScope::NotApplicable;
@@ -3895,7 +3900,7 @@ ShellClassification classify_shell_request(
                     cwd_outside = true;
                 } else {
                     const std::filesystem::path relative = effective.lexically_relative(root);
-                    cwd_protected = path_components_protected(relative);
+                    cwd_protected = path_components_protected(relative, allow_ymh);
                 }
             }
         }
@@ -3905,10 +3910,11 @@ ShellClassification classify_shell_request(
                                  canonical_tmp_root);
         const ScopeResult scope = scope_impl(analysis, root, effective,
                                              request.kernel_confinement,
-                                             request.tool == "shell", canonical_tmp_root);
+                                             request.tool == "shell", canonical_tmp_root,
+                                             allow_ymh);
         bool protected_target = scope.protected_target || cwd_protected;
         const Scan scanned = scan(analysis);
-        if (scan_protected_tokens(scanned.tokens, root, effective)) {
+        if (scan_protected_tokens(scanned.tokens, root, effective, allow_ymh)) {
             protected_target = true;
         }
         const TempInfo temp = temp_pass(analysis, root, effective, canonical_tmp_root);
@@ -3944,7 +3950,7 @@ ShellClassification classify_shell_request(
     out = classify_shell_command_with_scope(text.text, root, default_cwd,
                                             request.kernel_confinement,
                                             canonical_tmp_root,
-                                            request.tool == "shell");
+                                            request.tool == "shell", allow_ymh);
     if (terminal_write) {
         out.scope = ShellTargetScope::Unknown;
         out.tmp_exempt = out.tmp_exempt && out.neutral_reads.empty();

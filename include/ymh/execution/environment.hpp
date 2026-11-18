@@ -55,6 +55,10 @@ public:
     // 46-D8: the tunable bounds the tools/execution layer consumes, exposed so
     // the agent loop can derive the per-tool-run deadline.
     [[nodiscard]] virtual const ToolConfig& toolConfig() const noexcept = 0;
+
+    // Debug `--allow-ymh-access`; default false keeps third-party/test
+    // environments protected.
+    [[nodiscard]] virtual bool allow_ymh_access() const noexcept { return false; }
 };
 
 class LocalEnvironment final : public ExecutionEnvironment {
@@ -93,6 +97,9 @@ public:
 
     [[nodiscard]] const ToolConfig& toolConfig() const noexcept override {
         return config_;
+    }
+    [[nodiscard]] bool allow_ymh_access() const noexcept override {
+        return config_.allow_ymh_access;
     }
 
 private:

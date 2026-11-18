@@ -36,6 +36,7 @@ struct HeadlessOptions {
     std::optional<std::string> agent_preset;  // 52-D15: pins the session preset
     Config                config;
     bool                  verbose = false;  // echo reasoning deltas to stderr
+    bool                  allow_ymh_access = false;
 
     std::ostream* out = nullptr;  // default: std::cout
     std::ostream* err = nullptr;  // default: std::cerr

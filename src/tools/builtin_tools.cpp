@@ -51,7 +51,8 @@ std::filesystem::path safety_path(const std::filesystem::path& path) {
 
 void reject_protected_path(const ToolContext& context,
                            const std::filesystem::path& path) {
-    if (path_is_protected(context.root(), safety_path(path))) {
+    if (path_is_protected(context.root(), safety_path(path),
+                          context.execution().allow_ymh_access())) {
         throw ToolError{ToolErrorCode::PathEscape, "protected path"};
     }
 }

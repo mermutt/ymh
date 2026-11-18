@@ -18,9 +18,9 @@ CriticalPathResult critical_path(const PermissionRequest& request) {
         // matches the workspace-write sandbox's writable tmp. The tmp root
         // itself and `..` escapes are not "under" it, so `rm -rf /tmp` and
         // `rm -rf /tmp/../home/...` stay critical.
-        const ShellClassification strict = classify_shell_request(request);
+        const ShellClassification strict = classify_shell_request(request, {}, request.allow_ymh_access);
         const ShellClassification relaxed =
-            classify_shell_request(request, canonical_tmp_root());
+            classify_shell_request(request, canonical_tmp_root(), request.allow_ymh_access);
         const bool outside_or_unresolved =
             strict.risk == ShellCommandRisk::Forbid &&
             relaxed.risk == ShellCommandRisk::Forbid;

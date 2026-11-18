@@ -6,6 +6,7 @@ add_executable(ymh_file_store_tests
     session_file_store_test.cpp
     registry_liveness_test.cpp
     runtime_guard_test.cpp
+    ymh_access_test.cpp
 )
 
 target_include_directories(ymh_file_store_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -16,6 +17,8 @@ target_link_libraries(ymh_file_store_tests
         ymh::session
         ymh::registry
         ymh::prompt
+        ymh::policy
+        ymh::execution
         ymh::core
         SQLite3::SQLite3
 )
