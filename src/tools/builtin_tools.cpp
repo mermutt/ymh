@@ -742,7 +742,8 @@ public:
         return ToolSchema{
             ToolName{"read_file"},
             ToolVersion{1, 0},
-            "Read a UTF-8 text file under the workspace root and return its content. Use offset "
+            "Read a UTF-8 text file under the workspace root or the /tmp scratch area and return "
+            "its content. Use offset "
             "(1-based) and limit to page through large files; output may be truncated. Read a "
             "file before editing it.",
             object_schema(nlohmann::json{{"path", string_type()},
@@ -790,7 +791,8 @@ public:
         return ToolSchema{
             ToolName{"write_file"},
             ToolVersion{1, 0},
-            "Create or fully replace a UTF-8 text file under the workspace root. The content is "
+            "Create or fully replace a UTF-8 text file under the workspace root or the /tmp "
+            "scratch area. The content is "
             "written verbatim, overwriting any existing file; use edit_file for targeted changes "
             "to an existing file.",
             object_schema(nlohmann::json{{"path", string_type()},
@@ -829,7 +831,8 @@ public:
         return ToolSchema{
             ToolName{"edit_file"},
             ToolVersion{1, 0},
-            "Replace a literal string in an existing UTF-8 text file under the workspace root. "
+            "Replace a literal string in an existing UTF-8 text file under the workspace root or "
+            "the /tmp scratch area. "
             "old_string must match exactly; unless replace_all is true it must appear exactly "
             "once, so include enough surrounding text to be unique. If it is absent, a whole-line "
             "block that differs only in trailing whitespace or CRLF is matched as a fallback. "
@@ -943,7 +946,8 @@ public:
         return ToolSchema{
             ToolName{"multi_edit"},
             ToolVersion{1, 0},
-            "Apply several literal replacements to one existing UTF-8 text file in one atomic "
+            "Apply several literal replacements to one existing UTF-8 text file under the "
+            "workspace root or /tmp in one atomic "
             "call; all edits are validated before any write, and each edit sees the result of "
             "the earlier ones. Use edit_file for one replacement; the result includes a diff.",
             object_schema(
@@ -1053,7 +1057,8 @@ public:
         return ToolSchema{
             ToolName{"apply_patch"},
             ToolVersion{1, 0},
-            "Apply a small, single-file, multi-hunk patch located by exact context. Use for "
+            "Apply a small, single-file, multi-hunk patch under the workspace root or /tmp, "
+            "located by exact context. Use for "
             "structural changes that would otherwise require reproducing a large old_string. "
             "Each hunk starts with a line beginning with @@ (its numbers are ignored); body "
             "lines start with ' ' (context), '-' (removed) or '+' (added), and the old block "

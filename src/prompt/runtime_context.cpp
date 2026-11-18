@@ -32,6 +32,10 @@ std::string render_runtime_context(const RuntimeContextConfig& config, const std
     if (!config.delegation.empty()) {
         out += "- Delegation: " + config.delegation + "\n";
     }
+    if (config.sandbox == "workspace" || config.sandbox == "unrestricted") {
+        out += "- Scratch space: `/tmp` is writable by shell and file tools; use an absolute "
+               "`/tmp/...` path for temporary files.\n";
+    }
     if (config.allow_ymh_access) {
         out += "- Workspace internals: direct access to `.ymh/` is enabled for this invocation "
                "(debug mode); inspect it normally. `.git/` remains protected.\n";

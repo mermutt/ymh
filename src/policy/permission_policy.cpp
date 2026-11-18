@@ -271,6 +271,23 @@ bool tool_is_mutating(const PermissionRequest& request, bool read_only_shell) no
     return false;
 }
 
+// A path-tool target under the canonical /tmp scratch area. Lexical only:
+// `LocalEnvironment::resolve` canonicalizes the parent/final path and rejects
+// symlink escapes, so this decides whether the request needs a prompt, not
+// whether it is physically safe.
+bool request_targets_tmp(const PermissionRequest& request,
+                         const std::filesystem::path& tmp_root) {
+    if (tmp_root.empty() || request.root.empty() || !request.path.has_value() ||
+        !tool_has_path_dimension(request.tool)) {
+        return false;
+    }
+    const std::filesystem::path root = request.root.lexically_normal();
+    if (root == tmp_root || path_is_under_tmp_root(tmp_root, root)) {
+        return false;
+    }
+    return path_is_under_tmp_root(tmp_root, *request.path);
+}
+
 void validate_glob(const std::string& pattern) {
     std::size_t open = 0;
     for (char c : pattern) {
@@ -557,6 +574,16 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
             }
             return PolicyVerdict::Ask;
         }
+        return PolicyVerdict::Allow;
+    }
+    // Workspace-write exposes /tmp as scratch: a mutating path tool (write_file,
+    // edit_file, ...) there does not need an approval, and an out-of-root path
+    // could not create a session/durable grant anyway. Explicit denies above
+    // still win; reads stay under the normal read policy. The execution layer
+    // canonicalizes the path and rejects symlink escapes.
+    if (request.sandbox != SandboxMode::ReadOnly &&
+        tool_is_mutating(request, read_only_shell_) &&
+        request_targets_tmp(request, tmp_root_)) {
         return PolicyVerdict::Allow;
     }
     return PolicyVerdict::Ask;

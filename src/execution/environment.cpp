@@ -65,7 +65,18 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
         throw std::invalid_argument("workspace root cannot be canonicalized: " +
                                     root_.string());
     }
-    fs_ = LocalFilesystem(root_, config);
+    std::vector<std::filesystem::path> allowed_roots;
+    if (mode_ == SandboxMode::WorkspaceWrite) {
+        // 119-D7: the workspace-write shell sandbox exposes the host /tmp as
+        // its scratch area. File tools use the same area so a helper written
+        // by `write_file` is readable by `read_file`/`edit_file` without a
+        // second root.
+        const std::filesystem::path& temp = canonical_tmp_root();
+        if (!temp.empty() && temp != root_) {
+            allowed_roots.push_back(temp);
+        }
+    }
+    fs_ = LocalFilesystem(root_, config_, std::move(allowed_roots));
     policy_service_ = make_deployment_policy_service(mode_, writable_roots_);
 }
 
@@ -87,10 +98,47 @@ std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
         return candidate.lexically_normal();
     }
 
-    const std::filesystem::path parent = weakly(candidate.parent_path());
-    if (!path_is_within(parent, base)) {
+    // Workspace-write also exposes the host /tmp scratch area (the same area
+    // the shell sandbox grants). Read-only keeps the historical root scope.
+    const std::filesystem::path temp =
+        mode_ == SandboxMode::WorkspaceWrite ? canonical_tmp_root()
+                                             : std::filesystem::path{};
+    const std::filesystem::path tmp_literal{"/tmp"};
+
+    enum class RootKind { None, Workspace, Temp };
+    const auto lexical_kind = [&](const std::filesystem::path& value) {
+        if (component_prefix(base, value)) {
+            return RootKind::Workspace;
+        }
+        if (component_prefix(tmp_literal, value)) {
+            return RootKind::Temp;
+        }
+        return RootKind::None;
+    };
+    const auto canonical_kind = [&](const std::filesystem::path& value) {
+        const std::filesystem::path canonical = weakly(value);
+        if (component_prefix(base, canonical)) {
+            return RootKind::Workspace;
+        }
+        if (!temp.empty() && component_prefix(temp, canonical)) {
+            return RootKind::Temp;
+        }
+        return RootKind::None;
+    };
+
+    const std::filesystem::path normalized = candidate.lexically_normal();
+    const RootKind            lexical_root = lexical_kind(normalized);
+    if (lexical_root == RootKind::None) {
         throw ToolError{ToolErrorCode::PathEscape,
-                        "path escapes workspace root: " + raw.string()};
+                        "path escapes the workspace root or /tmp scratch area: " +
+                            raw.string()};
+    }
+
+    const std::filesystem::path parent = weakly(candidate.parent_path());
+    if (canonical_kind(parent) != lexical_root) {
+        throw ToolError{ToolErrorCode::PathEscape,
+                        "path escapes the workspace root or /tmp scratch area: " +
+                            raw.string()};
     }
 
     std::filesystem::path final = parent / candidate.filename();
@@ -101,9 +149,10 @@ std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
             final = std::move(canonical);
         }
     }
-    if (!path_is_within(final, base)) {
+    if (canonical_kind(final) != lexical_root) {
         throw ToolError{ToolErrorCode::PathEscape,
-                        "path escapes workspace root: " + raw.string()};
+                        "path escapes the workspace root or /tmp scratch area: " +
+                            raw.string()};
     }
     return final;
 }

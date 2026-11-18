@@ -70,7 +70,12 @@ public:
 
 class LocalFilesystem final : public Filesystem {
 public:
-    LocalFilesystem(std::filesystem::path root, ToolConfig config);
+    // `allowed_roots` are extra absolute roots this service may touch in
+    // addition to the workspace root. `LocalEnvironment` passes the canonical
+    // `/tmp` scratch area in workspace-write mode; a direct construction keeps
+    // the historical workspace-only scope.
+    LocalFilesystem(std::filesystem::path root, ToolConfig config,
+                    std::vector<std::filesystem::path> allowed_roots = {});
 
     Task<FileData> read(const std::filesystem::path& path) override;
     Task<void>     write(const std::filesystem::path& path, const Data& data) override;
@@ -82,10 +87,12 @@ public:
     [[nodiscard]] const std::filesystem::path& root() const noexcept { return root_; }
 
 private:
-    void require_contained(const std::filesystem::path& path) const;
+    void require_contained(const std::filesystem::path& path,
+                           bool allow_extra_roots = true) const;
 
-    std::filesystem::path root_;
-    ToolConfig            config_;
+    std::filesystem::path              root_;
+    ToolConfig                         config_;
+    std::vector<std::filesystem::path> allowed_roots_;
 };
 
 } // namespace ymh

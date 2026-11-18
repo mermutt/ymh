@@ -35,11 +35,22 @@ namespace {
 
 } // namespace
 
-LocalFilesystem::LocalFilesystem(std::filesystem::path root, ToolConfig config)
-    : root_(std::move(root)), config_(config) {}
+LocalFilesystem::LocalFilesystem(std::filesystem::path root, ToolConfig config,
+                                 std::vector<std::filesystem::path> allowed_roots)
+    : root_(std::move(root)), config_(config), allowed_roots_(std::move(allowed_roots)) {}
 
-void LocalFilesystem::require_contained(const std::filesystem::path& path) const {
-    if (!path_is_within(path, root_)) {
+void LocalFilesystem::require_contained(const std::filesystem::path& path,
+                                        bool allow_extra_roots) const {
+    bool contained = path_is_within(path, root_);
+    if (!contained && allow_extra_roots) {
+        for (const std::filesystem::path& extra : allowed_roots_) {
+            if (path_is_within(path, extra)) {
+                contained = true;
+                break;
+            }
+        }
+    }
+    if (!contained) {
         throw ToolError{ToolErrorCode::PathEscape,
                         "path escapes workspace root: " + path.string()};
     }
@@ -168,7 +179,7 @@ Task<FileInfo> LocalFilesystem::stat(const std::filesystem::path& path) {
 }
 
 Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& query) {
-    require_contained(query.base);
+    require_contained(query.base, /*allow_extra_roots=*/false);
     // 90-A13/90-D14: canonical, independent of `resolve()`.
     {
         std::error_code canonical_ec;
@@ -227,7 +238,7 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
 }
 
 Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
-    require_contained(query.base);
+    require_contained(query.base, /*allow_extra_roots=*/false);
     // 90-A13/90-D14: canonical base check, independent of `resolve()`.
     {
         std::error_code canonical_ec;

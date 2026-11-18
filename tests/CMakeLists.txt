@@ -8,6 +8,7 @@ add_executable(ymh_file_store_tests
     runtime_guard_test.cpp
     ymh_access_test.cpp
     skills_test.cpp
+    tmp_access_test.cpp
 )
 
 target_include_directories(ymh_file_store_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
