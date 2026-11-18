@@ -51,6 +51,9 @@ std::optional<LLMError> parse_error(const nlohmann::json& node) {
         error.code = LLMErrorCode::ProviderInternal;
     }
     error.detail = node.value("detail", std::string{});
+    error.provider_message = node.value("provider_message", std::string{});
+    error.http_status = node.value("http_status", 0);
+    error.retryable = node.value("retryable", error.retryable);
     return error;
 }
 

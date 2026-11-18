@@ -160,6 +160,65 @@ bool contains_tool_id(const std::vector<ToolCallId>& pending, const ToolCallId& 
     return std::find(pending.begin(), pending.end(), id) != pending.end();
 }
 
+// Final projection invariant: each assistant `tool_use` has exactly one tool
+// message, placed immediately after the assistant message, and no tool message
+// answers a call that was compacted away. A log cut by a reboot can contain
+// either half; this repairs both without touching the durable events.
+void repair_tool_pairs(std::vector<Message>& messages, std::vector<Sequence>& origins,
+                       Sequence origin) {
+    std::vector<ToolCallId> open;
+    std::vector<Message>    repaired;
+    std::vector<Sequence>   repaired_origins;
+    repaired.reserve(messages.size());
+    repaired_origins.reserve(origins.size());
+
+    for (std::size_t index = 0; index < messages.size(); ++index) {
+        Message& message = messages[index];
+        if (message.role == Role::Tool) {
+            if (message.tool_call_id.empty() ||
+                !contains_tool_id(open, message.tool_call_id)) {
+                continue;  // orphan: its assistant call is not in the projection
+            }
+            erase_tool_id(open, message.tool_call_id);
+            repaired.push_back(std::move(message));
+            repaired_origins.push_back(origins[index]);
+            continue;
+        }
+
+        std::vector<ToolCallId> calls;
+        if (message.role == Role::Assistant) {
+            for (const ContentBlock& block : message.content) {
+                if (block.kind == ContentBlockKind::ToolUse && !block.tool_call_id.empty()) {
+                    calls.push_back(block.tool_call_id);
+                }
+            }
+        }
+
+        repaired.push_back(std::move(message));
+        repaired_origins.push_back(origins[index]);
+
+        for (const ToolCallId& id : calls) {
+            open.push_back(id);
+            bool answered = false;
+            for (std::size_t later = index + 1; later < messages.size(); ++later) {
+                if (messages[later].role == Role::Tool &&
+                    messages[later].tool_call_id == id) {
+                    answered = true;
+                    break;
+                }
+            }
+            if (!answered) {
+                repaired.push_back(make_synthetic_tool_message(id, payload::ToolOutcome::Error));
+                repaired_origins.push_back(origin);
+                erase_tool_id(open, id);
+            }
+        }
+    }
+
+    messages = std::move(repaired);
+    origins  = std::move(repaired_origins);
+}
+
 } // namespace
 
 std::string_view session_kind_name(SessionKind kind) noexcept {
@@ -400,13 +459,27 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
     std::vector<Message> messages;
     std::vector<Sequence> origins;
     std::vector<ToolCallId> pending;
+    Sequence last_seq = 0;
 
     auto push = [&](Message message, Sequence origin) {
         messages.push_back(std::move(message));
         origins.push_back(origin);
     };
 
+    // An assistant tool call must always be followed by a tool message. A turn
+    // cut short by a reboot, a killed daemon, or a stream failure has no
+    // turn/end|fail|cancel event, so close the call at every projection
+    // boundary as well as at the end of the log. A late real result replaces
+    // the synthetic message in place (the same-id loop below).
+    auto flush_pending = [&](payload::ToolOutcome outcome) {
+        for (const ToolCallId& id : pending) {
+            push(make_synthetic_tool_message(id, outcome), last_seq);
+        }
+        pending.clear();
+    };
+
     for (const EventRecord& record : events) {
+        last_seq = record.seq;
         const Event& event = record.event;
         switch (event.type) {
             case EventType::SessionStarted:
@@ -427,37 +500,26 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::ContextPrune:
                 break;
             case EventType::TurnStarted: {
-                const auto& value = event.payload.get<payload::TurnStarted>();
-                (void)value;
-                pending.clear();
+                flush_pending(payload::ToolOutcome::Error);
                 break;
             }
             case EventType::StepStarted:
             case EventType::StepEnded:
+                flush_pending(payload::ToolOutcome::Error);
                 break;
             case EventType::TurnEnded:
-                pending.clear();
+                flush_pending(payload::ToolOutcome::Error);
                 break;
             case EventType::TurnCancelled: {
-                const auto& value = event.payload.get<payload::TurnCancelled>();
-                (void)value;
-                for (const ToolCallId& id : pending) {
-                    push(make_synthetic_tool_message(id, payload::ToolOutcome::Cancelled),
-                         record.seq);
-                }
-                pending.clear();
+                flush_pending(payload::ToolOutcome::Cancelled);
                 break;
             }
             case EventType::TurnFailed: {
-                const auto& value = event.payload.get<payload::TurnFailed>();
-                (void)value;
-                for (const ToolCallId& id : pending) {
-                    push(make_synthetic_tool_message(id, payload::ToolOutcome::Error), record.seq);
-                }
-                pending.clear();
+                flush_pending(payload::ToolOutcome::Error);
                 break;
             }
             case EventType::UserMessage: {
+                flush_pending(payload::ToolOutcome::Error);
                 const auto& value = event.payload.get<payload::UserMessage>();
                 Message message;
                 message.role    = Role::User;
@@ -471,6 +533,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::AssistantAttempt:
                 break;
             case EventType::AssistantMessage: {
+                flush_pending(payload::ToolOutcome::Error);
                 const auto& value = event.payload.get<payload::AssistantMessage>();
                 Message message;
                 message.role    = Role::Assistant;
@@ -527,6 +590,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
             case EventType::PermissionDecision:
                 break;
             case EventType::ContextInjected: {
+                flush_pending(payload::ToolOutcome::Error);
                 const auto& value = event.payload.get<payload::ContextInjected>();
                 Message message = make_text_message(value.role, value.text);
                 message.source  = value.source;
@@ -548,6 +612,23 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 origins  = std::move(keptOrigins);
                 messages.insert(messages.begin(), make_text_message(Role::System, value.summary));
                 origins.insert(origins.begin(), record.seq);
+                // Rebuild the dangling set from what survived the boundary; a
+                // tool call dropped by the compaction must not get an orphan
+                // synthetic result later.
+                pending.clear();
+                for (const Message& message : messages) {
+                    if (message.role == Role::Assistant) {
+                        for (const ContentBlock& block : message.content) {
+                            if (block.kind == ContentBlockKind::ToolUse &&
+                                !block.tool_call_id.empty() &&
+                                !contains_tool_id(pending, block.tool_call_id)) {
+                                pending.push_back(block.tool_call_id);
+                            }
+                        }
+                    } else if (message.role == Role::Tool && !message.tool_call_id.empty()) {
+                        erase_tool_id(pending, message.tool_call_id);
+                    }
+                }
                 break;
             }
             case EventType::TokenUsage:
@@ -557,6 +638,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
         }
     }
 
+    repair_tool_pairs(messages, origins, last_seq);
     return messages;
 }
 

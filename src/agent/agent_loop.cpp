@@ -610,6 +610,19 @@ void AgentLoop::materializeInstructions() {
     if (!message.has_value()) {
         return;
     }
+    // A resumed worker starts with a fresh `instructions_loaded_` flag but the
+    // same durable session. Never append a second identical instructions
+    // prefix; only a changed render is a new context message.
+    const EventRange events = session_.events();
+    for (auto record = events.rbegin(); record != events.rend(); ++record) {
+        if (record->event.type != EventType::ContextInjected) {
+            continue;
+        }
+        const auto& injected = record->event.payload.get<payload::ContextInjected>();
+        if (injected.context.form == ContextForm::Instructions && injected.text == *message) {
+            return;
+        }
+    }
     ContextMessage context;
     context.role    = Role::User;
     context.text    = *message;
@@ -1576,9 +1589,18 @@ void AgentLoop::runTurn() {
             return;
         }
         if (response.outcome == StreamOutcome::Failed) {
-            const std::string detail = response.error.detail.empty()
-                                           ? response.error.provider_message
-                                           : response.error.detail;
+            std::string detail;
+            if (!response.error.provider_message.empty()) {
+                detail = response.error.provider_message;
+                if (response.error.http_status > 0) {
+                    detail = "HTTP " + std::to_string(response.error.http_status) + ": " + detail;
+                }
+            } else {
+                detail = response.error.detail;
+            }
+            if (detail.empty()) {
+                detail = "provider request failed";
+            }
             appendTurnFailed(turn, mapAgentError(response.error.code), detail);
             return;
         }
