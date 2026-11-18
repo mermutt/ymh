@@ -124,6 +124,16 @@ void exec_sql(sqlite3* db, const char* sql) {
     }
 }
 
+// Best-effort variant for pragmas whose failure must not make the registry
+// unavailable (notably the WAL -> DELETE conversion while another process or
+// host still has the database open).
+bool try_exec_sql(sqlite3* db, const char* sql) noexcept {
+    char*     message = nullptr;
+    const int rc      = sqlite3_exec(db, sql, nullptr, nullptr, &message);
+    sqlite3_free(message);
+    return rc == SQLITE_OK;
+}
+
 class Statement {
 public:
     Statement(sqlite3* db, const char* sql) : db_(db) {
@@ -234,7 +244,16 @@ void apply_pragmas(sqlite3* db, const RegistryConfig& config, bool writable) {
     // Read-only opens never change the journal mode.
     exec_sql(db, "PRAGMA synchronous = FULL");
     if (writable) {
-        exec_sql(db, "PRAGMA journal_mode = DELETE");
+        // Changing out of WAL needs an exclusive lock. Another ymh process or
+        // another server on a shared home may legitimately hold the database
+        // open, so this must be a bounded best-effort migration: if it cannot
+        // run, keep the existing journal mode and let startup continue.
+        const int previous_timeout = sqlite3_busy_timeout(db, 500);
+        (void)try_exec_sql(db, "PRAGMA journal_mode = DELETE");
+        sqlite3_busy_timeout(db,
+                             previous_timeout > 0
+                                 ? previous_timeout
+                                 : static_cast<int>(config.busy_timeout.count()));
     }
 }
 

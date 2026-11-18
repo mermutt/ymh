@@ -8,7 +8,10 @@
 
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
+
+#include <sqlite3.h>
 
 #include "test_support.hpp"
 
@@ -74,6 +77,41 @@ TEST(RegistryLiveness, LocalSocketIsLiveRemoteLockIsRemoteAndFreeIsStale) {
     EXPECT_EQ(registry->probeLiveness(record.id), HostLiveness::Stale);
     EXPECT_TRUE(registry->reapHost(record.id));
     EXPECT_EQ(registry->probeLiveness(record.id), HostLiveness::Absent);
+}
+
+
+TEST(RegistryOpen, SucceedsWhenJournalModeSwitchIsLocked) {
+    TempWorkspace workspace;
+    std::filesystem::create_directories(workspace.root / "empty-scan");
+
+    RegistryConfig config;
+    config.db_path         = workspace.root / "state" / "registry.db";
+    config.lock_path       = workspace.root / "state" / "registry.lock";
+    config.workspace_roots = {workspace.root / "empty-scan"};
+    config.busy_timeout    = std::chrono::milliseconds{50};
+
+    {
+        auto registry = WorkspaceRegistry::open(config);
+        (void)registry;
+    }
+
+    sqlite3* wal = nullptr;
+    ASSERT_EQ(sqlite3_open(config.db_path.c_str(), &wal), SQLITE_OK);
+    auto exec = [&](const char* sql) {
+        char* message = nullptr;
+        const int rc = sqlite3_exec(wal, sql, nullptr, nullptr, &message);
+        const std::string detail = message != nullptr ? message : "";
+        sqlite3_free(message);
+        ASSERT_EQ(rc, SQLITE_OK) << detail;
+    };
+    exec("PRAGMA journal_mode = WAL;");
+    exec("BEGIN; SELECT count(*) FROM registry_meta;");
+
+    std::unique_ptr<WorkspaceRegistry> reopened;
+    EXPECT_NO_THROW(reopened = WorkspaceRegistry::open(config));
+
+    exec("ROLLBACK;");
+    sqlite3_close(wal);
 }
 
 } // namespace
