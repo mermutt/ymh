@@ -932,6 +932,9 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
     request.arguments = call.arguments;
     if (services_.execution != nullptr) {
         request.root = services_.execution->root();
+        // Multi-root: snapshot every allowed root (primary first) so policy,
+        // shell classification, and the dialog all see the same set.
+        request.roots = services_.execution->roots();
     }
     request.allow_ymh_access = services_.allow_ymh_access;
     // 90-D2: populate the path dimension from the tool arguments. This is a
@@ -1097,6 +1100,21 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         escalation_.used = true;
         carried          = services_.execution->sandboxPolicy().resolve(request);
         request.sandbox  = carried->mode;
+    }
+    // Multi-root: a "Directory" answer registers an additional workspace root in
+    // this spawn's environment after the policy decision was already taken.
+    // Refresh the snapshot and, for shell/terminal, re-resolve the sandbox mode
+    // so the current spawn sees the new root. Skipped after an escalation grant
+    // (re-resolving would consume its single-use grant).
+    const bool escalation_granted =
+        escalation_request.has_value() && decision != payload::PermissionDecisionKind::Deny;
+    if (decision != payload::PermissionDecisionKind::Deny && !escalation_granted &&
+        services_.execution != nullptr) {
+        request.roots = services_.execution->roots();
+        if (shell_tool) {
+            carried         = services_.execution->sandboxPolicy().resolve(request);
+            request.sandbox = carried->mode;
+        }
     }
     if (decision == payload::PermissionDecisionKind::Deny && shell_tool) {
         const auto command_it = request.arguments.find("command");

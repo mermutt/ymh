@@ -14,6 +14,7 @@
 #include "ymh/execution/deadline.hpp"
 #include "ymh/execution/path_safety.hpp"
 #include "ymh/execution/pty.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 #include "ymh/tools/tool_context.hpp"
 
 namespace ymh {
@@ -191,9 +192,9 @@ private:
                 !workspace_under_tmp && !tmp_root.empty() &&
                 path_is_under_tmp_root(tmp_root, checked);
             if (!temp &&
-                (!path_is_within(checked, context.root()) ||
-                 path_is_protected(context.root(), checked,
-                                   context.execution().allow_ymh_access()))) {
+                (!context.execution().within_roots(checked) ||
+                 path_is_protected_in_roots(context.execution().roots(), checked,
+                                            context.execution().allow_ymh_access()))) {
                 throw ToolError{ToolErrorCode::PathEscape,
                                 "terminal cwd escapes workspace root"};
             }

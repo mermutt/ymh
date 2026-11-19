@@ -53,8 +53,10 @@ enum class PolicyVerdict : std::uint8_t {
     Deny,
 };
 
-// Mirrors protocol::PermissionScope (05 §7.6) 1:1.
-enum class GrantScope : std::uint8_t { Once, Session, Always };
+// Mirrors protocol::PermissionScope (05 §7.6) 1:1. `Directory` is the
+// multi-root answer: add the request's candidate directory as an additional
+// workspace root instead of remembering a tool/command grant.
+enum class GrantScope : std::uint8_t { Once, Session, Always, Directory };
 
 struct PermissionRequest {
     ToolCallId             call;
@@ -69,6 +71,10 @@ struct PermissionRequest {
     // workspace root and, when the tool targets a path, the absolute,
     // lexically-normalized target (90-A5; no resolve/stat/realpath).
     std::filesystem::path  root;          // canonical (07 X3)
+    // Additional approved roots, primary first (empty => {root}). Treated
+    // exactly like `root` for target classification, path-rule matching, and
+    // protected-path checks.
+    std::vector<std::filesystem::path> roots;
     std::optional<std::filesystem::path> path;   // absolute, lexically normal
 
     SandboxMode            sandbox = SandboxMode::WorkspaceWrite;
@@ -126,6 +132,13 @@ struct PolicyRule {
     // word of a simple shell command.
     TargetClass   target_class = TargetClass::Any;
     bool          prefix = false;
+
+    // Multi-root anchoring: a `remember()`-derived grant records the canonical
+    // root it was approved under, so a tool-wide in-root grant cannot silently
+    // extend to a directory approved later. Empty means "any root" (config
+    // rules, legacy grants). Only path-tool grants are anchored; command-exact
+    // shell grants keep the historical any-root semantics.
+    std::string   root;
 };
 
 // 46-D1 / 90-D3: exported so the config parser can validate a rule (F-10).
@@ -152,6 +165,12 @@ public:
     // Atomic (temp+fsync+rename) flock(LOCK_EX)-guarded read-modify-write;
     // returns false on failure.
     virtual bool append(const PolicyRule& grant) = 0;
+
+    // Multi-root persistence in the same document. Defaults keep stores that
+    // predate additional roots source-compatible; they simply never persist
+    // roots. `append_root` must preserve loaded grants.
+    virtual std::vector<std::filesystem::path> load_roots() { return {}; }
+    virtual bool append_root(const std::filesystem::path&) { return false; }
 };
 
 // 46-D2.2: opens `<workspace>/.ymh/permissions.jsonc`. `expected_workspace_id`

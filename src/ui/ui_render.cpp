@@ -1175,14 +1175,18 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
             rows.push_back(row);
         }
     } else {
-        const std::string options[] = {
+        std::vector<std::string> options = {
             "Allow once",
             "Allow for session",
             always_label(dialog.tool),
-            "Deny",
         };
-        for (int index = 0; index < 4; ++index) {
-            Element row = ftxui::text(options[index]);
+        const bool offer_add_root = dialog.add_root.has_value();
+        if (offer_add_root) {
+            options.push_back("Allow and add directory: " + *dialog.add_root);
+        }
+        options.push_back("Deny");
+        for (int index = 0; index < static_cast<int>(options.size()); ++index) {
+            Element row = ftxui::text(options[static_cast<std::size_t>(index)]);
             if (index == dialog.selected) {
                 row = row | ftxui::inverted;
             }
@@ -1191,8 +1195,11 @@ Element render_dialog(const UiModel& model, const Theme& theme) {
     }
     rows.push_back(ftxui::text("↑/↓ select · Enter confirm · Esc cancel") | ftxui::dim);
     rows.push_back(
-        ftxui::text(dialog.force_ask ? "[O] allow once | [D] deny"
-                                     : "[A] always | [O] once | [S] session | [D] deny") |
+        ftxui::text(dialog.force_ask
+                        ? "[O] allow once | [D] deny"
+                        : (dialog.add_root.has_value()
+                               ? "[A] always | [O] once | [S] session | [R] add dir | [D] deny"
+                               : "[A] always | [O] once | [S] session | [D] deny")) |
         ftxui::dim);
     (void)theme;
     return ftxui::window(ftxui::text("permission"), ftxui::vbox(std::move(rows))) |

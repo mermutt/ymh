@@ -250,6 +250,8 @@ protocol::PermissionScope wire_scope(GrantScope scope) {
             return protocol::PermissionScope::Session;
         case GrantScope::Always:
             return protocol::PermissionScope::Always;
+        case GrantScope::Directory:
+            return protocol::PermissionScope::Directory;
     }
     return protocol::PermissionScope::Once;
 }
@@ -3892,7 +3894,9 @@ private:
             resolve_dialog(payload::PermissionDecisionKind::Deny, GrantScope::Once);
             return true;
         }
-        const int option_count = model_.dialog.force_ask ? 2 : 4;
+        const bool offer_add_root =
+            !model_.dialog.force_ask && model_.dialog.add_root.has_value();
+        const int option_count = model_.dialog.force_ask ? 2 : (offer_add_root ? 5 : 4);
         if (event == ftxui::Event::ArrowUp) {
             model_.dialog.selected =
                 (model_.dialog.selected + option_count - 1) % option_count;
@@ -3920,6 +3924,14 @@ private:
                     break;
                 case 2:
                     resolve_dialog(payload::PermissionDecisionKind::AllowAlways, GrantScope::Always);
+                    break;
+                case 3:
+                    if (offer_add_root) {
+                        resolve_dialog(payload::PermissionDecisionKind::Allow,
+                                       GrantScope::Directory);
+                    } else {
+                        resolve_dialog(payload::PermissionDecisionKind::Deny, GrantScope::Once);
+                    }
                     break;
                 default:
                     resolve_dialog(payload::PermissionDecisionKind::Deny, GrantScope::Once);
@@ -3955,13 +3967,22 @@ private:
                                            GrantScope::Session);
                         }
                         return true;
+                    case 'R':
+                    case 'r':
+                        if (!model_.dialog.force_ask &&
+                            model_.dialog.add_root.has_value()) {
+                            resolve_dialog(payload::PermissionDecisionKind::Allow,
+                                           GrantScope::Directory);
+                        }
+                        return true;
                     default:
                         return true;
                 }
             }
         }
-        // RB-12 is narrowed for exactly A/a, O/o, S/s, D/d (94-D5/D6);
-        // every other printable key is still swallowed.
+        // RB-12 is narrowed for exactly A/a, O/o, S/s, R/r, D/d (94-D5/D6);
+        // every other printable key is still swallowed. R/r is accepted only
+        // when the dialog offers the add-directory option.
         return true;
     }
 
@@ -5362,7 +5383,8 @@ public:
 
     void open_permission_dialog(const SessionId& session, const PermissionRequestId& request,
                                 std::string tool, std::string summary,
-                                bool force_ask) override {
+                                bool force_ask,
+                                std::optional<std::string> add_root) override {
         app_.last_dialog_resolution_.reset();
         app_.model_.dialog.open    = true;
         app_.model_.dialog.session = session;
@@ -5370,6 +5392,7 @@ public:
         app_.model_.dialog.tool    = std::move(tool);
         app_.model_.dialog.summary = std::move(summary);
         app_.model_.dialog.force_ask = force_ask;
+        app_.model_.dialog.add_root  = std::move(add_root);
         app_.model_.dialog.selected = force_ask ? 1 : 0;
         // 81-D13: record the interrupted mode so the resolve restores it.
         app_.model_.dialog.prev_mode = app_.model_.mode;

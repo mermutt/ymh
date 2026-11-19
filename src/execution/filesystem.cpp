@@ -36,15 +36,20 @@ namespace {
 } // namespace
 
 LocalFilesystem::LocalFilesystem(std::filesystem::path root, ToolConfig config,
-                                 std::vector<std::filesystem::path> allowed_roots)
-    : root_(std::move(root)), config_(config), allowed_roots_(std::move(allowed_roots)) {}
+                                 std::vector<std::filesystem::path> allowed_roots,
+                                 std::shared_ptr<WorkspaceRoots>    roots)
+    : root_(std::move(root)),
+      config_(config),
+      allowed_roots_(std::move(allowed_roots)),
+      roots_(std::move(roots)) {}
 
 void LocalFilesystem::require_contained(const std::filesystem::path& path,
                                         bool allow_extra_roots) const {
-    bool contained = path_is_within(path, root_);
+    bool contained = path_is_within(path, root_) ||
+                     (roots_ != nullptr && roots_->contains(path));
     if (!contained && allow_extra_roots) {
         for (const std::filesystem::path& extra : allowed_roots_) {
-            if (path_is_within(path, extra)) {
+            if (path_is_under_root(extra, path)) {
                 contained = true;
                 break;
             }
@@ -184,13 +189,17 @@ Task<FileInfo> LocalFilesystem::stat(const std::filesystem::path& path) {
 }
 
 Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& query) {
-    require_contained(query.base, /*allow_extra_roots=*/false);
+    require_contained(query.base, /*allow_extra_roots=*/true);
+    const std::vector<std::filesystem::path> roots =
+        roots_ != nullptr ? roots_->all()
+                          : std::vector<std::filesystem::path>{root_};
     // 90-A13/90-D14: canonical, independent of `resolve()`.
     {
         std::error_code canonical_ec;
         const std::filesystem::path canonical =
             std::filesystem::weakly_canonical(query.base, canonical_ec);
-        if (!canonical_ec && path_is_protected(root_, canonical, config_.allow_ymh_access)) {
+        if (!canonical_ec &&
+            path_is_protected_in_roots(roots, canonical, config_.allow_ymh_access)) {
             throw ToolError{ToolErrorCode::PathEscape, "protected path"};
         }
     }
@@ -204,11 +213,10 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
         if (!std::filesystem::is_regular_file(candidate, ec)) {
             return;
         }
-        std::error_code rel_ec;
-        const std::filesystem::path rel =
-            std::filesystem::relative(candidate, root_, rel_ec);
-        const std::string text = rel_ec ? candidate.filename().string()
-                                        : rel.generic_string();
+        const std::optional<std::filesystem::path> rel =
+            relative_to_any_root(roots, candidate);
+        const std::string text =
+            rel.has_value() ? rel->generic_string() : candidate.filename().string();
         if (path_glob_match(query.pattern, text)) {
             results.push_back(candidate);
         }
@@ -224,7 +232,8 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
             if (ec) {
                 break;
             }
-            if (path_is_protected(root_, it->path(), config_.allow_ymh_access)) {
+            if (path_is_protected_in_roots(roots, it->path(),
+                                           config_.allow_ymh_access)) {
                 std::error_code entry_ec;
                 if (it->is_directory(entry_ec)) {
                     it.disable_recursion_pending();
@@ -243,13 +252,17 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
 }
 
 Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
-    require_contained(query.base, /*allow_extra_roots=*/false);
+    require_contained(query.base, /*allow_extra_roots=*/true);
+    const std::vector<std::filesystem::path> roots =
+        roots_ != nullptr ? roots_->all()
+                          : std::vector<std::filesystem::path>{root_};
     // 90-A13/90-D14: canonical base check, independent of `resolve()`.
     {
         std::error_code canonical_ec;
         const std::filesystem::path canonical =
             std::filesystem::weakly_canonical(query.base, canonical_ec);
-        if (!canonical_ec && path_is_protected(root_, canonical, config_.allow_ymh_access)) {
+        if (!canonical_ec &&
+            path_is_protected_in_roots(roots, canonical, config_.allow_ymh_access)) {
             throw ToolError{ToolErrorCode::PathEscape, "protected path"};
         }
     }
@@ -290,7 +303,8 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
             const std::filesystem::recursive_directory_iterator end;
             while (it != end) {
                 std::error_code entry_ec;
-                const bool protected_entry = path_is_protected(root_, it->path(), config_.allow_ymh_access);
+                const bool protected_entry = path_is_protected_in_roots(
+                    roots, it->path(), config_.allow_ymh_access);
                 const bool symlink_entry = it->is_symlink(entry_ec);
                 if (protected_entry || symlink_entry) {
                     // 90-A13/90-D14: never traverse `.ymh`/`.git`, and never

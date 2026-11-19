@@ -56,6 +56,7 @@ class AgentPresetRoster;
 class PlanModeController;
 class ModelSelectionController;
 class ModelCatalog;
+class WorkspaceRoots;
 struct AgentConfig;
 struct CompactionPolicy;
 struct LLMProviderConfig;
@@ -147,6 +148,16 @@ public:
     ~WorkspaceRuntime();
 
     [[nodiscard]] const std::filesystem::path& root() const noexcept;
+
+    // Multi-root workspaces: the live registry (primary first, then approved
+    // additional roots). The execution environment and sandbox policy hold the
+    // same shared instance, so an approval takes effect immediately.
+    [[nodiscard]] WorkspaceRoots& roots() noexcept;
+
+    // The permission broker's "also allow this directory" hook: validate and
+    // register `directory`, then persist it best-effort in the grants store.
+    [[nodiscard]] std::expected<std::filesystem::path, std::string>
+    add_workspace_root(const std::filesystem::path& directory);
 
     [[nodiscard]] ExecutionEnvironment& environment() noexcept;
     [[nodiscard]] ResourceGovernor&     governor() noexcept;

@@ -1,7 +1,9 @@
 #include "ymh/permission/permission_broker.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -10,6 +12,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "ymh/execution/workspace_roots.hpp"
+#include "ymh/policy/shell_guard.hpp"
 
 namespace ymh {
 namespace {
@@ -25,6 +30,10 @@ struct Pending {
     // it AFTER the request post (request-before-notice, 95-I10).
     bool request_posted = false;
     std::optional<protocol::PermissionResolvedNotice> deferred_notice;
+    // Multi-root: the candidate directory the dialog offered (fixture for the
+    // `Directory` answer). Computed once at registration so the decision uses
+    // exactly what the dialog showed.
+    std::optional<std::filesystem::path> add_root;
 };
 
 std::future<PermissionOutcome> ready_outcome(PermissionOutcome outcome) {
@@ -162,6 +171,11 @@ payload::PermissionDecisionKind decision_kind(protocol::PermissionAnswer answer,
     if (answer == protocol::PermissionAnswer::Deny) {
         return payload::PermissionDecisionKind::Deny;
     }
+    // Multi-root: adding a directory is a one-shot approval, never a durable
+    // tool grant (the policy is not asked to remember it).
+    if (scope == protocol::PermissionScope::Directory) {
+        return payload::PermissionDecisionKind::Allow;
+    }
     if (scope == protocol::PermissionScope::Always) {
         return payload::PermissionDecisionKind::AllowAlways;
     }
@@ -170,11 +184,50 @@ payload::PermissionDecisionKind decision_kind(protocol::PermissionAnswer answer,
 
 GrantScope grant_scope(protocol::PermissionScope scope) {
     switch (scope) {
-        case protocol::PermissionScope::Once:    return GrantScope::Once;
-        case protocol::PermissionScope::Session: return GrantScope::Session;
-        case protocol::PermissionScope::Always:  return GrantScope::Always;
+        case protocol::PermissionScope::Once:      return GrantScope::Once;
+        case protocol::PermissionScope::Session:   return GrantScope::Session;
+        case protocol::PermissionScope::Always:    return GrantScope::Always;
+        case protocol::PermissionScope::Directory: return GrantScope::Once;
     }
     return GrantScope::Once;
+}
+
+std::vector<std::filesystem::path> request_roots(const PermissionRequest& request) {
+    if (!request.roots.empty()) {
+        return request.roots;
+    }
+    return {request.root};
+}
+
+// The directory a permission dialog should offer to add as a root, or nullopt
+// when this request is not eligible (no outside target, forced review, or no
+// safe candidate). Pure classification apart from the bounded stat-like probes
+// inside `suggest_workspace_root`; never mutates anything.
+std::optional<std::filesystem::path> suggest_add_root(const PermissionRequest& request) {
+    if (request.force_ask) {
+        return std::nullopt;
+    }
+    const std::vector<std::filesystem::path> roots = request_roots(request);
+    if (roots.empty()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path& primary = roots.front();
+    if (request.path.has_value()) {
+        return suggest_workspace_root(*request.path, primary, roots);
+    }
+    if (request.tool == "shell" || request.tool == "terminal") {
+        const ShellClassification classification =
+            classify_shell_request(request, {}, request.allow_ymh_access);
+        std::vector<std::filesystem::path> targets = classification.outside_targets;
+        std::sort(targets.begin(), targets.end());
+        targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+        for (const std::filesystem::path& target : targets) {
+            if (auto candidate = suggest_workspace_root(target, primary, roots)) {
+                return candidate;
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -183,11 +236,13 @@ struct PermissionBroker::State {
     State(PermissionPolicy& policy_ref,
           PermissionTransport& transport_ref,
           PermissionConfig config_value,
-          ClockReader now_reader)
+          ClockReader now_reader,
+          RootAddHook add_root_hook)
         : policy(policy_ref),
           transport(transport_ref),
           config(std::move(config_value)),
-          now(std::move(now_reader)) {}
+          now(std::move(now_reader)),
+          add_root(std::move(add_root_hook)) {}
 
     std::size_t subscriber_count_for(const SessionId& session) const {
         SubscriberCount reader;
@@ -262,6 +317,7 @@ struct PermissionBroker::State {
     PermissionTransport& transport;
     PermissionConfig   config;
     ClockReader        now;
+    RootAddHook        add_root;
 
     mutable std::mutex                    mutex;
     std::vector<std::shared_ptr<Pending>> pending;
@@ -296,6 +352,9 @@ std::future<PermissionOutcome> PermissionBroker::State::resolve(const Permission
     }
 
     auto entry = std::make_shared<Pending>();
+    // Multi-root: compute the candidate once, before any lock, and use exactly
+    // this value for both the dialog and the decision.
+    const std::optional<std::filesystem::path> add_root = suggest_add_root(request);
     std::string id;
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -305,6 +364,10 @@ std::future<PermissionOutcome> PermissionBroker::State::resolve(const Permission
         id = "perm-" + std::to_string(next_id++);
         entry->core = request;
         entry->wire = make_wire(request, id, config);
+        if (add_root.has_value()) {
+            entry->wire.add_root = add_root->string();
+        }
+        entry->add_root = add_root;
         entry->deadline = now() + config.permission_timeout;
         pending.push_back(entry);
     }
@@ -400,8 +463,10 @@ std::future<PermissionOutcome> PermissionBroker::State::resolve(const Permission
 PermissionBroker::PermissionBroker(PermissionPolicy& policy,
                                    PermissionTransport& transport,
                                    PermissionConfig config,
-                                   ClockReader now)
-    : state_(std::make_shared<State>(policy, transport, std::move(config), std::move(now))) {}
+                                   ClockReader now,
+                                   RootAddHook add_root)
+    : state_(std::make_shared<State>(policy, transport, std::move(config), std::move(now),
+                                     std::move(add_root))) {}
 
 PermissionBroker::~PermissionBroker() { denyAll("shutdown"); }
 
@@ -439,6 +504,36 @@ bool PermissionBroker::onDecision(const protocol::PermissionDecisionParams& para
     std::shared_ptr<Pending> entry = state->claim(params.request_id);
     if (!entry) {
         return false;
+    }
+
+    // Multi-root: "Also allow directory <candidate>" adds the stored candidate
+    // as an additional workspace root. The decision was already taken; no
+    // tool/command grant is remembered for this scope.
+    if (params.decision == protocol::PermissionAnswer::Allow &&
+        params.scope == protocol::PermissionScope::Directory) {
+        PermissionOutcome outcome{payload::PermissionDecisionKind::Deny,
+                                  "user:add-root-unavailable"};
+        if (entry->add_root.has_value() && state->add_root) {
+            try {
+                if (state->add_root(*entry->add_root).has_value()) {
+                    outcome = {payload::PermissionDecisionKind::Allow, "user:added-root"};
+                } else {
+                    outcome = {payload::PermissionDecisionKind::Deny, "user:add-root-failed"};
+                }
+            } catch (...) {
+                outcome = {payload::PermissionDecisionKind::Deny, "user:add-root-failed"};
+            }
+        }
+        entry->promise.set_value(outcome);
+        // 95-D3: emit AFTER `set_value`. A failed add is a Deny for every
+        // attached UI, so the notice must not echo the Allow/Directory answer.
+        if (outcome.decision == payload::PermissionDecisionKind::Deny) {
+            state->notify_resolved(entry, protocol::PermissionAnswer::Deny,
+                                   protocol::PermissionScope::Once, outcome.reason);
+        } else {
+            state->notify_resolved(entry, params.decision, params.scope, outcome.reason);
+        }
+        return true;
     }
 
     const payload::PermissionDecisionKind kind = decision_kind(params.decision, params.scope);

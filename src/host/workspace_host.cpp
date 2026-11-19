@@ -918,8 +918,10 @@ HostExitCode WorkspaceHost::Impl::startup() {
     const std::size_t workers =
         config_.caps.max_llm_concurrency == 0 ? 1 : config_.caps.max_llm_concurrency;
     turns_ = std::make_unique<TurnExecutor>(workers, workers);
-    broker_ = std::make_unique<PermissionBroker>(runtime_->policy(), *permission_adapter_,
-                                                 to_permission_config(config_.config));
+    broker_ = std::make_unique<PermissionBroker>(
+        runtime_->policy(), *permission_adapter_, to_permission_config(config_.config),
+        Clock::now,
+        [this](const std::filesystem::path& dir) { return runtime_->add_workspace_root(dir); });
     runtime_->agents().set_permission_resolver(
         [this](const PermissionRequest& request, CancellationToken token) -> PermissionOutcome {
             std::future<PermissionOutcome> outcome = broker_->resolve(request, token);

@@ -408,6 +408,7 @@ struct PendingPermission {
     std::string         tool;
     std::string         summary;
     bool                force_ask = false;
+    std::optional<std::string> add_root;
 };
 
 struct SessionUiState {
@@ -838,9 +839,12 @@ struct PermissionDialogModel {
     PermissionRequestId request;
     std::string         tool;
     std::string         summary;
-    int                 selected = 0;   // 0=Once 1=Session 2=Always 3=Deny
+    int                 selected = 0;   // 0=Once 1=Session 2=Always 3=Dir 4=Deny
     // 25-D4 (NEW-3 Rev 5): true => only {Allow once, Deny}; default Deny.
     bool                force_ask = false;
+    // Multi-root: candidate directory offered as "Also allow directory"; when
+    // set (and !force_ask) the dialog has five options and `selected` 3 is it.
+    std::optional<std::string> add_root;
     // 81-D13: the mode the dialog interrupted, restored on `PermissionResolved`
     // so a dialog raised over the dashboard returns to it. Defaults to
     // `Conversation`, the only value the conversation path ever records.

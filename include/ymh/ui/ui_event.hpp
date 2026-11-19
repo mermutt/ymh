@@ -159,6 +159,9 @@ struct PermissionRequested {
     std::string         tool;
     std::string         summary;   // bounded, redacted by 09
     bool                force_ask = false;
+    // Multi-root: the candidate absolute directory the dialog may offer to add
+    // as an additional workspace root; nullopt when the request is not eligible.
+    std::optional<std::string> add_root;
 };
 
 struct PermissionResolved {

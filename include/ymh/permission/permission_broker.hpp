@@ -23,6 +23,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <memory>
@@ -57,13 +59,20 @@ public:
     // turn thread and must never touch the io-confined accessor directly.
     using SubscriberCount = std::function<std::size_t(SessionId)>;
 
+    // Multi-root: adds a directory to the workspace's live root set. Called
+    // synchronously from `onDecision` for the `Directory` scope; returns the
+    // canonical directory or a refusal reason.
+    using RootAddHook = std::function<std::expected<std::filesystem::path, std::string>(
+        const std::filesystem::path&)>;
+
     // `now` defaults to `Clock::now`; tests pass `ManualClock::reader()`.
     // Every deadline/expiry is computed from `now()`, NEVER `Clock::now()`
     // directly (errata §7.2, E21).
     PermissionBroker(PermissionPolicy& policy,
                      PermissionTransport& transport,
                      PermissionConfig config,
-                     ClockReader now = Clock::now);
+                     ClockReader now = Clock::now,
+                     RootAddHook add_root = {});
     ~PermissionBroker();
 
     PermissionBroker(const PermissionBroker&) = delete;

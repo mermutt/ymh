@@ -43,7 +43,8 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
                                    SandboxMode mode,
                                    ToolConfig config,
                                    PtyService* pty,
-                                   std::vector<std::filesystem::path> writable_roots)
+                                   std::vector<std::filesystem::path> writable_roots,
+                                   std::shared_ptr<WorkspaceRoots> roots)
     : root_(std::move(root)),
       mode_(mode),
       confinement_status_(mode == SandboxMode::DangerFullAccess
@@ -65,6 +66,8 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
         throw std::invalid_argument("workspace root cannot be canonicalized: " +
                                     root_.string());
     }
+    roots_ = roots != nullptr ? std::move(roots)
+                              : std::make_shared<WorkspaceRoots>(root_);
     std::vector<std::filesystem::path> allowed_roots;
     if (mode_ == SandboxMode::WorkspaceWrite) {
         // 119-D7: the workspace-write shell sandbox exposes the host /tmp as
@@ -76,7 +79,7 @@ LocalEnvironment::LocalEnvironment(std::filesystem::path root,
             allowed_roots.push_back(temp);
         }
     }
-    fs_ = LocalFilesystem(root_, config_, std::move(allowed_roots));
+    fs_ = LocalFilesystem(root_, config_, std::move(allowed_roots), roots_);
     policy_service_ = make_deployment_policy_service(mode_, writable_roots_);
 }
 
@@ -105,39 +108,53 @@ std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
                                              : std::filesystem::path{};
     const std::filesystem::path tmp_literal{"/tmp"};
 
-    enum class RootKind { None, Workspace, Temp };
+    const std::filesystem::path normalized = candidate.lexically_normal();
+
+    // Containment kind: 0..N-1 is the index of the containing root; negative
+    // values are the /tmp scratch area or "outside every scope".
+    constexpr int kNone = -1;
+    constexpr int kTemp = -2;
+    const std::vector<std::filesystem::path> roots = roots_->all();
+    const auto index_of = [&roots](const std::filesystem::path& value) {
+        for (std::size_t index = 0; index < roots.size(); ++index) {
+            if (component_prefix(roots[index], value)) {
+                return static_cast<int>(index);
+            }
+        }
+        return kNone;
+    };
     const auto lexical_kind = [&](const std::filesystem::path& value) {
-        if (component_prefix(base, value)) {
-            return RootKind::Workspace;
+        const int root_index = index_of(value);
+        if (root_index != kNone) {
+            return root_index;
         }
         if (component_prefix(tmp_literal, value)) {
-            return RootKind::Temp;
+            return kTemp;
         }
-        return RootKind::None;
+        return kNone;
     };
     const auto canonical_kind = [&](const std::filesystem::path& value) {
-        const std::filesystem::path canonical = weakly(value);
-        if (component_prefix(base, canonical)) {
-            return RootKind::Workspace;
+        const int root_index = index_of(weakly(value));
+        if (root_index != kNone) {
+            return root_index;
         }
-        if (!temp.empty() && component_prefix(temp, canonical)) {
-            return RootKind::Temp;
+        if (!temp.empty() && component_prefix(temp, weakly(value))) {
+            return kTemp;
         }
-        return RootKind::None;
+        return kNone;
     };
 
-    const std::filesystem::path normalized = candidate.lexically_normal();
-    const RootKind            lexical_root = lexical_kind(normalized);
-    if (lexical_root == RootKind::None) {
+    const int lexical_root = lexical_kind(normalized);
+    if (lexical_root == kNone) {
         throw ToolError{ToolErrorCode::PathEscape,
-                        "path escapes the workspace root or /tmp scratch area: " +
+                        "path escapes the workspace roots or /tmp scratch area: " +
                             raw.string()};
     }
 
     const std::filesystem::path parent = weakly(candidate.parent_path());
     if (canonical_kind(parent) != lexical_root) {
         throw ToolError{ToolErrorCode::PathEscape,
-                        "path escapes the workspace root or /tmp scratch area: " +
+                        "path escapes the workspace roots or /tmp scratch area: " +
                             raw.string()};
     }
 
@@ -151,7 +168,7 @@ std::filesystem::path LocalEnvironment::resolve(std::string_view path) const {
     }
     if (canonical_kind(final) != lexical_root) {
         throw ToolError{ToolErrorCode::PathEscape,
-                        "path escapes the workspace root or /tmp scratch area: " +
+                        "path escapes the workspace roots or /tmp scratch area: " +
                             raw.string()};
     }
     return final;

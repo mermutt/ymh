@@ -10,11 +10,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "ymh/core/task.hpp"
 #include "ymh/execution/config.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 
 namespace ymh {
 
@@ -76,9 +78,11 @@ public:
     // `allowed_roots` are extra absolute roots this service may touch in
     // addition to the workspace root. `LocalEnvironment` passes the canonical
     // `/tmp` scratch area in workspace-write mode; a direct construction keeps
-    // the historical workspace-only scope.
+    // the historical workspace-only scope. `roots` is the live multi-root
+    // registry; when present it decides containment and relative paths.
     LocalFilesystem(std::filesystem::path root, ToolConfig config,
-                    std::vector<std::filesystem::path> allowed_roots = {});
+                    std::vector<std::filesystem::path> allowed_roots = {},
+                    std::shared_ptr<WorkspaceRoots>    roots = nullptr);
 
     Task<FileData> read(const std::filesystem::path& path) override;
     Task<FileData> read(const std::filesystem::path& path,
@@ -98,6 +102,7 @@ private:
     std::filesystem::path              root_;
     ToolConfig                         config_;
     std::vector<std::filesystem::path> allowed_roots_;
+    std::shared_ptr<WorkspaceRoots>    roots_;
 };
 
 } // namespace ymh

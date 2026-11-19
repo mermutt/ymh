@@ -14,6 +14,10 @@ add_executable(ymh_file_store_tests
     prompt_images_explicit_test.cpp
     vision_capability_test.cpp
     tool_images_test.cpp
+    workspace_roots_test.cpp
+    workspace_roots_store_test.cpp
+    permission_roots_test.cpp
+    permission_broker_roots_test.cpp
 )
 
 target_include_directories(ymh_file_store_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -26,6 +30,7 @@ target_link_libraries(ymh_file_store_tests
         ymh::prompt
         ymh::policy
         ymh::execution
+        ymh::permission
         ymh::skills
         ymh::config
         ymh::agent

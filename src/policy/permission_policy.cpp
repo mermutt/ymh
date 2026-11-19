@@ -10,6 +10,7 @@
 
 #include "ymh/execution/glob.hpp"
 #include "ymh/execution/path_safety.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 #include "ymh/policy/shell_guard.hpp"
 
 namespace ymh {
@@ -108,7 +109,20 @@ bool rule_sort_less(const PolicyRule& left, const PolicyRule& right) {
     if (left.tool != right.tool) return left.tool < right.tool;
     if (left.path != right.path) return left.path < right.path;
     if (left.command != right.command) return left.command < right.command;
+    if (left.root != right.root) return left.root < right.root;
     return effect_rank(left.effect) < effect_rank(right.effect);
+}
+
+// Multi-root anchors. `request.roots` wins when supplied; a single `root`
+// remains the fallback so older call sites keep working.
+std::vector<std::filesystem::path> request_roots(const PermissionRequest& request) {
+    if (!request.roots.empty()) {
+        return request.roots;
+    }
+    if (!request.root.empty()) {
+        return {request.root};
+    }
+    return {};
 }
 
 // 90-D4/90-D5: lexical only; no `std::filesystem::relative` (which may stat).
@@ -116,19 +130,12 @@ std::optional<std::string> root_relative_target(const PermissionRequest& request
     if (!request.path.has_value()) {
         return std::nullopt;
     }
-    const std::filesystem::path relative =
-        request.path->lexically_relative(request.root);
-    if (relative.empty()) {
-        return std::string{"."};
-    }
-    if (relative.is_absolute()) {
+    const std::optional<std::filesystem::path> relative =
+        relative_to_any_root(request_roots(request), *request.path);
+    if (!relative.has_value()) {
         return std::nullopt;
     }
-    const std::string text = relative.generic_string();
-    if (text == ".." || text.starts_with("../")) {
-        return std::nullopt;
-    }
-    return text;
+    return relative->generic_string();
 }
 
 std::string command_pattern(const PermissionRequest& request) {
@@ -164,6 +171,20 @@ std::string command_pattern(const PermissionRequest& request) {
 
 bool rule_matches(const PolicyRule& rule, const PermissionRequest& request,
                   TargetClass target_class) {
+    // Multi-root anchoring: an anchored grant only matches its own root. A
+    // request outside that root (or a non-path tool) never matches.
+    if (!rule.root.empty()) {
+        if (!tool_has_path_dimension(request.tool) || !request.path.has_value()) {
+            return false;
+        }
+        const std::optional<std::filesystem::path> containing =
+            containing_root(request_roots(request), *request.path);
+        if (!containing.has_value() ||
+            containing->lexically_normal() !=
+                std::filesystem::path{rule.root}.lexically_normal()) {
+            return false;
+        }
+    }
     if (!rule.tool.empty() && !glob_match(rule.tool, request.tool)) {
         return false;
     }
@@ -228,8 +249,13 @@ std::string hash_hex(std::string_view command) {
     return id;
 }
 
-std::string grant_id(const std::string& tool, const std::string& command) {
-    return "grant:" + tool + ":" + hash_hex(command);
+std::string grant_id(const std::string& tool, const std::string& command,
+                     const std::string& root) {
+    std::string id = "grant:" + tool + ":" + hash_hex(command);
+    if (!root.empty()) {
+        id += ":" + hash_hex(root);
+    }
+    return id;
 }
 
 char class_letter(TargetClass target_class) {
@@ -243,8 +269,12 @@ char class_letter(TargetClass target_class) {
 }
 
 std::string session_grant_id(const PolicyRule& grant) {
-    return "grant:" + grant.tool + ":" + class_letter(grant.target_class) + ":" +
-           (grant.prefix ? "p:" : "e:") + hash_hex(grant.command);
+    std::string id = "grant:" + grant.tool + ":" + class_letter(grant.target_class) +
+                     ":" + (grant.prefix ? "p:" : "e:") + hash_hex(grant.command);
+    if (!grant.root.empty()) {
+        id += ":" + hash_hex(grant.root);
+    }
+    return id;
 }
 
 } // namespace
@@ -475,8 +505,9 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
 
     // 90-D13/H1: paths inside `.git`/`.ymh` are a hard deny after the 89 guard,
     // ReadOnly, and force_ask, and before the rule fold and every grant.
+    const std::vector<std::filesystem::path> roots = request_roots(request);
     if (request.path.has_value() &&
-        path_is_protected(request.root, *request.path, config_.allow_ymh_access)) {
+        path_is_protected_in_roots(roots, *request.path, config_.allow_ymh_access)) {
         if (reason != nullptr) {
             *reason = "permission:protected-path";
         }
@@ -491,7 +522,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
 
     TargetClass target_class = TargetClass::Any;
     if (request.path.has_value()) {
-        target_class = path_is_within_root(request.root, *request.path)
+        target_class = containing_root(roots, *request.path).has_value()
                            ? TargetClass::InRoot
                            : TargetClass::Outside;
     } else if (tool_has_path_dimension(request.tool)) {
@@ -566,6 +597,20 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         return PolicyVerdict::Deny;
     }
     if (folded == PolicyVerdict::Allow) {
+        // Multi-root: a path target outside every root cannot be resolved by
+        // the execution layer (it would fail with PathEscape). Any rule that
+        // would otherwise allow it (a tool-wide `read = allow` default, a
+        // non-path config rule) must Ask instead, so the dialog can offer to
+        // add the target's directory. The canonical /tmp scratch area stays
+        // exempt (reads are the reason the default read rule is tool-wide).
+        if (request.path.has_value() && tool_has_path_dimension(request.tool) &&
+            !containing_root(roots, *request.path).has_value() &&
+            (tmp_root_.empty() || !path_is_under_tmp_root(tmp_root_, *request.path))) {
+            if (reason != nullptr) {
+                *reason = "permission:add-root-candidate";
+            }
+            return PolicyVerdict::Ask;
+        }
         // 119-D12: the critical check runs here too, so every caller (the loop,
         // the gate, the broker) is safe even if it did not set the flag.
         if (request.critical || critical_path(request).critical) {
@@ -600,10 +645,15 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
     if (kind == payload::PermissionDecisionKind::Deny || scope == GrantScope::Once) {
         return {};
     }
+    // Multi-root: `Directory` is consumed by the broker (it registers an
+    // additional workspace root); it is never a LocalGrant/SessionGrant.
+    if (scope == GrantScope::Directory) {
+        return {};
+    }
 
     // 90-D7/90-D9: protected targets can never create a grant.
     if (request.path.has_value() &&
-        path_is_protected(request.root, *request.path)) {
+        path_is_protected_in_roots(request_roots(request), *request.path)) {
         return {};
     }
 
@@ -626,13 +676,19 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
                                                 : PolicyRule::Layer::SessionGrant;
 
     if (tool_has_path_dimension(request.tool)) {
-        // InRoot path-tool grant; an outside/unknown target creates no grant.
-        if (!request.path.has_value() ||
-            !path_is_within_root(request.root, *request.path)) {
+        // InRoot path-tool grant anchored to its containing root; an
+        // outside/unknown target creates no grant.
+        if (!request.path.has_value()) {
+            return {};
+        }
+        const std::optional<std::filesystem::path> containing =
+            containing_root(request_roots(request), *request.path);
+        if (!containing.has_value()) {
             return {};
         }
         grant.target_class = TargetClass::InRoot;
         grant.command.clear();
+        grant.root = containing->string();
         // No command dimension: retain the historical `literal` flag so the
         // durable file entry shape is unchanged (90-D9).
         grant.literal = true;
@@ -674,8 +730,9 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
         grant.target_class = TargetClass::Any;   // non-path tool: tool-wide
     }
 
-    grant.id = scope == GrantScope::Session ? session_grant_id(grant)
-                                            : grant_id(grant.tool, grant.command);
+    grant.id = scope == GrantScope::Session
+                   ? session_grant_id(grant)
+                   : grant_id(grant.tool, grant.command, grant.root);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

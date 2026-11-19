@@ -66,10 +66,11 @@ constexpr std::array<WireEnumEntry<PermissionAnswer>, 2> kPermissionAnswers{{
     {PermissionAnswer::Deny, "deny"},
 }};
 
-constexpr std::array<WireEnumEntry<PermissionScope>, 3> kPermissionScopes{{
+constexpr std::array<WireEnumEntry<PermissionScope>, 4> kPermissionScopes{{
     {PermissionScope::Once, "once"},
     {PermissionScope::Session, "session"},
     {PermissionScope::Always, "always"},
+    {PermissionScope::Directory, "directory"},
 }};
 
 constexpr std::array<WireEnumEntry<HostState>, 5> kHostStates{{
@@ -541,6 +542,9 @@ void to_json(nlohmann::json& json, const PermissionRequest& request) {
         {"expires_at_ms", request.expires_at_ms},
         {"force_ask", request.force_ask},
     };
+    if (request.add_root.has_value()) {
+        json["add_root"] = *request.add_root;
+    }
 }
 
 void from_json(const nlohmann::json& json, PermissionRequest& request) {
@@ -551,6 +555,11 @@ void from_json(const nlohmann::json& json, PermissionRequest& request) {
     request.summary = json.value("summary", std::string{});
     request.expires_at_ms = json.at("expires_at_ms").get<std::int64_t>();
     request.force_ask = json.value("force_ask", false);
+    if (json.contains("add_root") && !json.at("add_root").is_null()) {
+        request.add_root = json.at("add_root").get<std::string>();
+    } else {
+        request.add_root.reset();
+    }
 }
 
 void to_json(nlohmann::json& json, const PermissionDecisionParams& params) {

@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <string_view>
 
@@ -20,6 +21,7 @@
 #include "ymh/execution/process.hpp"
 #include "ymh/execution/sandbox.hpp"
 #include "ymh/execution/services.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 
 namespace ymh {
 
@@ -29,6 +31,15 @@ public:
 
     virtual const std::filesystem::path& root() const = 0;
     virtual std::filesystem::path resolve(std::string_view) const = 0;
+
+    // Multi-root workspace support: the primary root first, then the roots the
+    // user has approved. `within_roots` is lexical/component-wise containment;
+    // `relative_to_root` yields the path relative to the containing root, or
+    // nullopt when the path is outside every root.
+    [[nodiscard]] virtual std::vector<std::filesystem::path> roots() const = 0;
+    [[nodiscard]] virtual bool within_roots(const std::filesystem::path&) const = 0;
+    [[nodiscard]] virtual std::optional<std::filesystem::path>
+    relative_to_root(const std::filesystem::path&) const = 0;
 
     // The confinement policy `resolve()` obeys (§6.2, §6.8). Immutable per
     // environment; selected by config, never by the model (decision (r)).
@@ -70,10 +81,22 @@ public:
                               SandboxMode mode = SandboxMode::WorkspaceWrite,
                               ToolConfig config = {},
                               PtyService* pty = nullptr,
-                              std::vector<std::filesystem::path> writable_roots = {});
+                              std::vector<std::filesystem::path> writable_roots = {},
+                              std::shared_ptr<WorkspaceRoots> roots = nullptr);
 
     const std::filesystem::path& root() const override { return root_; }
     std::filesystem::path        resolve(std::string_view path) const override;
+
+    [[nodiscard]] std::vector<std::filesystem::path> roots() const override {
+        return roots_->all();
+    }
+    [[nodiscard]] bool within_roots(const std::filesystem::path& path) const override {
+        return roots_->contains(path);
+    }
+    [[nodiscard]] std::optional<std::filesystem::path>
+    relative_to_root(const std::filesystem::path& path) const override {
+        return roots_->relative(path);
+    }
     SandboxMode                  mode() const noexcept override { return mode_; }
 
     [[nodiscard]] ConfinementStatus confinementStatus() const noexcept override {
@@ -104,6 +127,7 @@ public:
 
 private:
     std::filesystem::path root_;
+    std::shared_ptr<WorkspaceRoots> roots_;
     SandboxMode           mode_;
     ConfinementStatus     confinement_status_ = ConfinementStatus::Unavailable;
     LocalFilesystem       fs_;

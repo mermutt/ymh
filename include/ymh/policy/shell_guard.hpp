@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "ymh/policy/permission_policy.hpp"   // PermissionRequest
 
@@ -52,6 +53,10 @@ struct ShellClassification {
     // 103: shell-only neutral read operands; canonicalized in-root and
     // non-protected by request_is_tmp_exempt. Empty for terminal requests.
     std::vector<std::filesystem::path> neutral_reads;
+    // Multi-root: concrete, absolute targets the classifier placed outside
+    // every allowed root. Used to offer "add this directory" in the permission
+    // dialog; unresolved/ambiguous operands are not included.
+    std::vector<std::filesystem::path> outside_targets;
 };
 
 // 89-D9/89-D7: the shell text the guard classifies plus the cwd it resolves
@@ -88,6 +93,18 @@ struct ShellText {
 [[nodiscard]] ShellClassification classify_shell_command_with_scope(
     std::string_view text,
     const std::filesystem::path& root,
+    const std::filesystem::path& cwd,
+    bool kernel_confinement,
+    const std::filesystem::path& canonical_tmp_root = {},
+    bool relaxed_sed = false,
+    bool allow_ymh = false);
+
+// Multi-root variant: `roots` must be absolute (primary first) and `cwd` is the
+// default working directory (normally the primary root). A target inside any
+// root counts as in-root; protected-path checks use the containing root.
+[[nodiscard]] ShellClassification classify_shell_command_with_scope(
+    std::string_view text,
+    const std::vector<std::filesystem::path>& roots,
     const std::filesystem::path& cwd,
     bool kernel_confinement,
     const std::filesystem::path& canonical_tmp_root = {},

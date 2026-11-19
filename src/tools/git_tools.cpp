@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "ymh/execution/services.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 #include "ymh/tools/tool_context.hpp"
 
 namespace ymh {
@@ -28,6 +30,38 @@ std::filesystem::path resolve_base(const ToolContext& context,
         return context.resolve(value["path"].get<std::string>());
     }
     return context.root();
+}
+
+// Multi-root: the repository that owns `base`. Inside the primary root the
+// repository root stays the workspace root (historical behavior); inside an
+// approved extra root, walk up to the nearest directory containing `.git`,
+// bounded by that root.
+std::filesystem::path repository_root_for(const ToolContext& context,
+                                          const std::filesystem::path& base) {
+    const std::filesystem::path& primary = context.root();
+    if (path_is_under_root(primary, base)) {
+        return primary;
+    }
+    const std::optional<std::filesystem::path> containing =
+        containing_root(context.execution().roots(), base);
+    if (!containing.has_value()) {
+        return primary;
+    }
+    std::error_code ec;
+    std::filesystem::path dir = base;
+    if (!std::filesystem::is_directory(dir, ec)) {
+        dir = base.parent_path();
+    }
+    for (; !dir.empty() && path_is_under_root(*containing, dir);
+         dir = dir.parent_path()) {
+        if (std::filesystem::exists(dir / ".git", ec)) {
+            return dir;
+        }
+        if (dir == *containing) {
+            break;
+        }
+    }
+    return *containing;
 }
 
 std::string clamp_diff(std::string diff, std::size_t cap, bool& truncated) {
@@ -105,8 +139,8 @@ public:
             throw ToolError{ToolErrorCode::Timeout, "git_diff deadline expired"};
         }
         GitQuery query;
-        query.root = context.root();
         query.path = resolve_base(context, arguments);
+        query.root = repository_root_for(context, query.path);
         query.staged = arguments.value.value("staged", false);
         query.ref = arguments.value.value("ref", std::string{});
 

@@ -275,7 +275,9 @@ struct HostNotice {
 
 // 05 §6 / §9.6.
 enum class PermissionAnswer : std::uint8_t { Allow, Deny };
-enum class PermissionScope  : std::uint8_t { Once, Session, Always };
+// `Directory` (additive) is the multi-root answer: add the request's candidate
+// directory (`PermissionRequest::add_root`) as an additional workspace root.
+enum class PermissionScope  : std::uint8_t { Once, Session, Always, Directory };
 
 struct PermissionRequest {
     std::string     request_id;     // UUIDv4, correlation only
@@ -286,6 +288,9 @@ struct PermissionRequest {
     std::int64_t    expires_at_ms{0};
     // 25-D4 (NEW-3 Rev 5): true => the dialog offers only {Allow once, Deny}.
     bool            force_ask{false};
+    // Additive, optional: the candidate absolute directory the dialog may offer
+    // to add as a workspace root. nullopt when the request is not eligible.
+    std::optional<std::string> add_root;
 };
 
 struct PermissionDecisionParams {

@@ -20,6 +20,8 @@
 
 namespace ymh {
 
+class WorkspaceRoots;
+
 class SessionSandboxPolicyService final : public SandboxPolicyService {
 public:
     SessionSandboxPolicyService(
@@ -27,7 +29,8 @@ public:
         PermissionPresetSettings deployment,
         std::string max_mode, bool allow_escalation_to_danger_full_access,
         std::vector<std::filesystem::path> roots,
-        std::map<std::string, PermissionPresetSettings, std::less<>> presets);
+        std::map<std::string, PermissionPresetSettings, std::less<>> presets,
+        std::shared_ptr<WorkspaceRoots> workspace_roots = nullptr);
 
     [[nodiscard]] SandboxPolicy resolveDeployment() const override;
     [[nodiscard]] SandboxPolicy resolve(const PermissionRequest& request) const override;
@@ -55,6 +58,7 @@ private:
     mutable ToolCallId                                           grant_call_;
     std::uint64_t                                                grant_generation_ = 0;
     std::vector<std::filesystem::path>                           roots_;
+    std::shared_ptr<WorkspaceRoots>                              workspace_roots_;
     std::map<std::string, PermissionPresetSettings, std::less<>> presets_;
 };
 

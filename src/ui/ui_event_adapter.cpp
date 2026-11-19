@@ -412,6 +412,7 @@ void UiEventAdapter::onPermissionRequest(const WorkspaceId& workspace,
                             ? summarize_tool_arguments(request.tool, request.arguments.dump())
                             : request.summary;
     requested.force_ask = request.force_ask;
+    requested.add_root = request.add_root;
     applyAndMark(UiEvent{std::move(requested)});
 
     const auto previous = lastState_.find(request.session);

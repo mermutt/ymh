@@ -1,5 +1,9 @@
 #include "ymh/agent/session_sandbox_policy.hpp"
 
+#include <algorithm>
+#include <utility>
+
+#include "ymh/execution/workspace_roots.hpp"
 #include "ymh/policy/permission_policy.hpp"
 #include "ymh/session/permissions_state.hpp"
 
@@ -29,17 +33,59 @@ ApprovalPolicy parse_policy(std::string_view policy) noexcept {
     return policy == "never" ? ApprovalPolicy::Never : ApprovalPolicy::Ask;
 }
 
+// Config-declared `[sandbox]` roots first, then the live approved roots, then
+// any roots carried by the request. Deduped by `lexically_normal` and never
+// containing the primary (it is already writable as the workspace root).
+std::vector<std::filesystem::path> merged_writable_roots(
+    const std::vector<std::filesystem::path>& config_roots,
+    const WorkspaceRoots*                     workspace_roots,
+    const std::filesystem::path&              primary,
+    const std::vector<std::filesystem::path>& request_roots) {
+    std::vector<std::filesystem::path> merged;
+    std::vector<std::string>           seen;
+    const std::filesystem::path        primary_key = primary.lexically_normal();
+    const auto add = [&](const std::filesystem::path& root) {
+        if (root.empty()) {
+            return;
+        }
+        const std::filesystem::path normalized = root.lexically_normal();
+        if (!primary_key.empty() && normalized == primary_key) {
+            return;
+        }
+        const std::string key = normalized.string();
+        if (std::find(seen.begin(), seen.end(), key) != seen.end()) {
+            return;
+        }
+        seen.push_back(key);
+        merged.push_back(root);
+    };
+    for (const std::filesystem::path& root : config_roots) {
+        add(root);
+    }
+    if (workspace_roots != nullptr) {
+        for (const std::filesystem::path& root : workspace_roots->all()) {
+            add(root);
+        }
+    }
+    for (const std::filesystem::path& root : request_roots) {
+        add(root);
+    }
+    return merged;
+}
+
 } // namespace
 
 SessionSandboxPolicyService::SessionSandboxPolicyService(
     SessionManager& sessions, PermissionPresetSettings deployment, std::string max_mode,
     bool allow_escalation_to_danger_full_access, std::vector<std::filesystem::path> roots,
-    std::map<std::string, PermissionPresetSettings, std::less<>> presets)
+    std::map<std::string, PermissionPresetSettings, std::less<>> presets,
+    std::shared_ptr<WorkspaceRoots> workspace_roots)
     : sessions_(sessions),
       deployment_(std::move(deployment)),
       max_mode_(std::move(max_mode)),
       allow_danger_(allow_escalation_to_danger_full_access),
       roots_(std::move(roots)),
+      workspace_roots_(std::move(workspace_roots)),
       presets_(std::move(presets)) {}
 
 PermissionsState SessionSandboxPolicyService::stateFor(const SessionId& id) const {
@@ -83,15 +129,22 @@ ApprovalPolicy SessionSandboxPolicyService::effectivePolicy(
 
 SandboxPolicy SessionSandboxPolicyService::resolveDeployment() const {
     SandboxPolicy policy;
-    policy.mode                      = parse_mode(deployment_.sandbox);
-    policy.additional_writable_roots = roots_;
+    policy.mode = parse_mode(deployment_.sandbox);
+    const std::filesystem::path primary =
+        workspace_roots_ != nullptr ? workspace_roots_->primary() : std::filesystem::path{};
+    policy.additional_writable_roots =
+        merged_writable_roots(roots_, workspace_roots_.get(), primary, {});
     return policy;
 }
 
 SandboxPolicy SessionSandboxPolicyService::resolve(const PermissionRequest& request) const {
-    SandboxPolicy policy = resolveDeployment();
-    policy.mode          = effectiveMode(stateFor(request.session));
+    SandboxPolicy policy;
+    policy.mode           = effectiveMode(stateFor(request.session));
     policy.workspace_root = request.root;
+    // The dynamic roots are read live: a folder approved mid-session widens the
+    // sandbox on the next spawn without rebuilding the policy service.
+    policy.additional_writable_roots =
+        merged_writable_roots(roots_, workspace_roots_.get(), request.root, request.roots);
     // 119-D22: consume the single-use grant bound to this retry call.
     {
         std::lock_guard<std::mutex> lock(grant_mutex_);

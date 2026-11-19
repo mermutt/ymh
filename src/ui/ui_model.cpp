@@ -1519,6 +1519,7 @@ void UiModel::eraseSession(const WorkspaceId& workspace, const SessionId& id) {
         dialog.tool.clear();
         dialog.summary.clear();
         dialog.force_ask = false;
+        dialog.add_root.reset();
         dialog.selected  = 0;
         dialog.prev_mode = UiMode::Conversation;
         mode             = restore;
@@ -1638,6 +1639,7 @@ void UiModel::eraseWorkspace(const WorkspaceId& workspace) {
             dialog.tool.clear();
             dialog.summary.clear();
             dialog.force_ask = false;
+            dialog.add_root.reset();
             dialog.selected  = 0;
             dialog.prev_mode = UiMode::Conversation;
             mode             = restore;
@@ -1740,6 +1742,7 @@ void UiModel::openPendingPermissionIfAny() {
     dialog.tool      = std::move(pending.tool);
     dialog.summary   = std::move(pending.summary);
     dialog.force_ask = pending.force_ask;
+    dialog.add_root  = std::move(pending.add_root);
     dialog.selected  = pending.force_ask ? 1 : 0;
     dialog.prev_mode = mode;
     viewed->attention.needsInput = true;
@@ -1963,6 +1966,7 @@ void UiModel::apply(const UiEvent& event) {
                     dialog.tool      = e.tool;
                     dialog.summary   = e.summary;
                     dialog.force_ask = e.force_ask;
+                    dialog.add_root  = e.add_root;
                     dialog.selected  = e.force_ask ? 1 : 0;
                     dialog.prev_mode = mode;
                     state.attention.needsInput = true;
@@ -1971,7 +1975,8 @@ void UiModel::apply(const UiEvent& event) {
                     // 97-D1/D2: not viewed (or a modal is up, or not in
                     // Conversation): store it for this session's dialog.
                     state.pending_permissions.push_back(
-                        PendingPermission{e.request, e.tool, e.summary, e.force_ask});
+                        PendingPermission{e.request, e.tool, e.summary, e.force_ask,
+                                          e.add_root});
                     state.attention.needsInput = true;
                 }
                 dirty.mark(e.session, UiDirtyFlag::Attention);
@@ -2222,7 +2227,8 @@ void UiModel::focusSessionIn(const WorkspaceId& workspace, const SessionId& id) 
         const auto dialog_state = sessions.find(dialog.session);
         if (dialog_state != sessions.end()) {
             dialog_state->second.pending_permissions.push_front(
-                PendingPermission{dialog.request, dialog.tool, dialog.summary, dialog.force_ask});
+                PendingPermission{dialog.request, dialog.tool, dialog.summary, dialog.force_ask,
+                                  dialog.add_root});
             dialog_state->second.attention.needsInput = true;
             dirty.mark(dialog_state->first, UiDirtyFlag::Attention);
         }

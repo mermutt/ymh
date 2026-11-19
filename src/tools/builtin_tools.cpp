@@ -16,6 +16,7 @@
 #include "ymh/execution/deadline.hpp"
 #include "ymh/execution/path_safety.hpp"
 #include "ymh/execution/resource_governor.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 #include "ymh/tools/git_tools.hpp"
 #include "ymh/tools/tool_context.hpp"
 
@@ -52,8 +53,8 @@ std::filesystem::path safety_path(const std::filesystem::path& path) {
 
 void reject_protected_path(const ToolContext& context,
                            const std::filesystem::path& path) {
-    if (path_is_protected(context.root(), safety_path(path),
-                          context.execution().allow_ymh_access())) {
+    if (path_is_protected_in_roots(context.execution().roots(), safety_path(path),
+                                   context.execution().allow_ymh_access())) {
         throw ToolError{ToolErrorCode::PathEscape, "protected path"};
     }
 }
@@ -69,10 +70,15 @@ std::filesystem::path resolve_optional_base(const ToolContext& context,
 
 std::string relative_string(const ToolContext& context,
                             const std::filesystem::path& path) {
+    if (const std::optional<std::filesystem::path> relative =
+            context.execution().relative_to_root(path);
+        relative.has_value()) {
+        return relative->generic_string();
+    }
     std::error_code ec;
-    const std::filesystem::path relative =
+    const std::filesystem::path fallback =
         std::filesystem::relative(path, context.root(), ec);
-    return ec ? path.generic_string() : relative.generic_string();
+    return ec ? path.generic_string() : fallback.generic_string();
 }
 
 std::vector<std::string> split_lines(const std::string& content) {

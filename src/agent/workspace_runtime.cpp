@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <functional>
@@ -34,6 +35,7 @@
 #include "ymh/execution/output.hpp"
 #include "ymh/execution/pty.hpp"
 #include "ymh/execution/resource_governor.hpp"
+#include "ymh/execution/workspace_roots.hpp"
 #include "ymh/handoff/handoff_command.hpp"
 #include "ymh/jobs/job_registry.hpp"
 #include "ymh/jobs/job_wakeup.hpp"
@@ -85,6 +87,29 @@ std::vector<std::filesystem::path> sandbox_writable_roots(const Config& config) 
         roots.emplace_back(root);
     }
     return roots;
+}
+
+// Multi-root bootstrap: validate each persisted root against the primary and
+// the roots already accepted, exactly like a fresh approval. Invalid or stale
+// entries are dropped with a diagnostic and never reach the live registry.
+std::shared_ptr<WorkspaceRoots> make_workspace_roots(const std::filesystem::path& primary,
+                                                     GrantStore* grant_store) {
+    std::vector<std::filesystem::path> accepted;
+    if (grant_store != nullptr) {
+        std::vector<std::filesystem::path> existing;
+        for (const std::filesystem::path& raw : grant_store->load_roots()) {
+            const std::expected<std::filesystem::path, std::string> validated =
+                validate_workspace_root(raw, primary, existing);
+            if (!validated.has_value()) {
+                std::fprintf(stderr, "ymh: workspace roots: ignoring %s: %s\n",
+                             raw.c_str(), validated.error().c_str());
+                continue;
+            }
+            existing.push_back(*validated);
+            accepted.push_back(*validated);
+        }
+    }
+    return std::make_shared<WorkspaceRoots>(primary, std::move(accepted));
 }
 
 std::string sandbox_mode_name(SandboxMode mode) {
@@ -323,9 +348,11 @@ public:
                    ? std::make_unique<LocalPtyService>(*executor, governor_,
                                                        pty_events_, tool_config_)
                    : nullptr),
+          roots_(make_workspace_roots(root_, grant_store)),
+          grant_store_(grant_store),
           environment_(std::make_unique<LocalEnvironment>(
               root_, effective_sandbox_mode(config), tool_config_, pty_.get(),
-              sandbox_writable_roots(config))),
+              sandbox_writable_roots(config), roots_)),
           skill_catalog_(make_skill_catalog(config, *environment_, launch_dir,
                                             category_logger(LogCategory::Tool))),
           permission_config_(make_permission_config(config, allow_ymh_access)),
@@ -380,7 +407,7 @@ public:
         sandbox_policy_ = std::make_unique<SessionSandboxPolicyService>(
             sessions_, PermissionPresetSettings{config.sandbox.mode, config.approval.policy},
             config.sandbox.max_mode, config.sandbox.allow_escalation_to_danger_full_access,
-            sandbox_writable_roots(config), config.permissions.presets);
+            sandbox_writable_roots(config), config.permissions.presets, roots_);
         environment_->setSandboxPolicyService(sandbox_policy_.get());
 
         for (std::unique_ptr<Tool>& tool : make_builtin_tools(tool_config_)) {
@@ -604,6 +631,8 @@ public:
     ResourceGovernor                   governor_;
     NoopPtyEventSink                   pty_events_;
     std::unique_ptr<LocalPtyService>   pty_;
+    std::shared_ptr<WorkspaceRoots>    roots_;
+    GrantStore*                        grant_store_ = nullptr;
     std::unique_ptr<SessionSandboxPolicyService> sandbox_policy_;
     std::unique_ptr<LocalEnvironment>  environment_;
     std::shared_ptr<SkillCatalog>      skill_catalog_;
@@ -756,6 +785,21 @@ make_workspace_runtime(WorkspaceRuntimeOptions options) {
 }
 
 const std::filesystem::path& WorkspaceRuntime::root() const noexcept { return impl_->root_; }
+
+WorkspaceRoots& WorkspaceRuntime::roots() noexcept { return *impl_->roots_; }
+
+std::expected<std::filesystem::path, std::string> WorkspaceRuntime::add_workspace_root(
+    const std::filesystem::path& directory) {
+    std::expected<std::filesystem::path, std::string> added = impl_->roots_->add(directory);
+    if (!added.has_value()) {
+        return added;
+    }
+    // Best effort: the approval is live even when persistence fails.
+    if (impl_->grant_store_ != nullptr) {
+        (void)impl_->grant_store_->append_root(*added);
+    }
+    return added;
+}
 
 ExecutionEnvironment& WorkspaceRuntime::environment() noexcept { return *impl_->environment_; }
 ResourceGovernor&     WorkspaceRuntime::governor() noexcept { return impl_->governor_; }
