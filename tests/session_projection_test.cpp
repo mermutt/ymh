@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "test_support.hpp"
 
@@ -57,6 +58,39 @@ nlohmann::json assistant_text(const std::string& message_id, const std::string& 
             {"text", text},
         }})},
     };
+}
+
+nlohmann::json assistant_tool_calls(const std::string&              message_id,
+                                    const std::vector<std::string>& call_ids) {
+    nlohmann::json content = nlohmann::json::array();
+    for (const std::string& call_id : call_ids) {
+        content.push_back(nlohmann::json{
+            {"kind", "tool_use"},
+            {"tool_call_id", call_id},
+            {"tool_name", "shell"},
+            {"arguments", nlohmann::json{{"command", "echo hi"}}},
+        });
+    }
+    return nlohmann::json{{"id", message_id}, {"content", std::move(content)}};
+}
+
+nlohmann::json tool_result(const std::string& call_id) {
+    return nlohmann::json{
+        {"id", call_id},
+        {"name", "shell"},
+        {"outcome", "ok"},
+        {"output", "done"},
+    };
+}
+
+std::vector<std::string> assistant_tool_ids(const Message& message) {
+    std::vector<std::string> ids;
+    for (const ymh::ContentBlock& block : message.content) {
+        if (block.kind == ContentBlockKind::ToolUse) {
+            ids.push_back(block.tool_call_id);
+        }
+    }
+    return ids;
 }
 
 nlohmann::json tool_call(const std::string& call_id) {
@@ -214,4 +248,100 @@ TEST(SessionProjection, CompactionDoesNotLeaveAnOrphanToolResult) {
     EXPECT_EQ(find_tool(messages, "call-1"), messages.size());
     EXPECT_EQ(messages.front().role, Role::System);
     EXPECT_EQ(messages.back().role, Role::User);
+}
+
+TEST(SessionProjection, DuplicateToolCallIdsAreMadeUniqueAndResultsStayPaired) {
+    TempWorkspace workspace;
+    const std::string id = fresh_uuid();
+    const auto        header = root_header(workspace.root, id);
+
+    EventRange events;
+    events.push_back(record(1, id, EventType::TurnStarted, turn_started()));
+    events.push_back(record(2, id, EventType::StepStarted, step(1)));
+    events.push_back(record(3, id, EventType::AssistantMessage,
+                            assistant_tool_calls("m1", {"0", "0"})));
+    events.push_back(record(4, id, EventType::ToolCall, tool_call("0")));
+    events.push_back(record(5, id, EventType::ToolResult, tool_result("0")));
+    events.push_back(record(6, id, EventType::ToolCall, tool_call("0")));
+    events.push_back(record(7, id, EventType::ToolResult, tool_result("0")));
+    events.push_back(record(8, id, EventType::TurnEnded, nlohmann::json{{"turn", 1}}));
+
+    const std::vector<Message> messages = ymh::deriveMessages(header, events);
+    ASSERT_EQ(messages.size(), 3U);
+    EXPECT_EQ(messages[0].role, Role::Assistant);
+    const std::vector<std::string> ids = assistant_tool_ids(messages[0]);
+    ASSERT_EQ(ids.size(), 2U);
+    EXPECT_FALSE(ids[0].empty());
+    EXPECT_FALSE(ids[1].empty());
+    EXPECT_NE(ids[0], ids[1]);
+    EXPECT_EQ(messages[1].role, Role::Tool);
+    EXPECT_EQ(messages[1].tool_call_id, ids[0]);
+    EXPECT_EQ(messages[2].role, Role::Tool);
+    EXPECT_EQ(messages[2].tool_call_id, ids[1]);
+}
+
+TEST(SessionProjection, EmptyToolCallIdsAreSynthesizedAndResultsStayPaired) {
+    TempWorkspace workspace;
+    const std::string id = fresh_uuid();
+    const auto        header = root_header(workspace.root, id);
+
+    EventRange events;
+    events.push_back(record(1, id, EventType::TurnStarted, turn_started()));
+    events.push_back(record(2, id, EventType::StepStarted, step(1)));
+    events.push_back(record(3, id, EventType::AssistantMessage,
+                            assistant_tool_calls("m1", {"", ""})));
+    events.push_back(record(4, id, EventType::ToolCall, tool_call("")));
+    events.push_back(record(5, id, EventType::ToolResult, tool_result("")));
+    events.push_back(record(6, id, EventType::ToolCall, tool_call("")));
+    events.push_back(record(7, id, EventType::ToolResult, tool_result("")));
+
+    const std::vector<Message> messages = ymh::deriveMessages(header, events);
+    ASSERT_EQ(messages.size(), 3U);
+    const std::vector<std::string> ids = assistant_tool_ids(messages[0]);
+    ASSERT_EQ(ids.size(), 2U);
+    EXPECT_FALSE(ids[0].empty());
+    EXPECT_FALSE(ids[1].empty());
+    EXPECT_NE(ids[0], ids[1]);
+    EXPECT_EQ(messages[1].tool_call_id, ids[0]);
+    EXPECT_EQ(messages[2].tool_call_id, ids[1]);
+}
+
+TEST(SessionProjection, AnEmptyToolCallAtTheTailGetsAMatchingSyntheticResult) {
+    TempWorkspace workspace;
+    const std::string id = fresh_uuid();
+    const auto        header = root_header(workspace.root, id);
+
+    EventRange events;
+    events.push_back(record(1, id, EventType::TurnStarted, turn_started()));
+    events.push_back(record(2, id, EventType::StepStarted, step(1)));
+    events.push_back(record(3, id, EventType::AssistantMessage,
+                            assistant_tool_calls("m1", {""})));
+
+    const std::vector<Message> messages = ymh::deriveMessages(header, events);
+    ASSERT_EQ(messages.size(), 2U);
+    EXPECT_EQ(messages[0].role, Role::Assistant);
+    const std::vector<std::string> ids = assistant_tool_ids(messages[0]);
+    ASSERT_EQ(ids.size(), 1U);
+    EXPECT_FALSE(ids[0].empty());
+    EXPECT_EQ(messages[1].role, Role::Tool);
+    EXPECT_EQ(messages[1].tool_call_id, ids[0]);
+}
+
+TEST(SessionProjection, AUniqueToolCallIdIsLeftUnchanged) {
+    TempWorkspace workspace;
+    const std::string id = fresh_uuid();
+    const auto        header = root_header(workspace.root, id);
+
+    EventRange events;
+    events.push_back(record(1, id, EventType::TurnStarted, turn_started()));
+    events.push_back(record(2, id, EventType::StepStarted, step(1)));
+    events.push_back(record(3, id, EventType::AssistantMessage,
+                            assistant_tool_calls("m1", {"call-1"})));
+    events.push_back(record(4, id, EventType::ToolCall, tool_call("call-1")));
+    events.push_back(record(5, id, EventType::ToolResult, tool_result("call-1")));
+
+    const std::vector<Message> messages = ymh::deriveMessages(header, events);
+    ASSERT_EQ(messages.size(), 2U);
+    EXPECT_EQ(assistant_tool_ids(messages[0]), std::vector<std::string>{"call-1"});
+    EXPECT_EQ(messages[1].tool_call_id, "call-1");
 }

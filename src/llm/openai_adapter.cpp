@@ -599,7 +599,19 @@ private:
         }
 
         const auto index = tool_call.value("index", std::uint32_t{0});
-        std::string id = tool_call.value("id", std::string{});
+        std::string id;
+        if (tool_call.contains("id")) {
+            // Providers are inconsistent: ids can be strings, numbers, null or
+            // absent. The assembler fills an empty id; numeric ids stay usable.
+            const nlohmann::json& raw_id = tool_call["id"];
+            if (raw_id.is_string()) {
+                id = raw_id.get<std::string>();
+            } else if (raw_id.is_number_integer()) {
+                id = std::to_string(raw_id.get<long long>());
+            } else if (raw_id.is_number_unsigned()) {
+                id = std::to_string(raw_id.get<unsigned long long>());
+            }
+        }
         std::string name;
         std::string arguments;
         if (tool_call.contains("function") && tool_call["function"].is_object()) {
@@ -620,14 +632,14 @@ private:
                                              "tool-call delta before start");
                 return;
             }
-            assembler_.onStarted(index, id, name);
+            const ToolCallId assigned = assembler_.onStarted(index, id, name);
             if (assembler_.has_error()) {
                 terminal_error_ = assembler_.error();
                 return;
             }
             started_.push_back(index);
             unfinished_.push_back(index);
-            emit(StreamEvent{ToolCallStarted{index, id, name}});
+            emit(StreamEvent{ToolCallStarted{index, assigned, name}});
         }
 
         if (!arguments.empty()) {

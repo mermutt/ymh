@@ -34,11 +34,14 @@ public:
     explicit ToolCallAssembler(std::size_t max_arguments_bytes,
                                ToolArgumentPolicy policy = ToolArgumentPolicy::Strict);
 
-    // Returns nullopt while the call is incomplete. A duplicate start for an
-    // index is a `ProviderInternal` protocol violation.
-    std::optional<ToolCallAssembled> onStarted(std::uint32_t index,
-                                               ToolCallId id,
-                                               std::string name);
+    // Starts one call. Returns the normalized id: non-empty and unique among
+    // the calls started in this response. Providers that omit ids (or repeat
+    // one across several calls) get a synthetic `call_<n>_<index>` id, so the
+    // assistant `tool_calls` and the tool results always pair. A duplicate
+    // start for the same index is a `ProviderInternal` protocol violation.
+    [[nodiscard]] ToolCallId onStarted(std::uint32_t index,
+                                       ToolCallId    id,
+                                       std::string   name);
 
     // Appends a raw JSON fragment. Unknown index / mutation after error /
     // mutation after finish is a `ProviderInternal` protocol violation.

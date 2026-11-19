@@ -1,6 +1,7 @@
 #include "ymh/llm/tool_call_assembler.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <utility>
 
@@ -57,23 +58,36 @@ std::optional<nlohmann::json> ToolCallAssembler::parse_arguments(const std::stri
     return parsed;
 }
 
-std::optional<ToolCallAssembled> ToolCallAssembler::onStarted(std::uint32_t index,
-                                                              ToolCallId id,
-                                                              std::string name) {
+ToolCallId ToolCallAssembler::onStarted(std::uint32_t index, ToolCallId id,
+                                       std::string name) {
     if (has_error()) {
-        return std::nullopt;
+        return ToolCallId{};
     }
     if (find(index) != nullptr) {
         fail(LLMErrorCode::ProviderInternal, "duplicate tool-call index");
-        return std::nullopt;
+        return ToolCallId{};
+    }
+
+    const bool duplicate =
+        !id.empty() && std::any_of(calls_.begin(), calls_.end(), [&id](const auto& entry) {
+            return entry.second.id == id;
+        });
+    if (id.empty() || duplicate) {
+        // Some OpenAI-compatible gateways omit ids or reuse one id for every
+        // call. A unique non-empty id keeps the assistant `tool_calls` and the
+        // tool results pairable (and survives Anthropic-style translation).
+        static std::atomic<std::uint64_t> next_synthetic{1};
+        id = "call_" +
+             std::to_string(next_synthetic.fetch_add(1, std::memory_order_relaxed)) +
+             "_" + std::to_string(index);
     }
 
     CallState state;
-    state.id = std::move(id);
-    state.name = std::move(name);
+    state.id      = id;
+    state.name    = std::move(name);
     state.started = true;
     calls_.emplace_back(index, std::move(state));
-    return std::nullopt;
+    return id;
 }
 
 void ToolCallAssembler::onDelta(std::uint32_t index, std::string_view fragment) {

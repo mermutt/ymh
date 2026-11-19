@@ -459,6 +459,16 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
     std::vector<Message> messages;
     std::vector<Sequence> origins;
     std::vector<ToolCallId> pending;
+    // Legacy/loose providers can omit a tool-call id or reuse one id for
+    // several calls in the same assistant message. Record the id rewrite in
+    // call order so the following tool results can be re-paired before the
+    // same-id replacement check treats them as duplicates.
+    struct LegacyCall {
+        ToolCallId original;
+        ToolCallId assigned;
+        bool       paired = false;
+    };
+    std::vector<LegacyCall> legacy_calls;
     Sequence last_seq = 0;
 
     auto push = [&](Message message, Sequence origin) {
@@ -539,11 +549,34 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 message.role    = Role::Assistant;
                 message.content = value.content;
                 message.source  = value.source;
+
+                std::vector<ToolCallId> used;
+                std::size_t             ordinal = 0;
+                for (ContentBlock& block : message.content) {
+                    if (block.kind != ContentBlockKind::ToolUse) {
+                        continue;
+                    }
+                    LegacyCall call;
+                    call.original = block.tool_call_id;
+                    const bool reusable =
+                        !block.tool_call_id.empty() &&
+                        std::find(used.begin(), used.end(), block.tool_call_id) ==
+                            used.end();
+                    if (reusable) {
+                        call.assigned = block.tool_call_id;
+                    } else {
+                        call.assigned = "legacy-call-" + std::to_string(record.seq) +
+                                        "-" + std::to_string(ordinal);
+                        block.tool_call_id = call.assigned;
+                    }
+                    used.push_back(call.assigned);
+                    legacy_calls.push_back(std::move(call));
+                    ++ordinal;
+                }
                 push(std::move(message), record.seq);
-                for (const ContentBlock& block : value.content) {
-                    if (block.kind == ContentBlockKind::ToolUse && !block.tool_call_id.empty() &&
-                        !contains_tool_id(pending, block.tool_call_id)) {
-                        pending.push_back(block.tool_call_id);
+                for (const ToolCallId& id : used) {
+                    if (!contains_tool_id(pending, id)) {
+                        pending.push_back(id);
                     }
                 }
                 break;
@@ -556,9 +589,36 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 break;
             }
             case EventType::ToolResult: {
-                const auto& value = event.payload.get<payload::ToolResult>();
+                payload::ToolResult value = event.payload.get<payload::ToolResult>();
                 if (value.source.call.has_value() && *value.source.call != value.id) {
                     throw CorruptionError("tool result provenance call does not match its id");
+                }
+                // Prefer an exact (unrewritten or unique) call; otherwise consume
+                // the next unpaired call with the same original/empty id. This
+                // happens before the same-id replacement check so duplicate ids
+                // stay distinct.
+                auto call = std::find_if(
+                    legacy_calls.begin(), legacy_calls.end(), [&value](const LegacyCall& entry) {
+                        return !entry.paired && !value.id.empty() &&
+                               entry.assigned == value.id;
+                    });
+                if (call == legacy_calls.end()) {
+                    call = std::find_if(
+                        legacy_calls.begin(), legacy_calls.end(),
+                        [&value](const LegacyCall& entry) {
+                            return !entry.paired &&
+                                   (entry.original == value.id ||
+                                    (value.id.empty() && entry.original.empty()));
+                        });
+                }
+                if (call != legacy_calls.end()) {
+                    call->paired = true;
+                    if (call->assigned != value.id) {
+                        value.id = call->assigned;
+                        if (value.source.call.has_value()) {
+                            value.source.call = value.id;
+                        }
+                    }
                 }
                 erase_tool_id(pending, value.id);
                 Message message;
@@ -634,6 +694,7 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 // tool call dropped by the compaction must not get an orphan
                 // synthetic result later.
                 pending.clear();
+                legacy_calls.clear();
                 for (const Message& message : messages) {
                     if (message.role == Role::Assistant) {
                         for (const ContentBlock& block : message.content) {
