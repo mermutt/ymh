@@ -164,6 +164,7 @@ PermissionConfig to_permission_config(const Config& config) {
         master ? PolicyVerdict::Allow : parse_verdict(config.permissions.shell, "shell");
 
     add_rule(permissions, "read_file", read, "default.read_file");
+    add_rule(permissions, "read_image", read, "default.read_image");
     add_rule(permissions, "grep", read, "default.grep");
     add_rule(permissions, "glob", read, "default.glob");
     add_rule(permissions, "write_file", write, "default.write_file");

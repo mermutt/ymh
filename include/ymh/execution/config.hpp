@@ -23,6 +23,10 @@ struct ToolConfig {
     // Filesystem read bound (§6.3).
     std::size_t read_file_max_bytes{256u * 1024u};
 
+    // Tool-produced image bound (`read_image`): larger files are rejected
+    // instead of being truncated into an unusable base64 payload.
+    std::size_t read_image_max_bytes{2u * 1024u * 1024u};
+
     // glob/grep result bound (§6.3).
     std::size_t search_max_results{1000};
 

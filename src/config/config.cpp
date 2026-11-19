@@ -301,6 +301,20 @@ std::optional<double> read_optional_double(const Json& obj,
     return value;
 }
 
+std::optional<bool> read_optional_bool(const Json& obj,
+                                       std::string_view key,
+                                       std::string_view table_name,
+                                       const std::filesystem::path& source) {
+    const Json* node = member(obj, key);
+    if (node == nullptr) {
+        return std::nullopt;
+    }
+    if (!node->is_boolean()) {
+        fail(source, "invalid type for '" + std::string{table_name} + "." + std::string{key} + "'");
+    }
+    return node->get<bool>();
+}
+
 std::vector<std::string> read_string_array(const Json& obj,
                                            std::string_view key,
                                            std::string_view table_name,
@@ -786,6 +800,7 @@ void apply_model_entry(ModelSettings& entry, const Json& table, const std::strin
         }
         entry.seed = static_cast<std::uint32_t>(value);
     }
+    entry.vision = read_optional_bool(table, "vision", label, source);
 }
 
 void apply_endpoints(Config& config, const Json& table, const std::filesystem::path& source,
@@ -821,7 +836,7 @@ void apply_models(Config& config, const Json& table, const std::filesystem::path
     reject_unknown_named_map(table, "llm.models",
                              {"endpoint", "model", "profile", "max_tokens", "context_window",
                               "reasoning_effort", "temperature", "top_p", "top_k", "tool_choice",
-                              "stop", "seed"},
+                              "stop", "seed", "vision"},
                              source);
     for (auto it = table.begin(); it != table.end(); ++it) {
         const std::string name  = it.key();
@@ -843,9 +858,9 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
     reject_unknown(table, "llm",
                    {"default", "provider", "base_url", "model", "api_key_env", "api_key",
                     "max_tokens", "reasoning_effort", "profile", "temperature", "top_p", "top_k",
-                    "tool_choice", "stop", "seed", "max_concurrency", "connect_timeout_ms",
-                    "idle_timeout_ms", "request_timeout_ms", "retry", "endpoints", "models",
-                    "active_model"},
+                    "tool_choice", "stop", "seed", "vision", "max_concurrency",
+                    "connect_timeout_ms", "idle_timeout_ms", "request_timeout_ms", "retry",
+                    "endpoints", "models", "active_model"},
                    source);
 
     if (const Json* endpoints = member(table, "endpoints"); endpoints != nullptr) {
@@ -869,8 +884,8 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
         reject_unknown(*nested, "llm.default",
                        {"provider", "base_url", "model", "api_key_env", "api_key", "max_tokens",
                         "reasoning_effort", "profile", "temperature", "top_p", "top_k",
-                        "tool_choice", "stop", "seed", "max_concurrency", "connect_timeout_ms",
-                        "idle_timeout_ms", "request_timeout_ms", "retry"},
+                        "tool_choice", "stop", "seed", "vision", "max_concurrency",
+                        "connect_timeout_ms", "idle_timeout_ms", "request_timeout_ms", "retry"},
                        source);
         section = nested;
     }
@@ -896,6 +911,10 @@ void apply_llm(Config& config, const Json& table, const std::filesystem::path& s
 
     config.llm.profile =
         read_string(*section, "profile", "llm.default", config.llm.profile, source);
+    config.llm.vision = read_optional_bool(*section, "vision", "llm.default", source);
+    if (!config.llm.vision.has_value() && section != &table) {
+        config.llm.vision = read_optional_bool(table, "vision", "llm", source);
+    }
     if (member(*section, "temperature") != nullptr) {
         const std::optional<double> value =
             read_optional_double(*section, "temperature", "llm.default", source);
@@ -2306,7 +2325,8 @@ std::optional<std::int64_t> read_non_negative_integer(const Json& value) {
 
 std::optional<std::string> map_localcode_tool(const std::string& tool) {
     static constexpr std::string_view kKnown[] = {
-        "read_file", "write_file", "edit_file", "grep", "glob", "shell", "terminal"};
+        "read_file", "read_image", "write_file", "edit_file", "grep", "glob", "shell",
+        "terminal"};
     if (tool == "bash") {
         return std::string{"shell"};
     }
@@ -2677,6 +2697,9 @@ void fill_default_model(ResolvedModel& out, const Config& config, const std::str
     out.stop             = config.llm.stop;
     out.seed             = config.llm.seed;
     out.source           = source;
+    if (config.llm.vision.has_value()) {
+        out.profile.capabilities.vision = config.llm.vision;
+    }
 }
 
 void fill_named_model(ResolvedModel& out, const Config& config, const std::string& name,
@@ -2700,6 +2723,13 @@ void fill_named_model(ResolvedModel& out, const Config& config, const std::strin
     out.stop             = model.stop;
     out.seed             = model.seed;
     out.source           = source;
+    // llm.vision is the default; llm.models.<name>.vision overrides it.
+    if (config.llm.vision.has_value()) {
+        out.profile.capabilities.vision = config.llm.vision;
+    }
+    if (model.vision.has_value()) {
+        out.profile.capabilities.vision = model.vision;
+    }
 }
 
 } // namespace

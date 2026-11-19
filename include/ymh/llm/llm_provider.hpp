@@ -34,6 +34,7 @@ struct ProviderCapabilities {
     bool                       usage_streaming = false;
     bool                       prompt_caching = false;
     std::optional<std::size_t> max_context_tokens;  // nullopt => unknown
+    bool                       vision = true;  // permissive base; false only when declared
 };
 
 // Retry/backoff policy (08 §3.7). Applied by the adapter; a retry occurs only

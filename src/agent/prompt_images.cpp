@@ -205,12 +205,7 @@ std::filesystem::path resolve_token(const std::string& token,
     return error ? path.lexically_normal() : canonical;
 }
 
-struct LoadedImage {
-    std::string media_type;
-    std::string data;  // standard base64, no data: prefix
-};
-
-std::optional<LoadedImage> load_image(const std::filesystem::path& path,
+std::optional<EncodedImage> load_image(const std::filesystem::path& path,
                                       const PromptImageLimits&    limits,
                                       std::string&                reason) {
     std::ifstream input{path, std::ios::binary};
@@ -255,15 +250,9 @@ std::optional<LoadedImage> load_image(const std::filesystem::path& path,
         reason = "cannot read the file";
         return std::nullopt;
     }
-    if (bytes.size() > limits.max_image_bytes) {
-        reason = "file grew past the image size limit";
-        return std::nullopt;
-    }
-
-    LoadedImage loaded;
-    loaded.media_type = *media_type;
-    loaded.data       = base64_encode(bytes);
-    return loaded;
+    // Also covers a file that grew past the limit between the stat and the
+    // read; `encode_image` owns the size check.
+    return encode_image(bytes, limits.max_image_bytes, reason);
 }
 
 void append_note(Message& message, const std::string& token,
@@ -278,27 +267,79 @@ void append_note(Message& message, const std::string& token,
 
 } // namespace
 
+std::optional<EncodedImage> encode_image(std::string_view bytes,
+                                         std::size_t max_bytes,
+                                         std::string& reason) {
+    const std::string_view prefix = bytes.substr(0, 12);
+    const std::optional<std::string> media_type = detect_media_type(prefix);
+    if (!media_type.has_value()) {
+        reason = "unsupported image format";
+        return std::nullopt;
+    }
+    if (bytes.size() > max_bytes) {
+        reason = "image is " + std::to_string(bytes.size()) + " bytes (limit " +
+                 std::to_string(max_bytes) + " bytes)";
+        return std::nullopt;
+    }
+    EncodedImage encoded;
+    encoded.media_type = *media_type;
+    encoded.data       = base64_encode(bytes);
+    return encoded;
+}
+
 bool attach_image_file(Message& message, const std::filesystem::path& path,
                        PromptImageLimits limits, std::vector<std::string>& warnings) {
+    const PromptImageResult result = attach_image_files(message, {path}, limits);
+    if (result.attached == 1) {
+        return true;
+    }
+    warnings.insert(warnings.end(), result.warnings.begin(), result.warnings.end());
+    return false;
+}
+
+PromptImageResult attach_image_files(Message& message,
+                                     const std::vector<std::filesystem::path>& paths,
+                                     PromptImageLimits                         limits) {
+    PromptImageResult result;
     if (message.role != Role::User) {
-        return false;
+        return result;
     }
-    std::string reason;
-    const std::optional<LoadedImage> loaded = load_image(path, limits, reason);
-    if (!loaded.has_value()) {
-        append_note(message, path.string(), reason, warnings);
-        return false;
+
+    std::size_t attached      = 0;
+    std::size_t encoded_total = 0;
+    for (const ContentBlock& block : message.content) {
+        if (block.kind == ContentBlockKind::Image) {
+            ++attached;
+            encoded_total += block.data.size();
+        }
     }
-    if (loaded->data.size() > limits.max_total_encoded_bytes) {
-        append_note(message, path.string(), "image exceeds the attached-size limit", warnings);
-        return false;
+
+    for (const std::filesystem::path& path : paths) {
+        if (attached >= limits.max_images) {
+            append_note(message, path.string(), "image count limit reached", result.warnings);
+            break;
+        }
+        std::string reason;
+        const std::optional<EncodedImage> loaded = load_image(path, limits, reason);
+        if (!loaded.has_value()) {
+            append_note(message, path.string(), reason, result.warnings);
+            continue;
+        }
+        if (encoded_total + loaded->data.size() > limits.max_total_encoded_bytes) {
+            append_note(message, path.string(), "attached-image size limit reached",
+                        result.warnings);
+            break;
+        }
+        ContentBlock image;
+        image.kind       = ContentBlockKind::Image;
+        image.media_type = loaded->media_type;
+        image.data       = loaded->data;
+        encoded_total += image.data.size();
+        ++attached;
+        ++result.attached;
+        message.content.push_back(std::move(image));
     }
-    ContentBlock image;
-    image.kind       = ContentBlockKind::Image;
-    image.media_type = loaded->media_type;
-    image.data       = loaded->data;
-    message.content.push_back(std::move(image));
-    return true;
+    return result;
 }
 
 PromptImageResult attach_prompt_images(Message& message,
@@ -351,7 +392,7 @@ PromptImageResult attach_prompt_images(Message& message,
         }
 
         std::string reason;
-        const std::optional<LoadedImage> loaded = load_image(*resolved, limits, reason);
+        const std::optional<EncodedImage> loaded = load_image(*resolved, limits, reason);
         if (!loaded.has_value()) {
             if (reason == "unsupported image format" && !has_image_extension(token)) {
                 continue;  // an ordinary non-image file mentioned in prose

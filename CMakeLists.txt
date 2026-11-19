@@ -356,6 +356,7 @@ target_link_libraries(ymh_llm
     PRIVATE
         CURL::libcurl
         Threads::Threads
+        ymh::logging
         ymh::warnings
 )
 
@@ -602,6 +603,7 @@ add_library(ymh_agent STATIC
     src/agent/subagent_service.cpp
     src/agent/subagent_types.cpp
     src/agent/tool_result_pruner.cpp
+    src/agent/vision_gate.cpp
     src/commands/command_registry.cpp
     src/commands/goal_command.cpp
     src/commands/handoff_command.cpp

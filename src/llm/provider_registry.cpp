@@ -120,6 +120,9 @@ void apply_profile_capabilities(ProviderCapabilities& capabilities,
     if (declared.prompt_caching.has_value()) {
         capabilities.prompt_caching = *declared.prompt_caching;
     }
+    if (declared.vision.has_value()) {
+        capabilities.vision = *declared.vision;
+    }
 }
 
 void register_builtin_providers(ProviderRegistry& registry) {

@@ -60,6 +60,9 @@ struct CommandContext {
     // 82-D2: forwards the raw argument tail of `/handoff` to the supervisor,
     // which submits the durable `command.invoke` RPC.
     std::function<void(const std::string&)> handoff;
+    // `/image [<path>|clear]`: the supervisor validates and stages the file for
+    // the focused session; staged images ride that session's next prompt.
+    std::function<void(const std::string&)> image;
 };
 
 // 20 §6.1: the non-static, callable-from-supervisor form of the file-local

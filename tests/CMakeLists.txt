@@ -11,6 +11,9 @@ add_executable(ymh_file_store_tests
     tmp_access_test.cpp
     session_projection_test.cpp
     prompt_images_test.cpp
+    prompt_images_explicit_test.cpp
+    vision_capability_test.cpp
+    tool_images_test.cpp
 )
 
 target_include_directories(ymh_file_store_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

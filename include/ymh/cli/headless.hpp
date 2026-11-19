@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "ymh/config/config.hpp"
 #include "ymh/core/event.hpp"
@@ -32,6 +33,7 @@ namespace ymh {
 struct HeadlessOptions {
     std::filesystem::path workspace;  // canonicalised by the runner
     std::string           task;
+    std::vector<std::string> images;  // explicit `--image` attachments, before the prose scan
     std::optional<SessionId> resume;  // resume this session instead of creating one
     std::optional<std::string> agent_preset;  // 52-D15: pins the session preset
     Config                config;

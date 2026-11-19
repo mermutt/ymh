@@ -15,13 +15,23 @@ constexpr std::size_t kMaxAppliedEventIds = 8192;
 std::string flatten_content(const std::vector<ContentBlock>& content) {
     std::string text;
     for (const ContentBlock& block : content) {
-        if (block.kind != ContentBlockKind::Text || block.text.empty()) {
+        std::string piece;
+        if (block.kind == ContentBlockKind::Text) {
+            if (block.text.empty()) {
+                continue;
+            }
+            piece = block.text;
+        } else if (block.kind == ContentBlockKind::Image) {
+            // An image-bearing user message must not render blank; mirror the
+            // `[image <media_type>]` marker `session_export` already uses.
+            piece = block.media_type.empty() ? "[image]" : "[image " + block.media_type + "]";
+        } else {
             continue;
         }
         if (!text.empty()) {
             text += '\n';
         }
-        text += block.text;
+        text += piece;
     }
     return text;
 }

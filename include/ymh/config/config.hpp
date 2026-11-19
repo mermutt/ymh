@@ -308,6 +308,8 @@ struct ModelSettings {
     std::optional<std::string>   tool_choice;
     std::vector<std::string>     stop;
     std::optional<std::uint32_t> seed;
+    // Unset => unknown, assume vision-capable and let the provider decide.
+    std::optional<bool>          vision;
 };
 
 // [llm.default] — mapped onto `LLMProviderConfig` by the CLI wiring.
@@ -336,6 +338,8 @@ struct LlmSettings {
     std::optional<std::string>   tool_choice;
     std::vector<std::string>     stop;
     std::optional<std::uint32_t> seed;
+    // Unset => unknown, assume vision-capable and let the provider decide.
+    std::optional<bool>          vision;
     std::size_t                max_concurrency = 4;
     std::chrono::milliseconds  connect_timeout{10'000};
     std::chrono::milliseconds  idle_timeout{60'000};

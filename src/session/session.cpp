@@ -585,6 +585,24 @@ std::vector<Message> deriveMessages([[maybe_unused]] const SessionHeader& header
                 if (!replaced) {
                     push(std::move(message), record.seq);
                 }
+                // Tool-produced images are projected as a synthetic user
+                // message because a `role: tool` message is text-only. This is
+                // projection-only: no event is appended. A same-id replacement
+                // already carries (or lacks) its own projection, so skip it.
+                if (!replaced && !value.images.empty()) {
+                    Message image_message;
+                    image_message.role = Role::User;
+                    ContentBlock note;
+                    note.kind = ContentBlockKind::Text;
+                    note.text = value.images.size() == 1
+                                    ? "[image from tool " + value.name + "]"
+                                    : "[images from tool " + value.name + "]";
+                    image_message.content.push_back(std::move(note));
+                    for (const ContentBlock& image : value.images) {
+                        image_message.content.push_back(image);
+                    }
+                    push(std::move(image_message), record.seq);
+                }
                 break;
             }
             case EventType::PermissionDecision:

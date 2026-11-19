@@ -15,6 +15,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <unistd.h>
 
@@ -44,6 +45,28 @@ Message user_message(std::string text) {
     block.text = std::move(text);
     message.content.push_back(std::move(block));
     return message;
+}
+
+// `--image`: resolve an explicit path against the workspace root. Accepts
+// plain relative/absolute paths plus `~/` and `file://` forms.
+std::filesystem::path resolve_image_path(const std::string& raw,
+                                         const std::filesystem::path& root) {
+    std::string value = raw;
+    if (value.rfind("file://", 0) == 0) {
+        value.erase(0, 7);
+        if (value.rfind("localhost/", 0) == 0) {
+            value.erase(0, 9);
+        }
+    } else if (value == "~" || value.rfind("~/", 0) == 0) {
+        if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+            value = std::string{home} + value.substr(1);
+        }
+    }
+    std::filesystem::path path{value};
+    if (path.is_relative()) {
+        path = root / path;
+    }
+    return path;
 }
 
 std::string first_line(const std::string& text, std::size_t max_bytes) {
@@ -303,6 +326,17 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
     std::atomic<bool> finished{false};
     std::thread worker([&]() {
         Message message = user_message(options.task);
+        // Explicit `--image` files first; the prose scan below no-ops once an
+        // Image block is present.
+        std::vector<std::filesystem::path> image_paths;
+        image_paths.reserve(options.images.size());
+        for (const std::string& image : options.images) {
+            image_paths.push_back(resolve_image_path(image, root));
+        }
+        const PromptImageResult explicit_images = attach_image_files(message, image_paths);
+        for (const std::string& warning : explicit_images.warnings) {
+            err << "ymh: " << warning << '\n';
+        }
         const PromptImageResult attached = attach_prompt_images(message, root);
         for (const std::string& warning : attached.warnings) {
             err << "ymh: " << warning << '\n';

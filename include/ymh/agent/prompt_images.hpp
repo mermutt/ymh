@@ -7,12 +7,28 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ymh/agent/message.hpp"
 
 namespace ymh {
+
+// A supported image, base64-encoded (standard alphabet, no `data:` prefix).
+struct EncodedImage {
+    std::string media_type;
+    std::string data;
+};
+
+// Detect the media type from magic bytes (PNG/JPEG/GIF/WebP) and base64-encode
+// `bytes`. On failure returns nullopt and sets `reason`: "unsupported image
+// format" for an unknown header, or a message containing "limit" when `bytes`
+// exceeds `max_bytes`.
+[[nodiscard]] std::optional<EncodedImage> encode_image(std::string_view bytes,
+                                                       std::size_t max_bytes,
+                                                       std::string& reason);
 
 struct PromptImageLimits {
     std::size_t max_image_bytes = 2u * 1024u * 1024u;
@@ -39,5 +55,13 @@ struct PromptImageResult {
 [[nodiscard]] bool attach_image_file(Message& message, const std::filesystem::path& path,
                                      PromptImageLimits limits,
                                      std::vector<std::string>& warnings);
+
+// Attach a whole explicit list in order, enforcing the image-count cap and the
+// encoded total across the list AND any Image blocks already present. Returns
+// how many files from `paths` were attached; failures append a visible note and
+// a warning.
+[[nodiscard]] PromptImageResult attach_image_files(
+    Message& message, const std::vector<std::filesystem::path>& paths,
+    PromptImageLimits limits = {});
 
 } // namespace ymh

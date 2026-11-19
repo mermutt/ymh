@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "ymh/agent/preset.hpp"
+#include "ymh/agent/vision_gate.hpp"
 #include "ymh/execution/environment.hpp"
 #include "ymh/execution/resource_governor.hpp"
 #include "ymh/llm/assistant_stream.hpp"
@@ -764,6 +765,18 @@ FrozenRequest AgentLoop::buildRequest(const std::vector<Message>& messages,
     LLMRequest request;
     request.model    = selected.model;
     request.messages = messages;
+    // A profile that explicitly declares `vision = false` must not receive
+    // image blocks: rewrite them to a visible text note. Unset means "assume
+    // capable" and the provider decides.
+    if (selected.profile.capabilities.vision.has_value() &&
+        !*selected.profile.capabilities.vision) {
+        const std::string reason = "model '" + selected.model + "' is not vision-capable";
+        const std::size_t degraded = degrade_prompt_images(request.messages, reason);
+        if (degraded > 0 && services_.logger != nullptr) {
+            services_.logger->warn("omitted " + std::to_string(degraded) +
+                                   " image block(s): " + reason);
+        }
+    }
     if (services_.context != nullptr) {
         request.tools = services_.context->tools(active_scope());
     }

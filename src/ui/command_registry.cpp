@@ -215,6 +215,16 @@ CommandRegistry CommandRegistry::builtin() {
             }
         }});
     registry.add(Command{
+        "image", "attach an image file to your next prompt",
+        [](CommandContext& context, const std::string& args) {
+            if (context.session == nullptr) {
+                return;
+            }
+            if (context.image) {
+                context.image(args);
+            }
+        }});
+    registry.add(Command{
         "skills", "list available skills",
         [](CommandContext& context, const std::string& args) {
             if (context.skills) {

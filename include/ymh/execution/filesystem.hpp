@@ -2,9 +2,10 @@
 
 // Rooted filesystem service (07 §6.3). Every method receives an already
 // `resolve()`d absolute path; `LocalFilesystem` re-verifies containment on
-// writes as defense-in-depth against TOCTOU (§15). Reads are bounded by
-// `ToolConfig::read_file_max_bytes`; glob/grep results by
-// `ToolConfig::search_max_results`.
+// writes as defense-in-depth against TOCTOU (§15). `read(path)` is bounded by
+// `ToolConfig::read_file_max_bytes`; the explicit `read(path, max_bytes)`
+// overload lets an image tool use `ToolConfig::read_image_max_bytes`. glob/grep
+// results are bounded by `ToolConfig::search_max_results`.
 
 #include <cstddef>
 #include <cstdint>
@@ -61,6 +62,8 @@ public:
     virtual ~Filesystem() = default;
 
     virtual Task<FileData> read(const std::filesystem::path&) = 0;
+    // Same read, with an explicit byte bound (e.g. `read_image_max_bytes`).
+    virtual Task<FileData> read(const std::filesystem::path&, std::size_t max_bytes) = 0;
     virtual Task<void>     write(const std::filesystem::path&, const Data&) = 0;
     virtual Task<void>     remove(const std::filesystem::path&) = 0;
     virtual Task<FileInfo> stat(const std::filesystem::path&) = 0;
@@ -78,6 +81,8 @@ public:
                     std::vector<std::filesystem::path> allowed_roots = {});
 
     Task<FileData> read(const std::filesystem::path& path) override;
+    Task<FileData> read(const std::filesystem::path& path,
+                        std::size_t max_bytes) override;
     Task<void>     write(const std::filesystem::path& path, const Data& data) override;
     Task<void>     remove(const std::filesystem::path& path) override;
     Task<FileInfo> stat(const std::filesystem::path& path) override;

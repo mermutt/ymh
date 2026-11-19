@@ -57,6 +57,11 @@ void LocalFilesystem::require_contained(const std::filesystem::path& path,
 }
 
 Task<FileData> LocalFilesystem::read(const std::filesystem::path& path) {
+    return read(path, config_.read_file_max_bytes);
+}
+
+Task<FileData> LocalFilesystem::read(const std::filesystem::path& path,
+                                     std::size_t max_bytes) {
     require_contained(path);
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
@@ -75,7 +80,7 @@ Task<FileData> LocalFilesystem::read(const std::filesystem::path& path) {
         data.total_bytes = static_cast<std::size_t>(info.st_size);
     }
 
-    const std::size_t limit = config_.read_file_max_bytes;
+    const std::size_t limit = max_bytes;
     std::string bytes;
     bytes.resize(limit);
     std::size_t used = 0;

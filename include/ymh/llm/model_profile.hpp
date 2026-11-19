@@ -22,6 +22,7 @@ struct ProfileCapabilities {
     std::optional<bool> reasoning;
     std::optional<bool> usage_streaming;
     std::optional<bool> prompt_caching;
+    std::optional<bool> vision;
 };
 
 // 47-D1: the profile seam. The type is generic; the built-in profile values

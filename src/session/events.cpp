@@ -519,6 +519,11 @@ void to_json(nlohmann::json& json, const ToolResult& value) {
         }
         json["sandbox"] = std::move(sandbox);
     }
+    // Backward-compatible: an old reader ignores the key, and an old log (or a
+    // text-only result) simply omits it.
+    if (!value.images.empty()) {
+        json["images"] = value.images;
+    }
 }
 
 void from_json(const nlohmann::json& json, ToolResult& value) {
@@ -561,6 +566,7 @@ void from_json(const nlohmann::json& json, ToolResult& value) {
         facts.denied = sandbox.value("denied", false);
         value.sandbox = facts;
     }
+    value.images = json.value("images", std::vector<ContentBlock>{});
 }
 
 void to_json(nlohmann::json& json, const PermissionDecision& value) {

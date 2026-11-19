@@ -10,6 +10,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <deque>
 #include <filesystem>
@@ -21,6 +22,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -32,6 +34,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ymh/agent/message.hpp"
+#include "ymh/agent/prompt_images.hpp"
 #include "ymh/llm/redaction.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -481,6 +485,55 @@ std::string make_rewind_summary(std::int64_t started_at_ms, const std::string& p
         preview = preview.substr(0, kMaxPreview - 3) + "...";
     }
     return age + " | " + preview;
+}
+
+// ---------------------------------------------------------------------------
+// `/image` attachment staging.
+// ---------------------------------------------------------------------------
+
+// One file validated and encoded by `/image`, held until the session's next
+// prompt folds it into a user `Message`.
+struct StagedImage {
+    std::string path;        // resolved path, shown in notices
+    std::string media_type;  // e.g. "image/png"
+    std::string data;        // provider-encoded base64 payload
+    std::size_t bytes = 0;   // decoded file size, for the notice
+};
+
+// Strip one layer of matching quotes (`"`, `'` or a backtick) around a path.
+std::string unquote_path(std::string value) {
+    if (value.size() >= 2 && value.back() == value.front() &&
+        (value.front() == '"' || value.front() == '\'' || value.front() == '`')) {
+        value = value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+// `/image` path resolution: quotes are stripped, a leading `~` expands to $HOME,
+// and a relative path resolves against the session's workspace root.
+std::filesystem::path resolve_image_path(const std::string& raw,
+                                         const std::filesystem::path& workspace_root) {
+    std::string value = unquote_path(raw);
+    if (value == "~" || value.rfind("~/", 0) == 0) {
+        if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+            value = std::string{home} + value.substr(1);
+        }
+    }
+    std::filesystem::path path{value};
+    if (path.is_relative() && !workspace_root.empty()) {
+        path = workspace_root / path;
+    }
+    std::error_code             error;
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, error);
+    return error ? path.lexically_normal() : canonical;
+}
+
+// "812 B" / "12 KiB": the attachment notice never shows raw base64 sizes.
+std::string format_image_size(std::size_t bytes) {
+    if (bytes < 1024) {
+        return std::to_string(bytes) + " B";
+    }
+    return std::to_string((bytes + 1023) / 1024) + " KiB";
 }
 
 class SupervisorApp final : public UiController {
@@ -2740,9 +2793,34 @@ private:
         refresh_sessions(workspace);
     }
 
+    // Sends `text` as the session's next prompt. Files staged by `/image` for
+    // that session are folded into a full user `Message` (text block first,
+    // then the images), which the daemon accepts in place of the plain string;
+    // the staging is consumed here so one attach rides exactly one prompt.
     void prompt(const WorkspaceId& workspace, const SessionId& session, const std::string& text) {
+        nlohmann::json message = text;
+        if (const auto staged = staged_images_.find(session);
+            staged != staged_images_.end() && !staged->second.empty()) {
+            Message user_message;
+            user_message.role = Role::User;
+            if (!text.empty()) {
+                ContentBlock text_block;
+                text_block.kind = ContentBlockKind::Text;
+                text_block.text = text;
+                user_message.content.push_back(std::move(text_block));
+            }
+            for (StagedImage& image : staged->second) {
+                ContentBlock block;
+                block.kind       = ContentBlockKind::Image;
+                block.media_type = std::move(image.media_type);
+                block.data       = std::move(image.data);
+                user_message.content.push_back(std::move(block));
+            }
+            staged_images_.erase(staged);
+            message = nlohmann::json(user_message);
+        }
         submit_to(workspace, std::string(protocol::method::kAgentPrompt),
-                  nlohmann::json{{"session", session.value}, {"message", text}},
+                  nlohmann::json{{"session", session.value}, {"message", std::move(message)}},
                   [this, workspace, session](SupervisorReply reply) {
                       if (reply.ok ||
                           reply.error_code !=
@@ -2753,6 +2831,124 @@ private:
                           recover_unknown_session(workspace, session);
                       });
                   });
+    }
+
+    // `/image [<path>|clear]`. Staging is per session: the TUI can switch
+    // sessions, and an attachment must never leak into another transcript.
+    void image_command(const std::string& args) {
+        SessionUiState* state = model_.ensureActiveSession();
+        if (state == nullptr) {
+            model_.pushNotice("image: no active session");
+            return;
+        }
+        if (args.empty()) {
+            list_staged_images(*state);
+            return;
+        }
+        if (args == "clear") {
+            const auto staged = staged_images_.find(state->id);
+            const std::size_t count =
+                staged == staged_images_.end() ? 0 : staged->second.size();
+            if (staged != staged_images_.end()) {
+                staged_images_.erase(staged);
+            }
+            if (count == 0) {
+                append_system_entry(model_, *state, "no staged images to clear");
+                return;
+            }
+            append_system_entry(model_, *state,
+                                "cleared " + std::to_string(count) +
+                                    (count == 1 ? " staged image" : " staged images"));
+            return;
+        }
+        if (unquote_path(args).empty()) {
+            append_system_entry(model_, *state, "usage: /image <path> | /image clear");
+            return;
+        }
+        attach_staged_image(*state, args);
+    }
+
+    void list_staged_images(SessionUiState& state) {
+        const auto staged = staged_images_.find(state.id);
+        if (staged == staged_images_.end() || staged->second.empty()) {
+            append_system_entry(model_, state, "usage: /image <path> | /image clear");
+            return;
+        }
+        append_system_entry(model_, state, "staged for your next prompt:");
+        for (const StagedImage& image : staged->second) {
+            append_system_entry(model_, state, "  " + image.path + " (" + image.media_type +
+                                                    ", " + format_image_size(image.bytes) +
+                                                    ")");
+        }
+    }
+
+    // Validates + encodes `raw` immediately (so a missing or unsupported file is
+    // reported now, not at submit time) and stages it against the prompt-image
+    // limits: 4 images, 2 MiB each, 3 MiB encoded in total.
+    void attach_staged_image(SessionUiState& state, const std::string& raw) {
+        const PromptImageLimits limits{};
+        std::vector<StagedImage>& staged = staged_images_[state.id];
+
+        const std::filesystem::path root = workspace_root_of(state.workspace);
+        const std::filesystem::path path = resolve_image_path(raw, root);
+        const std::string           display = path.string();
+        const auto reject = [&](const std::string& reason) {
+            append_system_entry(model_, state,
+                                "image not attached: " + display + " (" + reason + ")");
+        };
+
+        if (std::any_of(staged.begin(), staged.end(), [&display](const StagedImage& image) {
+                return image.path == display;
+            })) {
+            append_system_entry(model_, state, "already staged: " + display);
+            return;
+        }
+        if (staged.size() >= limits.max_images) {
+            reject("already " + std::to_string(limits.max_images) +
+                   " images staged for the next prompt");
+            return;
+        }
+        std::size_t staged_encoded = 0;
+        for (const StagedImage& image : staged) {
+            staged_encoded += image.data.size();
+        }
+
+        Message                  message;
+        std::vector<std::string> warnings;
+        if (!attach_image_file(message, path, limits, warnings) || message.content.empty()) {
+            // The helper's own note already reads `image not attached: <path> (<reason>)`.
+            if (!warnings.empty()) {
+                append_system_entry(model_, state, warnings.back());
+            } else {
+                reject("cannot attach the file");
+            }
+            return;
+        }
+        ContentBlock block = std::move(message.content.back());
+        if (staged_encoded + block.data.size() > limits.max_total_encoded_bytes) {
+            reject("staged images would exceed the " +
+                   std::to_string(limits.max_total_encoded_bytes / (1024u * 1024u)) +
+                   " MiB limit");
+            return;
+        }
+
+        std::error_code     error;
+        const std::uintmax_t size = std::filesystem::file_size(path, error);
+        const std::size_t    bytes = error ? 0 : static_cast<std::size_t>(size);
+        const std::string    media_type = block.media_type;
+        staged.push_back(StagedImage{display, media_type, std::move(block.data), bytes});
+        append_system_entry(model_, state,
+                            "image attached: " + display + " (" + media_type + ", " +
+                                format_image_size(bytes) +
+                                ") - sent with your next prompt; type a prompt when ready");
+    }
+
+    std::filesystem::path workspace_root_of(const WorkspaceId& workspace) const {
+        const auto modeled = model_.workspaces.find(workspace);
+        if (modeled != model_.workspaces.end() && !modeled->second.cwd.empty()) {
+            return std::filesystem::path{modeled->second.cwd};
+        }
+        return std::filesystem::current_path();
     }
 
     void submit_to(const WorkspaceId& workspace, std::string method, nlohmann::json params,
@@ -3523,6 +3719,7 @@ private:
         context.status = [this] { request_status(); };
         context.handoff = [this](const std::string& args) { request_handoff(args); };
         context.sandbox = [this](const std::string& args) { request_sandbox(args); };
+        context.image   = [this](const std::string& args) { image_command(args); };
         return registry_.dispatch(line, context);
     }
 
@@ -4871,6 +5068,10 @@ private:
     // `sync_subagent_subscriptions`.
     std::map<SessionId, WorkspaceId> viewed_children_;
     std::map<WorkspaceId, std::string> pending_creates_;
+    // `/image` staging: encoded images waiting for the session's next prompt.
+    // Keyed by session so switching sessions cannot leak an attachment, and
+    // consumed (erased) exactly when that prompt is submitted. UI thread only.
+    std::map<SessionId, std::vector<StagedImage>> staged_images_;
     // 49 test seams: per-workspace `ensure_workspace_running` invocations and
     // per-method `submit_to` invocations, so the lazy path can be asserted
     // without a live daemon. Inert in production.

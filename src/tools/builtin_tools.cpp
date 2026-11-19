@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "ymh/agent/prompt_images.hpp"
 #include "ymh/execution/deadline.hpp"
 #include "ymh/execution/path_safety.hpp"
 #include "ymh/execution/resource_governor.hpp"
@@ -777,6 +778,67 @@ public:
     }
 };
 
+class ReadImageTool final : public Tool {
+public:
+    explicit ReadImageTool(ToolConfig config) : config_(std::move(config)) {}
+
+    ToolSchema schema() const override {
+        return ToolSchema{
+            ToolName{"read_image"},
+            ToolVersion{1, 0},
+            "Read a PNG, JPEG, GIF, or WebP image under the workspace root or the /tmp "
+            "scratch area and attach it to the conversation so you can see it. Use this "
+            "to inspect screenshots, diagrams, and photos; read_file cannot show image "
+            "contents. Fails when the file is not a supported image or exceeds the image "
+            "size limit.",
+            object_schema(nlohmann::json{{"path", string_type()}},
+                          nlohmann::json::array({"path"})),
+            false};
+    }
+
+    Task<ToolResult> execute(const ToolContext& context,
+                             const ToolArguments& arguments) override {
+        const std::filesystem::path path = resolve_required_path(context, arguments);
+        reject_protected_path(context, path);
+        const FileData data =
+            context.execution().fs().read(path, config_.read_image_max_bytes).get();
+
+        ToolResult result;
+        result.id   = context.callId();
+        result.name = "read_image";
+        if (data.truncated) {
+            result.outcome = payload::ToolOutcome::Error;
+            result.error = "image exceeds read_image_max_bytes (" +
+                           std::to_string(config_.read_image_max_bytes) + " bytes)";
+            result.output  = *result.error;
+            return Task<ToolResult>(std::move(result));
+        }
+
+        std::string reason;
+        const std::optional<EncodedImage> encoded =
+            encode_image(data.bytes, config_.read_image_max_bytes, reason);
+        if (!encoded.has_value()) {
+            result.outcome = payload::ToolOutcome::Error;
+            result.error   = reason;
+            result.output  = reason;
+            return Task<ToolResult>(std::move(result));
+        }
+
+        ContentBlock image;
+        image.kind       = ContentBlockKind::Image;
+        image.media_type = encoded->media_type;
+        image.data       = encoded->data;
+        result.output = "attached image " + relative_string(context, path) + " (" +
+                        encoded->media_type + ", " + std::to_string(data.bytes.size()) +
+                        " bytes)";
+        result.images.push_back(std::move(image));
+        return Task<ToolResult>(std::move(result));
+    }
+
+private:
+    ToolConfig config_;
+};
+
 class WriteFileTool final : public Tool {
 public:
     explicit WriteFileTool([[maybe_unused]] ToolConfig config) {}
@@ -1424,6 +1486,10 @@ std::unique_ptr<Tool> make_read_file_tool(ToolConfig config) {
     return std::make_unique<ReadFileTool>(config);
 }
 
+std::unique_ptr<Tool> make_read_image_tool(ToolConfig config) {
+    return std::make_unique<ReadImageTool>(std::move(config));
+}
+
 std::unique_ptr<Tool> make_write_file_tool(ToolConfig config) {
     return std::make_unique<WriteFileTool>(config);
 }
@@ -1462,6 +1528,7 @@ std::vector<std::unique_ptr<Tool>> make_builtin_tools(ToolConfig config) {
     tools.push_back(make_grep_tool(config));
     tools.push_back(make_multi_edit_tool(config));
     tools.push_back(make_read_file_tool(config));
+    tools.push_back(make_read_image_tool(config));
     tools.push_back(make_shell_tool(config));
     tools.push_back(make_write_file_tool(config));
     return tools;

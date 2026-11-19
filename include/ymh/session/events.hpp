@@ -159,6 +159,10 @@ struct ToolResult {
     // 119-D35: what the sandbox actually did for this call (absent under
     // `danger-full-access` and for pre-119 logs).
     std::optional<SandboxFacts> sandbox;
+    // Tool-produced images (e.g. `read_image`). `role: tool` messages are
+    // text-only, so `deriveMessages` projects these as a follow-up user
+    // message. Empty for text-only tools and for older logs.
+    std::vector<ContentBlock> images;
 };
 
 // ---- permissions (01 §4.5, §19) --------------------------------------------

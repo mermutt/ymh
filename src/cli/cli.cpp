@@ -28,6 +28,8 @@
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 
+#include "ymh/agent/message.hpp"
+#include "ymh/agent/prompt_images.hpp"
 #include "ymh/cli/assistant_stream_printer.hpp"
 #include "ymh/cli/headless.hpp"
 #include "ymh/cli/provider_factory.hpp"
@@ -755,11 +757,33 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     return ui::run_supervisor(options);
 }
 
+// `ymh run --image`: resolve an explicit image path against the workspace root.
+// Accepts plain relative/absolute paths plus `~/` and `file://` forms.
+std::filesystem::path resolve_image_path(const std::string& raw,
+                                         const std::filesystem::path& root) {
+    std::string value = raw;
+    if (value.rfind("file://", 0) == 0) {
+        value.erase(0, 7);
+        if (value.rfind("localhost/", 0) == 0) {
+            value.erase(0, 9);
+        }
+    } else if (value == "~" || value.rfind("~/", 0) == 0) {
+        if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+            value = std::string{home} + value.substr(1);
+        }
+    }
+    std::filesystem::path path{value};
+    if (path.is_relative()) {
+        path = root / path;
+    }
+    return path;
+}
+
 // `ymh run` against a live daemon: attach, create/resume a session, stream the turn.
 int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
                    const std::filesystem::path& config_path, const std::string& task,
-                   const std::string& resume, bool allow_ymh_access, std::ostream& out,
-                   std::ostream& err) {
+                   const std::vector<std::string>& images, const std::string& resume,
+                   bool allow_ymh_access, std::ostream& out, std::ostream& err) {
     ForkExecLauncher launcher;
     HostLifecycle    lifecycle(launcher, registry, config_path, allow_ymh_access);
     AttachResult     attach;
@@ -790,8 +814,32 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
         protocol::to_json(subscribe, protocol::SubscribeParams{session, beginning});
         static_cast<void>(
             connection.request(protocol::method::kEventSubscribe, std::move(subscribe)));
-        static_cast<void>(connection.request(protocol::method::kAgentPrompt,
-                                             {{"session", session.value}, {"message", task}}));
+
+        // No `--image`: keep the plain string payload. With explicit images,
+        // send a Message whose Image blocks the daemon can consume as-is.
+        nlohmann::json message_payload = task;
+        if (!images.empty()) {
+            Message message;
+            message.role = Role::User;
+            ContentBlock text_block;
+            text_block.kind = ContentBlockKind::Text;
+            text_block.text = task;
+            message.content.push_back(std::move(text_block));
+            std::vector<std::filesystem::path> image_paths;
+            image_paths.reserve(images.size());
+            for (const std::string& image : images) {
+                image_paths.push_back(resolve_image_path(image, row.canonicalPath));
+            }
+            const PromptImageResult attached = attach_image_files(message, image_paths);
+            for (const std::string& warning : attached.warnings) {
+                err << "ymh: " << warning << '\n';
+            }
+            message_payload = nlohmann::json(message);
+        }
+
+        static_cast<void>(connection.request(
+            protocol::method::kAgentPrompt,
+            {{"session", session.value}, {"message", std::move(message_payload)}}));
 
         AssistantStreamPrinter assistant_printer;
         while (true) {
@@ -1351,6 +1399,8 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     CLI::App*   run = app.add_subcommand("run", "Run a task headlessly");
     add_common(*run, invocation);
     run->add_option("task", run_task, "Task text")->required();
+    run->add_option("--image", invocation.images,
+                    "Attach an image file to the task (repeatable)");
 
     CLI::App* list = app.add_subcommand("list", "List sessions in the workspace");
     add_common(*list, invocation);
@@ -1615,8 +1665,9 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                         std::unique_ptr<WorkspaceRegistry> writer =
                             WorkspaceRegistry::open(default_registry_config());
                         return run_via_daemon(*writer, *row, effective_global_config(invocation),
-                                              invocation.task, invocation.session,
-                                              invocation.allow_ymh_access, out, err);
+                                              invocation.task, invocation.images,
+                                              invocation.session, invocation.allow_ymh_access,
+                                              out, err);
                     }
                     if (row.has_value() && row->host.has_value() &&
                         reader->probeLiveness(row->id) == HostLiveness::Remote) {
@@ -1631,6 +1682,7 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
             HeadlessOptions options;
             options.workspace = root;
             options.task      = invocation.task;
+            options.images    = invocation.images;
             options.config    = config;
             options.verbose   = invocation.verbose;
             options.allow_ymh_access = invocation.allow_ymh_access;

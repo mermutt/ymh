@@ -13,6 +13,7 @@
 namespace ymh {
 
 [[nodiscard]] std::unique_ptr<Tool> make_read_file_tool(ToolConfig config = {});
+[[nodiscard]] std::unique_ptr<Tool> make_read_image_tool(ToolConfig config = {});
 [[nodiscard]] std::unique_ptr<Tool> make_write_file_tool(ToolConfig config = {});
 [[nodiscard]] std::unique_ptr<Tool> make_edit_file_tool(ToolConfig config = {});
 [[nodiscard]] std::unique_ptr<Tool> make_multi_edit_tool(ToolConfig config = {});

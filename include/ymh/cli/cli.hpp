@@ -36,6 +36,7 @@ struct CliInvocation {
 
     Command     command = Command::Tui;
     std::string task;
+    std::vector<std::string> images;  // `run --image`: explicit prompt image paths
     std::string session;   // show/replay/fork/--resume target
     bool        new_session = false;
     std::string workspace;     // empty => cwd
