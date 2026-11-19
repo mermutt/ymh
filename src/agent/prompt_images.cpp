@@ -11,6 +11,10 @@
 #include <system_error>
 #include <utility>
 
+#include <curl/curl.h>
+
+#include "ymh/llm/curl_init.hpp"
+
 namespace ymh {
 namespace {
 
@@ -255,6 +259,124 @@ std::optional<EncodedImage> load_image(const std::filesystem::path& path,
     return encode_image(bytes, limits.max_image_bytes, reason);
 }
 
+// Shared libcurl state for one remote image fetch. The write callback aborts
+// as soon as the body would exceed `max_bytes`; the progress callback polls the
+// caller's cancellation predicate.
+struct RemoteDownload {
+    std::string                  bytes;
+    std::size_t                  max_bytes        = 0;
+    bool                         over_limit       = false;
+    bool                         cancel_requested = false;
+    const std::function<bool()>* cancelled        = nullptr;
+};
+
+std::size_t remote_write_callback(char* data, std::size_t size, std::size_t count, void* user) {
+    auto*             download = static_cast<RemoteDownload*>(user);
+    const std::size_t total    = size * count;
+    if (download->bytes.size() > download->max_bytes ||
+        total > download->max_bytes - download->bytes.size()) {
+        download->over_limit = true;
+        return 0;
+    }
+    download->bytes.append(data, total);
+    return total;
+}
+
+int remote_progress_callback(void* user, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    auto* download = static_cast<RemoteDownload*>(user);
+    if (download->cancelled != nullptr && (*download->cancelled) &&
+        (*download->cancelled)()) {
+        download->cancel_requested = true;
+        return 1;
+    }
+    return 0;
+}
+
+std::optional<std::string> fetch_remote_image(std::string_view               url,
+                                              const PromptImageLimits&      limits,
+                                              const std::function<bool()>& cancelled,
+                                              std::string&                  reason) {
+    ensure_curl_global_init();
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        reason = "download failed: curl initialization failed";
+        return std::nullopt;
+    }
+
+    RemoteDownload download;
+    download.max_bytes = limits.max_image_bytes;
+    download.cancelled = cancelled ? &cancelled : nullptr;
+
+    const std::string url_string{url};
+    curl_easy_setopt(curl, CURLOPT_URL, url_string.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+    // curl < 7.85 only has the deprecated bitmask knobs; the string forms
+    // above keep a modern curl build free of -Werror deprecation failures.
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS,
+                     static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                     static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ymh/1.0");
+    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE,
+                     static_cast<curl_off_t>(limits.max_image_bytes));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, remote_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &download);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, remote_progress_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &download);
+
+    const CURLcode result = curl_easy_perform(curl);
+    long           status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(curl);
+
+    if (download.cancel_requested) {
+        reason = "cancelled";
+        return std::nullopt;
+    }
+    if (download.over_limit || result == CURLE_FILESIZE_EXCEEDED) {
+        reason = "download exceeds limit (" + std::to_string(limits.max_image_bytes) +
+                 " bytes)";
+        return std::nullopt;
+    }
+    if (result != CURLE_OK) {
+        reason = std::string{"download failed: "} + curl_easy_strerror(result);
+        return std::nullopt;
+    }
+    if (status < 200 || status >= 300) {
+        reason = "HTTP " + std::to_string(status);
+        return std::nullopt;
+    }
+    if (download.bytes.empty()) {
+        reason = "empty response";
+        return std::nullopt;
+    }
+    return std::move(download.bytes);
+}
+
+// A non-http scheme is only valid when it is `file://` (handled by
+// `resolve_token`); anything else is rejected with a stable reason.
+bool has_unsupported_scheme(std::string_view source) {
+    const std::size_t separator = source.find("://");
+    if (separator == std::string_view::npos) {
+        return false;
+    }
+    std::string scheme{source.substr(0, separator)};
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    return scheme != "file";
+}
+
 void append_note(Message& message, const std::string& token,
                  const std::string& reason, std::vector<std::string>& warnings) {
     const std::string note = "image not attached: " + token + " (" + reason + ")";
@@ -265,7 +387,74 @@ void append_note(Message& message, const std::string& token,
     message.content.push_back(std::move(block));
 }
 
+using SourceLoader =
+    std::function<std::optional<LoadedImageSource>(const std::string& label,
+                                                   std::string&       reason)>;
+
+// The one explicit-attachment loop behind `attach_image_files` and
+// `attach_image_sources`: same count cap, encoded-total cap, and notes.
+PromptImageResult attach_source_list(Message&                        message,
+                                     const std::vector<std::string>& labels,
+                                     const SourceLoader&             load,
+                                     PromptImageLimits               limits) {
+    PromptImageResult result;
+    if (message.role != Role::User) {
+        return result;
+    }
+
+    std::size_t attached      = 0;
+    std::size_t encoded_total = 0;
+    for (const ContentBlock& block : message.content) {
+        if (block.kind == ContentBlockKind::Image) {
+            ++attached;
+            encoded_total += block.data.size();
+        }
+    }
+
+    for (const std::string& label : labels) {
+        if (attached >= limits.max_images) {
+            append_note(message, label, "image count limit reached", result.warnings);
+            break;
+        }
+        std::string reason;
+        const std::optional<LoadedImageSource> loaded = load(label, reason);
+        if (!loaded.has_value()) {
+            append_note(message, label, reason, result.warnings);
+            continue;
+        }
+        if (encoded_total + loaded->image.data.size() > limits.max_total_encoded_bytes) {
+            append_note(message, loaded->display, "attached-image size limit reached",
+                        result.warnings);
+            break;
+        }
+        ContentBlock image;
+        image.kind       = ContentBlockKind::Image;
+        image.media_type = loaded->image.media_type;
+        image.data       = loaded->image.data;
+        encoded_total += image.data.size();
+        ++attached;
+        ++result.attached;
+        message.content.push_back(std::move(image));
+    }
+    return result;
+}
+
 } // namespace
+
+bool is_remote_image_source(std::string_view source) noexcept {
+    const auto has_prefix = [&](std::string_view prefix) {
+        if (source.size() < prefix.size()) {
+            return false;
+        }
+        for (std::size_t index = 0; index < prefix.size(); ++index) {
+            if (std::tolower(static_cast<unsigned char>(source[index])) != prefix[index]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return has_prefix("http://") || has_prefix("https://");
+}
 
 std::optional<EncodedImage> encode_image(std::string_view bytes,
                                          std::size_t max_bytes,
@@ -284,7 +473,46 @@ std::optional<EncodedImage> encode_image(std::string_view bytes,
     EncodedImage encoded;
     encoded.media_type = *media_type;
     encoded.data       = base64_encode(bytes);
+    encoded.bytes      = bytes.size();
     return encoded;
+}
+
+std::optional<LoadedImageSource> load_image_source(
+    std::string_view source, const std::filesystem::path& workspace_root,
+    const PromptImageLimits& limits, std::string& reason,
+    const std::function<bool()>& cancelled) {
+    if (is_remote_image_source(source)) {
+        const std::optional<std::string> bytes =
+            fetch_remote_image(source, limits, cancelled, reason);
+        if (!bytes.has_value()) {
+            return std::nullopt;
+        }
+        const std::optional<EncodedImage> image =
+            encode_image(*bytes, limits.max_image_bytes, reason);
+        if (!image.has_value()) {
+            return std::nullopt;
+        }
+        LoadedImageSource loaded;
+        loaded.display = std::string{source};
+        loaded.image   = *image;
+        return loaded;
+    }
+
+    if (has_unsupported_scheme(source)) {
+        reason = "unsupported URL scheme (use http or https)";
+        return std::nullopt;
+    }
+
+    const std::filesystem::path resolved =
+        resolve_token(std::string{source}, workspace_root);
+    const std::optional<EncodedImage> image = load_image(resolved, limits, reason);
+    if (!image.has_value()) {
+        return std::nullopt;
+    }
+    LoadedImageSource loaded;
+    loaded.display = resolved.string();
+    loaded.image   = *image;
+    return loaded;
 }
 
 bool attach_image_file(Message& message, const std::filesystem::path& path,
@@ -300,46 +528,41 @@ bool attach_image_file(Message& message, const std::filesystem::path& path,
 PromptImageResult attach_image_files(Message& message,
                                      const std::vector<std::filesystem::path>& paths,
                                      PromptImageLimits                         limits) {
-    PromptImageResult result;
-    if (message.role != Role::User) {
-        return result;
-    }
-
-    std::size_t attached      = 0;
-    std::size_t encoded_total = 0;
-    for (const ContentBlock& block : message.content) {
-        if (block.kind == ContentBlockKind::Image) {
-            ++attached;
-            encoded_total += block.data.size();
-        }
-    }
-
+    std::vector<std::string> labels;
+    labels.reserve(paths.size());
     for (const std::filesystem::path& path : paths) {
-        if (attached >= limits.max_images) {
-            append_note(message, path.string(), "image count limit reached", result.warnings);
-            break;
-        }
-        std::string reason;
-        const std::optional<EncodedImage> loaded = load_image(path, limits, reason);
-        if (!loaded.has_value()) {
-            append_note(message, path.string(), reason, result.warnings);
-            continue;
-        }
-        if (encoded_total + loaded->data.size() > limits.max_total_encoded_bytes) {
-            append_note(message, path.string(), "attached-image size limit reached",
-                        result.warnings);
-            break;
-        }
-        ContentBlock image;
-        image.kind       = ContentBlockKind::Image;
-        image.media_type = loaded->media_type;
-        image.data       = loaded->data;
-        encoded_total += image.data.size();
-        ++attached;
-        ++result.attached;
-        message.content.push_back(std::move(image));
+        labels.push_back(path.string());
     }
-    return result;
+    return attach_source_list(
+        message, labels,
+        [&](const std::string& label, std::string& reason)
+            -> std::optional<LoadedImageSource> {
+            // Explicit path lists are already resolved; keep the historical
+            // CWD-relative interpretation for relative entries.
+            const std::filesystem::path path{label};
+            const std::optional<EncodedImage> image = load_image(path, limits, reason);
+            if (!image.has_value()) {
+                return std::nullopt;
+            }
+            LoadedImageSource loaded;
+            loaded.display = label;
+            loaded.image   = *image;
+            return loaded;
+        },
+        limits);
+}
+
+PromptImageResult attach_image_sources(Message&                        message,
+                                       const std::vector<std::string>& sources,
+                                       const std::filesystem::path&   workspace_root,
+                                       PromptImageLimits               limits) {
+    return attach_source_list(
+        message, sources,
+        [&](const std::string& source, std::string& reason)
+            -> std::optional<LoadedImageSource> {
+            return load_image_source(source, workspace_root, limits, reason);
+        },
+        limits);
 }
 
 PromptImageResult attach_prompt_images(Message& message,

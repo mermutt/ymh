@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,7 +21,11 @@ namespace ymh {
 struct EncodedImage {
     std::string media_type;
     std::string data;
+    std::size_t bytes = 0;  // decoded size, for notices and limits
 };
+
+// True for an `http://` or `https://` source (case-insensitive scheme).
+[[nodiscard]] bool is_remote_image_source(std::string_view source) noexcept;
 
 // Detect the media type from magic bytes (PNG/JPEG/GIF/WebP) and base64-encode
 // `bytes`. On failure returns nullopt and sets `reason`: "unsupported image
@@ -63,5 +68,30 @@ struct PromptImageResult {
 [[nodiscard]] PromptImageResult attach_image_files(
     Message& message, const std::vector<std::filesystem::path>& paths,
     PromptImageLimits limits = {});
+
+// A validated image source plus the label to show in notices: the resolved
+// local path, or the URL exactly as typed.
+struct LoadedImageSource {
+    std::string  display;
+    EncodedImage image;
+};
+
+// Load one explicit source: a local path (relative to `workspace_root`, `~/`,
+// `file://`, percent-decoded) or an `http(s)://` URL. Remote fetches follow at
+// most five http(s) redirects, use 10 s connect / 30 s total timeouts, and
+// abort above `limits.max_image_bytes`. `cancelled` is polled during a remote
+// transfer and aborts it promptly. On failure returns nullopt and sets
+// `reason`.
+[[nodiscard]] std::optional<LoadedImageSource> load_image_source(
+    std::string_view source, const std::filesystem::path& workspace_root,
+    const PromptImageLimits& limits, std::string& reason,
+    const std::function<bool()>& cancelled = {});
+
+// Attach explicit sources (CLI `--image`, TUI `/image`): local paths or
+// http(s) URLs, in order, with the same count/total caps as
+// `attach_image_files`. Failures append a visible note and a warning.
+[[nodiscard]] PromptImageResult attach_image_sources(
+    Message& message, const std::vector<std::string>& sources,
+    const std::filesystem::path& workspace_root, PromptImageLimits limits = {});
 
 } // namespace ymh

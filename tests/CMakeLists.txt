@@ -12,6 +12,7 @@ add_executable(ymh_file_store_tests
     session_projection_test.cpp
     prompt_images_test.cpp
     prompt_images_explicit_test.cpp
+    prompt_url_test.cpp
     vision_capability_test.cpp
     tool_images_test.cpp
     workspace_roots_test.cpp
@@ -36,6 +37,7 @@ target_link_libraries(ymh_file_store_tests
         ymh::agent
         ymh::core
         SQLite3::SQLite3
+        Threads::Threads
 )
 
 include(GoogleTest)

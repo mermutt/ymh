@@ -22,6 +22,7 @@
 
 #include <curl/curl.h>
 
+#include "ymh/llm/curl_init.hpp"
 #include "ymh/llm/leaked_call_detector.hpp"
 #include "ymh/llm/llm_transcript.hpp"
 #include "ymh/llm/redaction.hpp"
@@ -817,12 +818,6 @@ struct CurlWriteContext {
     std::chrono::milliseconds             idle_timeout{0};
 };
 
-std::once_flag g_curl_init;
-
-void ensure_curl_initialized() {
-    std::call_once(g_curl_init, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
-}
-
 std::size_t curl_write_callback(char* data, std::size_t size, std::size_t count, void* user) {
     auto* context = static_cast<CurlWriteContext*>(user);
     const std::size_t total = size * count;
@@ -1115,7 +1110,7 @@ nlohmann::json build_chat_completions_body(const LLMRequest& request,
 Task<HttpResponse> CurlHttpTransport::postStream(const HttpRequest& request,
                                                  HttpBodySink on_body,
                                                  CancellationToken cancel) {
-    ensure_curl_initialized();
+    ensure_curl_global_init();
 
     HttpResponse response;
     CURL* curl = curl_easy_init();

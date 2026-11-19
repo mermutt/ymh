@@ -757,28 +757,6 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     return ui::run_supervisor(options);
 }
 
-// `ymh run --image`: resolve an explicit image path against the workspace root.
-// Accepts plain relative/absolute paths plus `~/` and `file://` forms.
-std::filesystem::path resolve_image_path(const std::string& raw,
-                                         const std::filesystem::path& root) {
-    std::string value = raw;
-    if (value.rfind("file://", 0) == 0) {
-        value.erase(0, 7);
-        if (value.rfind("localhost/", 0) == 0) {
-            value.erase(0, 9);
-        }
-    } else if (value == "~" || value.rfind("~/", 0) == 0) {
-        if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-            value = std::string{home} + value.substr(1);
-        }
-    }
-    std::filesystem::path path{value};
-    if (path.is_relative()) {
-        path = root / path;
-    }
-    return path;
-}
-
 // `ymh run` against a live daemon: attach, create/resume a session, stream the turn.
 int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
                    const std::filesystem::path& config_path, const std::string& task,
@@ -825,12 +803,8 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
             text_block.kind = ContentBlockKind::Text;
             text_block.text = task;
             message.content.push_back(std::move(text_block));
-            std::vector<std::filesystem::path> image_paths;
-            image_paths.reserve(images.size());
-            for (const std::string& image : images) {
-                image_paths.push_back(resolve_image_path(image, row.canonicalPath));
-            }
-            const PromptImageResult attached = attach_image_files(message, image_paths);
+            const PromptImageResult attached =
+                attach_image_sources(message, images, row.canonicalPath);
             for (const std::string& warning : attached.warnings) {
                 err << "ymh: " << warning << '\n';
             }
@@ -1400,7 +1374,7 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     add_common(*run, invocation);
     run->add_option("task", run_task, "Task text")->required();
     run->add_option("--image", invocation.images,
-                    "Attach an image file to the task (repeatable)");
+                    "Attach an image file or http(s) URL to the task (repeatable)");
 
     CLI::App* list = app.add_subcommand("list", "List sessions in the workspace");
     add_common(*list, invocation);

@@ -338,6 +338,7 @@ add_library(ymh_llm STATIC
     src/llm/tool_call_assembler.cpp
     src/llm/sse_parser.cpp
     src/llm/redaction.cpp
+    src/llm/curl_init.cpp
     src/llm/openai_adapter.cpp
     src/llm/llm_transcript.cpp
     src/llm/fake_llm.cpp
@@ -635,6 +636,7 @@ target_link_libraries(ymh_agent
     PRIVATE
         ymh::config
         ymh::warnings
+        CURL::libcurl
 )
 
 # 52-D13: the shipped-presets root. A dev build falls back to <source>/presets;

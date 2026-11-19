@@ -493,13 +493,13 @@ std::string make_rewind_summary(std::int64_t started_at_ms, const std::string& p
 // `/image` attachment staging.
 // ---------------------------------------------------------------------------
 
-// One file validated and encoded by `/image`, held until the session's next
+// One source validated and encoded by `/image`, held until the session's next
 // prompt folds it into a user `Message`.
 struct StagedImage {
-    std::string path;        // resolved path, shown in notices
+    std::string display;     // resolved path or URL as typed, shown in notices
     std::string media_type;  // e.g. "image/png"
     std::string data;        // provider-encoded base64 payload
-    std::size_t bytes = 0;   // decoded file size, for the notice
+    std::size_t bytes = 0;   // decoded image size, for the notice
 };
 
 // Strip one layer of matching quotes (`"`, `'` or a backtick) around a path.
@@ -511,24 +511,10 @@ std::string unquote_path(std::string value) {
     return value;
 }
 
-// `/image` path resolution: quotes are stripped, a leading `~` expands to $HOME,
-// and a relative path resolves against the session's workspace root.
-std::filesystem::path resolve_image_path(const std::string& raw,
-                                         const std::filesystem::path& workspace_root) {
-    std::string value = unquote_path(raw);
-    if (value == "~" || value.rfind("~/", 0) == 0) {
-        if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-            value = std::string{home} + value.substr(1);
-        }
-    }
-    std::filesystem::path path{value};
-    if (path.is_relative() && !workspace_root.empty()) {
-        path = workspace_root / path;
-    }
-    std::error_code             error;
-    const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, error);
-    return error ? path.lexically_normal() : canonical;
-}
+// `/image` sources go through `load_image_source`, which strips quotes, expands
+// `~/`, resolves relative paths against the workspace root, and accepts
+// `file://` and http(s) URLs. Deliberately no local-only resolution here: the
+// loader is the single place that decides what a source means.
 
 // "812 B" / "12 KiB": the attachment notice never shows raw base64 sizes.
 std::string format_image_size(std::size_t bytes) {
@@ -546,6 +532,19 @@ public:
     }
 
     ~SupervisorApp() override {
+        // `/image` URL fetches run on owned workers. Set the cancel flag first
+        // (the loader polls it and libcurl aborts promptly), then join every
+        // worker BEFORE any member teardown. A worker checks the flag after the
+        // fetch and before `enqueue`, so it never touches `this` once the flag
+        // is set, and `enqueue` itself is safe while we join (`action_mutex_`,
+        // `actions_` and `screen_` are still alive).
+        image_fetch_cancel_.store(true);
+        for (std::thread& worker : image_fetches_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        image_fetches_.clear();
         // 22 §4.2 (SW26, MEDIUM-2): stop+join the catalog worker first, before
         // any member teardown. Its sink calls `enqueue`, which locks
         // `action_mutex_` and reads `screen_`; letting it outlive them would be
@@ -2835,8 +2834,10 @@ private:
                   });
     }
 
-    // `/image [<path>|clear]`. Staging is per session: the TUI can switch
+    // `/image [<source>|clear]`. Staging is per session: the TUI can switch
     // sessions, and an attachment must never leak into another transcript.
+    // Local paths load synchronously; http(s) URLs fetch on a tracked worker so
+    // the FTXUI thread never blocks on the network.
     void image_command(const std::string& args) {
         SessionUiState* state = model_.ensureActiveSession();
         if (state == nullptr) {
@@ -2863,44 +2864,96 @@ private:
                                     (count == 1 ? " staged image" : " staged images"));
             return;
         }
-        if (unquote_path(args).empty()) {
-            append_system_entry(model_, *state, "usage: /image <path> | /image clear");
+        const std::string source = unquote_path(args);
+        if (source.empty()) {
+            append_system_entry(model_, *state, "usage: /image <path|url> | /image clear");
             return;
         }
-        attach_staged_image(*state, args);
+        if (is_remote_image_source(source)) {
+            start_image_fetch(*state, source);
+            return;
+        }
+        attach_staged_image(*state, source);
     }
 
     void list_staged_images(SessionUiState& state) {
         const auto staged = staged_images_.find(state.id);
         if (staged == staged_images_.end() || staged->second.empty()) {
-            append_system_entry(model_, state, "usage: /image <path> | /image clear");
+            append_system_entry(model_, state, "usage: /image <path|url> | /image clear");
             return;
         }
         append_system_entry(model_, state, "staged for your next prompt:");
         for (const StagedImage& image : staged->second) {
-            append_system_entry(model_, state, "  " + image.path + " (" + image.media_type +
-                                                    ", " + format_image_size(image.bytes) +
-                                                    ")");
+            append_system_entry(model_, state, "  " + image.display + " (" +
+                                                    image.media_type + ", " +
+                                                    format_image_size(image.bytes) + ")");
         }
     }
 
-    // Validates + encodes `raw` immediately (so a missing or unsupported file is
-    // reported now, not at submit time) and stages it against the prompt-image
-    // limits: 4 images, 2 MiB each, 3 MiB encoded in total.
-    void attach_staged_image(SessionUiState& state, const std::string& raw) {
+    // Local path: validate + encode immediately (so a missing or unsupported
+    // file is reported now, not at submit time), then stage it.
+    void attach_staged_image(SessionUiState& state, const std::string& source) {
+        const PromptImageLimits limits{};
+        std::string             reason;
+        std::optional<LoadedImageSource> loaded = load_image_source(
+            source, workspace_root_of(state.workspace), limits, reason);
+        if (!loaded.has_value()) {
+            append_system_entry(model_, state,
+                                "image not attached: " + source + " (" + reason + ")");
+            return;
+        }
+        stage_loaded_image(state, std::move(*loaded));
+    }
+
+    // URL: fetch off the UI thread, then marshal the result back through
+    // `enqueue` and re-resolve the session by id. A session that disappeared
+    // (closed, deleted, evicted) drops the result silently.
+    void start_image_fetch(SessionUiState& state, const std::string& url) {
+        const SessionId session = state.id;
+        const std::filesystem::path root = workspace_root_of(state.workspace);
+        append_system_entry(model_, state, "fetching image: " + url + " ...");
+        image_fetches_.emplace_back([this, session, url, root]() mutable {
+            const PromptImageLimits limits{};
+            std::string             reason;
+            std::optional<LoadedImageSource> loaded = load_image_source(
+                url, root, limits, reason, [this] {
+                    return image_fetch_cancel_.load(std::memory_order_relaxed);
+                });
+            // The destructor joins us after setting the flag; never touch `this`
+            // (via `enqueue` or otherwise) once cancellation is requested.
+            if (image_fetch_cancel_.load(std::memory_order_relaxed)) {
+                return;
+            }
+            enqueue([this, session, url, loaded = std::move(loaded),
+                     reason = std::move(reason)]() mutable {
+                SessionUiState* target = model_.session(session);
+                if (target == nullptr) {
+                    return;
+                }
+                if (!loaded.has_value()) {
+                    append_system_entry(model_, *target,
+                                        "image not attached: " + url + " (" + reason + ")");
+                    return;
+                }
+                stage_loaded_image(*target, std::move(*loaded));
+            });
+        });
+    }
+
+    // Shared staging checks for a loaded source: dedupe by display, 4-image cap,
+    // then the 3 MiB encoded-total cap (the loader already enforced the 2 MiB
+    // per-image cap). Runs on the UI thread only.
+    void stage_loaded_image(SessionUiState& state, LoadedImageSource loaded) {
         const PromptImageLimits limits{};
         std::vector<StagedImage>& staged = staged_images_[state.id];
-
-        const std::filesystem::path root = workspace_root_of(state.workspace);
-        const std::filesystem::path path = resolve_image_path(raw, root);
-        const std::string           display = path.string();
+        std::string display = std::move(loaded.display);
         const auto reject = [&](const std::string& reason) {
             append_system_entry(model_, state,
                                 "image not attached: " + display + " (" + reason + ")");
         };
 
         if (std::any_of(staged.begin(), staged.end(), [&display](const StagedImage& image) {
-                return image.path == display;
+                return image.display == display;
             })) {
             append_system_entry(model_, state, "already staged: " + display);
             return;
@@ -2914,31 +2967,17 @@ private:
         for (const StagedImage& image : staged) {
             staged_encoded += image.data.size();
         }
-
-        Message                  message;
-        std::vector<std::string> warnings;
-        if (!attach_image_file(message, path, limits, warnings) || message.content.empty()) {
-            // The helper's own note already reads `image not attached: <path> (<reason>)`.
-            if (!warnings.empty()) {
-                append_system_entry(model_, state, warnings.back());
-            } else {
-                reject("cannot attach the file");
-            }
-            return;
-        }
-        ContentBlock block = std::move(message.content.back());
-        if (staged_encoded + block.data.size() > limits.max_total_encoded_bytes) {
+        if (staged_encoded + loaded.image.data.size() > limits.max_total_encoded_bytes) {
             reject("staged images would exceed the " +
                    std::to_string(limits.max_total_encoded_bytes / (1024u * 1024u)) +
                    " MiB limit");
             return;
         }
 
-        std::error_code     error;
-        const std::uintmax_t size = std::filesystem::file_size(path, error);
-        const std::size_t    bytes = error ? 0 : static_cast<std::size_t>(size);
-        const std::string    media_type = block.media_type;
-        staged.push_back(StagedImage{display, media_type, std::move(block.data), bytes});
+        const std::string media_type = loaded.image.media_type;
+        const std::size_t bytes = loaded.image.bytes;
+        staged.push_back(
+            StagedImage{display, media_type, std::move(loaded.image.data), bytes});
         append_system_entry(model_, state,
                             "image attached: " + display + " (" + media_type + ", " +
                                 format_image_size(bytes) +
@@ -5110,6 +5149,12 @@ private:
     std::mutex action_mutex_;
     std::deque<std::function<void()>> actions_;
     ftxui::ScreenInteractive* screen_ = nullptr;
+    // `/image` URL fetch workers (UI-thread-created, joined in the destructor
+    // after `image_fetch_cancel_` is set). Declared after `action_mutex_`,
+    // `actions_` and `screen_` so those members outlive the vector during
+    // teardown; the explicit destructor joins every worker before either.
+    std::vector<std::thread> image_fetches_;
+    std::atomic<bool>        image_fetch_cancel_{false};
     // 66-D9: the run loop's terminal layer, so the subprocess-editor hand-off can
     // suspend/re-arm bracketed paste. UI-thread only; set in `run_loop` and
     // cleared by `RunLoopExitGuard`. Null in tests without a terminal.
