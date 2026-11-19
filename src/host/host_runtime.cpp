@@ -18,6 +18,7 @@
 #include "ymh/agent/model_selection.hpp"
 #include "ymh/agent/plan_mode_controller.hpp"
 #include "ymh/agent/preset.hpp"
+#include "ymh/agent/prompt_images.hpp"
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/commands/command.hpp"
@@ -123,6 +124,16 @@ Message message_from_json(const nlohmann::json& value) {
         return message;
     }
     return value.get<Message>();
+}
+
+Message user_message_from_json(const nlohmann::json& value,
+                               const std::filesystem::path& workspace_root) {
+    Message message = message_from_json(value);
+    const PromptImageResult attached = attach_prompt_images(message, workspace_root);
+    for (const std::string& warning : attached.warnings) {
+        category_logger(LogCategory::Agent).warn(warning);
+    }
+    return message;
 }
 
 // 19 §4.3: the text of the first Text content block, or empty when there is
@@ -1219,7 +1230,7 @@ void HostRuntime::agentPrompt(const SessionId& id, const nlohmann::json& message
                                    "UnknownSession"});
         }
         ensureAgent(id);
-        const Message parsed = message_from_json(message);
+        const Message parsed = user_message_from_json(message, runtime_.root());
         // 19 §4.3: advisory first-turn auto-name. maybeAutoName is a no-op
         // unless RN5/RN6 hold; the own-log scan, title read, and append run as
         // one critical section on the session's appendMutex_ (I18), so it
@@ -1256,7 +1267,7 @@ void HostRuntime::agentFollowup(const SessionId& id, const nlohmann::json& messa
                                    "UnknownSession"});
         }
         ensureAgent(id);
-        const Message parsed = message_from_json(message);
+        const Message parsed = user_message_from_json(message, runtime_.root());
         if (!turns_.submit(id, [this, id, parsed]() {
                 std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
                 if (agent != nullptr) {
@@ -1276,7 +1287,7 @@ void HostRuntime::agentSteer(const SessionId& id, const nlohmann::json& message)
                                    "UnknownSession"});
         }
         ensureAgent(id);
-        const Message parsed = message_from_json(message);
+        const Message parsed = user_message_from_json(message, runtime_.root());
         if (!turns_.submit(id, [this, id, parsed]() {
                 std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
                 if (agent != nullptr) {

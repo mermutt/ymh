@@ -596,6 +596,7 @@ add_library(ymh_agent STATIC
     src/agent/model_selection.cpp
     src/agent/plan_mode_controller.cpp
     src/agent/preset.cpp
+    src/agent/prompt_images.cpp
     src/agent/repeat_tool_reminder.cpp
     src/agent/subagent.cpp
     src/agent/subagent_service.cpp

@@ -21,6 +21,7 @@
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/agent_registry.hpp"
 #include "ymh/agent/message.hpp"
+#include "ymh/agent/prompt_images.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/assistant_stream_printer.hpp"
 #include "ymh/cli/provider_factory.hpp"
@@ -301,7 +302,12 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
 
     std::atomic<bool> finished{false};
     std::thread worker([&]() {
-        agent->send(user_message(options.task));
+        Message message = user_message(options.task);
+        const PromptImageResult attached = attach_prompt_images(message, root);
+        for (const std::string& warning : attached.warnings) {
+            err << "ymh: " << warning << '\n';
+        }
+        agent->send(std::move(message));
         finished.store(true);
     });
 

@@ -10,6 +10,7 @@ add_executable(ymh_file_store_tests
     skills_test.cpp
     tmp_access_test.cpp
     session_projection_test.cpp
+    prompt_images_test.cpp
 )
 
 target_include_directories(ymh_file_store_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -24,6 +25,7 @@ target_link_libraries(ymh_file_store_tests
         ymh::execution
         ymh::skills
         ymh::config
+        ymh::agent
         ymh::core
         SQLite3::SQLite3
 )
