@@ -16,6 +16,7 @@ add_executable(ymh_file_store_tests
     vision_capability_test.cpp
     tool_images_test.cpp
     tool_call_assembler_test.cpp
+    tool_result_pruner_test.cpp
     workspace_roots_test.cpp
     workspace_roots_store_test.cpp
     permission_roots_test.cpp

@@ -100,6 +100,13 @@ PruneResult ToolResultPruner::prune_session(Session& session) {
         if (original.name == "skill" && original.outcome == payload::ToolOutcome::Ok) {
             continue;
         }
+        // A replacement is head + marker + tail, which exceeds the threshold
+        // when head + tail >= threshold. The marker is emitted only here, so
+        // its presence means this result was already pruned by an earlier pass;
+        // skipping it keeps prune_session idempotent on replay.
+        if (original.output.find(kPruneMarker) != std::string::npos) {
+            continue;
+        }
         if (code_point_length(original.output) <= config_.threshold_code_points) {
             continue;
         }
