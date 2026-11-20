@@ -68,13 +68,14 @@ public:
     // throws on the deadline ("connect: timed out after <n> ms") and on refusal.
     void connect(const std::string& socket_path,
                  std::chrono::milliseconds timeout = kHostConnectTimeout);
-    [[nodiscard]] HelloResult handshake(ServerProfile profile,
-                                        ClientInstanceId instance,
-                                        std::chrono::milliseconds timeout = std::chrono::seconds{5});
-    [[nodiscard]] HelloResult handshake(ServerProfile profile,
-                                        ClientInstanceId instance,
-                                        ClientRole role,
-                                        std::chrono::milliseconds timeout = std::chrono::seconds{5});
+    [[nodiscard]] HelloResult handshake(
+        ServerProfile profile, ClientInstanceId instance,
+        std::chrono::milliseconds timeout = std::chrono::seconds{5},
+        std::string config_digest = {});
+    [[nodiscard]] HelloResult handshake(
+        ServerProfile profile, ClientInstanceId instance, ClientRole role,
+        std::chrono::milliseconds timeout = std::chrono::seconds{5},
+        std::string config_digest = {});
     [[nodiscard]] nlohmann::json request(
         std::string_view method, nlohmann::json params = nlohmann::json::object(),
         std::chrono::milliseconds timeout = std::chrono::seconds{30});

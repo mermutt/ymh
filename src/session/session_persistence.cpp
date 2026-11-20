@@ -1161,12 +1161,18 @@ std::unique_ptr<SessionPersistence::Impl> SessionPersistence::Impl::create(
             throw StoreOpenError(StoreOpenErrorCode::Unavailable,
                                  "cannot acquire sidecar lock: " + config.lock_path.string());
         }
-        const std::string diagnostic =
-            nlohmann::json{{"pid", ::getpid()}, {"boot_id", config.boot_id.value},
-                           {"acquired_at", now_ms()}}
-                .dump();
+        nlohmann::json diagnostic{{"pid", ::getpid()},
+                                  {"boot_id", config.boot_id.value},
+                                  {"acquired_at", now_ms()}};
+        if (!config.build.empty()) {
+            diagnostic["build"] = config.build;
+        }
+        if (!config.config_digest.empty()) {
+            diagnostic["config_digest"] = config.config_digest;
+        }
+        const std::string text = diagnostic.dump();
         ignore_result(::ftruncate(impl.lock_fd, 0));
-        ignore_result(::write(impl.lock_fd, diagnostic.data(), diagnostic.size()));
+        ignore_result(::write(impl.lock_fd, text.data(), text.size()));
     }
 
     const bool needs_migration = !marker_exists(impl.store_dir) && legacy_db_exists(config);

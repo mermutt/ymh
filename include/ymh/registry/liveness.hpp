@@ -23,6 +23,8 @@ struct WorkspaceLockProbe {
     bool                        held = false;
     std::optional<std::int32_t> pid;
     std::optional<std::string>  bootId;
+    std::optional<std::string>  build;         // daemon YMH_VERSION, when written
+    std::optional<std::string>  configDigest;  // daemon config fingerprint
 };
 
 // `open(<workspace>/.ymh/sessions.lock, O_RDWR|O_CREAT|O_CLOEXEC, 0600)`, then

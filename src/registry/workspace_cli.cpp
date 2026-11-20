@@ -53,6 +53,8 @@ int workspace_list(std::ostream& out, std::ostream& err) {
             // the sidecar-flock truth beside them: `running` (claim + held
             // lock), `stale` (claim, lock free) or `stopped` (no claim).
             const HostLiveness liveness = registry->probeLiveness(record.id);
+            const WorkspaceLockProbe lock =
+                probeWorkspaceLock(record.canonicalPath, false);
             const char*        state    = "stopped";
             if (liveness == HostLiveness::Live) {
                 state = "running";
@@ -67,6 +69,12 @@ int workspace_list(std::ostream& out, std::ostream& err) {
             if (record.host.has_value()) {
                 out << "\thost=" << record.host->pid;
             }
+            if (liveness != HostLiveness::Absent && lock.build.has_value()) {
+                out << "\tbuild=" << *lock.build;
+            }
+            if (liveness != HostLiveness::Absent && lock.configDigest.has_value()) {
+                out << "\tconfig=" << *lock.configDigest;
+            }
             out << '\n';
         }
         return 0;
@@ -76,18 +84,16 @@ int workspace_list(std::ostream& out, std::ostream& err) {
     }
 }
 
-// `workspace remove` accepts an unambiguous prefix of any workspace handle —
-// its ID, its canonical path, or its display title — instead of only the full
-// ID/path. Resolution order is exact ID, exact canonical path, exact display
-// title, then a prefix; a prefix matching more than one workspace is reported
-// as ambiguous (with the candidates) rather than guessed.
-struct TargetResolution {
-    std::optional<WorkspaceRecord> resolved;
-    std::vector<WorkspaceRecord>   ambiguous;
-};
+} // namespace
 
-TargetResolution resolve_remove_target(const WorkspaceRegistry& registry,
-                                       const std::string&        target) {
+// `workspace remove` (and `stop`/`restart`/`doctor`) accept an unambiguous
+// prefix of any workspace handle — its ID, its canonical path, or its display
+// title — instead of only the full ID/path. Resolution order is exact ID,
+// exact canonical path, exact display title, then a prefix; a prefix matching
+// more than one workspace is reported as ambiguous (with the candidates)
+// rather than guessed.
+WorkspaceTargetResolution resolve_workspace_target(const WorkspaceRegistry& registry,
+                                                   const std::string&        target) {
     if (auto exact = registry.findById(WorkspaceId{target})) {
         return {std::move(exact), {}};
     }
@@ -130,12 +136,10 @@ TargetResolution resolve_remove_target(const WorkspaceRegistry& registry,
     return {std::nullopt, std::move(prefixed)};
 }
 
-} // namespace
-
 int run_workspace_command(const std::vector<std::string>& args, std::ostream& out,
                           std::ostream& err) {
     if (args.empty()) {
-        err << "usage: ymh workspace <add|list|stop|reap|remove> ...\n";
+        err << "usage: ymh workspace <add|list|stop|restart|remove> ...\n";
         return 2;
     }
     if (args[0] == "add") {
@@ -163,7 +167,7 @@ int run_workspace_remove(const std::vector<std::string>& args, bool assume_yes, 
         return 3;
     }
 
-    TargetResolution resolution = resolve_remove_target(*registry, args[1]);
+    WorkspaceTargetResolution resolution = resolve_workspace_target(*registry, args[1]);
     if (!resolution.ambiguous.empty()) {
         err << "ymh: " << resolution.ambiguous.size() << " workspaces start with '" << args[1]
             << "':\n";

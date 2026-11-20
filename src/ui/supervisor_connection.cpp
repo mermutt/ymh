@@ -231,7 +231,8 @@ bool SupervisorConnection::attempt_attach() {
     try {
         connection->connect(config_.socket_path);
         const protocol::HelloResult hello = connection->handshake(
-            config_.profile, config_.client_instance, config_.role, config_.handshake_timeout);
+            config_.profile, config_.client_instance, config_.role, config_.handshake_timeout,
+            config_.config_digest);
         if (!protocol::names_live_daemon(hello, protocol::WorkspaceId{config_.workspace.value},
                                          protocol::HostBootId{config_.expected_boot_id})) {
             connection->close();

@@ -58,7 +58,7 @@ std::string stop_command(const WorkspaceId& id) {
 }
 
 std::string reap_command(const WorkspaceId& id) {
-    return "ymh workspace reap " + id.value + " --yes";
+    return "ymh workspace stop " + id.value;
 }
 
 std::string add_command(const fs::path& root) {

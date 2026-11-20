@@ -111,6 +111,9 @@ struct HostConfig {
     // empty keeps the daemon's own `default_global_config_path()` resolution.
     // May be relative; both sides resolve it before any `chdir`.
     std::filesystem::path config_path;
+    // Fingerprint of config_path + the workspace config file, computed by the
+    // launcher. Empty for a hand-started daemon or an unknown config.
+    std::string           config_digest;
 
     RegistryConfig    registry;     // 03 §4.1
     PersistenceConfig persistence;  // 02 §4.1; run() sets boot_id before open()

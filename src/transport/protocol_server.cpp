@@ -347,6 +347,9 @@ std::optional<nlohmann::json> ProtocolServer::handle_hello(Connection& conn,
     result.client_id = conn.id;
     result.limits = config_.limits;
     result.server_time_ms = now_ms();
+    result.server_build = config_.build;
+    result.config_digest = config_.config_digest;
+    result.active_turns = config_.active_turns ? config_.active_turns() : 0;
     return to_json_value(result);
 }
 

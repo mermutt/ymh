@@ -87,6 +87,10 @@ struct WorkspaceRuntimeOptions {
     // back to `root`.
     std::filesystem::path launch_dir;
     BootId                boot_id;  // minted once by the owner (02 §5.2)
+    // Daemon identity written into `<root>/.ymh/sessions.lock`. Empty in
+    // headless/read-only uses; the daemon fills both.
+    std::string           build;
+    std::string           config_digest;
 
     // When true, the owned `PermissionGate` is attached to `AgentServices`
     // (the interactive TUI path). When false, the loop consults the policy

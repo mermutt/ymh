@@ -53,6 +53,8 @@ struct SupervisorRunOptions {
     // owns them for the whole TUI session. Null leaves the workspace NotRunning.
     HostLifecycle*     lifecycle{nullptr};
     WorkspaceRegistry* registry{nullptr};
+    // Global config path used for the daemon build/config fingerprint.
+    std::filesystem::path global_config_path;
 
     // This supervisor's pinned identity (16-D8) and clock seam (16-D10).
     AttachIdentity     identity;   // {pinned id, ClientRole::Supervisor}

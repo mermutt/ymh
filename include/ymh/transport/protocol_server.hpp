@@ -45,6 +45,10 @@ struct ProtocolServerConfig {
     WorkspaceId     workspace;
     HostBootId      boot_id;
     HostPid         pid{0};
+    // Additive build/config identity reported in every `host.hello`.
+    std::string     build;          // YMH_VERSION; empty when unknown
+    std::string     config_digest;  // 16 hex chars; empty when unknown
+    std::function<std::size_t()> active_turns;  // in-flight turns, io thread
 };
 
 // D4/E3: the same-UID trust boundary (05 §4.2) compares against the daemon's

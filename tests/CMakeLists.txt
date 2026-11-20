@@ -17,6 +17,9 @@ add_executable(ymh_file_store_tests
     tool_images_test.cpp
     tool_call_assembler_test.cpp
     tool_result_pruner_test.cpp
+    hello_identity_test.cpp
+    config_fingerprint_test.cpp
+    workspace_target_test.cpp
     workspace_roots_test.cpp
     workspace_roots_store_test.cpp
     permission_roots_test.cpp
@@ -37,6 +40,7 @@ target_link_libraries(ymh_file_store_tests
         ymh::skills
         ymh::config
         ymh::agent
+        ymh::transport
         ymh::core
         SQLite3::SQLite3
         Threads::Threads

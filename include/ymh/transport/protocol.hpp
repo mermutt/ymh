@@ -326,6 +326,9 @@ struct HelloParams {
     ClientInstanceId           client_instance;
     std::optional<EventCursor> resume_hint;
     ClientRole                 role{ClientRole::Supervisor};  // additive; default preserves v1
+    // Additive build/config negotiation (pre-identity clients send neither).
+    std::string                client_build;    // YMH_VERSION, e.g. v261120-10aff020
+    std::string                config_digest;   // 16 hex chars; empty = unknown
 };
 
 struct HelloResult {
@@ -337,7 +340,26 @@ struct HelloResult {
     ClientId                   client_id;
     TransportLimits            limits;
     std::int64_t               server_time_ms{0};
+    // Additive build/config negotiation (old daemons omit these).
+    std::string                server_build;    // YMH_VERSION of the daemon
+    std::string                config_digest;   // 16 hex chars; empty = unknown
+    std::size_t                active_turns{0}; // in-flight turns at hello time
 };
+
+// How a client should treat a daemon's advertised identity.
+struct HelloIdentityMismatch {
+    bool build        = false;  // server_build differs from client_build
+    bool config       = false;  // both digests known and different
+    bool server_older = false;  // the client may replace the daemon
+};
+
+// Pure comparison used by `HostLifecycle::ensureRunning`. A missing server
+// build (pre-identity daemon) is treated as older. Build ids are
+// `v<YYMMDD>-<hash>[x]`; when both dates parse, a client date older than the
+// server's is NOT authoritative (no downgrade). Config mismatch alone never
+// authorizes a downgrade.
+[[nodiscard]] HelloIdentityMismatch classify_hello_identity(
+    const HelloResult& hello, std::string_view client_build, std::string_view client_digest);
 
 // 87-D1: the SINGLE notion of "this workspace's live daemon" (87-I1). True iff
 // the hello names `workspace` AND (no `expected_boot_id` is known, or the hello's

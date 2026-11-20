@@ -2064,6 +2064,99 @@ std::filesystem::path workspace_config_path(const std::filesystem::path& workspa
     return workspace_root / ".ymh" / kConfigFile;
 }
 
+std::string config_fingerprint(const std::filesystem::path& global,
+                               const std::filesystem::path& workspace) {
+    if (global.empty()) {
+        return {};
+    }
+    constexpr std::size_t kMaxBytes = 4u * 1024u * 1024u;
+
+    auto read_bytes = [](const std::filesystem::path& path, std::string& out) -> bool {
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(path, error) || error) {
+            return false;
+        }
+        std::ifstream stream{path, std::ios::binary};
+        if (!stream) {
+            return false;
+        }
+        char buffer[64 * 1024];
+        while (stream) {
+            stream.read(buffer, sizeof(buffer));
+            out.append(buffer, static_cast<std::size_t>(stream.gcount()));
+            if (out.size() > kMaxBytes) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    std::error_code             path_error;
+    const std::filesystem::path global_path =
+        std::filesystem::weakly_canonical(global, path_error);
+    if (path_error) {
+        return {};
+    }
+    std::string global_bytes;
+    if (!read_bytes(global_path, global_bytes)) {
+        return {};
+    }
+
+    std::filesystem::path workspace_path;
+    std::string           workspace_bytes;
+    bool                  workspace_present = false;
+    std::filesystem::path permissions_path;
+    std::string           permissions_bytes;
+    bool                  permissions_present = false;
+    if (!workspace.empty()) {
+        workspace_path = std::filesystem::weakly_canonical(workspace, path_error);
+        if (path_error) {
+            return {};
+        }
+        std::error_code exists_error;
+        workspace_present = std::filesystem::exists(workspace_path, exists_error) && !exists_error;
+        if (workspace_present && !read_bytes(workspace_path, workspace_bytes)) {
+            return {};
+        }
+        // `.ymh/permissions.jsonc` is also frozen at daemon start.
+        permissions_path = workspace_path.parent_path() / "permissions.jsonc";
+        permissions_present =
+            std::filesystem::exists(permissions_path, exists_error) && !exists_error;
+        if (permissions_present && !read_bytes(permissions_path, permissions_bytes)) {
+            return {};
+        }
+    }
+
+    constexpr std::uint64_t kOffset = 1469598103934665603ULL;
+    constexpr std::uint64_t kPrime  = 1099511628211ULL;
+    std::uint64_t           hash    = kOffset;
+    const auto              mix     = [&hash](std::string_view bytes) {
+        for (const unsigned char byte : bytes) {
+            hash ^= byte;
+            hash *= kPrime;
+        }
+    };
+
+    mix("ymh-config-v1");
+    mix(global_path.string());
+    mix(std::string_view{"\0", 1});
+    mix(global_bytes);
+    mix(workspace_path.string());
+    mix(workspace_present ? std::string_view{"\1", 1} : std::string_view{"\0", 1});
+    mix(workspace_bytes);
+    mix(permissions_path.string());
+    mix(permissions_present ? std::string_view{"\1", 1} : std::string_view{"\0", 1});
+    mix(permissions_bytes);
+
+    std::string hex;
+    hex.reserve(16);
+    static constexpr char kHex[] = "0123456789abcdef";
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        hex.push_back(kHex[(hash >> shift) & 0xFU]);
+    }
+    return hex;
+}
+
 std::filesystem::path localcode_config_path() {
     if (const std::optional<std::string> home = env_value("HOME"); home.has_value()) {
         return std::filesystem::path{*home} / ".localcode" / "config.json";

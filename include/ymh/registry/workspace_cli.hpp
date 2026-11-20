@@ -5,10 +5,25 @@
 // forwards argv; all registry knowledge stays here.
 
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "ymh/registry/registry.hpp"
+
 namespace ymh {
+
+// One target resolver shared by `workspace stop|restart|remove` and `doctor`.
+// Resolution order is exact ID, exact canonical path, exact display title, then
+// an unambiguous prefix of any of those. A prefix matching more than one
+// workspace is reported as ambiguous rather than guessed.
+struct WorkspaceTargetResolution {
+    std::optional<WorkspaceRecord> resolved;
+    std::vector<WorkspaceRecord>   ambiguous;
+};
+
+[[nodiscard]] WorkspaceTargetResolution resolve_workspace_target(
+    const WorkspaceRegistry& registry, const std::string& target);
 
 // Executes a `ymh workspace` invocation. `args` excludes the leading
 // `ymh workspace` words: `{"add", "<path>"}`, `{"list"}`, or `{}` for usage.
@@ -26,7 +41,7 @@ int run_workspace_command(const std::vector<std::string>& args,
 // matches more than one workspace the command lists the candidates on `err`
 // and exits 2 without touching the registry.
 // `args` is `{"remove", "<workspace-id|path|title-prefix>"}`; exit codes follow
-// `reap` (2 usage/unknown/ambiguous target, 3 registry unavailable, 1 refused,
+// `stop` (2 usage/unknown/ambiguous target, 3 registry unavailable, 1 refused,
 // 0 removed).
 int run_workspace_remove(const std::vector<std::string>& args,
                          bool assume_yes,

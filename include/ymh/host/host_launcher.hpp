@@ -103,6 +103,8 @@ private:
 struct AttachResult {
     std::unique_ptr<protocol::HostConnection> connection;
     bool                                      spawned = false;
+    // Non-fatal upgrade note (e.g. "restart deferred: turn in flight").
+    std::string                               notice;
 };
 
 // Outcome of a lazy stale-claim clear (§7.3). Never the outcome of a signal.
@@ -168,7 +170,8 @@ private:
     AttachResult spawnAndAttach(const WorkspaceRecord& record,
                                 const AttachIdentity&   identity,
                                 const AttachBudget&     budget,
-                                std::chrono::steady_clock::time_point deadline);
+                                std::chrono::steady_clock::time_point deadline,
+                                const std::string&      config_digest);
 
     // 76-D4/76-D5: re-probes the sidecar lock and only attaches after a bounded
     // authenticated hello naming the claim's workspace and boot. Never reaps,
@@ -176,9 +179,11 @@ private:
     [[nodiscard]] LiveProbe probeLive(const WorkspaceRecord& record,
                                       const AttachIdentity&  identity,
                                       const AttachBudget&    budget,
-                                      std::chrono::steady_clock::time_point deadline);
+                                      std::chrono::steady_clock::time_point deadline,
+                                      const std::string&     config_digest);
 
     [[nodiscard]] HostConfig configFor(const WorkspaceRecord& record) const;
+    [[nodiscard]] std::string config_digest(const WorkspaceRecord& record) const;
 
     HostLauncher&      launcher_;
     WorkspaceRegistry& registry_;

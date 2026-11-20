@@ -39,7 +39,9 @@
 #include "ymh/agent/turn_executor.hpp"
 #include "ymh/agent/workspace_runtime.hpp"
 #include "ymh/cli/wiring.hpp"
+#include "ymh/config/config.hpp"
 #include "ymh/core/event.hpp"
+#include "ymh/core/version.hpp"
 #include "ymh/execution/asio_executor.hpp"
 #include "ymh/host/core_dump.hpp"
 #include "ymh/execution/environment.hpp"
@@ -409,13 +411,15 @@ std::unique_ptr<HostConnection> connect_checked(const std::filesystem::path& soc
                                                 const HostBootId&            boot_id,
                                                 const AttachIdentity&        identity,
                                                 const AttachBudget&          budget,
-                                                std::chrono::steady_clock::time_point deadline) {
+                                                std::chrono::steady_clock::time_point deadline,
+                                                const std::string& config_digest) {
     auto connection = std::make_unique<HostConnection>();
     connection->connect(socket_path.string(), std::min(budget.connect, remaining_until(deadline)));
     const protocol::HelloResult hello =
         connection->handshake(protocol::profile_for_role(identity.role),
                               identity.client_instance, identity.role,
-                              std::min(budget.handshake, remaining_until(deadline)));
+                              std::min(budget.handshake, remaining_until(deadline)),
+                              config_digest);
     if (!protocol::names_live_daemon(hello, protocol::WorkspaceId{workspace.value},
                                      protocol::HostBootId{boot_id.value})) {
         connection->close();
@@ -890,6 +894,8 @@ HostExitCode WorkspaceHost::Impl::startup() {
     runtime_options.root                  = canonical_root_;
     runtime_options.launch_dir            = saved_cwd_;
     runtime_options.boot_id               = to_boot_id(boot_id_);
+    runtime_options.build                 = YMH_VERSION;
+    runtime_options.config_digest         = config_.config_digest;
     runtime_options.attach_permission_gate = false;
     runtime_options.attach_permission_resolver = true;
     runtime_options.store_factory         = config_.store_factory;
@@ -956,10 +962,15 @@ HostExitCode WorkspaceHost::Impl::startup() {
     host_runtime_->set_checkpoint_store(checkpoints_.get());
 
     protocol::ProtocolServerConfig server_config;
-    server_config.uid       = protocol::current_uid();
-    server_config.workspace = protocol::WorkspaceId{config_.workspace.value};
-    server_config.boot_id   = to_protocol_boot_id(boot_id_);
-    server_config.pid       = pid_;
+    server_config.uid           = protocol::current_uid();
+    server_config.workspace     = protocol::WorkspaceId{config_.workspace.value};
+    server_config.boot_id       = to_protocol_boot_id(boot_id_);
+    server_config.pid           = pid_;
+    server_config.build         = YMH_VERSION;
+    server_config.config_digest = config_.config_digest;
+    server_config.active_turns  = [this] {
+        return turns_ != nullptr ? turns_->inFlight() : std::size_t{0};
+    };
     protocol_ = std::make_unique<ProtocolServer>(*host_runtime_, server_config);
     host_runtime_->attachServer(*protocol_);
     protocol_->set_owner_liveness_sink(
@@ -1426,6 +1437,10 @@ std::vector<std::string> ForkExecLauncher::build_argv(
         argv.push_back("--config");
         argv.push_back(config.config_path.string());
     }
+    if (!config.config_digest.empty()) {
+        argv.push_back("--config-digest");
+        argv.push_back(config.config_digest);
+    }
     if (config.boot_id.has_value()) {
         argv.push_back("--boot-id");
         argv.push_back(config.boot_id->value);
@@ -1574,13 +1589,24 @@ std::optional<int> ForkExecLauncher::tryReap(HostPid pid) {
     return -1;
 }
 
+std::string HostLifecycle::config_digest(const WorkspaceRecord& record) const {
+    const std::filesystem::path global =
+        config_path_.empty() ? default_global_config_path() : config_path_;
+    return config_fingerprint(global, workspace_config_path(record.canonicalPath));
+}
+
 HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     HostConfig config;
     config.workspace      = record.id;
     config.workspace_root = record.canonicalPath;
     config.socket_path    = local_host_socket_path(record.id.value);
     config.log_sink       = record.canonicalPath / ".ymh" / "host.log";
-    config.config_path    = config_path_;
+    std::error_code path_error;
+    const std::filesystem::path global =
+        config_path_.empty() ? default_global_config_path() : config_path_;
+    const std::filesystem::path absolute = std::filesystem::weakly_canonical(global, path_error);
+    config.config_path    = path_error ? global : absolute;
+    config.config_digest  = config_digest(record);
     config.registry       = default_registry_config();
     config.persistence.db_path   = record.canonicalPath / ".ymh" / "sessions.db";
     config.persistence.lock_path = record.canonicalPath / ".ymh" / "sessions.lock";
@@ -1608,8 +1634,10 @@ ReapResult HostLifecycle::reapIfStale(const WorkspaceRecord& record) {
 AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
                                            const AttachIdentity&  identity,
                                            const AttachBudget&    budget,
-                                           std::chrono::steady_clock::time_point deadline) {
-    const HostConfig                    config  = configFor(record);
+                                           std::chrono::steady_clock::time_point deadline,
+                                           const std::string&     config_digest) {
+    HostConfig                          config  = configFor(record);
+    config.config_digest = config_digest;
     const HostLauncher::SpawnResult     spawned = launcher_.spawn(config);
     // 69-D5: the diagnostic pipe read end is parent-owned and single-consumer;
     // this closer releases it on every return/throw path (success, winner
@@ -1654,8 +1682,9 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
             }
             try {
                 return AttachResult{connect_checked(spawned.socketPath, record.id,
-                                                    spawned.bootId, identity, budget, deadline),
-                                    true};
+                                                    spawned.bootId, identity, budget, deadline,
+                                                    config_digest),
+                                    true, {}};
             } catch (const std::exception& error) {
                 last_error = error.what();
             }
@@ -1686,8 +1715,9 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
         if (current.has_value() && current->host.has_value()) {
             try {
                 return AttachResult{connect_checked(current->host->socketPath, current->id,
-                                                    current->host->bootId, identity, budget, deadline),
-                                    false};
+                                                    current->host->bootId, identity, budget,
+                                                    deadline, config_digest),
+                                    false, {}};
             } catch (const std::exception& error) {
                 last_error = error.what();
             }
@@ -1706,7 +1736,8 @@ AttachResult HostLifecycle::spawnAndAttach(const WorkspaceRecord& record,
 LiveProbe HostLifecycle::probeLive(const WorkspaceRecord& record,
                                    const AttachIdentity&  identity,
                                    const AttachBudget&    budget,
-                                   std::chrono::steady_clock::time_point deadline) {
+                                   std::chrono::steady_clock::time_point deadline,
+                                   const std::string&     config_digest) {
     LiveProbe probe;
     const WorkspaceLockProbe lock = probeWorkspaceLock(record.canonicalPath);
     probe.holder_pid = lock.pid;
@@ -1716,7 +1747,8 @@ LiveProbe HostLifecycle::probeLive(const WorkspaceRecord& record,
     }
     try {
         probe.connection = connect_checked(record.host->socketPath, record.id,
-                                           record.host->bootId, identity, budget, deadline);
+                                           record.host->bootId, identity, budget, deadline,
+                                           config_digest);
         probe.outcome = LiveProbeOutcome::Attached;
         return probe;
     } catch (const HostError& error) {
@@ -1750,6 +1782,24 @@ AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace, AttachIdentity 
         throw HostError(protocol::HostErrorCode::WorkspaceMissing,
                         "no workspace row for id " + workspace.value);
     }
+    const std::string digest = config_digest(*record);
+    const auto identity_note = [&](AttachResult result) -> AttachResult {
+        if (result.connection == nullptr) {
+            return result;
+        }
+        const protocol::HelloIdentityMismatch mismatch =
+            protocol::classify_hello_identity(result.connection->hello(), YMH_VERSION, digest);
+        if (mismatch.build || mismatch.config) {
+            const std::string build = result.connection->hello().server_build.empty()
+                                          ? std::string{"unknown"}
+                                          : result.connection->hello().server_build;
+            result.notice = mismatch.server_older
+                                ? "daemon identity is still " + build +
+                                      "; run `ymh workspace restart` to replace it"
+                                : "daemon is newer than this client; using " + build;
+        }
+        return result;
+    };
     if (record->host.has_value() &&
         registry_.probeLiveness(workspace) == HostLiveness::Remote) {
         throw HostError(
@@ -1758,17 +1808,82 @@ AttachResult HostLifecycle::ensureRunning(WorkspaceId workspace, AttachIdentity 
             "(`ymh workspace stop <path>` on that machine)");
     }
     if (!record->host.has_value()) {
-        return spawnAndAttach(*record, identity, budget, deadline);
+        return identity_note(spawnAndAttach(*record, identity, budget, deadline, digest));
     }
-    LiveProbe probe = probeLive(*record, identity, budget, deadline);
+    LiveProbe probe = probeLive(*record, identity, budget, deadline, digest);
     const std::string lock_path =
         (record->canonicalPath / ".ymh" / "sessions.lock").string();
     switch (probe.outcome) {
-        case LiveProbeOutcome::Attached:
-            return AttachResult{std::move(probe.connection), false};
+        case LiveProbeOutcome::Attached: {
+            const protocol::HelloResult& hello = probe.connection->hello();
+            const protocol::HelloIdentityMismatch mismatch =
+                protocol::classify_hello_identity(hello, YMH_VERSION, digest);
+            if (!mismatch.build && !mismatch.config) {
+                return AttachResult{std::move(probe.connection), false, {}};
+            }
+            if (!mismatch.server_older) {
+                return AttachResult{std::move(probe.connection), false,
+                                    "daemon is newer than this client; using " +
+                                        hello.server_build};
+            }
+            if (hello.active_turns > 0) {
+                return AttachResult{std::move(probe.connection), false,
+                                    "daemon is out of date; restart deferred: " +
+                                        std::to_string(hello.active_turns) +
+                                        " turn(s) in flight"};
+            }
+            // A newer client is the fresh owner: replace the daemon even when
+            // older clients are attached. `workspace_stop` is the existing
+            // administrative override; `active_turns == 0` is the safety gate.
+            bool shutdown_requested = false;
+            try {
+                (void)probe.connection->request(protocol::method::kHostShutdown,
+                                                {{"reason", "workspace_stop"}});
+                shutdown_requested = true;
+            } catch (const std::exception&) {
+                // Automation profiles cannot call host.shutdown. Re-ask over the
+                // Interactive control channel; `workspace_stop` is the
+                // administrative override, and `active_turns == 0` is the gate.
+            }
+            if (!shutdown_requested) {
+                try {
+                    std::unique_ptr<HostConnection> control = connect_to(record->host->socketPath);
+                    (void)control->request(protocol::method::kHostShutdown,
+                                           {{"reason", "workspace_stop"}});
+                    shutdown_requested = true;
+                    control->close();
+                } catch (const std::exception&) {
+                    // The daemon may already be draining; the wait below decides.
+                }
+            }
+            probe.connection->close();
+
+            const std::chrono::steady_clock::time_point release_deadline =
+                std::min(deadline, std::chrono::steady_clock::now() +
+                                       std::chrono::seconds{15});
+            while (std::chrono::steady_clock::now() < release_deadline &&
+                   registry_.probeLiveness(workspace) == HostLiveness::Live) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+            if (registry_.probeLiveness(workspace) == HostLiveness::Live) {
+                throw HostError(
+                    protocol::HostErrorCode::HostUnresponsive,
+                    "the old daemon did not release the workspace within 15 s; "
+                    "run `ymh workspace restart <path> --force`");
+            }
+            const std::optional<WorkspaceRecord> refreshed = registry_.findById(workspace);
+            if (refreshed.has_value() && refreshed->host.has_value()) {
+                if (registry_.probeLiveness(workspace) == HostLiveness::Remote) {
+                    throw HostError(protocol::HostErrorCode::WorkspaceLockForeign,
+                                    "workspace daemon moved to another host during upgrade");
+                }
+                (void)registry_.reapHost(workspace);
+            }
+            return identity_note(spawnAndAttach(*record, identity, budget, deadline, digest));
+        }
         case LiveProbeOutcome::NoHolder:
             reapIfStale(*record);
-            return spawnAndAttach(*record, identity, budget, deadline);
+            return identity_note(spawnAndAttach(*record, identity, budget, deadline, digest));
         case LiveProbeOutcome::IdentityMismatch:
             throw HostError(protocol::HostErrorCode::AttachRejected,
                             "attach identity mismatch at " +

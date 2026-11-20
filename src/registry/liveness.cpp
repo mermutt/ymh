@@ -56,9 +56,18 @@ WorkspaceLockProbe probeWorkspaceLock(const std::filesystem::path& workspaceRoot
             if (diagnostic.contains("boot_id") && diagnostic.at("boot_id").is_string()) {
                 probe.bootId = diagnostic.at("boot_id").get<std::string>();
             }
+            if (diagnostic.contains("build") && diagnostic.at("build").is_string()) {
+                probe.build = diagnostic.at("build").get<std::string>();
+            }
+            if (diagnostic.contains("config_digest") &&
+                diagnostic.at("config_digest").is_string()) {
+                probe.configDigest = diagnostic.at("config_digest").get<std::string>();
+            }
         } catch (const nlohmann::json::exception&) {
             probe.pid.reset();
             probe.bootId.reset();
+            probe.build.reset();
+            probe.configDigest.reset();
         }
     }
     ::close(fd);

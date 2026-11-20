@@ -1,5 +1,7 @@
 #include "ymh/ui/supervisor.hpp"
 
+#include "ymh/config/config.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1002,10 +1004,23 @@ private:
     }
 
     void attach_workspace(const SupervisorWorkspace& spec) {
-        if (connections_.count(spec.id) != 0) {
-            return;
+        const auto existing_spec = specs_.find(spec.id);
+        const auto existing_conn = connections_.find(spec.id);
+        const bool generation_changed =
+            existing_spec != specs_.end() &&
+            (existing_spec->second.boot_id != spec.boot_id ||
+             existing_spec->second.socket_path != spec.socket_path);
+        if (existing_conn != connections_.end()) {
+            if (!generation_changed) {
+                return;
+            }
+            // An upgrade/restart replaced the daemon: the old boot nonce and
+            // socket cannot attach again. Drop the old pump and build a new
+            // connection against the refreshed registry row.
+            existing_conn->second->stop();
+            connections_.erase(existing_conn);
         }
-        specs_.emplace(spec.id, spec);
+        specs_[spec.id] = spec;
         if (model_.workspaces.count(spec.id) == 0) {
             WorkspaceModel model;
             model.id = spec.id;
@@ -1016,6 +1031,10 @@ private:
             model.live = false;
             model_.workspaces.emplace(spec.id, std::move(model));
             model_.dirty.markAggregate();
+        } else {
+            WorkspaceModel& model = model_.workspaces.at(spec.id);
+            model.boot_id        = spec.boot_id;
+            model.daemonStatus   = DaemonStatus::Connecting;
         }
 
         SupervisorConnectionConfig config;
@@ -1025,6 +1044,10 @@ private:
         config.client_instance = options_.identity.client_instance;
         config.role = options_.identity.role;
         config.profile = protocol::profile_for_role(options_.identity.role);
+        config.config_digest = config_fingerprint(
+            options_.global_config_path.empty() ? default_global_config_path()
+                                                : options_.global_config_path,
+            workspace_config_path(spec.cwd));
 
         SupervisorSink sink;
         const WorkspaceId workspace_id = spec.id;

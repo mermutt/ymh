@@ -1,5 +1,7 @@
 #include "ymh/transport/host_connection.hpp"
 
+#include "ymh/core/version.hpp"
+
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -256,17 +258,22 @@ bool HostConnection::fill_incoming(std::chrono::milliseconds timeout) {
 }
 
 HelloResult HostConnection::handshake(ServerProfile profile, ClientInstanceId instance,
-                                      std::chrono::milliseconds timeout) {
-    return handshake(profile, std::move(instance), ClientRole::Supervisor, timeout);
+                                      std::chrono::milliseconds timeout,
+                                      std::string config_digest) {
+    return handshake(profile, std::move(instance), ClientRole::Supervisor, timeout,
+                     std::move(config_digest));
 }
 
 HelloResult HostConnection::handshake(ServerProfile profile, ClientInstanceId instance,
-                                      ClientRole role, std::chrono::milliseconds timeout) {
+                                      ClientRole role, std::chrono::milliseconds timeout,
+                                      std::string config_digest) {
     HelloParams params;
     params.protocol_version = kProtocolVersion;
     params.profile = profile;
     params.client_instance = std::move(instance);
     params.role = role;
+    params.client_build = YMH_VERSION;
+    params.config_digest = std::move(config_digest);
     nlohmann::json body;
     to_json(body, params);
     const nlohmann::json result = request(method::kHostHello, std::move(body), timeout);

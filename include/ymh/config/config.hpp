@@ -507,6 +507,15 @@ struct ConfigPaths {
 [[nodiscard]] std::filesystem::path workspace_config_path(
     const std::filesystem::path& workspace_root);
 
+// Stable, non-cryptographic fingerprint (16 hex chars) of the daemon's config
+// inputs: the global config file, the workspace config file, and
+// `<workspace>/.ymh/permissions.jsonc`. Contents, not mtimes, so only a real
+// edit changes it. Returns empty when the global file is absent/unreadable or a
+// file exceeds the 4 MiB bound; callers treat empty as "unknown" and never
+// restart on it.
+[[nodiscard]] std::string config_fingerprint(const std::filesystem::path& global,
+                                             const std::filesystem::path& workspace);
+
 // `ymh::Logger` (core/logging.hpp); only the pointer is used here so the config
 // component stays free of a logging-library dependency.
 class Logger;

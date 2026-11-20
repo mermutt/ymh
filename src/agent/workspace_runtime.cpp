@@ -704,8 +704,10 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
     } else {
         PersistenceConfig persistence_config;
         persistence_config.db_path   = options.root / ".ymh" / "sessions.db";
-        persistence_config.lock_path = options.root / ".ymh" / "sessions.lock";
-        persistence_config.boot_id   = options.boot_id;
+        persistence_config.lock_path     = options.root / ".ymh" / "sessions.lock";
+        persistence_config.boot_id       = options.boot_id;
+        persistence_config.build         = options.build;
+        persistence_config.config_digest = options.config_digest;
         try {
             std::unique_ptr<SessionPersistence> opened =
                 SessionPersistence::open(persistence_config);

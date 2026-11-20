@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -332,7 +334,8 @@ std::string help_text(CLI::App& app, std::initializer_list<CLI::App*> subcommand
 
 std::string host_usage() {
     return "ymh --host --workspace <uuid> --root <canonical-root> --socket <path>\n"
-           "          [--config <path>] [--boot-id <uuid>] [--predecessor-boot-id <uuid>]\n";
+           "          [--config <path>] [--config-digest <hex>] [--boot-id <uuid>]\n"
+           "          [--predecessor-boot-id <uuid>]\n";
 }
 
 bool contains_host_flag(const std::vector<std::string>& args) {
@@ -344,6 +347,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     std::string root;
     std::string socket_path;
     std::string config_path;
+    std::string config_digest;
     std::string boot_id;
     std::string predecessor_boot_id;
 
@@ -371,6 +375,8 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
             if (!take_value(socket_path)) { err << host_usage(); return 2; }
         } else if (argument == "--config") {
             if (!take_value(config_path)) { err << host_usage(); return 2; }
+        } else if (argument == "--config-digest") {
+            if (!take_value(config_digest)) { err << host_usage(); return 2; }
         } else if (argument == "--boot-id") {
             if (!take_value(boot_id)) { err << host_usage(); return 2; }
         } else if (argument == "--predecessor-boot-id") {
@@ -437,6 +443,7 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     host_config.persistence.db_path   = canonical / ".ymh" / "sessions.db";
     host_config.persistence.lock_path = canonical / ".ymh" / "sessions.lock";
     host_config.config                = std::move(config);
+    host_config.config_digest         = config_digest;
     host_config.provider_factory      = make_provider_factory({});
     host_config.foreground            = false;
     host_config.require_owner         = true;
@@ -460,57 +467,78 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
 
 constexpr std::chrono::milliseconds kOwnershipQueryTimeout{2'000};
 
+int report_target_error(const WorkspaceTargetResolution& resolution,
+                        const std::string&                 target, std::ostream& err) {
+    if (!resolution.ambiguous.empty()) {
+        err << "ymh: " << resolution.ambiguous.size() << " workspaces start with '" << target
+            << "':\n";
+        for (const WorkspaceRecord& candidate : resolution.ambiguous) {
+            err << "  " << candidate.id.value << '\t' << candidate.canonicalPath.string() << '\t'
+                << candidate.displayTitle << '\n';
+        }
+        err << "ymh: provide more characters to identify one workspace\n";
+        return 2;
+    }
+    err << "ymh: unknown workspace: " << target << '\n';
+    return 2;
+}
+
 int run_workspace_stop(const std::vector<std::string>& args, bool force, std::ostream& out,
                        std::ostream& err) {
-    if (args.size() != 2) {
-        err << "ymh: usage: ymh workspace stop <workspace-id|path> [--force]\n";
+    if (args.size() > 2) {
+        err << "ymh: usage: ymh workspace stop [<workspace-id|path|title-prefix>] [--force]\n";
         return 2;
+    }
+
+    std::string target;
+    if (args.size() == 2) {
+        target = args[1];
+    }
+    if (target.empty()) {
+        std::error_code error;
+        const std::filesystem::path cwd = std::filesystem::current_path(error);
+        if (error) {
+            err << "ymh: cannot resolve the current directory: " << error.message() << '\n';
+            return 2;
+        }
+        target = cwd.string();
     }
 
     std::unique_ptr<WorkspaceRegistry> registry;
     try {
-        registry = WorkspaceRegistry::openReadOnly(default_registry_config());
+        registry = WorkspaceRegistry::open(default_registry_config());
     } catch (const std::exception& registry_error) {
         err << "ymh: registry unavailable: " << registry_error.what() << '\n';
         return 1;
     }
 
-    std::optional<WorkspaceRecord> record = registry->findById(WorkspaceId{args[1]});
-    if (!record.has_value()) {
-        std::error_code error;
-        const std::filesystem::path canonical = std::filesystem::canonical(args[1], error);
-        if (!error) {
-            record = registry->findByCanonicalPath(canonical);
-        }
+    WorkspaceTargetResolution resolution = resolve_workspace_target(*registry, target);
+    if (!resolution.resolved.has_value() || !resolution.ambiguous.empty()) {
+        return report_target_error(resolution, target, err);
     }
-    if (!record.has_value()) {
-        err << "ymh: unknown workspace: " << args[1] << '\n';
-        return 1;
-    }
-    if (!record->host.has_value()) {
-        // 111-D2: the requested state is already reached; stopping a stopped
-        // workspace is an idempotent no-op, not an error.
-        out << "not running " << record->id.value << '\n';
+    const WorkspaceRecord record = std::move(*resolution.resolved);
+
+    const HostLiveness liveness = registry->probeLiveness(record.id);
+    if (liveness == HostLiveness::Absent) {
+        out << "not running " << record.id.value << '\n';
         return 0;
     }
-    if (registry->probeLiveness(record->id) == HostLiveness::Remote) {
-        err << "ymh: workspace " << record->id.value
+    if (liveness == HostLiveness::Remote) {
+        err << "ymh: workspace " << record.id.value
             << " is running on another host; stop it there\n";
         return 1;
     }
-    // 111-D2: a claim whose sidecar lock is free outlived its daemon (SIGKILL,
-    // reboot). `stop` must not clear claims (88-D1: remediation is explicit),
-    // so name the sanctioned command instead of surfacing a raw connect error.
-    if (!probeWorkspaceLock(record->canonicalPath, false).held) {
-        err << "ymh: workspace " << record->id.value << " has a stale host claim (recorded pid "
-            << record->host->pid << " is not running)\n"
-            << "ymh: clear it with: ymh workspace reap " << record->id.value << " --yes\n";
-        return 1;
+    if (liveness == HostLiveness::Stale) {
+        // Stop owns the whole lifecycle: a claim whose lock is free is cleared
+        // here. There is no separate `reap` step to point at.
+        const bool cleared = registry->reapHost(record.id);
+        out << (cleared ? "cleared stale claim " : "cleared claim ") << record.id.value << '\n';
+        return 0;
     }
 
     try {
         protocol::HostConnection connection;
-        connection.connect(record->host->socketPath.string());
+        connection.connect(record.host->socketPath.string());
         [[maybe_unused]] const protocol::HelloResult hello =
             connection.handshake(protocol::ServerProfile::Interactive,
                                  protocol::ClientInstanceId{generate_uuid_v4()},
@@ -522,7 +550,7 @@ int run_workspace_stop(const std::vector<std::string>& args, bool force, std::os
                 .get<protocol::OwnershipView>();
         const bool interactive = ::isatty(STDIN_FILENO) != 0;
         if (!workspace_stop_may_proceed(view.live_supervisors, view.live_automation, force,
-                                        interactive, std::cin, out, err, record->id.value)) {
+                                        interactive, std::cin, out, err, record.id.value)) {
             connection.close();
             return 1;
         }
@@ -530,13 +558,69 @@ int run_workspace_stop(const std::vector<std::string>& args, bool force, std::os
             protocol::method::kHostShutdown, {{"reason", "workspace_stop"}});
         connection.close();
     } catch (const std::exception& stop_error) {
-        // 111-D2: the lock is held but the advertised socket refuses, i.e. a
-        // wedged or mis-registered daemon; point at the read-only inspector.
-        err << "ymh: cannot stop daemon: " << stop_error.what() << '\n'
-            << "ymh: inspect ownership with: ymh doctor --workspace " << record->id.value << '\n';
-        return 1;
+        if (!force) {
+            err << "ymh: cannot stop daemon: " << stop_error.what() << '\n'
+                << "ymh: inspect ownership with: ymh doctor --workspace " << record.id.value
+                << '\n';
+            return 1;
+        }
+        // `--force` is the last resort for a wedged daemon whose socket no
+        // longer answers. Signal only a lock holder that is provably this
+        // workspace's daemon (same boot nonce) and alive in this PID namespace.
+        const WorkspaceLockProbe lock = probeWorkspaceLock(record.canonicalPath, false);
+        const bool ours = lock.held && lock.pid.has_value() &&
+                          lock.bootId.has_value() &&
+                          *lock.bootId == record.host->bootId.value;
+        if (!ours || killHint(*lock.pid) != KillHint::Alive) {
+            err << "ymh: cannot stop daemon: " << stop_error.what() << '\n'
+                << "ymh: inspect ownership with: ymh doctor --workspace " << record.id.value
+                << '\n';
+            return 1;
+        }
+        (void)::kill(*lock.pid, SIGTERM);
+        const auto term_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while (std::chrono::steady_clock::now() < term_deadline &&
+               registry->probeLiveness(record.id) == HostLiveness::Live) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        }
+        if (registry->probeLiveness(record.id) == HostLiveness::Live &&
+            killHint(*lock.pid) == KillHint::Alive) {
+            (void)::kill(*lock.pid, SIGKILL);
+        }
     }
-    out << "stopped " << record->id.value << '\n';
+
+    // The daemon drains before it releases the sidecar lock. Wait briefly so
+    // the next start cannot race the old generation; clear a leftover claim
+    // only once the lock is free.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{15};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (registry->probeLiveness(record.id) != HostLiveness::Live) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    }
+    if (registry->probeLiveness(record.id) == HostLiveness::Stale) {
+        (void)registry->reapHost(record.id);
+    }
+    out << "stopped " << record.id.value << '\n';
+    return 0;
+}
+
+int run_workspace_restart(const std::vector<std::string>& args, bool force, std::ostream& out,
+                          std::ostream& err) {
+    std::vector<std::string> stop_args{"stop"};
+    if (args.size() == 2) {
+        stop_args.push_back(args[1]);
+    }
+    const int stop_code = run_workspace_stop(stop_args, force, out, err);
+    if (stop_code != 0) {
+        return stop_code;
+    }
+    // A daemon requires an owner, so restart cannot usefully pre-spawn one and
+    // then exit. Stop is the whole restart contract: the next `ymh` invocation
+    // spawns the current binary with the current config.
+    out << "ready: the next start uses ymh " << YMH_VERSION << '\n';
     return 0;
 }
 
@@ -682,6 +766,9 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
         const AttachResult attach =
             lifecycle.ensureRunning(row->id, ui::probe_attach_identity(), AttachBudget{});
         attached_existing = !attach.spawned;
+        if (!attach.notice.empty()) {
+            startup_notice = attach.notice;
+        }
         ensured           = true;
     } catch (const std::exception& error) {
         // 53-D1 step 4: an explicit activation (`--resume`/`--new`) stays fatal;
@@ -732,6 +819,7 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
     options.version = YMH_VERSION;
     options.lifecycle = &lifecycle;
     options.registry = registry.get();
+    options.global_config_path = config_path;
     options.identity = identity;
     options.initial_notice = std::move(startup_notice);
     if (resume_id.has_value()) {
@@ -755,6 +843,9 @@ int run_via_daemon(WorkspaceRegistry& registry, const WorkspaceRecord& row,
     } catch (const std::exception& error) {
         err << "ymh: cannot attach to workspace daemon: " << error.what() << '\n';
         return 1;
+    }
+    if (!attach.notice.empty()) {
+        err << "ymh: " << attach.notice << '\n';
     }
     protocol::HostConnection& connection = *attach.connection;
     try {
@@ -1383,15 +1474,18 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
     CLI::App*   workspace_stop = workspace->add_subcommand("stop", "Stop a workspace daemon");
     std::string workspace_stop_target;
     bool        workspace_stop_force = false;
-    workspace_stop->add_option("target", workspace_stop_target, "Workspace ID or path")->required();
+    workspace_stop->add_option("target", workspace_stop_target,
+                               "Workspace ID, path, title, or prefix (default: cwd)");
     workspace_stop->add_flag("--force", workspace_stop_force,
-                             "Stop even when the workspace has live owners (§4.6)");
-    CLI::App*   workspace_reap = workspace->add_subcommand(
-        "reap", "Clear a stale host claim when the sidecar lock is free");
-    std::string workspace_reap_target;
-    bool        workspace_reap_yes = false;
-    workspace_reap->add_option("target", workspace_reap_target, "Workspace ID or path")->required();
-    workspace_reap->add_flag("--yes", workspace_reap_yes, "Skip the confirmation prompt (88-D8)");
+                             "Stop live owners and escalate a wedged daemon (SIGTERM/SIGKILL)");
+    CLI::App*   workspace_restart = workspace->add_subcommand(
+        "restart", "Stop so the next start uses the current binary and config");
+    std::string workspace_restart_target;
+    bool        workspace_restart_force = false;
+    workspace_restart->add_option("target", workspace_restart_target,
+                                  "Workspace ID, path, title, or prefix (default: cwd)");
+    workspace_restart->add_flag("--force", workspace_restart_force,
+                                "Stop live owners and escalate a wedged daemon");
     CLI::App*   workspace_remove = workspace->add_subcommand(
         "remove", "Delete a stopped workspace's registry row (keeps <workspace>/.ymh)");
     std::string workspace_remove_target;
@@ -1476,12 +1570,16 @@ CliInvocation parse_cli(const std::vector<std::string>& args) {
             invocation.workspace_args.emplace_back("list");
         } else if (workspace_stop->parsed()) {
             invocation.workspace_args.emplace_back("stop");
-            invocation.workspace_args.push_back(workspace_stop_target);
+            if (!workspace_stop_target.empty()) {
+                invocation.workspace_args.push_back(workspace_stop_target);
+            }
             invocation.workspace_force = workspace_stop_force;
-        } else if (workspace_reap->parsed()) {
-            invocation.workspace_args.emplace_back("reap");
-            invocation.workspace_args.push_back(workspace_reap_target);
-            invocation.workspace_yes = workspace_reap_yes;
+        } else if (workspace_restart->parsed()) {
+            invocation.workspace_args.emplace_back("restart");
+            if (!workspace_restart_target.empty()) {
+                invocation.workspace_args.push_back(workspace_restart_target);
+            }
+            invocation.workspace_force = workspace_restart_force;
         } else if (workspace_remove->parsed()) {
             invocation.workspace_args.emplace_back("remove");
             invocation.workspace_args.push_back(workspace_remove_target);
@@ -1664,9 +1762,10 @@ int run_cli(const std::vector<std::string>& args, std::ostream& out, std::ostrea
                 return run_workspace_stop(invocation.workspace_args, invocation.workspace_force,
                                           out, err);
             }
-            if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "reap") {
-                return run_workspace_reap(invocation.workspace_args, invocation.workspace_yes, out,
-                                          err);
+            if (!invocation.workspace_args.empty() &&
+                invocation.workspace_args[0] == "restart") {
+                return run_workspace_restart(invocation.workspace_args,
+                                             invocation.workspace_force, out, err);
             }
             if (!invocation.workspace_args.empty() && invocation.workspace_args[0] == "remove") {
                 return run_workspace_remove(invocation.workspace_args, invocation.workspace_yes,

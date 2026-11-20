@@ -54,6 +54,11 @@ struct PersistenceConfig {
     std::filesystem::path lock_path;
     BootId                boot_id;
 
+    // Additive daemon identity written into the sidecar-lock diagnostic. Empty
+    // for read-only/headless opens; the daemon fills both before opening.
+    std::string build;
+    std::string config_digest;
+
     std::chrono::milliseconds lease_ttl{15'000};
     std::chrono::milliseconds renew_interval{5'000};
 

@@ -51,7 +51,7 @@ struct CliInvocation {
     bool        verbose = false;
     bool        version_requested = false;
     bool        workspace_force = false;   // `workspace stop --force` (§4.6)
-    bool        workspace_yes = false;     // `workspace reap --yes` (88-A1/DOC8)
+    bool        workspace_yes = false;     // `workspace remove --yes`
     std::vector<std::string> workspace_args;
 
     // 88-A1: `ymh doctor --json`.

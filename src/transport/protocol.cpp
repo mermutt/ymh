@@ -116,6 +116,55 @@ std::string request_id_key(const RequestId& id) {
     return "n:";
 }
 
+namespace {
+// `v<YYMMDD>-...` -> the six date digits, or empty when the shape is unknown.
+std::string build_date(std::string_view build) {
+    if (build.size() < 7 || build.front() != 'v') {
+        return {};
+    }
+    for (std::size_t index = 1; index < 7; ++index) {
+        if (build[index] < '0' || build[index] > '9') {
+            return {};
+        }
+    }
+    return std::string{build.substr(1, 6)};
+}
+} // namespace
+
+HelloIdentityMismatch classify_hello_identity(const HelloResult& hello,
+                                              std::string_view  client_build,
+                                              std::string_view  client_digest) {
+    HelloIdentityMismatch mismatch;
+    if (!client_digest.empty() && !hello.config_digest.empty() &&
+        client_digest != hello.config_digest) {
+        mismatch.config = true;
+    }
+    if (client_build.empty()) {
+        return mismatch;
+    }
+    if (hello.server_build.empty()) {
+        mismatch.build        = true;
+        mismatch.server_older = true;
+        return mismatch;
+    }
+    if (hello.server_build != client_build) {
+        mismatch.build = true;
+        const std::string client_date = build_date(client_build);
+        const std::string server_date = build_date(hello.server_build);
+        if (client_date.empty() || server_date.empty()) {
+            mismatch.server_older = true;
+        } else {
+            mismatch.server_older = client_date >= server_date;
+        }
+    }
+    // A config-only mismatch is a restart when the client's build is not older;
+    // a newer daemon with a different config must not be downgraded.
+    if (mismatch.config && !mismatch.build) {
+        mismatch.server_older = true;
+    }
+    return mismatch;
+}
+
 bool names_live_daemon(const HelloResult& hello, const WorkspaceId& workspace,
                        const HostBootId& expected_boot_id) noexcept {
     if (hello.workspace.value != workspace.value) {
@@ -372,7 +421,9 @@ void to_json(nlohmann::json& json, const HelloParams& params) {
     json = nlohmann::json{{"protocol_version", params.protocol_version},
                           {"profile", std::string{wire_name(params.profile)}},
                           {"client_instance", params.client_instance.value},
-                          {"role", std::string{to_string(params.role)}}};
+                          {"role", std::string{to_string(params.role)}},
+                          {"client_build", params.client_build},
+                          {"config_digest", params.config_digest}};
     if (params.resume_hint.has_value()) {
         json["resume_hint"] = params.resume_hint->value;
     }
@@ -400,6 +451,8 @@ void from_json(const nlohmann::json& json, HelloParams& params) {
     } else {
         params.resume_hint.reset();
     }
+    params.client_build = json.value("client_build", std::string{});
+    params.config_digest = json.value("config_digest", std::string{});
 }
 
 void to_json(nlohmann::json& json, const HelloResult& result) {
@@ -416,6 +469,9 @@ void to_json(nlohmann::json& json, const HelloResult& result) {
         {"client_id", result.client_id.value},
         {"limits", result.limits},
         {"server_time_ms", result.server_time_ms},
+        {"server_build", result.server_build},
+        {"config_digest", result.config_digest},
+        {"active_turns", result.active_turns},
     };
 }
 
@@ -435,6 +491,9 @@ void from_json(const nlohmann::json& json, HelloResult& result) {
     result.client_id.value = json.at("client_id").get<std::uint64_t>();
     result.limits = json.at("limits").get<TransportLimits>();
     result.server_time_ms = json.at("server_time_ms").get<std::int64_t>();
+    result.server_build = json.value("server_build", std::string{});
+    result.config_digest = json.value("config_digest", std::string{});
+    result.active_turns = json.value("active_turns", std::size_t{0});
 }
 
 void to_json(nlohmann::json& json, const HostNotice& notice) {

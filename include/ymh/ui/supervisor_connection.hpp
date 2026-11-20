@@ -68,6 +68,7 @@ struct SupervisorConnectionConfig {
     protocol::ClientInstanceId    client_instance;        // pinned in-memory mint (16-D8)
     protocol::ServerProfile       profile = protocol::ServerProfile::Interactive;
     protocol::ClientRole          role = protocol::ClientRole::Supervisor;  // 16 §7.4 C-M6
+    std::string                   config_digest;  // build/config negotiation
 
     // Bounded intervals so a test can drive reconnect deterministically.
     std::chrono::milliseconds poll_interval{20};

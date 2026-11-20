@@ -795,6 +795,8 @@ add_library(ymh::transport ALIAS ymh_transport)
 target_include_directories(ymh_transport
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        "${CMAKE_BINARY_DIR}/generated"
 )
 
 target_link_libraries(ymh_transport
@@ -821,6 +823,8 @@ add_library(ymh::host ALIAS ymh_host)
 target_include_directories(ymh_host
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        "${CMAKE_BINARY_DIR}/generated"
 )
 
 target_link_libraries(ymh_host
