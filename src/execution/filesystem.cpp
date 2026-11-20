@@ -199,7 +199,7 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
         const std::filesystem::path canonical =
             std::filesystem::weakly_canonical(query.base, canonical_ec);
         if (!canonical_ec &&
-            path_is_protected_in_roots(roots, canonical, config_.allow_ymh_access)) {
+            path_is_protected_in_roots(roots, canonical)) {
             throw ToolError{ToolErrorCode::PathEscape, "protected path"};
         }
     }
@@ -232,8 +232,7 @@ Task<std::vector<std::filesystem::path>> LocalFilesystem::glob(const GlobQuery& 
             if (ec) {
                 break;
             }
-            if (path_is_protected_in_roots(roots, it->path(),
-                                           config_.allow_ymh_access)) {
+            if (path_is_protected_in_roots(roots, it->path())) {
                 std::error_code entry_ec;
                 if (it->is_directory(entry_ec)) {
                     it.disable_recursion_pending();
@@ -262,7 +261,7 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
         const std::filesystem::path canonical =
             std::filesystem::weakly_canonical(query.base, canonical_ec);
         if (!canonical_ec &&
-            path_is_protected_in_roots(roots, canonical, config_.allow_ymh_access)) {
+            path_is_protected_in_roots(roots, canonical)) {
             throw ToolError{ToolErrorCode::PathEscape, "protected path"};
         }
     }
@@ -304,7 +303,7 @@ Task<std::vector<GrepMatch>> LocalFilesystem::grep(const GrepQuery& query) {
             while (it != end) {
                 std::error_code entry_ec;
                 const bool protected_entry = path_is_protected_in_roots(
-                    roots, it->path(), config_.allow_ymh_access);
+                    roots, it->path());
                 const bool symlink_entry = it->is_symlink(entry_ec);
                 if (protected_entry || symlink_entry) {
                     // 90-A13/90-D14: never traverse `.ymh`/`.git`, and never

@@ -896,7 +896,6 @@ HostExitCode WorkspaceHost::Impl::startup() {
     runtime_options.provider_factory      = config_.provider_factory;
     runtime_options.executor              = executor_.get();
     runtime_options.grant_store           = grant_store_.get();
-    runtime_options.allow_ymh_access      = config_.allow_ymh_access;
 
     std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> created =
         WorkspaceRuntime::create(std::move(runtime_options));
@@ -1435,9 +1434,6 @@ std::vector<std::string> ForkExecLauncher::build_argv(
         argv.push_back("--predecessor-boot-id");
         argv.push_back(config.predecessor_boot_id->value);
     }
-    if (config.allow_ymh_access) {
-        argv.push_back("--allow-ymh-access");
-    }
     return argv;
 }
 
@@ -1585,7 +1581,6 @@ HostConfig HostLifecycle::configFor(const WorkspaceRecord& record) const {
     config.socket_path    = local_host_socket_path(record.id.value);
     config.log_sink       = record.canonicalPath / ".ymh" / "host.log";
     config.config_path    = config_path_;
-    config.allow_ymh_access = allow_ymh_access_;
     config.registry       = default_registry_config();
     config.persistence.db_path   = record.canonicalPath / ".ymh" / "sessions.db";
     config.persistence.lock_path = record.canonicalPath / ".ymh" / "sessions.lock";

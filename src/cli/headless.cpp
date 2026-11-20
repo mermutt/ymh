@@ -163,7 +163,6 @@ HeadlessResult run_headless(const HeadlessOptions& options) {
         runtime_options.launch_dir = root;
     }
     runtime_options.boot_id = mint_boot_id();
-    runtime_options.allow_ymh_access = options.allow_ymh_access;
     runtime_options.provider_factory = make_provider_factory(options.provider_factory);
 
     std::expected<std::unique_ptr<WorkspaceRuntime>, WorkspaceRuntimeError> runtime_result =

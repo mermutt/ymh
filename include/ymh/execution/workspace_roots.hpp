@@ -37,13 +37,13 @@ namespace ymh {
     const std::vector<std::filesystem::path>& roots,
     const std::filesystem::path&              candidate);
 
-// True when any component of `candidate` relative to its containing root is
-// `.git`, or `.ymh` unless `allow_ymh`. A candidate outside every root is not
-// protected by this predicate (callers reject it separately).
+// True when `.git` is any component of `candidate` relative to its containing
+// root, or `.ymh` is the first such component. A nested project's `.ymh` is
+// ordinary content. A candidate outside every root is not protected by this
+// predicate (callers reject it separately).
 [[nodiscard]] bool path_is_protected_in_roots(
     const std::vector<std::filesystem::path>& roots,
-    const std::filesystem::path&              candidate,
-    bool                                      allow_ymh = false);
+    const std::filesystem::path&              candidate);
 
 // Validate one additional root: must resolve to an existing directory, must be
 // absolute (relative paths resolve against `primary`), must not be `/` or a

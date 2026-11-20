@@ -936,7 +936,6 @@ AgentLoop::PreparedToolCall AgentLoop::prepareToolCall(const ToolCallAssembled& 
         // shell classification, and the dialog all see the same set.
         request.roots = services_.execution->roots();
     }
-    request.allow_ymh_access = services_.allow_ymh_access;
     // 90-D2: populate the path dimension from the tool arguments. This is a
     // pure lexical mapping; it never resolves, stats, or canonicalizes.
     request.path = request_path_target(call.name, call.arguments, request.root);

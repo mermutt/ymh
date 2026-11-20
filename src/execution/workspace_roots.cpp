@@ -93,11 +93,9 @@ std::optional<std::filesystem::path> relative_to_any_root(
 }
 
 bool path_is_protected_in_roots(const std::vector<std::filesystem::path>& roots,
-                                const std::filesystem::path&              candidate,
-                                bool allow_ymh) {
+                                const std::filesystem::path&              candidate) {
     for (const std::filesystem::path& root : roots) {
-        if (path_is_under_root(root, candidate) &&
-            path_is_protected(root, candidate, allow_ymh)) {
+        if (path_is_under_root(root, candidate) && path_is_protected(root, candidate)) {
             return true;
         }
     }

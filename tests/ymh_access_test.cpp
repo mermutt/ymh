@@ -43,20 +43,13 @@ PermissionRequest shell_request(const std::filesystem::path& root, const std::st
     return request;
 }
 
-PermissionConfig permissive(bool allow_ymh_access) {
+PermissionConfig permissive() {
     PermissionConfig config;
-    config.default_verdict  = PolicyVerdict::Allow;
-    config.allow_ymh_access = allow_ymh_access;
+    config.default_verdict = PolicyVerdict::Allow;
     return config;
 }
 
-struct PathCases {
-    PermissionRequest ymh_read;
-    PermissionRequest ymh_write;
-    PermissionRequest git_read;
-};
-
-TEST(YmhAccessSwitch, PathToolsStayProtectedUntilEnabled) {
+TEST(YmhMetadataAccess, RootMetadataStaysProtected) {
     TempWorkspace workspace;
     std::filesystem::create_directories(workspace.root / ".ymh");
     std::filesystem::create_directories(workspace.root / ".git");
@@ -66,64 +59,79 @@ TEST(YmhAccessSwitch, PathToolsStayProtectedUntilEnabled) {
         stream << "debug\n";
     }
 
-    const PathCases cases{
-        path_request(workspace.root, "read_file", log),
-        path_request(workspace.root, "write_file", log),
-        path_request(workspace.root, "read_file", workspace.root / ".git" / "config"),
-    };
-
-    const RulePermissionPolicy protected_policy(permissive(false));
-    EXPECT_EQ(protected_policy.evaluate(cases.ymh_read), PolicyVerdict::Deny);
-    EXPECT_EQ(protected_policy.evaluate(cases.ymh_write), PolicyVerdict::Deny);
-    EXPECT_EQ(protected_policy.evaluate(cases.git_read), PolicyVerdict::Deny);
-
-    const RulePermissionPolicy open_policy(permissive(true));
-    EXPECT_EQ(open_policy.evaluate(cases.ymh_read), PolicyVerdict::Allow);
-    EXPECT_EQ(open_policy.evaluate(cases.ymh_write), PolicyVerdict::Allow);
-    EXPECT_EQ(open_policy.evaluate(cases.git_read), PolicyVerdict::Deny);
+    const RulePermissionPolicy policy(permissive());
+    EXPECT_EQ(policy.evaluate(path_request(workspace.root, "read_file", log)),
+              PolicyVerdict::Deny);
+    EXPECT_EQ(policy.evaluate(path_request(workspace.root, "write_file", log)),
+              PolicyVerdict::Deny);
+    EXPECT_EQ(policy.evaluate(
+                  path_request(workspace.root, "read_file", workspace.root / ".git" / "config")),
+              PolicyVerdict::Deny);
 }
 
-TEST(YmhAccessSwitch, ShellClassifierHonoursTheSwitchButKeepsGitProtected) {
+TEST(YmhMetadataAccess, NestedYmhIsOrdinaryContentButGitStaysProtected) {
     TempWorkspace workspace;
-    std::filesystem::create_directories(workspace.root / ".ymh");
-    std::filesystem::create_directories(workspace.root / ".git");
+    const auto    nested = workspace.root / "project";
+    std::filesystem::create_directories(nested / ".ymh");
+    std::filesystem::create_directories(nested / ".git");
+    const auto config = nested / ".ymh" / "permissions.jsonc";
+    {
+        std::ofstream stream{config};
+        stream << "{}\n";
+    }
 
-    const RulePermissionPolicy protected_policy(permissive(false));
-    const RulePermissionPolicy open_policy(permissive(true));
-
-    PermissionRequest ymh = shell_request(workspace.root, "ls -la .ymh");
-    PermissionRequest git = shell_request(workspace.root, "cat .git/config");
-
-    EXPECT_EQ(protected_policy.evaluate(ymh), PolicyVerdict::Deny);
-    PermissionRequest ymh_open = ymh;
-    ymh_open.allow_ymh_access = true;
-    PermissionRequest git_open = git;
-    git_open.allow_ymh_access = true;
-    EXPECT_EQ(open_policy.evaluate(ymh_open), PolicyVerdict::Allow);
-    EXPECT_EQ(open_policy.evaluate(git_open), PolicyVerdict::Deny);
+    const RulePermissionPolicy policy(permissive());
+    EXPECT_EQ(policy.evaluate(path_request(workspace.root, "read_file", config)),
+              PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(path_request(workspace.root, "write_file", config)),
+              PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(
+                  path_request(workspace.root, "read_file", nested / ".git" / "config")),
+              PolicyVerdict::Deny);
 }
 
-TEST(YmhAccessSwitch, GlobTraversesYmhOnlyWhenEnabled) {
+TEST(YmhMetadataAccess, ShellClassifierProtectsOnlyTheRootMetadata) {
+    TempWorkspace workspace;
+    const auto    nested = workspace.root / "project";
+    std::filesystem::create_directories(nested / ".ymh");
+    std::filesystem::create_directories(nested / ".git");
+
+    const RulePermissionPolicy policy(permissive());
+    EXPECT_EQ(policy.evaluate(shell_request(workspace.root, "ls -la .ymh")),
+              PolicyVerdict::Deny);
+    EXPECT_EQ(policy.evaluate(shell_request(workspace.root, "ls -la project/.ymh")),
+              PolicyVerdict::Allow);
+    EXPECT_EQ(policy.evaluate(shell_request(workspace.root, "cat project/.git/config")),
+              PolicyVerdict::Deny);
+}
+
+TEST(YmhMetadataAccess, GlobTraversesNestedMetadataButNotRootMetadata) {
     TempWorkspace workspace;
     std::filesystem::create_directories(workspace.root / ".ymh");
+    std::filesystem::create_directories(workspace.root / "project" / ".ymh");
     {
         std::ofstream stream{workspace.root / ".ymh" / "host.log"};
         stream << "debug\n";
     }
+    {
+        std::ofstream stream{workspace.root / "project" / ".ymh" / "config.jsonc"};
+        stream << "{}\n";
+    }
 
-    GlobQuery query;
-    query.base    = workspace.root / ".ymh";
-    query.pattern = "**";
+    ToolConfig config;
+    LocalFilesystem fs(workspace.root, config);
 
-    ToolConfig closed;
-    LocalFilesystem protected_fs(workspace.root, closed);
-    EXPECT_THROW(protected_fs.glob(query).get(), ymh::ToolError);
+    GlobQuery protected_query;
+    protected_query.base    = workspace.root / ".ymh";
+    protected_query.pattern = "**";
+    EXPECT_THROW((void)fs.glob(protected_query).get(), ymh::ToolError);
 
-    ToolConfig open;
-    open.allow_ymh_access = true;
-    LocalFilesystem open_fs(workspace.root, open);
-    const auto results = open_fs.glob(query).get();
+    GlobQuery nested_query;
+    nested_query.base    = workspace.root / "project" / ".ymh";
+    nested_query.pattern = "**";
+    const auto results = fs.glob(nested_query).get();
     ASSERT_EQ(results.size(), 1U);
-    EXPECT_EQ(results.front().filename(), "host.log");
+    EXPECT_EQ(results.front().filename(), "config.jsonc");
 }
+
 } // namespace

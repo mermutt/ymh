@@ -36,14 +36,9 @@ std::string render_runtime_context(const RuntimeContextConfig& config, const std
         out += "- Scratch space: `/tmp` is writable by shell and file tools; use an absolute "
                "`/tmp/...` path for temporary files.\n";
     }
-    if (config.allow_ymh_access) {
-        out += "- Workspace internals: direct access to `.ymh/` is enabled for this invocation "
-               "(debug mode); inspect it normally. `.git/` remains protected.\n";
-    } else {
-        out += "- Workspace internals: `.ymh/` is protected from shell/file tools; use "
-               "`ymh list`, `ymh show <id>`, `ymh replay <id>`, or `ymh doctor` for session "
-               "and daemon state.\n";
-    }
+    out += "- Workspace internals: the workspace root's `.ymh/` is protected from shell/file "
+           "tools; a nested project's `.ymh/` is ordinary content. Use `ymh list`, `ymh show "
+           "<id>`, `ymh replay <id>`, or `ymh doctor` for session and daemon state.\n";
     out += "- Date: " + date;
     return out;
 }

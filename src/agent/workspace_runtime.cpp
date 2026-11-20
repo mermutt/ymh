@@ -183,17 +183,14 @@ AgentConfig make_agent_config(const Config& config,
     return agent;
 }
 
-ToolConfig make_tool_config(const Config& config, bool allow_ymh_access) {
+ToolConfig make_tool_config(const Config& config) {
     ToolConfig tool_config;
-    tool_config.tool_timeout     = std::chrono::milliseconds{config.tools.timeout_ms};
-    tool_config.allow_ymh_access = allow_ymh_access;
+    tool_config.tool_timeout = std::chrono::milliseconds{config.tools.timeout_ms};
     return tool_config;
 }
 
-PermissionConfig make_permission_config(const Config& config, bool allow_ymh_access) {
-    PermissionConfig permissions = to_permission_config(config);
-    permissions.allow_ymh_access = allow_ymh_access;
-    return permissions;
+PermissionConfig make_permission_config(const Config& config) {
+    return to_permission_config(config);
 }
 
 PresetConfig make_preset_config(const Config& config) {
@@ -336,12 +333,11 @@ public:
          bool attach_permission_resolver,
          Executor* executor,
          McpClientFactory mcp_client_factory,
-         GrantStore* grant_store,
-         bool allow_ymh_access)
+         GrantStore* grant_store)
         : root_(std::move(root)),
           store_(std::move(store)),
           persistence_(persistence),
-          tool_config_(make_tool_config(config, allow_ymh_access)),
+          tool_config_(make_tool_config(config)),
           governor_(),
           pty_events_(),
           pty_(executor != nullptr
@@ -355,7 +351,7 @@ public:
               sandbox_writable_roots(config), roots_)),
           skill_catalog_(make_skill_catalog(config, *environment_, launch_dir,
                                             category_logger(LogCategory::Tool))),
-          permission_config_(make_permission_config(config, allow_ymh_access)),
+          permission_config_(make_permission_config(config)),
           default_permission_preset_(default_permission_preset_name(config)),
           permission_defaults_(config.permissions),
           permission_baseline_(deployment_permission_baseline(config)),
@@ -452,7 +448,6 @@ public:
             runtime.model      = agent_config_.model;
             runtime.sandbox    = sandbox_mode_name(agent_config_.sandbox);
             runtime.approval   = default_permission_preset_;
-            runtime.allow_ymh_access = tool_config_.allow_ymh_access;
             runtime.delegation = config.presets.max_depth == 0
                                      ? std::string{"disabled"}
                                      : "available (max depth " +
@@ -486,7 +481,6 @@ public:
         services_.prompt          = &prompt_;
         services_.instructions    = instructions_.get();
         services_.execution       = environment_.get();
-        services_.allow_ymh_access = tool_config_.allow_ymh_access;
         services_.logger          = &category_logger(LogCategory::Tool);
         services_.estimator       = &estimator_;
         services_.presets         = roster_.get();
@@ -768,8 +762,7 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
                                            options.attach_permission_gate,
                                            options.attach_permission_resolver, options.executor,
                                            std::move(options.mcp_client_factory),
-                                           options.grant_store,
-                                           options.allow_ymh_access);
+                                           options.grant_store);
         auto runtime = std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
         runtime->replayUnreportedSettlements();
         return runtime;

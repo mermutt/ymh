@@ -107,10 +107,6 @@ struct HostConfig {
     std::filesystem::path workspace_root;  // canonical realpath; chdir target
     std::filesystem::path socket_path;     // default: local host runtime path
     std::filesystem::path log_sink;        // v1 default <root>/.ymh/host.log
-    // Debug escape hatch mirrored from `--allow-ymh-access`; forwarded to the
-    // workspace runtime's permission/execution config.
-    bool                  allow_ymh_access = false;
-
     // The global config the daemon must load (21-D15). Additive and defaulted:
     // empty keeps the daemon's own `default_global_config_path()` resolution.
     // May be relative; both sides resolve it before any `chdir`.

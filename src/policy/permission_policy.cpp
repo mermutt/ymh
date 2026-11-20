@@ -482,7 +482,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     // the old `classify_shell_command` value plus the additive target scope and
     // protected flag. `classify_shell_request` owns the terminal-open cwd.
     const ShellClassification classification =
-        classify_shell_request(request, tmp_root_, config_.allow_ymh_access);
+        classify_shell_request(request, tmp_root_);
     if (request.sandbox == SandboxMode::ReadOnly &&
         tool_is_mutating(request, read_only_shell_)) {
         return PolicyVerdict::Deny;
@@ -507,7 +507,7 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     // ReadOnly, and force_ask, and before the rule fold and every grant.
     const std::vector<std::filesystem::path> roots = request_roots(request);
     if (request.path.has_value() &&
-        path_is_protected_in_roots(roots, *request.path, config_.allow_ymh_access)) {
+        path_is_protected_in_roots(roots, *request.path)) {
         if (reason != nullptr) {
             *reason = "permission:protected-path";
         }

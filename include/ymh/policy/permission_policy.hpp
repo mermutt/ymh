@@ -96,10 +96,6 @@ struct PermissionRequest {
     bool                   critical = false;
     // 119-D22: the call carries `sandbox_permissions`; always approval-gated.
     bool                   escalation = false;
-    // Debug escape hatch: skip the `.ymh` protected-path deny for this
-    // invocation. `.git` protection is unchanged. Carried from
-    // `PermissionConfig::allow_ymh_access` by the agent loop.
-    bool                   allow_ymh_access = false;
 };
 
 struct PolicyRule {
@@ -195,10 +191,6 @@ struct PermissionConfig {
     std::vector<PolicyRule>   rules;
     std::vector<ToolDefault>  tool_defaults;
     PolicyVerdict             default_verdict{PolicyVerdict::Ask};
-    // Debug escape hatch behind `--allow-ymh-access`: `.ymh` is treated as an
-    // ordinary in-root path. `.git` protection and protected-grant rules are
-    // unchanged.
-    bool                      allow_ymh_access = false;
 };
 
 class PolicyConfigError : public std::runtime_error {

@@ -217,7 +217,7 @@ std::optional<std::filesystem::path> suggest_add_root(const PermissionRequest& r
     }
     if (request.tool == "shell" || request.tool == "terminal") {
         const ShellClassification classification =
-            classify_shell_request(request, {}, request.allow_ymh_access);
+            classify_shell_request(request, {});
         std::vector<std::filesystem::path> targets = classification.outside_targets;
         std::sort(targets.begin(), targets.end());
         targets.erase(std::unique(targets.begin(), targets.end()), targets.end());

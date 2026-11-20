@@ -33,15 +33,14 @@ TEST(RuntimeGuardGuidance, RuntimeContextNamesTheTempScratchArea) {
     EXPECT_EQ(read_only.find("Scratch space"), std::string::npos);
 }
 
-TEST(RuntimeGuardGuidance, RuntimeContextAnnouncesEnabledAccess) {
+TEST(RuntimeGuardGuidance, RuntimeContextExplainsNestedMetadata) {
     ymh::RuntimeContextConfig config;
-    config.cwd              = "/tmp/workspace";
-    config.model            = "test-model";
-    config.allow_ymh_access = true;
+    config.cwd   = "/tmp/workspace";
+    config.model = "test-model";
 
     const std::string text = ymh::render_runtime_context(config, "2026-01-01");
-    EXPECT_NE(text.find("direct access"), std::string::npos);
-    EXPECT_NE(text.find(".ymh"), std::string::npos);
+    EXPECT_NE(text.find("workspace root's `.ymh/` is protected"), std::string::npos);
+    EXPECT_NE(text.find("nested project's `.ymh/` is ordinary"), std::string::npos);
 }
 
 TEST(RuntimeGuardGuidance, ProtectedPathDenialTellsModelWhatToUse) {

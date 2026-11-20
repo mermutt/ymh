@@ -87,9 +87,6 @@ struct WorkspaceRuntimeOptions {
     // back to `root`.
     std::filesystem::path launch_dir;
     BootId                boot_id;  // minted once by the owner (02 §5.2)
-    // Debug escape hatch behind `--allow-ymh-access`: let shell/file tools read
-    // and write this workspace's `.ymh` tree.
-    bool                  allow_ymh_access = false;
 
     // When true, the owned `PermissionGate` is attached to `AgentServices`
     // (the interactive TUI path). When false, the loop consults the policy
