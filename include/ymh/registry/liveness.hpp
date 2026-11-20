@@ -36,6 +36,9 @@ struct WorkspaceLockProbe {
 // `create_if_missing == false` the probe opens the existing lock file
 // `O_RDONLY|O_CLOEXEC` and never creates `<ws>/.ymh/sessions.lock`, so
 // `ymh doctor` stays read-only (DOC1/88-D5); a missing file reports not held.
+// The read-only path takes `LOCK_SH|LOCK_NB` instead of `LOCK_EX`: an exclusive
+// writer lock on an O_RDONLY descriptor fails on NFS, which used to look like a
+// free lock. A shared lock still fails when the daemon holds the exclusive one.
 // The 1-arg overload above delegates here with `create_if_missing == true` and is
 // behaviourally unchanged for all existing callers. Caller: `run_doctor`
 // (create_if_missing == false); every existing caller keeps the 1-arg overload.

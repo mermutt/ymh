@@ -26,7 +26,14 @@ WorkspaceLockProbe probeWorkspaceLock(const std::filesystem::path& workspaceRoot
     if (fd < 0) {
         return probe;
     }
-    if (::flock(fd, LOCK_EX | LOCK_NB) == 0) {
+    // The read-only probe (doctor, `workspace stop`) must not ask for an
+    // exclusive lock on an O_RDONLY descriptor: NFS maps flock onto POSIX
+    // record locks, where a write lock on a read-only fd fails with EBADF, and
+    // that was silently reported as "lock free" while the writable probe
+    // reported "held". A shared lock is enough to detect an exclusive holder
+    // and is valid on both open modes.
+    const int lock_mode = (create_if_missing ? LOCK_EX : LOCK_SH) | LOCK_NB;
+    if (::flock(fd, lock_mode) == 0) {
         ::flock(fd, LOCK_UN);
         ::close(fd);
         return probe;
