@@ -18,6 +18,8 @@ add_executable(ymh_file_store_tests
     tool_call_assembler_test.cpp
     tool_result_pruner_test.cpp
     hello_identity_test.cpp
+    provider_error_test.cpp
+    compaction_budget_test.cpp
     config_fingerprint_test.cpp
     workspace_target_test.cpp
     workspace_roots_test.cpp
@@ -40,6 +42,7 @@ target_link_libraries(ymh_file_store_tests
         ymh::skills
         ymh::config
         ymh::agent
+        ymh::llm
         ymh::transport
         ymh::core
         SQLite3::SQLite3

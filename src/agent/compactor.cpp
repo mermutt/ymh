@@ -1,6 +1,7 @@
 #include "ymh/agent/compactor.hpp"
 
 #include "ymh/agent/model_selection.hpp"
+#include "ymh/core/logging.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -205,44 +206,81 @@ ContextCompactor::ContextCompactor(LlmRuntime&           runtime,
       clock_(std::move(clock)),
       catalog_(catalog) {}
 
-ContextCompactor::PlanResult ContextCompactor::select_plan(const Session& session,
-                                                           std::size_t keep) const {
-    PlanResult result;
-    const EventRange events = session.events();
-
+CompactionBoundary select_compaction_boundary(const EventRange& events, std::size_t keep,
+                                              bool allow_relaxed) {
+    CompactionBoundary result;
     std::vector<Sequence> points;
     for (const EventRecord& record : events) {
         if (is_turn_terminal(record.event.type)) {
             points.push_back(record.seq);
         }
     }
-    if (points.size() <= keep) {
-        result.reason = CompactionError::Code::NoBoundary;
+    if (points.empty()) {
         return result;
     }
-    const Sequence candidate = points[points.size() - 1 - keep];
-    if (candidate <= effective_boundary(events)) {
-        result.reason = CompactionError::Code::NoBoundary;
-        return result;
+    const Sequence floor = effective_boundary(events);
+    for (;;) {
+        if (points.size() > keep) {
+            const Sequence candidate = points[points.size() - 1 - keep];
+            if (candidate > floor) {
+                result.boundary   = candidate;
+                result.kept_turns = keep;
+                result.valid      = true;
+                return result;
+            }
+        }
+        if (!allow_relaxed || keep == 0) {
+            return result;
+        }
+        --keep;
     }
+}
 
-    EventRange prefix_events;
-    for (const EventRecord& record : events) {
-        if (record.seq > candidate) {
+ContextCompactor::PlanResult ContextCompactor::select_plan(const Session& session,
+                                                           std::size_t keep,
+                                                           bool allow_relaxed) const {
+    PlanResult result;
+    const EventRange events = session.events();
+
+    CompactionBoundary selected;
+    std::size_t        prefix_messages = 0;
+    std::size_t        try_keep = keep;
+    for (;;) {
+        selected = select_compaction_boundary(events, try_keep, allow_relaxed);
+        if (!selected.valid) {
+            result.reason = CompactionError::Code::NoBoundary;
+            return result;
+        }
+        EventRange prefix_events;
+        for (const EventRecord& record : events) {
+            if (record.seq > selected.boundary) {
+                break;
+            }
+            prefix_events.push_back(record);
+        }
+        prefix_messages = deriveMessages(session.header(), prefix_events).size();
+        if (prefix_messages >= policy_.min_prefix_messages) {
             break;
         }
-        prefix_events.push_back(record);
+        if (!allow_relaxed || selected.kept_turns == 0) {
+            result.reason = CompactionError::Code::PrefixTooSmall;
+            return result;
+        }
+        // A smaller keep admits more turns into the prefix; retry there.
+        try_keep = selected.kept_turns - 1;
     }
-    const std::vector<Message> prefix = deriveMessages(session.header(), prefix_events);
-    if (prefix.size() < policy_.min_prefix_messages) {
-        result.reason = CompactionError::Code::PrefixTooSmall;
-        return result;
+    if (selected.kept_turns != keep) {
+        category_logger(LogCategory::Agent)
+            .warn("compaction: " + std::to_string(keep) +
+                  " recent turn(s) cannot be preserved; compacting with " +
+                  std::to_string(selected.kept_turns));
     }
 
     const std::vector<Message> full = deriveMessages(session.header(), events);
-    result.plan.boundary        = candidate;
-    result.plan.prefix_messages = prefix.size();
-    result.plan.kept_messages   = full.size() - prefix.size();
+    result.plan.boundary        = selected.boundary;
+    result.plan.prefix_messages = prefix_messages;
+    result.plan.kept_messages   = full.size() - prefix_messages;
+    result.plan.kept_turns      = selected.kept_turns;
     result.plan.valid           = true;
     return result;
 }
@@ -283,7 +321,8 @@ std::string ContextCompactor::bound_summary(const std::string& summary) const {
 
 CompactionResult ContextCompactor::compact(const Session& session,
                                            const std::vector<Message>& messages,
-                                           CancellationToken cancel) {
+                                           CancellationToken cancel,
+                                           bool allow_relaxed) {
     CompactionResult result;
     if (!policy_.is_enabled()) {
         result.outcome    = CompactionOutcome::NotNeeded;
@@ -291,7 +330,8 @@ CompactionResult ContextCompactor::compact(const Session& session,
         return result;
     }
 
-    PlanResult selected = select_plan(session, policy_.keep_recent_turns);
+    PlanResult selected =
+        select_plan(session, policy_.keep_recent_turns, allow_relaxed);
     if (!selected.plan.valid) {
         result.outcome    = CompactionOutcome::NotNeeded;
         result.error.code = selected.reason;
@@ -441,16 +481,22 @@ Task<std::optional<CompactionResult>> ContextCompactor::compact_if_needed(
     CompactionTrigger trigger,
     const Session& session,
     const std::vector<Message>& messages,
-    CancellationToken cancel) {
+    CancellationToken cancel,
+    std::size_t request_tokens) {
     if (!policy_.is_enabled()) {
         return Task<std::optional<CompactionResult>>{std::optional<CompactionResult>{}};
     }
+    const std::size_t estimate =
+        request_tokens > 0 ? request_tokens : estimator_.estimate(messages);
     if (trigger == CompactionTrigger::Pressure &&
-        estimator_.estimate(messages) <= policy_.effective_threshold_tokens()) {
+        estimate <= policy_.effective_threshold_tokens()) {
         return Task<std::optional<CompactionResult>>{std::optional<CompactionResult>{}};
     }
+    // Pressure and an actual provider overflow may relax `keep_recent_turns`:
+    // refusing to compact the only completed turn would guarantee another
+    // overflow. The manual `/compact` path keeps the configured policy.
     return Task<std::optional<CompactionResult>>{
-        std::optional<CompactionResult>{compact(session, messages, cancel)}};
+        std::optional<CompactionResult>{compact(session, messages, cancel, true)}};
 }
 
 Task<CompactionResult> ContextCompactor::compact_now(const Session& session,

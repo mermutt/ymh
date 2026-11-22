@@ -103,6 +103,14 @@ struct ContextSnapshot {
 // `nlohmann::json::dump()` may throw on invalid UTF-8.
 [[nodiscard]] std::uint64_t estimate_tool_schema_tokens(const ToolSchema& schema);
 
+// Advisory size of one full request: the message estimate plus every tool
+// schema. The compaction preflight must use this shape; message-only estimates
+// undercount a large MCP catalog and let a request overflow before the
+// threshold fires.
+[[nodiscard]] std::size_t estimate_request_tokens(const TokenEstimator& estimator,
+                                                  const std::vector<Message>& messages,
+                                                  const std::vector<ToolSchema>& tools);
+
 void to_json(nlohmann::json& json, const ContextSnapshot& snapshot);
 void from_json(const nlohmann::json& json, ContextSnapshot& snapshot);
 

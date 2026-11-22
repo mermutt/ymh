@@ -91,6 +91,16 @@ std::uint64_t estimate_tool_schema_tokens(const ToolSchema& schema) {
     return static_cast<std::uint64_t>(bytes / kSchemaBytesPerToken + kSchemaOverhead);
 }
 
+std::size_t estimate_request_tokens(const TokenEstimator& estimator,
+                                    const std::vector<Message>& messages,
+                                    const std::vector<ToolSchema>& tools) {
+    std::size_t total = estimator.estimate(messages);
+    for (const ToolSchema& schema : tools) {
+        total += static_cast<std::size_t>(estimate_tool_schema_tokens(schema));
+    }
+    return total;
+}
+
 ContextSnapshot build_context_snapshot(const ContextSnapshotInputs& inputs) {
     ContextSnapshot snapshot;
     snapshot.session = inputs.header.id;

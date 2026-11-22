@@ -181,7 +181,8 @@ private:
     void                      appendTurnFailed(TurnId turn, AgentErrorCode code,
                                                std::string message, bool recoverable = false);
     CompactionOutcome         runCompaction(const std::vector<Message>& messages, TurnId turn,
-                                            CompactionTrigger trigger);
+                                            CompactionTrigger trigger,
+                                            std::size_t request_tokens = 0);
     CompactionOutcome         runCompactionNow(const std::vector<Message>& messages, TurnId turn);
     CompactionOutcome         commitCompactionResult(const CompactionResult& result, TurnId turn);
     [[nodiscard]] FrozenRequest buildRequest(const std::vector<Message>& messages,

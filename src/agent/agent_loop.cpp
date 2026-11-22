@@ -19,6 +19,7 @@
 #include <variant>
 #include <vector>
 
+#include "ymh/agent/context_snapshot.hpp"
 #include "ymh/agent/preset.hpp"
 #include "ymh/agent/vision_gate.hpp"
 #include "ymh/execution/environment.hpp"
@@ -688,7 +689,8 @@ CompactionOutcome AgentLoop::commitCompactionResult(const CompactionResult& resu
 }
 
 CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages, TurnId turn,
-                                           CompactionTrigger trigger) {
+                                           CompactionTrigger trigger,
+                                           std::size_t request_tokens) {
     CancellationToken turnToken;
     {
         std::lock_guard<std::mutex> lock(control_mutex_);
@@ -696,7 +698,8 @@ CompactionOutcome AgentLoop::runCompaction(const std::vector<Message>& messages,
     }
     if (services_.context_compactor != nullptr) {
         std::optional<CompactionResult> result =
-            services_.context_compactor->compact_if_needed(trigger, session_, messages, turnToken)
+            services_.context_compactor
+                ->compact_if_needed(trigger, session_, messages, turnToken, request_tokens)
                 .get();
         if (!result.has_value()) {
             return CompactionOutcome::NotNeeded;
@@ -1370,6 +1373,25 @@ void AgentLoop::runTurn() {
         return services_.context->assemble(session_, TurnContext{turn, step, {}, {}, scope});
     };
 
+    // Tool schemas are part of the provider prompt but not of `messages`; the
+    // context snapshot already counts them. The compaction preflight must count
+    // them too, or a large MCP catalog silently consumes the budget. Advisory:
+    // never fail a turn because a schema could not be serialized.
+    const auto request_token_estimate = [&](const std::vector<Message>& messages) -> std::size_t {
+        if (services_.estimator == nullptr) {
+            return 0;
+        }
+        if (services_.context == nullptr) {
+            return services_.estimator->estimate(messages);
+        }
+        try {
+            return estimate_request_tokens(*services_.estimator, messages,
+                                           services_.context->tools(active_scope()));
+        } catch (const std::exception&) {
+            return services_.estimator->estimate(messages);
+        }
+    };
+
     const auto compaction_available = [&]() -> bool {
         if (services_.context_compactor != nullptr) {
             return compactions_this_turn_ <
@@ -1440,13 +1462,13 @@ void AgentLoop::runTurn() {
             return;
         }
         if (services_.estimator != nullptr && compaction_available() && threshold_enabled) {
-            const std::size_t estimate = services_.estimator->estimate(messages);
+            const std::size_t estimate = request_token_estimate(messages);
             const std::size_t threshold = services_.context_compactor != nullptr
                                               ? services_.context_compactor->policy()
                                                     .effective_threshold_tokens()
                                               : config_.compaction_threshold_tokens;
             if (estimate > threshold) {
-                runCompaction(messages, turn, CompactionTrigger::Pressure);
+                runCompaction(messages, turn, CompactionTrigger::Pressure, estimate);
                 try {
                     messages = assemble_messages(step);
                 } catch (const std::exception& error) {
@@ -1587,7 +1609,8 @@ void AgentLoop::runTurn() {
                 !services_.context_compactor->policy().retry_on_context_length) {
                 break;
             }
-            runCompaction(messages, turn, CompactionTrigger::ContextOverflow);
+            runCompaction(messages, turn, CompactionTrigger::ContextOverflow,
+                          request_token_estimate(messages));
             try {
                 messages = assemble_messages(step);
             } catch (const std::exception& error) {

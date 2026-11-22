@@ -198,23 +198,31 @@ Usage parse_usage(const nlohmann::json& json) {
     return usage;
 }
 
+bool looks_like_context_overflow(std::string_view message, std::string_view code) {
+    return contains_ci(code, "context_length") || contains_ci(message, "context length") ||
+           contains_ci(message, "maximum context") || contains_ci(message, "too many tokens") ||
+           contains_ci(message, "token count exceeds");
+}
+
 LLMError classify_error(int status, std::string message, std::string code) {
     LLMError error;
     error.http_status = status;
     error.provider_message = redact_secrets(message);
     error.detail = redact_secrets(code);
 
-    if (status == 401 || status == 403) {
+    // The message is authoritative for overflow, regardless of status: gateways
+    // (notably LiteLLM in front of Anthropic) report an exhausted context as
+    // HTTP 500, not 400/413. Misclassifying it as a transient server fault
+    // disables the agent's compaction-and-retry path and fails the turn instead.
+    if (looks_like_context_overflow(message, code)) {
+        error.code = LLMErrorCode::ContextLengthExceeded;
+    } else if (status == 401 || status == 403) {
         error.code = LLMErrorCode::Auth;
     } else if (status == 429) {
         error.code = LLMErrorCode::RateLimited;
     } else if (status == 400 || status == 422) {
-        if (contains_ci(code, "context_length") || contains_ci(message, "context length") ||
-            contains_ci(message, "maximum context") || contains_ci(message, "too many tokens")) {
-            error.code = LLMErrorCode::ContextLengthExceeded;
-        } else if (contains_ci(code, "content_filter") ||
-                   contains_ci(message, "content filter") ||
-                   contains_ci(message, "content_policy")) {
+        if (contains_ci(code, "content_filter") || contains_ci(message, "content filter") ||
+            contains_ci(message, "content_policy")) {
             error.code = LLMErrorCode::ContentFiltered;
         } else {
             error.code = LLMErrorCode::BadRequest;
@@ -236,8 +244,7 @@ LLMError classify_embedded_error(std::string message, std::string code) {
     error.provider_message = redact_secrets(message);
     error.detail = redact_secrets(code);
 
-    if (contains_ci(code, "context_length") || contains_ci(message, "context length") ||
-        contains_ci(message, "maximum context") || contains_ci(message, "too many tokens")) {
+    if (looks_like_context_overflow(message, code)) {
         error.code = LLMErrorCode::ContextLengthExceeded;
     } else if (contains_ci(code, "content_filter") || contains_ci(message, "content filter") ||
                contains_ci(message, "content_policy")) {

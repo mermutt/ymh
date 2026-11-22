@@ -131,8 +131,27 @@ struct CompactionPlan {
     Sequence    boundary = 0;
     std::size_t prefix_messages = 0;
     std::size_t kept_messages = 0;
+    std::size_t kept_turns = 0;  // completed turns preserved (<= configured keep)
     bool        valid = false;
 };
+
+// The boundary chosen for a given policy width. `kept_turns` is the effective
+// keep, which can be lower than the configured `keep` when `allow_relaxed` is
+// set and the log has fewer completed turns than the policy wants to preserve.
+struct CompactionBoundary {
+    Sequence    boundary = 0;
+    std::size_t kept_turns = 0;
+    bool        valid = false;
+};
+
+// Pure boundary selection over the resolved log. Nominally this picks the
+// (keep+1)-th most recent turn-terminal event. With `allow_relaxed`, a log that
+// has not yet completed `keep` turns is compacted with a smaller keep (down to
+// 0) instead of refusing: an oversized early turn must not make the context
+// impossible to compact. The candidate always advances past the last
+// `ContextCompaction` boundary.
+[[nodiscard]] CompactionBoundary select_compaction_boundary(
+    const EventRange& events, std::size_t keep, bool allow_relaxed = false);
 
 // Injectable WALL clock for `ContextCompaction.createdAt` (13 §2.3, §5.2). Not
 // the broker's `steady_clock`-based `ClockReader`: the payload stores a
@@ -154,15 +173,20 @@ public:
     std::optional<payload::ContextCompaction>
     run(const Session&, const std::vector<Message>&, CancellationToken) override;
 
-    CompactionResult compact(const Session&, const std::vector<Message>&, CancellationToken);
+    CompactionResult compact(const Session&, const std::vector<Message>&, CancellationToken,
+                             bool allow_relaxed = false);
 
     // 32 §4.2: the two D13 entry points. `compact_if_needed` is the
     // proactive/overflow path (nullopt when no compaction is warranted);
-    // `compact_now` always attempts and is the manual `/compact` path.
+    // `request_tokens` is the caller's full request estimate (messages + tool
+    // schemas), with 0 meaning "messages only". It may relax
+    // `keep_recent_turns` to find a boundary. `compact_now` always attempts and
+    // is the manual `/compact` path.
     Task<std::optional<CompactionResult>> compact_if_needed(CompactionTrigger trigger,
                                                             const Session&,
                                                             const std::vector<Message>&,
-                                                            CancellationToken);
+                                                            CancellationToken,
+                                                            std::size_t request_tokens = 0);
     Task<CompactionResult> compact_now(const Session&,
                                        const std::vector<Message>&,
                                        CancellationToken);
@@ -178,7 +202,8 @@ private:
         CompactionError::Code reason = CompactionError::Code::None;
     };
 
-    [[nodiscard]] PlanResult select_plan(const Session&, std::size_t keep) const;
+    [[nodiscard]] PlanResult select_plan(const Session&, std::size_t keep,
+                                         bool allow_relaxed = false) const;
     [[nodiscard]] std::vector<Message> build_summary_prompt(
         const std::vector<Message>& prefix) const;
     [[nodiscard]] std::string bound_summary(const std::string& summary) const;
