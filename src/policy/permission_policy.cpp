@@ -503,8 +503,10 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         return PolicyVerdict::Ask;
     }
 
-    // 90-D13/H1: paths inside `.git`/`.ymh` are a hard deny after the 89 guard,
-    // ReadOnly, and force_ask, and before the rule fold and every grant.
+    // 90-D13/H1: paths inside `.git`, and `.ymh` metadata or any non-readable
+    // `.ymh` path, are a hard deny after the 89 guard, ReadOnly, and force_ask,
+    // and before the rule fold and every grant. The shell guard already reports
+    // read-only reads of known `.ymh` user-content tiers as not protected.
     const std::vector<std::filesystem::path> roots = request_roots(request);
     if (request.path.has_value() &&
         path_is_protected_in_roots(roots, *request.path)) {

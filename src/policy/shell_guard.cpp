@@ -1352,24 +1352,75 @@ bool temp_redirect_target(const Token& token, const RootSet& roots,
     return path_is_under_tmp_root(tmp_root, target);
 }
 
-bool candidate_is_protected(const RootSet& roots,
-                            const std::filesystem::path& cwd,
-                            std::string_view             text) {
+struct ProtectedPath {
+    bool protected_path = false;
+    // A concrete, non-metadata path below the root's `.ymh` directory. A
+    // read-only command may read it; a write still may not.
+    bool ymh_readable = false;
+};
+
+bool ymh_readable_component(std::string_view component) {
+    // Only known user-content tiers are readable through the shell. The
+    // daemon's own state (sessions, config, permissions, logs, checkpoints,
+    // transcripts, handoffs, MCP stderr, ...) stays hard-protected.
+    static constexpr std::string_view kReadable[] = {"wiki", "docs", "skills", "commands"};
+    return std::any_of(std::begin(kReadable), std::end(kReadable),
+                       [&](std::string_view name) { return component == name; });
+}
+
+ProtectedPath classify_protected_path(const RootSet& roots,
+                                      const std::filesystem::path& cwd,
+                                      std::string_view             text) {
+    ProtectedPath result;
     if (text.empty()) {
-        return false;
+        return result;
     }
     std::filesystem::path target;
     if (!resolve_lexical(roots.primary, cwd, text, target)) {
-        return false;
+        return result;
     }
     if (!roots.contains(target)) {
-        return false;
+        return result;
     }
     const std::optional<std::filesystem::path> relative = roots.relative(target);
     if (!relative.has_value() || relative->empty() || relative->is_absolute()) {
-        return false;
+        return result;
     }
-    return path_components_protected(*relative);
+    bool root_level = true;
+    bool under_ymh  = false;
+    bool ymh_child  = false;
+    for (const std::filesystem::path& component : *relative) {
+        const std::string name = component.string();
+        if (under_ymh) {
+            // Globs, `..`, and nested `.git` stay hard-protected even for a
+            // read. Only a concrete path below a known user-content tier is
+            // readable.
+            if (component_is_protected(name, /*root_level=*/false) || has_glob(name) ||
+                name == "..") {
+                return result;
+            }
+            if (!ymh_child && !ymh_readable_component(name)) {
+                return result;
+            }
+            ymh_child  = true;
+            root_level = false;
+            continue;
+        }
+        if (component_is_protected(name, root_level)) {
+            result.protected_path = true;
+            if (name == ".ymh") {
+                under_ymh = true;
+                root_level = false;
+                continue;
+            }
+            return result;
+        }
+        root_level = false;
+    }
+    if (under_ymh && ymh_child) {
+        result.ymh_readable = true;
+    }
+    return result;
 }
 
 int hex_value(char c) {
@@ -1732,14 +1783,19 @@ void note_scope(ScopeResult& result, ShellTargetScope scope) {
 }
 
 bool scan_token_protected(const std::string& token_text, const RootSet& roots,
-                          const std::filesystem::path& cwd) {
-    if (candidate_is_protected(roots, cwd, token_text)) {
+                          const std::filesystem::path& cwd, bool allow_ymh_read) {
+    const auto blocked = [&](std::string_view text) {
+        const ProtectedPath classified = classify_protected_path(roots, cwd, text);
+        return classified.protected_path &&
+               !(allow_ymh_read && classified.ymh_readable);
+    };
+    if (blocked(token_text)) {
         return true;
     }
     std::string fragment;
     const auto flush = [&]() {
         if (!fragment.empty()) {
-            if (candidate_is_protected(roots, cwd, fragment)) {
+            if (blocked(fragment)) {
                 return true;
             }
             fragment.clear();
@@ -1957,7 +2013,8 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const RootSet& roots,
                     ++t;
                 }
                 if (t < j && toks[t].kind == TokKind::Word &&
-                    scan_token_protected(toks[t].text, roots, cwd)) {
+                    scan_token_protected(toks[t].text, roots, cwd,
+                                         /*allow_ymh_read=*/false)) {
                     return true;
                 }
                 k = t;
@@ -1984,7 +2041,7 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const RootSet& roots,
             if (pattern_token.has_value() && k == *pattern_token) {
                 continue;
             }
-            if (scan_token_protected(toks[k].text, roots, cwd)) {
+            if (scan_token_protected(toks[k].text, roots, cwd, read_only)) {
                 return true;
             }
         }

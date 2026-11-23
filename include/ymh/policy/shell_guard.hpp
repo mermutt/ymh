@@ -38,10 +38,14 @@ struct ShellClassification {
     ShellCommandRisk risk = ShellCommandRisk::None;
     ShellTargetScope scope = ShellTargetScope::NotApplicable;
     // True when any target is protected: `path_protected` (a real path under
-    // `.git`/`.ymh`) or `git_metadata_write` (refs by subcommand name). Kept as
-    // the single "did we touch something protected" bit for observers.
+    // `.git` or a protected `.ymh` path) or `git_metadata_write` (refs by
+    // subcommand name). Kept as the single "did we touch something protected"
+    // bit for observers.
     bool             protected_target = false;
-    // 110-D1: a real path target under `.git`/`.ymh`. Stays a hard deny.
+    // 110-D1: a hard-protected path target. `.git` at any depth, the root
+    // `.ymh` itself, and `.ymh` metadata/writes are hard denies. A read-only
+    // command on a known `.ymh` user-content tier (`wiki`, `docs`, `skills`,
+    // `commands`) is not protected.
     bool             path_protected = false;
     // 110-D1: a git subcommand that writes refs/index/config by name. Unlike a
     // protected path target this is deferrable: an explicit allow rule or a
