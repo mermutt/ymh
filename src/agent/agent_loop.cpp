@@ -684,6 +684,9 @@ CompactionOutcome AgentLoop::commitCompactionResult(const CompactionResult& resu
         if (result.usage.has_value()) {
             session_.append(payload::TokenUsage{*result.usage, turn});
         }
+        // The summary request's usage describes a different, bounded prompt;
+        // the old floor no longer applies to the compacted conversation.
+        last_reported_input_tokens_ = 0;
     }
     return result.outcome;
 }
@@ -1363,9 +1366,16 @@ void AgentLoop::runTurn() {
         turnToken      = turn_cancel_.token();
     }
     compactions_this_turn_ = 0;
+    if (last_reported_input_tokens_ == 0) {
+        last_reported_input_tokens_ = reported_input_token_floor(session_.events());
+    }
 
     const auto assemble_messages = [&](StepId step) -> std::vector<Message> {
-        (void)pruner_.prune_session(session_);
+        if (pruner_.prune_session(session_).pruned > 0) {
+            // The surface just shrank; the previous request's input count is no
+            // longer a valid lower bound.
+            last_reported_input_tokens_ = 0;
+        }
         const std::optional<std::string>& scope = active_scope();
         if (services_.prompt != nullptr) {
             materializeContexts(services_.prompt->assemble(AssembleContext{.scope = scope}));
@@ -1462,7 +1472,14 @@ void AgentLoop::runTurn() {
             return;
         }
         if (services_.estimator != nullptr && compaction_available() && threshold_enabled) {
-            const std::size_t estimate = request_token_estimate(messages);
+            std::size_t estimate = request_token_estimate(messages);
+            // The byte estimate undercounts dense code/JSON/CJK and ignores
+            // provider-side prompt framing. The previous request's reported
+            // input count is exact and the prompt only grows until a prune or
+            // compaction, so it is a safe floor.
+            if (last_reported_input_tokens_ > estimate) {
+                estimate = last_reported_input_tokens_;
+            }
             const std::size_t threshold = services_.context_compactor != nullptr
                                               ? services_.context_compactor->policy()
                                                     .effective_threshold_tokens()
@@ -1628,6 +1645,9 @@ void AgentLoop::runTurn() {
         // 34-D11: the settled Completed attempt's `assembler.usage()` is the
         // single durable usage source.
         const std::optional<Usage>& usage = settledUsage;
+        if (usage.has_value() && usage->input_tokens > 0) {
+            last_reported_input_tokens_ = static_cast<std::size_t>(usage->input_tokens);
+        }
 
         std::string cancelReason;
         {

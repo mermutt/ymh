@@ -258,6 +258,10 @@ private:
     std::atomic<bool>                   running_{false};
     std::atomic<AgentState>             state_{AgentState::Idle};
     std::size_t                         compactions_this_turn_ = 0;  // worker-only
+    // Provider-reported input tokens for the most recent main request in this
+    // log (after the last compaction). Exact where the byte estimator is not;
+    // used as the compaction preflight's lower bound. Worker-only.
+    std::size_t                         last_reported_input_tokens_ = 0;
     std::optional<std::string>          scope_;             // worker-only, resolved once
     bool                                scope_resolved_ = false;  // worker-only
     std::optional<LlmCallConfig>        held_config_;               // worker-only

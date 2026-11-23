@@ -1,5 +1,6 @@
 #include "ymh/agent/context_snapshot.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -99,6 +100,27 @@ std::size_t estimate_request_tokens(const TokenEstimator& estimator,
         total += static_cast<std::size_t>(estimate_tool_schema_tokens(schema));
     }
     return total;
+}
+
+std::size_t reported_input_token_floor(const EventRange& events) {
+    Sequence boundary = 0;
+    for (const EventRecord& record : events) {
+        if (record.event.type == EventType::ContextCompaction) {
+            boundary = std::max(
+                boundary, record.event.payload.get<payload::ContextCompaction>().boundary);
+        }
+    }
+    std::size_t floor = 0;
+    for (const EventRecord& record : events) {
+        if (record.seq <= boundary || record.event.type != EventType::TokenUsage) {
+            continue;
+        }
+        const auto& usage = record.event.payload.get<payload::TokenUsage>().usage;
+        if (usage.input_tokens > 0) {
+            floor = static_cast<std::size_t>(usage.input_tokens);
+        }
+    }
+    return floor;
 }
 
 ContextSnapshot build_context_snapshot(const ContextSnapshotInputs& inputs) {

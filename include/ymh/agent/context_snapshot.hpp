@@ -111,6 +111,13 @@ struct ContextSnapshot {
                                                   const std::vector<Message>& messages,
                                                   const std::vector<ToolSchema>& tools);
 
+// The last provider-reported `input_tokens` after the log's most recent
+// `ContextCompaction`, or 0 when none is available. This is exact for the
+// previous request and is used as a lower bound for the next compaction
+// preflight: a byte-based estimate undercounts dense code, JSON, CJK, and tool
+// schemas, while the provider's own count cannot.
+[[nodiscard]] std::size_t reported_input_token_floor(const EventRange& events);
+
 void to_json(nlohmann::json& json, const ContextSnapshot& snapshot);
 void from_json(const nlohmann::json& json, ContextSnapshot& snapshot);
 

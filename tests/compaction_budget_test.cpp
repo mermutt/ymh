@@ -40,6 +40,11 @@ EventRecord compaction(Sequence seq, Sequence boundary) {
                   nlohmann::json{{"boundary", boundary}, {"summary", "checkpoint"}});
 }
 
+EventRecord usage(Sequence seq, std::int64_t input_tokens) {
+    return record(seq, EventType::TokenUsage,
+                  nlohmann::json{{"usage", nlohmann::json{{"input_tokens", input_tokens}}}});
+}
+
 TEST(CompactionBoundary, NominalKeepSelectsTheNthMostRecentTurn) {
     const EventRange events{terminal(10), terminal(20), terminal(30)};
     const CompactionBoundary selected =
@@ -103,6 +108,26 @@ TEST(CompactionBudget, PreflightEstimateCountsToolSchemas) {
     EXPECT_EQ(ymh::estimate_request_tokens(estimator, messages, tools),
               messages_only + schema_only);
     EXPECT_GT(ymh::estimate_request_tokens(estimator, messages, tools), messages_only);
+}
+
+TEST(ReportedInputTokens, UsesTheLastUsageWhenNoCompactionExists) {
+    const EventRange events{usage(1, 1000), usage(2, 2000)};
+    EXPECT_EQ(ymh::reported_input_token_floor(events), 2000U);
+}
+
+TEST(ReportedInputTokens, IgnoresUsageShadowedByACompaction) {
+    const EventRange events{usage(1, 1000), compaction(2, 1), usage(3, 300)};
+    EXPECT_EQ(ymh::reported_input_token_floor(events), 300U);
+}
+
+TEST(ReportedInputTokens, ReturnsZeroWhenEverythingPredatesTheLastCompaction) {
+    const EventRange events{usage(1, 1000), compaction(2, 1)};
+    EXPECT_EQ(ymh::reported_input_token_floor(events), 0U);
+}
+
+TEST(ReportedInputTokens, IgnoresNonPositiveUsage) {
+    const EventRange events{usage(1, 0), usage(2, -5)};
+    EXPECT_EQ(ymh::reported_input_token_floor(events), 0U);
 }
 
 TEST(CompactionBudget, EmptyToolListKeepsTheMessageEstimate) {
