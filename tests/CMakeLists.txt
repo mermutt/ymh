@@ -20,6 +20,7 @@ add_executable(ymh_file_store_tests
     hello_identity_test.cpp
     provider_error_test.cpp
     compaction_budget_test.cpp
+    shell_guard_test.cpp
     config_fingerprint_test.cpp
     workspace_target_test.cpp
     workspace_roots_test.cpp

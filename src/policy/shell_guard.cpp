@@ -1820,6 +1820,50 @@ bool read_only_executable(std::string_view executable, const std::vector<Token>&
                        [&](std::string_view name) { return executable == name; });
 }
 
+bool grep_family(std::string_view executable) {
+    return executable == "grep" || executable == "egrep" || executable == "fgrep" ||
+           executable == "rg";
+}
+
+// The first positional token of a grep-family command is the search pattern,
+// not a path. A quoted regex such as `foo|.ymh` must not be resolved as
+// `<cwd>/.ymh` and hard-denied. `-e/--regexp` and `-f/--file` carry the
+// pattern/file out of the positional slot, so leave the scan untouched there.
+std::optional<std::size_t> grep_pattern_token(const std::vector<Token>& toks,
+                                              std::size_t b, std::size_t e) {
+    for (std::size_t k = b + 1; k < e; ++k) {
+        if (toks[k].kind != TokKind::Word) {
+            continue;
+        }
+        const std::string& text = toks[k].text;
+        if (text == "-e" || text == "--regexp" || text == "-f" || text == "--file" ||
+            text.rfind("--regexp=", 0) == 0 || text.rfind("--file=", 0) == 0) {
+            return std::nullopt;
+        }
+    }
+    for (std::size_t k = b + 1; k < e; ++k) {
+        if (toks[k].kind != TokKind::Word) {
+            continue;
+        }
+        const std::string& text = toks[k].text;
+        if (text == "--") {
+            continue;
+        }
+        if (text.size() >= 2 && text.front() == '-') {
+            // These options consume a separate numeric argument; skip it so the
+            // pattern remains the first non-option token.
+            if (text == "-A" || text == "-B" || text == "-C" || text == "-m" ||
+                text == "--after-context" || text == "--before-context" ||
+                text == "--context" || text == "--max-count") {
+                ++k;
+            }
+            continue;
+        }
+        return k;
+    }
+    return std::nullopt;
+}
+
 bool git_metadata_readable(std::string_view text, std::string_view executable,
                            const RootSet& roots,
                            const std::filesystem::path& cwd) {
@@ -1890,6 +1934,9 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const RootSet& roots,
         }
         const bool read_only =
             !executable.empty() && read_only_executable(executable, toks, i, j);
+        const std::optional<std::size_t> pattern_token =
+            read_only && grep_family(executable) ? grep_pattern_token(toks, i, j)
+                                                 : std::nullopt;
         // 110-D1/113-D2: a read-only git invocation may name `.git` explicitly
         // through `--git-dir`/`-C`/`--work-tree`; those operands are metadata
         // reads, not protected writes. Every other token is still scanned.
@@ -1932,6 +1979,9 @@ bool scan_protected_tokens(const std::vector<Token>& toks, const RootSet& roots,
             }
             if (read_only && k != i &&
                 git_metadata_readable(toks[k].text, executable, roots, cwd)) {
+                continue;
+            }
+            if (pattern_token.has_value() && k == *pattern_token) {
                 continue;
             }
             if (scan_token_protected(toks[k].text, roots, cwd)) {
