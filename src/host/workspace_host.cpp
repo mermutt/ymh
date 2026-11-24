@@ -896,6 +896,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     runtime_options.boot_id               = to_boot_id(boot_id_);
     runtime_options.build                 = YMH_VERSION;
     runtime_options.config_digest         = config_.config_digest;
+    runtime_options.config_path           = config_.config_path;
     runtime_options.attach_permission_gate = false;
     runtime_options.attach_permission_resolver = true;
     runtime_options.store_factory         = config_.store_factory;
@@ -971,6 +972,7 @@ HostExitCode WorkspaceHost::Impl::startup() {
     server_config.active_turns  = [this] {
         return turns_ != nullptr ? turns_->inFlight() : std::size_t{0};
     };
+    server_config.refresh_permissions = [this] { (void)runtime_->reload_permissions(); };
     protocol_ = std::make_unique<ProtocolServer>(*host_runtime_, server_config);
     host_runtime_->attachServer(*protocol_);
     protocol_->set_owner_liveness_sink(

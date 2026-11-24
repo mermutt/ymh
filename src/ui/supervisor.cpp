@@ -1716,6 +1716,13 @@ private:
                     surface_notice(request.workspace, request.resume, notice);
                     return;
                 }
+                // `ensureRunning` still succeeds when it attaches to an older
+                // daemon and defers the replacement (active turns); surface that
+                // note instead of discarding it so a stale build/config is
+                // visible before it turns into unexplained denials.
+                if (!notice.empty()) {
+                    push_notice(notice);
+                }
                 attach_workspace(*spec);
             });
         }

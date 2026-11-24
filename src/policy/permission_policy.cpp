@@ -393,20 +393,30 @@ void validate_rule(std::string_view tool, std::string_view path,
     validate_glob(std::string{command});
 }
 
+namespace {
+
+// Shared by construction and `reload`: a bad rule set must be rejected before
+// any live state changes, so the running policy keeps its last good rules.
+void validate_permission_config(const PermissionConfig& config) {
+    for (const PolicyRule& rule : config.rules) {
+        validate_policy_rule(rule);
+    }
+    for (const ToolDefault& fallback : config.tool_defaults) {
+        if (fallback.prefix.empty() || fallback.prefix.back() != '.') {
+            throw PolicyConfigError{"tool default prefix must end with '.': " + fallback.id};
+        }
+    }
+}
+
+} // namespace
+
 RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* store,
                                              bool read_only_shell)
     : config_(std::move(config)),
       store_(store),
       read_only_shell_(read_only_shell),
       tmp_root_(canonical_tmp_root()) {
-    for (const PolicyRule& rule : config_.rules) {
-        validate_policy_rule(rule);
-    }
-    for (const ToolDefault& fallback : config_.tool_defaults) {
-        if (fallback.prefix.empty() || fallback.prefix.back() != '.') {
-            throw PolicyConfigError{"tool default prefix must end with '.': " + fallback.id};
-        }
-    }
+    validate_permission_config(config_);
     if (store_ != nullptr) {
         local_grants_ = store_->load();
     }
@@ -452,6 +462,14 @@ RulePermissionPolicy::RulePermissionPolicy(PermissionConfig config, GrantStore* 
     reorder();
 }
 
+void RulePermissionPolicy::reload(PermissionConfig config) {
+    validate_permission_config(config);
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_ = std::move(config);
+    reorder();
+    generation_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void RulePermissionPolicy::reorder() {
     std::vector<PolicyRule> base = config_.rules;
     base.insert(base.end(), local_grants_.begin(), local_grants_.end());
@@ -477,6 +495,10 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
     if (reason != nullptr) {
         reason->clear();
     }
+    // One lock for the whole decision: `reload` swaps the config-derived rules
+    // in place, and `evaluate` must see one coherent rule set. The work here is
+    // lexical and allocation-bounded; it never calls back into the policy.
+    std::lock_guard<std::mutex> lock(mutex_);
 
     // 90-D5/90-D6: one request-level classification; the L1 risk is exactly
     // the old `classify_shell_command` value plus the additive target scope and
@@ -539,14 +561,10 @@ PolicyVerdict RulePermissionPolicy::evaluate(const PermissionRequest& request,
         }
     }
 
-    std::vector<PolicyRule> candidates;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        candidates = base_rules_;
-        const auto it = session_grants_.find(request.session.value);
-        if (it != session_grants_.end()) {
-            candidates.insert(candidates.end(), it->second.begin(), it->second.end());
-        }
+    std::vector<PolicyRule> candidates = base_rules_;
+    if (const auto it = session_grants_.find(request.session.value);
+        it != session_grants_.end()) {
+        candidates.insert(candidates.end(), it->second.begin(), it->second.end());
     }
 
     const PolicyRule* winner = nullptr;
@@ -743,7 +761,7 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
         } else {
             session_grants_[request.session.value].push_back(grant);
         }
-        ++generation_.value;
+        generation_.fetch_add(1, std::memory_order_relaxed);
         reorder();
     }
 
@@ -768,7 +786,7 @@ PolicyRule RulePermissionPolicy::remember(const PermissionRequest& request,
         PolicyRule degraded = grant;
         degraded.layer      = PolicyRule::Layer::SessionGrant;
         session_grants_[request.session.value].push_back(std::move(degraded));
-        ++generation_.value;
+        generation_.fetch_add(1, std::memory_order_relaxed);
         reorder();
     }
     grant.layer = PolicyRule::Layer::SessionGrant;

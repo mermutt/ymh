@@ -21,6 +21,8 @@ add_executable(ymh_file_store_tests
     provider_error_test.cpp
     compaction_budget_test.cpp
     shell_guard_test.cpp
+    permission_reload_test.cpp
+    workspace_runtime_reload_test.cpp
     config_fingerprint_test.cpp
     workspace_target_test.cpp
     workspace_roots_test.cpp
@@ -43,6 +45,7 @@ target_link_libraries(ymh_file_store_tests
         ymh::skills
         ymh::config
         ymh::agent
+        ymh::runtime
         ymh::llm
         ymh::transport
         ymh::core

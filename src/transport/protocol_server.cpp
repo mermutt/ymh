@@ -338,6 +338,21 @@ std::optional<nlohmann::json> ProtocolServer::handle_hello(Connection& conn,
     conn.last_frame_at = std::chrono::steady_clock::now();
     publish_owner_liveness();
 
+    // A config edit on disk is otherwise invisible to a running daemon until a
+    // restart. When the attaching client already computed a different digest,
+    // refresh the permission rule set now; this is what makes an edit effective
+    // in the middle of a long turn (the replacement restart is deferred while
+    // `active_turns > 0`). The read is bounded by `config_fingerprint`.
+    if (config_.refresh_permissions != nullptr && !params.config_digest.empty() &&
+        params.config_digest != config_.config_digest) {
+        try {
+            config_.refresh_permissions();
+        } catch (...) {
+            // The callback contract says it does not throw; stay fail-open on
+            // the old policy if an implementation violates it.
+        }
+    }
+
     HelloResult result;
     result.protocol_version = kProtocolVersion;
     result.workspace = config_.workspace;

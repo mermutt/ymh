@@ -91,6 +91,10 @@ struct WorkspaceRuntimeOptions {
     // headless/read-only uses; the daemon fills both.
     std::string           build;
     std::string           config_digest;
+    // The global config file this runtime was built from. Set by the daemon so
+    // a permission edit can be re-read at a turn boundary; empty disables the
+    // refresh (headless/tests).
+    std::filesystem::path config_path;
 
     // When true, the owned `PermissionGate` is attached to `AgentServices`
     // (the interactive TUI path). When false, the loop consults the policy
@@ -178,6 +182,11 @@ public:
     [[nodiscard]] CommandRegistry&      commands() noexcept;
     [[nodiscard]] ToolRegistry&         tools() noexcept;
     [[nodiscard]] PermissionPolicy&     policy() noexcept;
+    // Re-read the global + workspace config and, when its permission section
+    // changed, replace the live rule set (durable/session grants survive).
+    // Returns true when the policy was reloaded. Never throws: a malformed edit
+    // logs a warning and keeps the last good rules.
+    bool reload_permissions();
     [[nodiscard]] PermissionGate&       gate() noexcept;
     [[nodiscard]] SkillCatalog&         skills() noexcept;
     [[nodiscard]] const SkillCatalog&   skills() const noexcept;

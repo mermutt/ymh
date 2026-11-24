@@ -1248,6 +1248,10 @@ void HostRuntime::agentPrompt(const SessionId& id, const nlohmann::json& message
                 .warn(std::string{"auto-name skipped: "} + error.what());
         }
         if (!turns_.submit(id, [this, id, parsed]() {
+                // A new turn is the permission-config boundary: a running
+                // daemon re-reads the layered config here so an edit takes
+                // effect without a restart. The runtime no-ops when unchanged.
+                (void)runtime_.reload_permissions();
                 // W3: resolve the owning handle at body start and hold it.
                 std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
                 if (agent != nullptr) {
@@ -1269,6 +1273,9 @@ void HostRuntime::agentFollowup(const SessionId& id, const nlohmann::json& messa
         ensureAgent(id);
         const Message parsed = user_message_from_json(message, runtime_.root());
         if (!turns_.submit(id, [this, id, parsed]() {
+                // A follow-up can start an idle turn; refresh permissions first
+                // so the queued message sees the current rules.
+                (void)runtime_.reload_permissions();
                 std::shared_ptr<AgentLoop> agent = runtime_.agents().findShared(id);
                 if (agent != nullptr) {
                     agent->followup(parsed);

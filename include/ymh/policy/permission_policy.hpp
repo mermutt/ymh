@@ -7,6 +7,7 @@
 // transport-free core of the broker, §4.2), which fails closed on
 // timeout/cancel (Q3/Q8).
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -241,14 +242,25 @@ public:
     PolicyRule    remember(const PermissionRequest& request,
                            payload::PermissionDecisionKind kind,
                            GrantScope scope) override;
-    PolicyGeneration generation() const noexcept override { return generation_; }
+    PolicyGeneration generation() const noexcept override {
+        return PolicyGeneration{generation_.load(std::memory_order_relaxed)};
+    }
+    // Startup/test introspection only: a concurrent `reload` reallocates the
+    // vector, so no caller may retain this reference across a reload.
     const std::vector<PolicyRule>& rules() const noexcept override { return ordered_rules_; }
+
+    // Replace the config-derived rules in place. Existing durable and session
+    // grants are re-folded into the new rule set. The incoming config is
+    // validated first; a malformed one throws and leaves the old rules
+    // untouched. Thread-safe with `evaluate` and `remember`; a daemon uses it
+    // to pick up config edits without a restart.
+    void reload(PermissionConfig config);
 
 private:
     void reorder();
 
     PermissionConfig   config_;
-    PolicyGeneration   generation_;
+    std::atomic<std::uint64_t> generation_{0};
     GrantStore*        store_ = nullptr;
     bool                  read_only_shell_ = false;
     std::filesystem::path tmp_root_;

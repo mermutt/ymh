@@ -444,6 +444,16 @@ int run_host_command(const std::vector<std::string>& args, std::ostream& out, st
     host_config.persistence.lock_path = canonical / ".ymh" / "sessions.lock";
     host_config.config                = std::move(config);
     host_config.config_digest         = config_digest;
+    {
+        // Resolve before `run()` chdirs into the workspace: the turn-boundary
+        // permission refresh re-reads this file from the daemon.
+        const std::filesystem::path global =
+            config_path.empty() ? default_global_config_path()
+                                : std::filesystem::path{config_path};
+        std::error_code           path_error;
+        const std::filesystem::path absolute = std::filesystem::weakly_canonical(global, path_error);
+        host_config.config_path = path_error ? global : absolute;
+    }
     host_config.provider_factory      = make_provider_factory({});
     host_config.foreground            = false;
     host_config.require_owner         = true;
@@ -795,14 +805,14 @@ int run_supervisor_entry(const std::filesystem::path& root, const Config& config
         }
     }
 
-    // 109-D4: policy is frozen when a workspace daemon starts (there is no
-    // config reload). If one is already running, the file we just read may be
-    // newer than the policy in effect; say so instead of letting stale prompts
-    // look like a bug in the rules.
+    // The daemon re-reads the permission section at every turn boundary (and
+    // when a client with a different config digest attaches), so a permissions
+    // edit no longer needs a restart. Everything else in the config (model,
+    // MCP, sandbox) is still frozen at daemon start.
     if (attached_existing) {
         const std::string note =
-            "config: a workspace daemon is already running; policy edits need a restart "
-            "(`ymh workspace stop <path>`)";
+            "config: attached to a running daemon; permission edits apply from the next turn, "
+            "other edits need `ymh workspace restart <path>`";
         if (startup_notice.has_value()) {
             *startup_notice += "  ·  " + note;
         } else {

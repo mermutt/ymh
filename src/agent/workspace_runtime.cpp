@@ -333,7 +333,9 @@ public:
          bool attach_permission_resolver,
          Executor* executor,
          McpClientFactory mcp_client_factory,
-         GrantStore* grant_store)
+         GrantStore* grant_store,
+         std::filesystem::path config_path,
+         std::string config_digest)
         : root_(std::move(root)),
           store_(std::move(store)),
           persistence_(persistence),
@@ -352,6 +354,8 @@ public:
           skill_catalog_(make_skill_catalog(config, *environment_, launch_dir,
                                             category_logger(LogCategory::Tool))),
           permission_config_(make_permission_config(config)),
+          permission_config_digest_(std::move(config_digest)),
+          config_path_(std::move(config_path)),
           default_permission_preset_(default_permission_preset_name(config)),
           permission_defaults_(config.permissions),
           permission_baseline_(deployment_permission_baseline(config)),
@@ -617,6 +621,46 @@ public:
         return provider;
     }
 
+    // Re-reads the layered config only when the files on disk changed. Called
+    // at a turn boundary by the daemon; a malformed edit is logged and keeps
+    // the last good policy, so a typo never turns every later tool call into a
+    // denial. Grants already in `policy_` survive `reload`.
+    bool reload_permissions() {
+        if (config_path_.empty()) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(permission_reload_mutex_);
+        const std::filesystem::path workspace_config = workspace_config_path(root_);
+        const std::string digest = config_fingerprint(config_path_, workspace_config);
+        if (digest.empty() || digest == permission_config_digest_) {
+            return false;
+        }
+        Config fresh;
+        try {
+            ConfigPaths paths;
+            paths.global    = config_path_;
+            paths.workspace = workspace_config;
+            fresh           = load_config(paths);
+        } catch (const std::exception& error) {
+            category_logger(LogCategory::Process)
+                .warn(std::string{"permission reload skipped: "} + error.what());
+            return false;
+        }
+        try {
+            PermissionConfig next = make_permission_config(fresh);
+            policy_.reload(next);
+            permission_config_ = std::move(next);
+        } catch (const std::exception& error) {
+            category_logger(LogCategory::Process)
+                .warn(std::string{"permission reload rejected: "} + error.what());
+            return false;
+        }
+        permission_config_digest_ = digest;
+        category_logger(LogCategory::Process)
+            .info("permissions reloaded from " + config_path_.string());
+        return true;
+    }
+
     std::filesystem::path              root_;
     std::unique_ptr<SessionStore>      store_;
     SessionPersistence*                persistence_ = nullptr;
@@ -634,6 +678,9 @@ public:
     std::vector<ToolRegistry::Registration> registrations_;
     std::unique_ptr<McpManager>        mcp_;
     PermissionConfig                   permission_config_;
+    std::string                        permission_config_digest_;
+    std::filesystem::path              config_path_;
+    mutable std::mutex                 permission_reload_mutex_;
     std::string                        default_permission_preset_;
     PermissionDefaults                 permission_defaults_;
     PermissionPresetSettings           permission_baseline_;
@@ -764,7 +811,8 @@ WorkspaceRuntime::create(WorkspaceRuntimeOptions options) {
                                            options.attach_permission_gate,
                                            options.attach_permission_resolver, options.executor,
                                            std::move(options.mcp_client_factory),
-                                           options.grant_store);
+                                           options.grant_store, std::move(options.config_path),
+                                           std::move(options.config_digest));
         auto runtime = std::unique_ptr<WorkspaceRuntime>(new WorkspaceRuntime(std::move(impl)));
         runtime->replayUnreportedSettlements();
         return runtime;
@@ -807,6 +855,8 @@ AgentRegistry&        WorkspaceRuntime::agents() noexcept { return *impl_->agent
 CommandRegistry&      WorkspaceRuntime::commands() noexcept { return *impl_->commands_; }
 ToolRegistry&         WorkspaceRuntime::tools() noexcept { return impl_->tools_; }
 PermissionPolicy&     WorkspaceRuntime::policy() noexcept { return impl_->policy_; }
+
+bool WorkspaceRuntime::reload_permissions() { return impl_->reload_permissions(); }
 PermissionGate&       WorkspaceRuntime::gate() noexcept { return impl_->gate_; }
 SkillCatalog&         WorkspaceRuntime::skills() noexcept { return *impl_->skill_catalog_; }
 const SkillCatalog&   WorkspaceRuntime::skills() const noexcept {

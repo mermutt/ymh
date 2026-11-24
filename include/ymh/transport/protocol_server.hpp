@@ -49,6 +49,11 @@ struct ProtocolServerConfig {
     std::string     build;          // YMH_VERSION; empty when unknown
     std::string     config_digest;  // 16 hex chars; empty when unknown
     std::function<std::size_t()> active_turns;  // in-flight turns, io thread
+    // Called on the transport io thread when an attaching client reports a
+    // different known config digest. The daemon re-reads the layered config so
+    // a deferred restart still applies permission edits; the callback must be
+    // fast and must not throw.
+    std::function<void()> refresh_permissions;
 };
 
 // D4/E3: the same-UID trust boundary (05 §4.2) compares against the daemon's
