@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "ymh/agent/agent.hpp"
 #include "ymh/agent/compactor.hpp"
@@ -64,6 +65,19 @@ namespace ymh {
 [[nodiscard]] std::optional<std::string> clamp_or_refuse_root(
     const std::filesystem::path& canonical_root,
     const std::filesystem::path& home);
+
+// Resolve the `/new [dir]` target for the TUI. Empty (or ".") returns
+// `active_root`. `~` and `~/...` expand against `home`; a relative path
+// resolves against `active_root`. The result is canonical, must be an existing
+// directory, and must pass `clamp_or_refuse_root` (so `$HOME` and sensitive
+// system paths are refused exactly like daemon startup). On success `out` is
+// set and the returned optional is empty; on failure it carries the
+// user-facing reason.
+[[nodiscard]] std::optional<std::string> resolve_session_directory(
+    std::string_view             raw,
+    const std::filesystem::path& active_root,
+    const std::filesystem::path& home,
+    std::filesystem::path&       out);
 
 // 11-m2-errata §6 (D17): the per-process boot nonce. Minted EXACTLY ONCE at
 // daemon startup (04 §3.3 step 3), after chdir, before store open; a UUIDv4

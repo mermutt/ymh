@@ -147,8 +147,14 @@ bool CommandRegistry::dispatch(const std::string& line, CommandContext& context)
 CommandRegistry CommandRegistry::builtin() {
     CommandRegistry registry;
     registry.add(Command{
-        "new", "create and activate a new session",
-        [](CommandContext& context, const std::string&) {
+        "new", "create a new session, optionally in another directory",
+        [](CommandContext& context, const std::string& args) {
+            if (!args.empty()) {
+                if (context.create_session_in) {
+                    context.create_session_in(args);
+                }
+                return;
+            }
             if (context.create_session) {
                 context.create_session();
             }

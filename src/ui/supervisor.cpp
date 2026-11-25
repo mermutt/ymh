@@ -38,6 +38,7 @@
 
 #include "ymh/agent/message.hpp"
 #include "ymh/agent/prompt_images.hpp"
+#include "ymh/cli/wiring.hpp"
 #include "ymh/llm/redaction.hpp"
 #include "ymh/registry/registry.hpp"
 #include "ymh/session/session_persistence.hpp"
@@ -1635,7 +1636,13 @@ private:
             surface_notice(workspace, resume, "cannot start workspace");
             return;
         }
-        pending_resume_[workspace] = resume;
+        // Empty `resume` is "ensure running only": do not record it, or the
+        // `Attached` consumer would submit a `session.resume` with an empty id
+        // (which the daemon reports as a store failure). A real pending resume
+        // already queued for this workspace is left intact.
+        if (!resume.value.empty()) {
+            pending_resume_[workspace] = resume;
+        }
         if (ensure_in_flight_.count(workspace) != 0) {
             return;
         }
@@ -1698,6 +1705,7 @@ private:
                 ensure_in_flight_.erase(request.workspace);
                 if (!spec.has_value()) {
                     pending_resume_.erase(request.workspace);
+                    pending_new_session_.erase(request.workspace);
                     // 49-F1: a failed first-prompt spawn never modeled the
                     // workspace, so restore the draft to the empty-screen
                     // composer for a retry.
@@ -2513,6 +2521,7 @@ private:
             }
             specs_.erase(id);
             pending_creates_.erase(id);
+            pending_new_session_.erase(id);
             pending_resume_.erase(id);
             model_.eraseWorkspace(id);
             // 58-E37: after `eraseWorkspace` (so the reconcile can pop); the
@@ -2595,6 +2604,13 @@ private:
                         model_.activeWorkspaceId = workspace;
                     }
                     create_session(workspace, std::move(draft));
+                }
+                // `/new <dir>`: the target workspace was not live when the
+                // command ran, so its create waited for this transition. Submit
+                // it before `refresh_sessions`, whose auto-create branch would
+                // otherwise race the pending create.
+                if (pending_new_session_.erase(workspace) != 0) {
+                    create_session(workspace, std::string{});
                 }
                 refresh_sessions(workspace);
                 // 25 review M3: a plain re-attach does not re-activate, so
@@ -3181,6 +3197,70 @@ private:
         }
     }
 
+    // `/new <dir>`: create a session in the daemon rooted at another directory.
+    // The target resolves against the active workspace root (or the process cwd
+    // when no workspace is modeled). `$HOME` and sensitive system roots are
+    // refused exactly like daemon startup. An unregistered directory gets a
+    // workspace row here; the ensure worker spawns/attaches its daemon off the
+    // UI thread, and the create waits for the link to report `Attached`.
+    void new_session_in(const std::string& arg) {
+        WorkspaceModel* active = model_.activeWorkspace();
+        std::filesystem::path base;
+        if (active != nullptr && !active->cwd.empty()) {
+            base = std::filesystem::path{active->cwd};
+        } else {
+            std::error_code cwd_error;
+            base = std::filesystem::current_path(cwd_error);
+            if (cwd_error) {
+                push_notice("new session: cannot resolve the current directory");
+                return;
+            }
+        }
+        const char*                 home_env = std::getenv("HOME");
+        const std::filesystem::path home =
+            home_env != nullptr ? std::filesystem::path{home_env} : std::filesystem::path{};
+
+        std::filesystem::path target;
+        if (const std::optional<std::string> refusal =
+                resolve_session_directory(arg, base, home, target);
+            refusal.has_value()) {
+            push_notice("new session: " + *refusal);
+            return;
+        }
+
+        if (options_.registry == nullptr) {
+            push_notice("new session: workspace registry is unavailable");
+            return;
+        }
+        std::optional<WorkspaceRecord> row;
+        try {
+            row = options_.registry->findByCanonicalPath(target);
+            if (!row.has_value()) {
+                row = options_.registry->registerWorkspace(target, target.filename().string());
+            }
+        } catch (const std::exception& error) {
+            push_notice("new session: " + std::string{error.what()});
+            return;
+        }
+        if (!row.has_value()) {
+            push_notice("new session: cannot register " + target.string());
+            return;
+        }
+
+        const WorkspaceId workspace{row->id.value};
+        const auto        connection = connections_.find(workspace);
+        if (connection != connections_.end() &&
+            connection->second->state() == SupervisorLinkState::Attached) {
+            create_session(workspace, std::string{});
+            return;
+        }
+        // The link may be connecting, dead, or not modeled yet. Queue the
+        // create for the `Attached` transition; `ensure_workspace_running`
+        // coalesces with any spawn already in flight for this workspace.
+        pending_new_session_.insert(workspace);
+        ensure_workspace_running(workspace, SessionId{});
+    }
+
     int edit_export_file(const std::filesystem::path& file) {
         if (screen_ == nullptr) {
             return -1;
@@ -3709,6 +3789,7 @@ private:
         context.session = model_.ensureActiveSession();
         context.request_exit = [this] { requestExit(); };
         context.create_session = [this] { new_session(); };
+        context.create_session_in = [this](const std::string& arg) { new_session_in(arg); };
         context.open_model_picker = [this] { open_model_picker(); };
         context.apply_model       = [this](const std::string& name) { apply_model(name); };
         context.compact = [this] {
@@ -5158,6 +5239,10 @@ private:
     // `sync_subagent_subscriptions`.
     std::map<SessionId, WorkspaceId> viewed_children_;
     std::map<WorkspaceId, std::string> pending_creates_;
+    // `/new <dir>` asked for a session in a workspace whose link was not yet
+    // `Attached`. Consumed by `on_link_state`; the create is submitted before
+    // `refresh_sessions` so its auto-create branch cannot claim the slot first.
+    std::set<WorkspaceId> pending_new_session_;
     // `/image` staging: encoded images waiting for the session's next prompt.
     // Keyed by session so switching sessions cannot leak an attachment, and
     // consumed (erased) exactly when that prompt is submitted. UI thread only.

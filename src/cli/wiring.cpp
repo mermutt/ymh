@@ -1,6 +1,7 @@
 #include "ymh/cli/wiring.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -53,6 +54,18 @@ void warn_assumed_window_once(std::size_t assumed) {
                   " tokens (override via llm.models.<name>.context_window or "
                   "agent.compaction.context_window_tokens)");
     });
+}
+
+std::string trim_copy(std::string_view text) {
+    std::size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin])) != 0) {
+        ++begin;
+    }
+    std::size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+        --end;
+    }
+    return std::string{text.substr(begin, end - begin)};
 }
 
 } // namespace
@@ -476,6 +489,55 @@ std::optional<std::string> clamp_or_refuse_root(const std::filesystem::path& can
             return "workspace root is a sensitive system path: " + root.string();
         }
     }
+    return std::nullopt;
+}
+
+std::optional<std::string> resolve_session_directory(std::string_view             raw,
+                                                     const std::filesystem::path& active_root,
+                                                     const std::filesystem::path& home,
+                                                     std::filesystem::path&       out) {
+    std::string text = trim_copy(raw);
+    if (text.size() >= 2 &&
+        ((text.front() == '"' && text.back() == '"') ||
+         (text.front() == '\'' && text.back() == '\''))) {
+        text = trim_copy(std::string_view{text}.substr(1, text.size() - 2));
+    }
+
+    std::filesystem::path candidate;
+    if (text.empty() || text == ".") {
+        candidate = active_root;
+    } else if (text == "~") {
+        if (home.empty()) {
+            return "cannot expand `~`: $HOME is not set";
+        }
+        candidate = home;
+    } else if (text.size() >= 2 && text[0] == '~' && text[1] == '/') {
+        if (home.empty()) {
+            return "cannot expand `~`: $HOME is not set";
+        }
+        candidate = home / text.substr(2);
+    } else if (text.front() == '~') {
+        return "cannot expand `" + text + "`: use `~` or `~/...`";
+    } else {
+        candidate = std::filesystem::path{text};
+        if (candidate.is_relative()) {
+            candidate = active_root / candidate;
+        }
+    }
+
+    std::error_code       error;
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(candidate, error);
+    if (error || canonical.empty()) {
+        return "cannot resolve directory: " + candidate.string();
+    }
+    canonical = canonical.lexically_normal();
+    if (!std::filesystem::is_directory(canonical, error) || error) {
+        return "not a directory: " + canonical.string();
+    }
+    if (std::optional<std::string> refusal = clamp_or_refuse_root(canonical, home)) {
+        return refusal;
+    }
+    out = std::move(canonical);
     return std::nullopt;
 }
 

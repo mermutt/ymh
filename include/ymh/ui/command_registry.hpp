@@ -20,6 +20,12 @@ struct CommandContext {
     SessionUiState*                         session = nullptr;
     std::function<void()>                   request_exit;
     std::function<void()>                   create_session;
+    // `/new [dir]`: empty args keep the active workspace. A non-empty tail is
+    // resolved by the supervisor against the active workspace root and the
+    // session is created in (and, when needed, the daemon is started for) that
+    // directory. The handler does not append a system entry itself; the
+    // supervisor reports resolution failures through the notice ring.
+    std::function<void(const std::string&)> create_session_in;
     // 53-D4: `/model` with no args opens the picker; with an arg it validates
     // and applies (or sets `preferred_model_` when no session is live).
     std::function<void()>                   open_model_picker;

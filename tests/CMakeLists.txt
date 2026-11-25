@@ -27,6 +27,7 @@ add_executable(ymh_file_store_tests
     workspace_target_test.cpp
     workspace_roots_test.cpp
     workspace_roots_store_test.cpp
+    new_session_dir_test.cpp
     permission_roots_test.cpp
     permission_broker_roots_test.cpp
 )
